@@ -1,0 +1,49 @@
+[project]
+name = "long_earn"
+version = "0.5.0"
+description = "自我进化的量化交易系统"
+authors = [
+    { name = "shiyz", email = "shiyz@eoutlook.com" },
+]
+requires-python = "==3.11.*"
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "langgraph>=0.2.0",
+    "langchain>=0.2.0",
+    "langchain-core>=0.2.0",
+    "langchain-community>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "ollama>=0.2.0",
+    "langchain-ollama>=0.2.0",
+    "loguru>=0.7.0",
+    "faiss-cpu>=1.13.0",
+    "langgraph-cli[inmem]>=0.4.3",
+    "langgraph-checkpoint-sqlite>=2.0.11",
+    "akshare>=1.10.0",
+    "langchain-qdrant>=0.2.1",
+    "qdrant-client>=1.16.1",
+]
+
+[project.scripts]
+long_earn = "long_earn.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+]
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
+ 
+[tool.uv.pip]
+index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+

@@ -1,0 +1,18 @@
+{
+  "name": "long_earn",
+  "description": "证券交易顾问智能体",
+  "version": "0.6",
+  "graphs": {
+    "agent": "src/long_earn/agent.py:main_agent"
+  },
+  "dependencies": {
+    "langgraph": "^0.2.0",
+    "langchain": "^0.2.0",
+    "ollama": "^0.1.0",
+    "pyqlib": "^0.9.0",
+    "qrant": "^0.1.0",
+    "akshare": "^1.0.0",
+    "loguru": "^0.7.0"
+  },
+  "env": ".env"
+}

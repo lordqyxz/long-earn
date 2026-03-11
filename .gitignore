@@ -5,3 +5,9 @@ logs/
 test_strategies/
 **/__pycache__/
 .pytest_cache/
+checkpoint.db
+checkpoint.db-shm
+checkpoint.db-wal
+.venv/
+
+**.egg-info
