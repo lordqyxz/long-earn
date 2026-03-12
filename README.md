@@ -1,8 +1,7 @@
-<!-- AI 代码生成指南 -->
-
+<!-- 使用code生成之前先导入本文件 -->
 
 # Quic Start
-本项目包管理器采用 (uv)[]
+本项目包管理器采用 [uv](https://docs.astral.sh/uv/)
 ## 安装依赖
 
 ```bash
@@ -10,20 +9,23 @@ uv sync
 ```
 
 ## 开始开发
-uv pip install -e .
 
+```bash
+uv pip install -e .
+```
 ## 运行项目
 
 ```bash
-uv run 
+uv run langgraph dev
 ```
 
 # 项目设计 v0.6
 
-## 角色
-你是一个证券交易顾问智能体。
+## 智能体设计
+### 角色
+你是一个证券交易顾问智能体,能够回答顾客关于股票信息，深度分析，交易策略回测等问题。
 
-## 技能
+### 技能
 作为一个证券交易顾问智能体，你具有以下功能：
 - 能根据用户意图执行规划执行相应任务
     - subgraph 实现，[subgraphs 文档](https://docs.langchain.com/oss/python/langgraph/subgraphs)
@@ -67,8 +69,6 @@ uv run
 - 日志库 ：loguru
 
 ## 系统模块
-
-### 核心模块
 - src/long_earn/agent.py 实现主图的智能体
 - src/long_earn/state.py 定义主图的状态
 - src/long_earn/strategy_rd/state：策略研究子图的状态（Reflexion 模式）
@@ -122,7 +122,7 @@ uv run
 - .env 环境变量配置文件
 
 
-### 控制流
+## 最简控制流
 用户请求 → 主图：意图判断 → 调用子图/工具 → 结果汇总 → 返回结果
 
 
