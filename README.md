@@ -1,4 +1,6 @@
 <!-- AI 代码生成指南 -->
+
+
 # Quic Start
 本项目包管理器采用 (uv)[]
 ## 安装依赖
@@ -16,10 +18,10 @@ uv pip install -e .
 uv run 
 ```
 
-# 项目设计 v0.2
+# 项目设计 v0.6
 
 ## 角色
-你是一个专业Python开发者，负责设计和实现一个能自我进化的证券交易顾问智能体。
+你是一个证券交易顾问智能体。
 
 ## 技能
 作为一个证券交易顾问智能体，你具有以下功能：
@@ -56,14 +58,13 @@ uv run
     - token 统计
 
 ## 技术栈摘要
-- **语言**：Python（ 3.10 版本）
-- **工作流框架**：LangGraph
-- **LLM**：ollama（默认）/dashcope / openAi兼容本地lmstudio
-- **交易框架**：pyqlib（完整量化流程：数据、因子、回测）
-- **回测数据源**：pyqlib 内置
-- **记忆组件**：langchain-qdrant
+- 开发语言：Python3.11
+- 工作流框架：LangGraph
+- LLM：ollama（默认）/dashcope / openAi兼容本地lmstudio
+- 交易框架：pyqlib（完整量化流程：数据、因子、回测）
+- 回测数据源：pyqlib 内置
+- 记忆组件：langchain-qdrant
 - 日志库 ：loguru
-- 提示词通过 PromptTemplate 管理
 
 ## 系统模块
 
@@ -74,11 +75,11 @@ uv run
     - subgraph.py 实现策略研究子图的文件
     - state.py 定义策略研究子图的状态
     - agents/ 实现策略研究子图的智能体
-        - strategy_research_agent.py 反思策略表现，提出优化建议，生成策略。
+        - strategy_research_agent.py 反思策略表现，提出优化建议，生成策略，优化目标（收益权重 > 回撤 > 其他）。
         - strategy_research_prompt.py 实现策略研究子图的智能体的提示模板
         - strategy_rd_supervisor.py 实现策略研究子图的监督器，判断是否接受优化建议并重新回测。
         - strategy_rd_supervisor_prompt.py 实现策略研究子图的监督器的提示模板
-        - strategy_develop_agent.py 将策略转化成能让 pyqlib 回测的格式
+        - strategy_develop_agent.py 将策略转化成能让 pyqlib 回测的格式：Python 代码文件 + qlib Strategy 注册
         - strategy_develop_prompt.py 实现策略开发子图的智能体的提示模板
     - pyqlib 数据获取、因子计算、回测分析
 - src/long_earn/stock_analysis：股票分析子图，用于获取股票数据和计算因子
@@ -122,33 +123,16 @@ uv run
 
 
 ### 控制流
-用户请求 → 主图：协调智能体 → 调用子图/工具 → 结果汇总 → 返回结果
+用户请求 → 主图：意图判断 → 调用子图/工具 → 结果汇总 → 返回结果
 
-### 其他说明
-- **触发方式**：通过一个supervisor节点，根据用户输入和系统状态触发策略生成与优化工作流
-- **回测机制**：每次生成策略后默认自动回测
-- **策略输出**：Python 代码文件 + qlib Strategy 注册
-- 自我进化机制
-    - **优化目标**：多目标（收益权重 > 回撤 > 其他）
-    - **代码权限**：完全自主 + 安全检查 Tool
 
-## 参考内容
-### 交易框架
-采用pyqlib，只允许参考官方文档 https://qlib.readthedocs.io/en/latest/
-
-# LangGraph 工作流设计注意事项
-- **节点返回值**：每个节点只需要返回要更新的key，不需要返回整个状态
-- **状态管理**：LangGraph会自动合并节点返回的更新到全局状态中
-- **检查点保存**：使用SqliteSaver作为检查点保存器，确保工作流状态持久化
+# 开发注意事项
+- 回测框架包名：pyqlib，[文档](https://qlib.readthedocs.io/en/latest/)
+- 节点返回值：每个节点只需要返回要更新的key，不需要返回整个状态
+- 状态管理：LangGraph会自动合并节点返回的更新到全局状态中
+<!-- - 检查点保存：使用SqliteSaver作为检查点保存器，确保工作流状态持久化 -->
+- 提示词通过 PromptTemplate 管理
 
 # python 代码规范
 - 所有python代码都需要符合PEP8规范
 - 所有python代码都需要添加类型注解,str 类型的参数需要添加默认值空字符串 ""
-
-<!-- # dev-stage2
-交互接口
-- **src/lang_earn_cli**：命令行接口
-- **src/lang_earn_web**：Web UI 和 API -->
-
-
-
