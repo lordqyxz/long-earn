@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: long_earn
+Version: 0.5.0
+Summary: 自我进化的量化交易系统
+Author-email: shiyz <shiyz@eoutlook.com>
+Requires-Python: ==3.11.*
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: fastapi>=0.104.0
+Requires-Dist: uvicorn>=0.24.0
+Requires-Dist: langgraph>=0.2.0
+Requires-Dist: langchain>=0.2.0
+Requires-Dist: langchain-core>=0.2.0
+Requires-Dist: langchain-community>=0.2.0
+Requires-Dist: langchain-openai>=0.2.0
+Requires-Dist: ollama>=0.2.0
+Requires-Dist: langchain-ollama>=0.2.0
+Requires-Dist: loguru>=0.7.0
+Requires-Dist: faiss-cpu>=1.13.0
+Requires-Dist: langgraph-cli[inmem]>=0.4.3
+Requires-Dist: langgraph-checkpoint-sqlite>=2.0.11
+Requires-Dist: akshare>=1.10.0
+Requires-Dist: langchain-qdrant>=0.2.1
+Requires-Dist: qdrant-client>=1.16.1
+Requires-Dist: pytest>=9.0.2
+Requires-Dist: tavily-python>=0.7.23
+Requires-Dist: pyqlib>=0.9.7
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: isort; extra == "dev"
