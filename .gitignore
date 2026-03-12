@@ -12,4 +12,4 @@ checkpoint.db-wal
 
 **.egg-info
 
-/temp/
+temp/
