@@ -3,6 +3,7 @@
 """
 
 import json
+import os
 
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaEmbeddings
@@ -18,9 +19,8 @@ from long_earn.utils import llm_factory
 from long_earn.utils.llm_factory import create_llm
 from long_earn.utils.logger import LOGGER
 
-client = QdrantClient(":memory:")
-
-embeddings = OllamaEmbeddings(model="qwen3-embedding:0.6b")
+client = QdrantClient(os.getenv("QDRANT_URL", ":memory:"))
+embeddings = OllamaEmbeddings(model=os.getenv("EMBEDDING_MODEL", "qwen3-embedding:0.6b"))
 vector_size = len(embeddings.embed_query("sample text"))
 
 if not client.collection_exists("test"):
