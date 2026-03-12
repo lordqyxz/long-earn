@@ -170,6 +170,8 @@ def create_main_agent():
         strategy_result = state.get("strategy_result")
         stock_analysis_result = state.get("stock_analysis_result")
         routing_reason = state.get("routing_reason", "")
+        user_query = state.get("user_query", "")
+        
         LOGGER.info(f"执行汇总节点，路由类型: {routing_reason}")
 
         if not strategy_result and not stock_analysis_result:
@@ -178,12 +180,13 @@ def create_main_agent():
 
         summarize_prompt = PromptTemplate(
             input_variables=[
+                "user_query",
                 "strategy_result",
                 "stock_analysis_result",
                 "routing_reason",
             ],
-            template="""请根据以下研究结果，为客户生成一段友好、专业的回复。
-
+            template="""请根据以下研究结果生成一段证据详实，保持原有文本专业性的基础上、友好的回复，直接面向客户，综合概述技术细节。如果某部分结果为空，请忽略该部分。
+用户原始问题：{user_query}
 路由类型: {routing_reason}
 
 策略研究结果:
@@ -192,13 +195,14 @@ def create_main_agent():
 股票分析结果:
 {stock_analysis_result}
 
-请生成一段简洁、友好的回复，直接面向客户，不需要提及技术细节。如果某部分结果为空，请忽略该部分。
+针对股票分析结果，总结各个视角下最佳买入区间，以表格样式汇总给我。
 """,
         )
 
         try:
             response = llm.invoke(
                 summarize_prompt.format(
+                    user_query=user_query,
                     strategy_result=strategy_result or "无",
                     stock_analysis_result=stock_analysis_result or "无",
                     routing_reason=routing_reason,
@@ -232,15 +236,15 @@ def create_main_agent():
             return "summarize"
 
     graph.add_node("start", start_node)
-    graph.add_node("user_analyze", intent_analyze_node)
+    graph.add_node("intent_analyze", intent_analyze_node)
     graph.add_node("strategy_rd", strategy_rd_node)
     graph.add_node("stock_analysis", stock_analysis_node)
     graph.add_node("summarize", summarize_node)
 
     graph.add_edge(START, "start")
-    graph.add_edge("start", "user_analyze")
+    graph.add_edge("start", "intent_analyze")
     graph.add_conditional_edges(
-        "user_analyze",
+        "intent_analyze",
         route_decision,
         {
             "strategy_rd": "strategy_rd",
@@ -251,11 +255,6 @@ def create_main_agent():
     graph.add_edge("strategy_rd", "summarize")
     graph.add_edge("stock_analysis", "summarize")
     graph.add_edge("summarize", END)
-
-    # from langgraph.checkpoint.sqlite import SqliteSaver
-    # import sqlite3
-    # conn = sqlite3.connect("checkpoint.db", check_same_thread=False)
-    # checkpointer = SqliteSaver(conn)
 
     return graph.compile()
 

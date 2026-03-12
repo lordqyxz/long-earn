@@ -9,7 +9,7 @@ class StrategyRdSupervisor:
     """策略研究监督器"""
 
     def __init__(
-        self, llm_type: str = "ollama", model_name: str = None, base_url: str = None
+        self, llm_type: str = "ollama", model_name: str = "", base_url: str = ""
     ):
         self.llm_type = llm_type
         self.model_name = model_name
@@ -39,21 +39,12 @@ class StrategyRdSupervisor:
             response = llm.invoke(prompt)
 
             content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-
             result = json.loads(content)
             decision = result.get("decision", "拒绝")
             LOGGER.info(f"监督器评估结果: {decision}, 原因: {result.get('reason', '')}")
-
             return decision == "接受"
         except Exception as e:
-            LOGGER.error(f"策略评估失败: {e}")
+            LOGGER.exception(f"策略评估失败: {e}")
             return False
 
     def should_continue(
@@ -92,13 +83,13 @@ class StrategyRdSupervisor:
             response = llm.invoke(prompt)
 
             content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+            # if content.startswith("```json"):
+            #     content = content[7:]
+            # if content.startswith("```"):
+            #     content = content[3:]
+            # if content.endswith("```"):
+            #     content = content[:-3]
+            # content = content.strip()
 
             result = json.loads(content)
             should_continue = result.get("should_continue", False)

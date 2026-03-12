@@ -1,5 +1,6 @@
 from langgraph.graph import END, START, StateGraph
 
+from ..tools.backtest import run_backtest
 from .agents.strategy_develop_agent import StrategyDevelopAgent
 from .agents.strategy_rd_supervisor import StrategyRdSupervisor
 from .agents.strategy_research_agent import StrategyResearchAgent
@@ -35,15 +36,15 @@ def create_strategy_rd_subgraph():
         """回测节点 - 执行回测"""
         strategy_code = state.get("strategy_code", "")
 
-        mock_backtest_result = {
-            "total_return": 0.08,
-            "annual_return": 0.12,
-            "max_drawdown": 0.15,
-            "sharpe_ratio": 0.8,
-            "win_rate": 0.55,
-        }
+        if not strategy_code:
+            return {"backtest_result": {"error": "策略代码为空"}}
 
-        return {"backtest_result": mock_backtest_result}
+        backtest_result = run_backtest(strategy_code=strategy_code)
+        
+        if backtest_result is None:
+            return {"backtest_result": {"error": "回测失败"}}
+
+        return {"backtest_result": backtest_result}
 
     def reflection_node(state):
         """反思节点 - 分析回测结果并生成改进建议"""
@@ -83,15 +84,15 @@ def create_strategy_rd_subgraph():
         """回测优化后的策略"""
         optimized_strategy_code = state.get("optimized_strategy_code", "")
 
-        mock_backtest_result = {
-            "total_return": 0.12,
-            "annual_return": 0.18,
-            "max_drawdown": 0.10,
-            "sharpe_ratio": 1.2,
-            "win_rate": 0.60,
-        }
+        if not optimized_strategy_code:
+            return {"backtest_result": {"error": "优化后的策略代码为空"}}
 
-        return {"backtest_result": mock_backtest_result}
+        backtest_result = run_backtest(strategy_code=optimized_strategy_code)
+        
+        if backtest_result is None:
+            return {"backtest_result": {"error": "回测失败"}}
+
+        return {"backtest_result": backtest_result}
 
     def supervisor_node(state):
         """监督器节点 - 决定是否继续迭代"""
@@ -102,9 +103,6 @@ def create_strategy_rd_subgraph():
         backtest_result = state.get("backtest_result", {})
         reflection = state.get("reflection", "")
         improvement_suggestions = state.get("improvement_suggestions", [])
-
-        if isinstance(improvement_suggestions, list):
-            improvement_suggestions = "\n".join(improvement_suggestions)
 
         should_continue = supervisor.should_continue(
             iteration=current_iteration,

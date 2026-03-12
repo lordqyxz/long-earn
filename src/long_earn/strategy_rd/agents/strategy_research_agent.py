@@ -9,7 +9,7 @@ class StrategyResearchAgent:
     """策略研究智能体"""
 
     def __init__(
-        self, llm_type: str = "ollama", model_name: str = None, base_url: str = None
+        self, llm_type: str = "dashscope", model_name: str = "qwen3-max-2026-01-23", base_url: str = ""
     ):
         self.llm_type = llm_type
         self.model_name = model_name

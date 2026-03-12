@@ -1,11 +1,12 @@
-from langchain_community.chat_models import ChatOllama
+import os
+from langchain_ollama import ChatOllama
 from langchain_core.language_models import BaseLanguageModel
 from langchain_openai import ChatOpenAI
 
 
 def create_llm(
     llm_type: str = "ollama",
-    model_name: str = "qwen3.5:cloud",
+    model_name: str = "qwen3.5:9b",
     base_url: str = "http://localhost:11434",
     **kwargs,
 ) -> BaseLanguageModel:
@@ -35,6 +36,7 @@ def create_llm(
         # DASHSCOPE_API_KEY
         return ChatOpenAI(
             model=model_name,
+            api_key=os.getenv("DASHSCOPE_API_KEY"),  # type: ignore
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
             **kwargs,
         )
@@ -43,9 +45,9 @@ def create_llm(
         # OpenAI兼容模型
         if model_name is None:
             model_name = "gpt-3.5-turbo"
-        # 支持自定义base_url，如果不提供则使用OpenAI官方地址
+        # 支持自定义base_url，如果不提供则使用LM Studio地址
         if base_url is None:
-            base_url = "https://api.openai.com/v1"
+            base_url = "https://localhost:11434/v1"
         # 注意：使用OpenAI需要设置环境变量
         # OPENAI_API_KEY
         return ChatOpenAI(model=model_name, base_url=base_url, **kwargs)

@@ -27,6 +27,7 @@ dependencies = [
     "qdrant-client>=1.16.1",
     "pytest>=9.0.2",
     "tavily-python>=0.7.23",
+    "pyqlib>=0.9.7",
 ]
 
 [project.scripts]
