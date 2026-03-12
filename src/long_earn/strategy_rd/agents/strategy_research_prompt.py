@@ -1,5 +1,5 @@
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 
@@ -16,10 +16,13 @@ def create_strategy_research_prompt(
     target_market: str = "stock",
     query: str = "",
     strategy_examples: str = "无",
-    strategy_context: str = "无"
+    strategy_context: str = "无",
 ) -> ChatPromptTemplate:
     """创建策略研究提示模板"""
-    from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+    from langchain_core.prompts import (
+        HumanMessagePromptTemplate,
+        SystemMessagePromptTemplate,
+    )
 
     system_template = """<role>
 你是一位世界顶级的量化策略研究专家，拥有15年以上的量化投资经验，曾在全球顶级对冲基金任职。你擅长将前沿的机器学习技术与传统金融理论结合，创造出稳定盈利的量化策略。
@@ -68,17 +71,19 @@ def create_strategy_research_prompt(
 
     parser = JsonOutputParser(pydantic_object=StrategyOutput)
 
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system_template),
-        HumanMessagePromptTemplate.from_template(human_template)
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessagePromptTemplate.from_template(system_template),
+            HumanMessagePromptTemplate.from_template(human_template),
+        ]
+    )
 
     return prompt.partial(
         target_market=target_market,
         query=query,
         strategy_examples=strategy_examples,
         strategy_context=strategy_context,
-        format_instructions=parser.get_format_instructions()
+        format_instructions=parser.get_format_instructions(),
     )
 
 

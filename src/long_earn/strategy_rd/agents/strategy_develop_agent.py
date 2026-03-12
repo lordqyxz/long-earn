@@ -1,10 +1,12 @@
-from typing import Dict, Any
+from typing import Any, Dict
+
 
 class StrategyDevelopAgent:
     """策略开发智能体"""
+
     def __init__(self):
         pass
-    
+
     def develop_strategy(self, strategy: Dict[str, Any]) -> str:
         """将策略转化为pyqlib回测格式"""
         # 实现策略开发逻辑

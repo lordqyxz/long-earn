@@ -1,10 +1,12 @@
-from typing import Dict, Any, Optional, TypedDict
+from typing import Any, Dict, Optional, TypedDict
 
 
-class State(TypedDict, total=False):
+class StockAnalysisState(TypedDict, total=False):
     """股票分析子图的状态"""
+
     query: str
     stock_code: str
+    stock_name: str
     stock_data: Optional[Dict[str, Any]]
     petter_analysis: Optional[str]
     charles_munger_analysis: Optional[str]

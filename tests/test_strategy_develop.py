@@ -1,4 +1,5 @@
 import pytest
+
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 
 

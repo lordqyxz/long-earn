@@ -96,7 +96,8 @@ uv run
 - src/long_earn/tools/：自定义工具
     - subgraph_tool.py 将子图封装为工具，用于在主图中调用
     - kimi_web_search.py 实现kimi web search工具
-    - akshare.py 实现akshare工具
+    - akshare.py 实现akshare工具，用于获取股票/财务数据
+    - tavily_search.py 实现tavily search工具，用于搜索互联网
     - code_safety_check.py 实现代码安全检查工具
 - src/long_earn/config：配置管理
 - src/long_earn/callbacks/：回调函数包

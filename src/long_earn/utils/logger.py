@@ -1,5 +1,6 @@
-from loguru import logger
 import sys
+
+from loguru import logger
 
 # 配置日志记录
 logger.remove()  # 移除默认配置

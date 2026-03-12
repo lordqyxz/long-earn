@@ -1,4 +1,5 @@
 import pytest
+
 from long_earn.qlib.backtest import run_backtest
 
 
@@ -19,7 +20,7 @@ class CustomStrategy(Strategy):
         # 策略逻辑
         return {}
 """
-    
+
     result = run_backtest(strategy_code)
     assert result is not None
     assert "return" in result

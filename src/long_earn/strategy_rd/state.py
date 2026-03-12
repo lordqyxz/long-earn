@@ -1,8 +1,9 @@
-from typing import Dict, Any, Optional, TypedDict
+from typing import Any, Dict, Optional, TypedDict
 
 
 class State(TypedDict, total=False):
     """策略研究子图的状态 - Reflexion 模式"""
+
     query: str
     strategy: Optional[Dict[str, Any]]
     strategy_code: Optional[str]

@@ -25,6 +25,8 @@ dependencies = [
     "akshare>=1.10.0",
     "langchain-qdrant>=0.2.1",
     "qdrant-client>=1.16.1",
+    "pytest>=9.0.2",
+    "tavily-python>=0.7.23",
 ]
 
 [project.scripts]
@@ -46,4 +48,38 @@ default = true
 [tool.uv.pip]
 index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+skip-string-normalization = false
 
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+lines_after_imports = -1
+lines_between_types = 1
+combine_as_imports = false
+order_by_type = true
+case_sensitive = true
+src_paths = ["src", "tests"]
+skip = [".venv", "build", "dist"]
+known_first_party = ["long_earn"]

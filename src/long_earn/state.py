@@ -3,6 +3,7 @@ from typing import TypedDict
 
 class State(TypedDict):
     """主图状态定义"""
+
     user_query: str  # 用户查询
     status: str  # 状态信息
     route: str  # 路由决策

@@ -53,5 +53,5 @@ charles_munger_prompt = PromptTemplate(
 示例3（制造业）：
 从物理学角度看，生产效率提升有惯性；从工程学角度看，自动化是系统优化的关键；从经济学角度看，成本结构决定了盈利能力。
 """,
-    input_variables=["stock_data"]
+    input_variables=["stock_data"],
 )

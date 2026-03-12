@@ -98,5 +98,5 @@ fiske_prompt = PromptTemplate(
 示例3（新能源行业）：
 对于电动车制造商，我们评估其电池技术先进性、产能扩张计划、品牌认知度以及充电网络布局。技术领先和规模效应是关键。
 """,
-    input_variables=["stock_data"]
+    input_variables=["stock_data"],
 )

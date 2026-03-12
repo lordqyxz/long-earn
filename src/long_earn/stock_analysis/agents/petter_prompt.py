@@ -60,5 +60,5 @@ petter_prompt = PromptTemplate(
 示例3（房地产行业）：
 对于房地产信托基金(REITs)，我们将其归类为缓慢增长型，重点关注租金收益率、物业组合质量和债务结构。适合追求稳定分红的投资者。
 """,
-    input_variables=["stock_data"]
+    input_variables=["stock_data"],
 )

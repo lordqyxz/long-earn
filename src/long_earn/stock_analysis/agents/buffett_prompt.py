@@ -47,5 +47,5 @@ buffett_prompt_template = PromptTemplate(
 示例3（科技行业）：
 对于科技公司，我们评估其技术壁垒、市场占有率和创新持续性。像苹果这样的公司不仅有强大的品牌，还有生态系统锁定效应。
 """,
-    input_variables=["stock_data"]
+    input_variables=["stock_data"],
 )
