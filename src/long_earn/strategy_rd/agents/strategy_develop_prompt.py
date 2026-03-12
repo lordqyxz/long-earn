@@ -89,7 +89,6 @@ data = D.features(symbol, fields, start_time, end_time)
 # 策略代码
 <your_code_here>
 ```
-
 </output_format>
 
 <code_review_checklist>
