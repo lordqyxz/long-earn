@@ -3,42 +3,21 @@
 """
 
 import json
-import os
 
 from langchain_core.prompts import PromptTemplate
-from langchain_ollama import OllamaEmbeddings
-from langchain_qdrant import QdrantVectorStore
 from langgraph.graph import END, START, StateGraph
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
 
 from long_earn.state import State
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
 from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
-from long_earn.utils import llm_factory
-from long_earn.utils.llm_factory import create_llm
+from long_earn.utils import create_llm
 from long_earn.utils.logger import LOGGER
-
-client = QdrantClient(os.getenv("QDRANT_URL", ":memory:"))
-embeddings = OllamaEmbeddings(model=os.getenv("EMBEDDING_MODEL", "qwen3-embedding:0.6b"))
-vector_size = len(embeddings.embed_query("sample text"))
-
-if not client.collection_exists("test"):
-    client.create_collection(
-        collection_name="test",
-        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-    )
-vector_store = QdrantVectorStore(
-    client=client,
-    collection_name="test",
-    embedding=embeddings,
-)
 
 
 def create_main_agent():
     """创建主图智能体"""
     # 创建LLM实例用于路由决策
-    llm = llm_factory.create_llm(llm_type="ollama", model_name="qwen3.5:cloud")
+    llm = create_llm(llm_type="ollama", model_name="qwen3.5:cloud")
 
     # 创建子图
     strategy_rd_subgraph = create_strategy_rd_subgraph()
@@ -171,7 +150,7 @@ def create_main_agent():
         stock_analysis_result = state.get("stock_analysis_result")
         routing_reason = state.get("routing_reason", "")
         user_query = state.get("user_query", "")
-        
+
         LOGGER.info(f"执行汇总节点，路由类型: {routing_reason}")
 
         if not strategy_result and not stock_analysis_result:

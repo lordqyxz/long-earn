@@ -14,14 +14,11 @@ import pandas as pd
 try:
     from qlib.data import D
     from qlib import init
-    
+
     # 初始化 qlib，使用用户数据文件夹
     qlib_data_path = Path.home() / ".qlib_data"
     if qlib_data_path.exists():
-        init(
-            provider_uri=str(qlib_data_path),
-            region="cn"
-        )
+        init(provider_uri=str(qlib_data_path), region="cn")
     QLIB_AVAILABLE = True
 except Exception as e:
     print(f"警告：qlib 初始化失败，将使用模拟数据：{e}")
@@ -49,12 +46,10 @@ def run_backtest(
     try:
         if strategy_code:
             strategy_name = "dynamic_strategy"
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".py", delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
                 f.write(strategy_code)
                 temp_path = f.name
-            
+
             try:
                 spec: Optional[ModuleSpec] = importlib.util.spec_from_file_location(
                     strategy_name, temp_path
@@ -105,7 +100,10 @@ def run_backtest(
     if QLIB_AVAILABLE:
         try:
             from qlib.data import D as qlib_D  # 本地导入避免 linter 错误
-            dates = qlib_D.calendar(start_time=start_date, end_time=end_date, freq="day")
+
+            dates = qlib_D.calendar(
+                start_time=start_date, end_time=end_date, freq="day"
+            )
             dates = pd.to_datetime(dates)
         except Exception as e:
             print(f"获取交易日历失败：{e}，使用工作日代替")
@@ -164,10 +162,18 @@ def run_backtest(
 
     return {
         "total_return": float(total_return),
-        "annual_return": float((1 + total_return) ** (252 / len(daily_returns)) - 1) if daily_returns else 0.0,
+        "annual_return": (
+            float((1 + total_return) ** (252 / len(daily_returns)) - 1)
+            if daily_returns
+            else 0.0
+        ),
         "sharpe_ratio": float(sharpe_ratio),
         "max_drawdown": float(max_drawdown),
-        "win_rate": float((returns_series > 0).sum() / len(returns_series)) if len(returns_series) > 0 else 0.0,
+        "win_rate": (
+            float((returns_series > 0).sum() / len(returns_series))
+            if len(returns_series) > 0
+            else 0.0
+        ),
         "trading_days": len(daily_returns),
     }
 
@@ -175,64 +181,62 @@ def run_backtest(
 def _get_portfolio_return_qlib(signals: Union[Dict, pd.Series], date_str: str) -> float:
     """
     使用 qlib 获取真实市场收益率
-    
+
     Args:
         signals: 交易信号，key 为股票代码，value 为仓位权重
         date_str: 交易日期字符串
-        
+
     Returns:
         float: 组合收益率
     """
     # 检查 signals 是否为空
     if signals is None:
         return 0.0
-    if hasattr(signals, '__len__') and len(signals) == 0:
+    if hasattr(signals, "__len__") and len(signals) == 0:
         return 0.0
-    
+
     # 获取所有股票的收盘价
     stock_list = list(signals.keys())
     if len(stock_list) == 0:
         return 0.0
-    
+
     try:
         # 获取当日和前一个交易日的收盘价
         end_date = pd.Timestamp(date_str)
         start_date = end_date - pd.Timedelta(days=10)  # 多获取几天确保有数据
-        
+
         from qlib.data import D as qlib_D  # 本地导入避免 linter 错误
+
         close_data = qlib_D.features(
-            stock_list,
-            ['$close'],
-            start_time=start_date,
-            end_time=end_date
+            stock_list, ["$close"], start_time=start_date, end_time=end_date
         )
-        
+
         # 计算每只股票的收益率
         portfolio_return = 0.0
         total_weight = 0.0
-        
+
         for stock, weight in signals.items():
             if weight == 0:
                 continue
-                
+
             if stock in close_data.columns:
-                stock_close = close_data[stock]['$close']
+                stock_close = close_data[stock]["$close"]
                 if len(stock_close) >= 2:
                     # 计算当日收益率
                     latest_close = stock_close.iloc[-1]
                     prev_close = stock_close.iloc[-2]
-                    
+
                     if prev_close > 0:
                         stock_return = (latest_close - prev_close) / prev_close
                         portfolio_return += weight * stock_return
                         total_weight += abs(weight)
-        
+
         # 归一化
         if total_weight > 0:
             portfolio_return /= total_weight
-        
+
         return portfolio_return
-        
+
     except Exception as e:
         print(f"获取 qlib 数据失败：{e}")
         return 0.0
@@ -241,28 +245,22 @@ def _get_portfolio_return_qlib(signals: Union[Dict, pd.Series], date_str: str) -
 def _get_portfolio_return_mock(signals: Union[Dict, pd.Series], date_str: str) -> float:
     """
     模拟收益率（仅在 qlib 不可用时使用）
-    
+
     Args:
         signals: 交易信号
         date_str: 交易日期字符串（用于生成确定性随机数）
-        
+
     Returns:
         float: 模拟组合收益率
     """
     # 使用日期作为随机种子，确保同一日期的结果一致
     date_hash = hash(date_str) % (2**32)
     np.random.seed(int(date_hash))
-    
-    stock_returns = {
-        stock: np.random.normal(0, 0.02) for stock in signals.keys()
-    }
 
-    portfolio_return = (
-        sum(
-            signals[stock] * stock_returns.get(stock, 0)
-            for stock in signals.keys()
-        )
-        / max(len(signals), 1)
-    )
-    
+    stock_returns = {stock: np.random.normal(0, 0.02) for stock in signals.keys()}
+
+    portfolio_return = sum(
+        signals[stock] * stock_returns.get(stock, 0) for stock in signals.keys()
+    ) / max(len(signals), 1)
+
     return portfolio_return

@@ -2,7 +2,7 @@ import json
 import os
 
 from langchain_core.prompts import PromptTemplate
-from langgraph.constants import Send
+from langgraph.types import Send
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst

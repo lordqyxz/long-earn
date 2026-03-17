@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 
 class State(TypedDict, total=False):
@@ -7,6 +7,8 @@ class State(TypedDict, total=False):
     query: str
     strategy: Optional[Dict[str, Any]]
     strategy_code: Optional[str]
+    strategy_name: Optional[str]
+    design_rationale: Optional[str]
     backtest_result: Optional[Dict[str, Any]]
     reflection: Optional[str]
     improvement_suggestions: Optional[str]
@@ -17,6 +19,13 @@ class State(TypedDict, total=False):
     accept_optimization: bool
     should_continue: bool
     result: Optional[str]
+    explored_paths: Optional[List[Dict[str, Any]]]
+    selected_direction: Optional[str]
+    tot_enabled: bool
+    primary_issue: Optional[str]
+    error_history: Optional[List[Dict[str, Any]]]
+    code_valid: bool
+    experience_saved: bool
 
 
 StrategyResearchState = State

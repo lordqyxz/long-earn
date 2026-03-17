@@ -1,11 +1,8 @@
 import re
 
-from typing import Any, Dict, List
-
-from langchain.tools import tool
+from typing import Any, Dict
 
 
-@tool
 class CodeSafetyCheck:
     """代码安全检查工具"""
 

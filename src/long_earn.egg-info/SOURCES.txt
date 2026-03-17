@@ -28,6 +28,7 @@ src/long_earn/stock_analysis/agents/petter_prompt.py
 src/long_earn/strategy_rd/__init__.py
 src/long_earn/strategy_rd/state.py
 src/long_earn/strategy_rd/subgraph.py
+src/long_earn/strategy_rd/agents/fallback_strategy.py
 src/long_earn/strategy_rd/agents/strategy_develop_agent.py
 src/long_earn/strategy_rd/agents/strategy_develop_prompt.py
 src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py
@@ -45,7 +46,6 @@ src/long_earn/utils/logger.py
 tests/test_backtest.py
 tests/test_main.py
 tests/test_stock_analysis.py
-tests/test_strategy_backtest_integration.py
 tests/test_strategy_develop.py
 tests/test_strategy_rd.py
 tests/test_strategy_research.py

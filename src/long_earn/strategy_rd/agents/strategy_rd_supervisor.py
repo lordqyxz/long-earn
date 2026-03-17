@@ -19,7 +19,9 @@ class StrategyRdSupervisor:
         from long_earn.utils.llm_factory import create_llm
 
         return create_llm(
-            llm_type=self.llm_type, model_name=self.model_name, base_url=self.base_url
+            llm_type=self.llm_type or "ollama",
+            model_name=self.model_name or "qwen3.5:9b",
+            base_url=self.base_url or "http://localhost:11434"
         )
 
     def evaluate_strategy(
@@ -30,22 +32,18 @@ class StrategyRdSupervisor:
 
         llm = self._create_llm()
 
-        try:
-            prompt = strategy_rd_supervisor_prompt.format(
-                strategy=strategy,
-                backtest_result=backtest_result,
-                decision_history="无",
-            )
-            response = llm.invoke(prompt)
+        prompt = strategy_rd_supervisor_prompt.format(
+            strategy=strategy,
+            backtest_result=backtest_result,
+            decision_history="无",
+        )
+        response = llm.invoke(prompt)
 
-            content = response.content.strip()
-            result = json.loads(content)
-            decision = result.get("decision", "拒绝")
-            LOGGER.info(f"监督器评估结果: {decision}, 原因: {result.get('reason', '')}")
-            return decision == "接受"
-        except Exception as e:
-            LOGGER.exception(f"策略评估失败: {e}")
-            return False
+        content = response.content.strip()
+        result = json.loads(content)
+        decision = result.get("decision", "拒绝")
+        LOGGER.info(f"监督器评估结果: {decision}, 原因: {result.get('reason', '')}")
+        return decision == "接受"
 
     def should_continue(
         self,
@@ -67,37 +65,25 @@ class StrategyRdSupervisor:
 
         llm = self._create_llm()
 
-        try:
-            remaining_iterations = max_iterations - iteration
-            prompt = strategy_rd_supervisor_continue_prompt.format(
-                iteration=iteration,
-                max_iterations=max_iterations,
-                remaining_iterations=remaining_iterations,
-                strategy=strategy,
-                backtest_result=backtest_result,
-                reflection=reflection,
-                improvement_suggestions=improvement_suggestions,
-                decision_history="无",
-                iteration_history="无",
-            )
-            response = llm.invoke(prompt)
+        remaining_iterations = max_iterations - iteration
+        prompt = strategy_rd_supervisor_continue_prompt.format(
+            iteration=iteration,
+            max_iterations=max_iterations,
+            remaining_iterations=remaining_iterations,
+            strategy=strategy,
+            backtest_result=backtest_result,
+            reflection=reflection,
+            improvement_suggestions=improvement_suggestions,
+            decision_history="无",
+            iteration_history="无",
+        )
+        response = llm.invoke(prompt)
 
-            content = response.content.strip()
-            # if content.startswith("```json"):
-            #     content = content[7:]
-            # if content.startswith("```"):
-            #     content = content[3:]
-            # if content.endswith("```"):
-            #     content = content[:-3]
-            # content = content.strip()
+        content = response.content.strip()
+        result = json.loads(content)
+        should_continue = result.get("should_continue", False)
+        LOGGER.info(
+            f"监督器决策: {'继续' if should_continue else '停止'}, 原因: {result.get('reason', '')}"
+        )
 
-            result = json.loads(content)
-            should_continue = result.get("should_continue", False)
-            LOGGER.info(
-                f"监督器决策: {'继续' if should_continue else '停止'}, 原因: {result.get('reason', '')}"
-            )
-
-            return should_continue
-        except Exception as e:
-            LOGGER.error(f"判断是否继续失败: {e}")
-            return iteration < max_iterations
+        return should_continue

@@ -20,6 +20,11 @@ uv run
 
 # 项目设计 v0.6
 
+## 知识库系统
+- 系统启动时自动加载 `init/` 目录下的文档到 Qdrant 向量数据库
+- 策略生成时自动搜索知识库获取参考信息
+- 支持 .md、.txt、.py 文件格式
+
 ## 角色
 你是一个证券交易顾问智能体。
 
@@ -65,6 +70,7 @@ uv run
 - 回测数据源：pyqlib 内置
 - 记忆组件：langchain-qdrant
 - 日志库 ：loguru
+- 证券数据获取：[akshare](https://akshare.akfamily.xyz)
 
 ## 系统模块
 
@@ -72,8 +78,8 @@ uv run
 - src/long_earn/agent.py 实现主图的智能体
 - src/long_earn/state.py 定义主图的状态
 - src/long_earn/strategy_rd/state：策略研究子图的状态（Reflexion 模式）
-    - subgraph.py 实现策略研究子图的文件
     - state.py 定义策略研究子图的状态
+    - subgraph.py 实现策略研究子图的文件
     - agents/ 实现策略研究子图的智能体
         - strategy_research_agent.py 反思策略表现，提出优化建议，生成策略，优化目标（收益权重 > 回撤 > 其他）。
         - strategy_research_prompt.py 实现策略研究子图的智能体的提示模板
@@ -85,7 +91,6 @@ uv run
 - src/long_earn/stock_analysis：股票分析子图，用于获取股票数据和计算因子
     - state.py 定义股票分析子图的状态
     - subgraph.py 实现股票分析子图的文件
-    - state.py 定义股票分析子图的状态
     - agents/ 实现股票分析子图的智能体
         - petter_analyst.py 实现彼得林奇视角的股票分析智能体
         - petter_prompt.py 实现彼得林奇视角的股票分析智能体的提示模板
@@ -97,11 +102,10 @@ uv run
         - fiske_prompt.py 实现费雪视角的股票分析智能体的提示模板
 - src/long_earn/tools/：自定义工具
     - subgraph_tool.py 将子图封装为工具，用于在主图中调用
-    - kimi_web_search.py 实现kimi web search工具
-    - akshare.py 实现akshare工具，用于获取股票/财务数据
+    - kimi_web_search.py 实现kimi web search工具，用于搜索互联网
+    - get_stock_info.py 实现获取股票/财务数据的工具，使用akshare库
     - tavily_search.py 实现tavily search工具，用于搜索互联网
     - code_safety_check.py 实现代码安全检查工具
-- src/long_earn/config：配置管理
 - src/long_earn/callbacks/：回调函数包
     - logger.py 实现日志记录回调函数
     - exception.py 实现异常处理回调函数
