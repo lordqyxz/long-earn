@@ -68,6 +68,44 @@ class StrategyResearchAgent:
             base_url=self.base_url or "http://localhost:11434",
         )
 
+    def _create_retrieval_decision_prompt(self, query: str, context: str) -> str:
+        return f"""<task>
+判断是否需要从知识库检索更多信息来回答用户查询。
+</task>
+
+<user_query>
+{query}
+</user_query>
+
+<current_context>
+{context if context else "无"}
+</current_context>
+
+<instructions>
+分析当前上下文是否足够回答用户查询。如果需要更多信息，返回需要检索的关键词/问题。
+如果当前上下文已经足够，返回 "SUFFICIENT"。
+</instructions>
+
+<output_format>
+请返回以下格式：
+- 如果需要检索: "RETRIEVE: <检索关键词1>, <检索关键词2>"
+- 如果已足够: "SUFFICIENT"
+"""
+
+    def _should_retrieve(self, query: str, current_context: str) -> tuple[bool, list[str]]:
+        """判断是否需要检索，返回(是否需要, 检索关键词列表)"""
+        llm = self._create_llm()
+        prompt = self._create_retrieval_decision_prompt(query, current_context)
+        response = llm.invoke(prompt)
+
+        content = response.content.strip()
+        if content.startswith("SUFFICIENT"):
+            return False, []
+        elif content.startswith("RETRIEVE:"):
+            keywords = content[9:].split(",")
+            return True, [k.strip() for k in keywords]
+        return False, []
+
     def _search_knowledge(
         self,
         query: str,
@@ -130,6 +168,35 @@ class StrategyResearchAgent:
             messages = prompt
         response = llm.invoke(messages)
         LOGGER.info(f"策略研究代理生成策略完成：{query}")
+
+        return {
+            "strategy_name": "研究策略",
+            "description": response.content,
+            "query": query,
+        }
+
+    def research_strategy_with_context(
+        self, query: str, knowledge_context: str = ""
+    ) -> Dict[str, Any]:
+        """使用已有上下文的研究策略"""
+        from langchain_core.prompts import ChatPromptTemplate
+
+        from .strategy_research_prompt import create_strategy_research_prompt
+
+        llm = self._create_llm()
+
+        prompt = create_strategy_research_prompt(
+            target_market="stock",
+            query=query,
+            strategy_examples="无",
+            strategy_context=knowledge_context if knowledge_context else "无",
+        )
+        if isinstance(prompt, ChatPromptTemplate):
+            messages = prompt.format_messages()
+        else:
+            messages = prompt
+        response = llm.invoke(messages)
+        LOGGER.info(f"策略研究代理生成策略完成（使用自适应检索上下文）")
 
         return {
             "strategy_name": "研究策略",

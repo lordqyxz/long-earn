@@ -27,5 +27,12 @@ class State(TypedDict, total=False):
     code_valid: bool
     experience_saved: bool
 
+    retrieval_count: int
+    max_retrievals: int
+    knowledge_context: str
+    retrieval_needed: bool
+    retrieval_keywords: Optional[List[str]]
+    adaptive_retrieval_history: Optional[List[Dict[str, Any]]]
+
 
 StrategyResearchState = State

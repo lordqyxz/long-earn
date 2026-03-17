@@ -1,5 +1,6 @@
 from langgraph.graph import END, START, StateGraph
 
+from long_earn.utils.logger import LOGGER
 from ..tools.backtest import run_backtest
 from ..tools.store import save_experience
 from .agents.strategy_develop_agent import StrategyDevelopAgent
@@ -9,10 +10,11 @@ from .state import State
 
 
 MAX_CODE_REFINES = 3
+MAX_RETRIEVALS = 3
 
 
 def create_strategy_rd_subgraph():
-    """创建策略研究子图 - Reflexion 模式 with 代码修复"""
+    """创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索"""
     research_agent = StrategyResearchAgent()
     supervisor = StrategyRdSupervisor()
     develop_agent = StrategyDevelopAgent()
@@ -23,12 +25,84 @@ def create_strategy_rd_subgraph():
         """初始化迭代计数器"""
         current_iteration = state.get("iteration", 0)
         develop_agent.clear_error_history()
-        return {"iteration": current_iteration}
+        return {
+            "iteration": current_iteration,
+            "retrieval_count": 0,
+            "max_retrievals": MAX_RETRIEVALS,
+            "knowledge_context": "",
+            "adaptive_retrieval_history": [],
+        }
+
+    def initial_retrieval_node(state):
+        """初始检索节点 - 基础检索获取市场/策略基本信息"""
+        query = state.get("query", "")
+
+        knowledge_context = research_agent._get_knowledge_context(
+            query, node_type="research"
+        )
+
+        return {
+            "knowledge_context": knowledge_context if knowledge_context else "",
+            "retrieval_count": 1,
+        }
+
+    def evaluate_retrieval_node(state):
+        """评估是否需要继续检索"""
+        query = state.get("query", "")
+        current_context = state.get("knowledge_context", "")
+        retrieval_count = state.get("retrieval_count", 0)
+        max_retrievals = state.get("max_retrievals", MAX_RETRIEVALS)
+
+        if retrieval_count >= max_retrievals:
+            return {"retrieval_needed": False, "retrieval_keywords": []}
+
+        should_retrieve, keywords = research_agent._should_retrieve(
+            query, current_context
+        )
+
+        LOGGER.info(
+            f"检索评估 (第{retrieval_count}轮): 需要检索={should_retrieve}, 关键词={keywords}"
+        )
+
+        return {"retrieval_needed": should_retrieve, "retrieval_keywords": keywords}
+
+    def adaptive_retrieval_node(state):
+        """自适应检索节点 - 根据关键词执行检索"""
+        keywords = state.get("retrieval_keywords", [])
+        current_context = state.get("knowledge_context", "")
+        retrieval_count = state.get("retrieval_count", 0)
+        history = state.get("adaptive_retrieval_history", [])
+
+        new_results = []
+        for keyword in keywords:
+            retrieved = research_agent._get_knowledge_context(keyword)
+            if retrieved:
+                new_results.append({"keyword": keyword, "content": retrieved})
+                current_context += f"\n\n### {keyword}相关知识:\n{retrieved}"
+
+        retrieval_count += 1
+
+        history.extend(new_results)
+
+        LOGGER.info(
+            f"自适应检索第{retrieval_count}轮完成，新增{len(new_results)}条知识"
+        )
+
+        return {
+            "knowledge_context": current_context,
+            "retrieval_count": retrieval_count,
+            "adaptive_retrieval_history": history,
+            "retrieval_needed": False,
+        }
 
     def research_node(state):
         """研究节点 - 生成初始策略"""
         query = state.get("query", "")
-        strategy = research_agent.research_strategy(query)
+        knowledge_context = state.get("knowledge_context", "")
+
+        strategy = research_agent.research_strategy_with_context(
+            query, knowledge_context
+        )
         return {
             "strategy": strategy,
             "strategy_name": strategy.get("strategy_name", "CustomStrategy"),
@@ -177,6 +251,9 @@ def create_strategy_rd_subgraph():
         return {"should_continue": should_continue, "iteration": next_iteration}
 
     workflow.add_node("init", init_iteration)
+    workflow.add_node("initial_retrieval", initial_retrieval_node)
+    workflow.add_node("evaluate_retrieval", evaluate_retrieval_node)
+    workflow.add_node("adaptive_retrieval", adaptive_retrieval_node)
     workflow.add_node("research", research_node)
     workflow.add_node("develop", develop_node)
     workflow.add_node("backtest", backtest_node)
@@ -189,7 +266,16 @@ def create_strategy_rd_subgraph():
     workflow.add_node("supervisor", supervisor_node)
 
     workflow.add_edge(START, "init")
-    workflow.add_edge("init", "research")
+    workflow.add_edge("init", "initial_retrieval")
+    workflow.add_edge("initial_retrieval", "evaluate_retrieval")
+
+    workflow.add_conditional_edges(
+        "evaluate_retrieval",
+        lambda state: "adaptive_retrieval" if state.get("retrieval_needed", False) else "research",
+        {"adaptive_retrieval": "adaptive_retrieval", "research": "research"},
+    )
+
+    workflow.add_edge("adaptive_retrieval", "evaluate_retrieval")
     workflow.add_edge("research", "develop")
     workflow.add_edge("develop", "backtest")
     
