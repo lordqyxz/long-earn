@@ -18,10 +18,11 @@ uv pip install -e .
 uv run 
 ```
 
-# 项目设计 v0.6
+# 项目设计 v0.7
 
 ## 知识库系统
 - 系统启动时自动加载 `init/` 目录下的文档到 Qdrant 向量数据库
+- 支持保存和搜索交易经验，实现策略迭代的知识积累
 - 策略生成时自动搜索知识库获取参考信息
 - 支持 .md、.txt、.py 文件格式
 
@@ -68,8 +69,9 @@ uv run
 - LLM：ollama（默认）/dashcope / openAi兼容本地lmstudio
 - 交易框架：pyqlib（完整量化流程：数据、因子、回测）
 - 回测数据源：pyqlib 内置
+- 向量数据库：Qdrant
 - 记忆组件：langchain-qdrant
-- 日志库 ：loguru
+- 日志库：loguru
 - 证券数据获取：[akshare](https://akshare.akfamily.xyz)
 
 ## 系统模块
@@ -106,6 +108,9 @@ uv run
     - get_stock_info.py 实现获取股票/财务数据的工具，使用akshare库
     - tavily_search.py 实现tavily search工具，用于搜索互联网
     - code_safety_check.py 实现代码安全检查工具
+    - store.py 实现知识库存储工具（Qdrant向量数据库）
+    - md_splitter.py 实现Markdown文档分割工具
+    - backtest.py 实现回测工具
 - src/long_earn/callbacks/：回调函数包
     - logger.py 实现日志记录回调函数
     - exception.py 实现异常处理回调函数

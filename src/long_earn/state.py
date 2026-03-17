@@ -1,14 +1,15 @@
-from typing import TypedDict
+from typing import Any, Dict, TypedDict
 
 
-class State(TypedDict):
+class State(TypedDict, total=True):
     """主图状态定义"""
 
-    user_query: str  # 用户查询
-    status: str  # 状态信息
-    route: str  # 路由决策
-    routing_reason: str  # 路由理由
-    strategy_result: dict  # 策略研究结果
-    stock_analysis_result: dict  # 股票分析结果
-    summary: str  # 汇总结果
-    error: str  # 错误信息
+    user_query: str
+    status: str
+    route: str
+    routing_reason: str
+    strategy_result: dict
+    stock_analysis_result: dict
+    summary: str
+    error: str
+    metrics: Dict[str, Any]

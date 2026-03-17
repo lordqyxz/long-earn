@@ -7,6 +7,7 @@ import json
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
+from long_earn.callbacks.monitoring import monitor_node, track_tokens
 from long_earn.state import State
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
 from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
@@ -31,6 +32,7 @@ def create_main_agent():
         """开始节点"""
         return {"status": "started"}
 
+    @monitor_node("intent_analyze")
     def intent_analyze_node(state: State):
         """用户意图分析节点 - 使用LLM进行智能路由"""
         user_query = state["user_query"]
@@ -63,6 +65,8 @@ def create_main_agent():
 
         try:
             response = llm.invoke(routing_prompt.format(user_query=user_query))
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                track_tokens(response.usage_metadata)
             routing_decision = response.content.strip()
             LOGGER.debug(f"LLM响应: {repr(routing_decision)}")
 
@@ -128,6 +132,7 @@ def create_main_agent():
             else:
                 return {"route": "unknown", "error": str(e)}
 
+    @monitor_node("strategy_rd")
     def strategy_rd_node(state: State):
         """策略研究子图节点"""
         user_query = state.get("user_query", "")
@@ -136,6 +141,7 @@ def create_main_agent():
         LOGGER.debug(f"策略研究结果: {result}")
         return {"strategy_result": result}
 
+    @monitor_node("stock_analysis")
     def stock_analysis_node(state: State):
         """股票分析子图节点"""
         user_query = state.get("user_query", "")
@@ -144,6 +150,7 @@ def create_main_agent():
         LOGGER.debug(f"股票分析结果: {result}")
         return {"stock_analysis_result": result}
 
+    @monitor_node("summarize")
     def summarize_node(state: State):
         """汇总节点 - 使用LLM生成友好的客户返回结果"""
         strategy_result = state.get("strategy_result")

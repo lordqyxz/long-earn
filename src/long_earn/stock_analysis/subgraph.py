@@ -2,7 +2,6 @@ import json
 import os
 
 from langchain_core.prompts import PromptTemplate
-from langgraph.types import Send
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
@@ -87,15 +86,17 @@ def route_stock_data(state):
     retry_count = state.get("retry_count", 0)
     max_retries = 3
 
-    # 如果有错误且还有重试机会，则重试
     if "error" in stock_data and retry_count < max_retries:
-        return "get_stock_data"  # 循环回获取数据节点进行重试
+        return "get_stock_data"
     elif "error" in stock_data:
-        # 如果有错误但已达到最大重试次数，则转到错误处理
         return "error_handler"
     else:
-        # 如果没有错误，则继续正常流程，启动并行分析
-        return "parallel_analysis_start"
+        return [
+            "petter_analysis",
+            "charles_munger_analysis",
+            "buffett_analysis",
+            "fiske_analysis",
+        ]
 
 
 def petter_analysis_node(state):
@@ -148,23 +149,11 @@ def summarize_node(state):
     return {"summary": summary, "result": summary}
 
 
-def parallel_analysis_start_node(state):
-    """并行分析起始节点，使用 Send API 触发四个分析师真正并行执行"""
-    # 使用 Send API 实现真正的并行执行
-    return [
-        Send("petter_analysis", state),
-        Send("charles_munger_analysis", state),
-        Send("buffett_analysis", state),
-        Send("fiske_analysis", state),
-    ]
-
-
 def create_stock_analysis_subgraph():
     """创建股票分析子图"""
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node("get_stock_data", get_stock_data)
-    workflow.add_node("parallel_analysis_start", parallel_analysis_start_node)
     workflow.add_node("petter_analysis", petter_analysis_node)
     workflow.add_node("charles_munger_analysis", charles_munger_analysis_node)
     workflow.add_node("buffett_analysis", buffett_analysis_node)
@@ -177,18 +166,16 @@ def create_stock_analysis_subgraph():
         "get_stock_data",
         route_stock_data,
         {
-            "parallel_analysis_start": "parallel_analysis_start",
+            "get_stock_data": "get_stock_data",
+            "petter_analysis": "petter_analysis",
+            "charles_munger_analysis": "charles_munger_analysis",
+            "buffett_analysis": "buffett_analysis",
+            "fiske_analysis": "fiske_analysis",
             "error_handler": "error_handler",
         },
     )
-    # 使用 add_conditional_edges 实现真正的并行
-    workflow.add_conditional_edges(
-        "parallel_analysis_start",
-        lambda x: x,  # 直接返回 Send 列表
-        ["petter_analysis", "charles_munger_analysis", "buffett_analysis", "fiske_analysis"],
-    )
 
-    # 从四个并行节点汇聚到汇总节点（使用空条件边，等待所有节点完成）
+    # 从四个并行节点汇聚到汇总节点
     workflow.add_edge("petter_analysis", "summarize")
     workflow.add_edge("charles_munger_analysis", "summarize")
     workflow.add_edge("buffett_analysis", "summarize")
