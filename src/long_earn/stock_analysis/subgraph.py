@@ -2,6 +2,7 @@ import json
 import os
 
 from langchain_core.prompts import PromptTemplate
+from langgraph.constants import Send
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
@@ -148,9 +149,14 @@ def summarize_node(state):
 
 
 def parallel_analysis_start_node(state):
-    """并行分析起始节点，触发四个分析师并行执行"""
-    # 此节点只是作为一个触发点，实际的并行执行由图结构控制
-    return {}
+    """并行分析起始节点，使用 Send API 触发四个分析师真正并行执行"""
+    # 使用 Send API 实现真正的并行执行
+    return [
+        Send("petter_analysis", state),
+        Send("charles_munger_analysis", state),
+        Send("buffett_analysis", state),
+        Send("fiske_analysis", state),
+    ]
 
 
 def create_stock_analysis_subgraph():
@@ -175,14 +181,14 @@ def create_stock_analysis_subgraph():
             "error_handler": "error_handler",
         },
     )
-    # 并行执行四个分析节点
-    workflow.add_edge("parallel_analysis_start", "petter_analysis")
-    workflow.add_edge("parallel_analysis_start", "charles_munger_analysis")
-    workflow.add_edge("parallel_analysis_start", "buffett_analysis")
-    workflow.add_edge("parallel_analysis_start", "fiske_analysis")
+    # 使用 add_conditional_edges 实现真正的并行
+    workflow.add_conditional_edges(
+        "parallel_analysis_start",
+        lambda x: x,  # 直接返回 Send 列表
+        ["petter_analysis", "charles_munger_analysis", "buffett_analysis", "fiske_analysis"],
+    )
 
-    # 从四个并行节点汇聚到汇总节点
-    # LangGraph会在所有前置节点完成后自动执行后续节点
+    # 从四个并行节点汇聚到汇总节点（使用空条件边，等待所有节点完成）
     workflow.add_edge("petter_analysis", "summarize")
     workflow.add_edge("charles_munger_analysis", "summarize")
     workflow.add_edge("buffett_analysis", "summarize")
