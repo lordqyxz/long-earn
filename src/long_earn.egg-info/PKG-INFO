@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: long_earn
-Version: 0.5.0
+Version: 0.7.0
 Summary: 自我进化的量化交易系统
 Author-email: shiyz <shiyz@eoutlook.com>
 Requires-Python: ==3.11.*
