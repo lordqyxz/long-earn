@@ -1,31 +1,32 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from long_earn.utils.logger import LOGGER
+from long_earn.core.prompt_loader import MarkdownPromptTemplate
+from long_earn.services import KnowledgeService, LLMService, LoggerService
+
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 
 class StrategyDevelopAgent:
-    """策略开发智能体"""
+    """策略开发智能体
 
-    def __init__(
-        self,
-        llm_type: str = "ollama",
-        model_name: str = "qwen3.5:9b",
-        base_url: str = "",
-    ):
-        self.llm_type = llm_type
-        self.model_name = model_name
-        self.base_url = base_url
+    参考 LangGraph Runtime 实践：
+    1. 依赖通过 context 传递
+    2. 支持测试时注入 Mock
+    """
+
+    def __init__(self, context: "RuntimeContext"):
+        """初始化策略开发 Agent
+
+        Args:
+            context: 运行时上下文
+        """
+        self.context = context
+        self.llm_service = context.llm_service
+        self.knowledge_service = context.knowledge_service
+        self.logger = context.logger
         self._error_history: List[dict] = []
-
-    def _create_llm(self):
-        from long_earn.utils.llm_factory import create_llm
-
-        return create_llm(
-            llm_type=self.llm_type or "ollama",
-            model_name=self.model_name or "qwen3.5:cloud",
-            base_url=self.base_url or "http://localhost:11434",
-        )
 
     def _search_knowledge(
         self,
@@ -36,15 +37,16 @@ class StrategyDevelopAgent:
 
         Args:
             query: 搜索查询
-            source_files: 可选，按源文件过滤 (如 ["01_data.md", "02_strategy.md"])
+            source_files: 可选，按源文件过滤
         """
         try:
-            from long_earn.tools.store import search_knowledge
-
-            results = search_knowledge(query, k=5, source_files=source_files)
+            results = self.knowledge_service.search(
+                query, k=5, source_files=source_files
+            )
             return results
         except Exception as e:
-            LOGGER.warning(f"搜索知识库失败: {e}")
+            if self.logger:
+                self.logger.warning(f"搜索知识库失败：{e}")
             return []
 
     def _get_knowledge_context(self, query: str, node_type: str = "develop") -> str:
@@ -74,41 +76,64 @@ class StrategyDevelopAgent:
 
     def develop_strategy(self, strategy: Dict[str, Any]) -> str:
         """将策略转化为 pyqlib 回测格式"""
-        from langchain_core.prompts import ChatPromptTemplate
-
-        from .strategy_develop_prompt import strategy_develop_prompt
-
-        llm = self._create_llm()
+        if not hasattr(self, "_develop_prompt"):
+            self._develop_prompt = MarkdownPromptTemplate(
+                "strategy_develop_prompt.md",
+                ["strategy", "target_market", "backtest_params"],
+                __file__,
+            )
 
         strategy_info = strategy.get("description", str(strategy))
         strategy_name = strategy.get("strategy_name", "CustomStrategy")
 
+        # 获取知识库上下文
         knowledge_context = self._get_knowledge_context(
             strategy_info, node_type="develop"
         )
         if knowledge_context:
-            knowledge_context = "\n\n## 参考知识库内容:\n" + knowledge_context
-            LOGGER.info("成功获取知识库参考信息")
+            knowledge_context = "\n\n## 参考知识库:\n" + knowledge_context
 
-        prompt = strategy_develop_prompt.format(
+        # 生成提示词并调用
+        prompt = self._develop_prompt.format(
             strategy=strategy_info,
             target_market="A 股",
             backtest_params="默认参数",
         )
-
         if knowledge_context:
-            prompt = prompt + knowledge_context
+            prompt += knowledge_context
 
-        response = llm.invoke(prompt)
-        code = response.content
+        # 解析 JSON 并提取代码
+        response = self.llm_service.invoke(prompt).content
+        code = self._extract_code_from_response(response)
 
-        if "```python" in code:
-            code = code.split("```python")[1].split("```")[0].strip()
-        elif "```" in code:
-            code = code.split("```")[1].split("```")[0].strip()
-
-        LOGGER.info(f"策略开发完成：{strategy_name}")
+        if self.logger:
+            self.logger.info(f"策略开发完成：{strategy_name}")
         return code
+
+    def _extract_code_from_response(self, response: str) -> str:
+        """从响应中提取代码"""
+        import json
+
+        # 尝试解析 JSON
+        try:
+            # 查找 JSON 块
+            if "```json" in response:
+                json_str = response.split("```json")[1].split("```")[0].strip()
+                data = json.loads(json_str)
+                code = data.get("code", "")
+            else:
+                # 直接尝试解析整个响应
+                data = json.loads(response)
+                code = data.get("code", "")
+
+            # code 字段已经是纯文本，直接返回
+            return code.strip()
+        except (json.JSONDecodeError, KeyError):
+            # JSON 解析失败，直接提取代码块作为降级方案
+            for start, end in [("```python", "```"), ("```", "```")]:
+                if start in response:
+                    return response.split(start)[1].split(end)[0].strip()
+            return response
 
     def refine_code(
         self,
@@ -116,75 +141,57 @@ class StrategyDevelopAgent:
         error_message: str,
         failed_code: str,
     ) -> str:
-        """根据错误信息修复代码
-
-        Args:
-            strategy: 策略信息
-            error_message: 错误信息
-            failed_code: 失败的代码
-
-        Returns:
-            修复后的代码
-        """
-        from langchain_core.prompts import ChatPromptTemplate
-
-        from .strategy_develop_prompt import strategy_develop_refine_prompt
-
-        llm = self._create_llm()
+        """根据错误信息修复代码"""
+        if not hasattr(self, "_refine_prompt"):
+            self._refine_prompt = MarkdownPromptTemplate(
+                "strategy_develop_refine_prompt.md",
+                ["code", "strategy_description", "error_message"],
+                __file__,
+            )
 
         strategy_info = strategy.get("description", str(strategy))
         strategy_name = strategy.get("strategy_name", "CustomStrategy")
 
-        self._error_history.append(
-            {
-                "code": failed_code,
-                "error": error_message,
-            }
-        )
+        # 记录错误
+        self._error_history.append({"code": failed_code, "error": error_message})
 
-        experience_results = self._search_experience(strategy_info, min_sharpe=0.5)
-        experience_context = ""
-        if experience_results:
-            experience_context = "\n\n## 成功案例参考:\n"
-            for exp in experience_results[:2]:
-                experience_context += f"""
-### {exp['name']}
-设计思路: {exp['rationale'][:200]}...
-代码:
-```python
-{exp['code'][:500]}
-```
-"""
-
+        # 获取额外上下文
+        experience_context = self._get_experience_context(strategy_info)
         knowledge_context = self._get_knowledge_context(
             error_message, node_type="develop"
         )
-        if knowledge_context:
-            knowledge_context = "\n\n## 参考知识库:\n" + knowledge_context
 
-        prompt = strategy_develop_refine_prompt.format(
+        # 构建提示词
+        prompt = self._refine_prompt.format(
             code=failed_code,
             strategy_description=strategy_info,
             error_message=error_message,
         )
-
         if experience_context:
-            prompt = prompt + experience_context
+            prompt += experience_context
         if knowledge_context:
-            prompt = prompt + knowledge_context
+            prompt += "\n\n## 参考知识库:\n" + knowledge_context
 
-        response = llm.invoke(prompt)
-        code = response.content
+        # 解析 JSON 并提取代码
+        response = self.llm_service.invoke(prompt).content
+        code = self._extract_code_from_response(response)
 
-        if "```python" in code:
-            code = code.split("```python")[1].split("```")[0].strip()
-        elif "```" in code:
-            code = code.split("```")[1].split("```")[0].strip()
-
-        LOGGER.info(
-            f"代码修复完成：{strategy_name} (错误尝试 {len(self._error_history)} 次)"
-        )
+        if self.logger:
+            self.logger.info(
+                f"代码修复完成：{strategy_name} (尝试{len(self._error_history)}次)"
+            )
         return code
+
+    def _get_experience_context(self, strategy_info: str) -> str:
+        """获取成功案例参考"""
+        results = self._search_experience(strategy_info, min_sharpe=0.5)
+        if not results:
+            return ""
+
+        context = "\n\n## 成功案例:\n"
+        for exp in results[:2]:
+            context += f"\n### {exp['name']}\n设计思路：{exp['rationale'][:200]}...\n```python\n{exp['code'][:500]}\n```\n"
+        return context
 
     def _search_experience(
         self,
@@ -205,7 +212,8 @@ class StrategyDevelopAgent:
 
             return search_experience(query, k=2, min_sharpe=min_sharpe)
         except Exception as e:
-            LOGGER.warning(f"搜索经验失败: {e}")
+            if self.logger:
+                self.logger.warning(f"搜索经验失败：{e}")
             return []
 
     def get_error_history(self) -> List[dict]:

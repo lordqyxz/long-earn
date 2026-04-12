@@ -1,11 +1,11 @@
 import json
-import os
+from typing import TYPE_CHECKING
 
-from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
 from long_earn.stock_analysis.agents.charles_munger_analyst import CharlesMungerAnalyst
+from long_earn.stock_analysis.agents.extract_prompt import extract_prompt
 from long_earn.stock_analysis.agents.fiske_analyst import FiskeAnalyst
 from long_earn.stock_analysis.agents.petter_analyst import PetterAnalyst
 from long_earn.stock_analysis.state import StockAnalysisState
@@ -15,52 +15,41 @@ from long_earn.tools.get_stock_info import (
     get_stock_code_by_name,
 )
 from long_earn.tools.get_stock_info import get_stock_data as akshare_get_stock_data
-from long_earn.utils.llm_factory import create_llm
 
-# 定义提示词模板
-extract_prompt = PromptTemplate(
-    template="""请从以下用户查询中提取股票名称：
-
-用户查询：{query}
-
-请以JSON格式返回结果，包含以下字段：
-- stock_name: 提取的股票名称（如果有）
-- stock_code: 提取的股票代码（如果有）
-如果无法提取，则返回空字符串。
-""",
-    input_variables=["query"],
-)
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 
 def get_stock_data(state: StockAnalysisState) -> StockAnalysisState:
-    """获取股票数据，带重试机制"""
-
+    """获取股票数据，带重试机制
+    
+    Args:
+        state: 状态
+    """
     # 首先尝试从状态中获取股票代码
     stock_code = state.get("stock_code", "")
     stock_name = state.get("stock_name", "")
     # 如果没有股票代码，尝试从查询中提取
     if not stock_code:
         if not stock_name:
-            # 创建LLM实例
-            llm = create_llm(
-                llm_type=os.getenv("LLM_TYPE", "ollama"),
-                model_name=os.getenv("LLM_MODEL", "qwen3.5:cloud"),
-            )
-            query = state.get("query", "")
-            formatted_prompt = extract_prompt.format(query=query)
-            response = llm.invoke(formatted_prompt)
-            response_content = (
-                response.content if hasattr(response, "content") else str(response)
-            )
+            # 使用 context 中的 LLM - 从状态中获取
+            llm_service = state.get("context", {}).get("llm_service")
+            if llm_service:
+                query = state.get("query", "")
+                formatted_prompt = extract_prompt.format(query=query)
+                response = llm_service.invoke(formatted_prompt)
+                response_content = (
+                    response.content if hasattr(response, "content") else str(response)
+                )
 
-            # 解析LLM响应
-            try:
-                extraction_result = json.loads(response_content)
-                stock_name = extraction_result.get("stock_name", "")
-                stock_code = extraction_result.get("stock_code", "")
-            except json.JSONDecodeError:
-                stock_name = ""
-                stock_code = ""
+                # 解析 LLM 响应
+                try:
+                    extraction_result = json.loads(response_content)
+                    stock_name = extraction_result.get("stock_name", "")
+                    stock_code = extraction_result.get("stock_code", "")
+                except json.JSONDecodeError:
+                    stock_name = ""
+                    stock_code = ""
     if stock_name and not stock_code:
         stock_code = get_stock_code_by_name(stock_name)
 
@@ -101,28 +90,40 @@ def route_stock_data(state):
 
 def petter_analysis_node(state):
     """彼得林奇视角分析"""
-    petter_analyst = PetterAnalyst()
+    context = state.get("context")
+    if not context:
+        return {"petter_analysis": "错误：缺少上下文信息"}
+    petter_analyst = PetterAnalyst(context=context)
     analysis = petter_analyst.analyze(state.get("stock_data", {}))
     return {"petter_analysis": analysis}
 
 
 def charles_munger_analysis_node(state):
     """查理芒格视角分析"""
-    charles_munger_analyst = CharlesMungerAnalyst()
+    context = state.get("context")
+    if not context:
+        return {"charles_munger_analysis": "错误：缺少上下文信息"}
+    charles_munger_analyst = CharlesMungerAnalyst(context=context)
     analysis = charles_munger_analyst.analyze(state.get("stock_data", {}))
     return {"charles_munger_analysis": analysis}
 
 
 def buffett_analysis_node(state):
     """巴菲特视角分析"""
-    buffett_analyst = BuffettAnalyst()
+    context = state.get("context")
+    if not context:
+        return {"buffett_analysis": "错误：缺少上下文信息"}
+    buffett_analyst = BuffettAnalyst(context=context)
     analysis = buffett_analyst.analyze(state.get("stock_data", {}))
     return {"buffett_analysis": analysis}
 
 
 def fiske_analysis_node(state):
     """费雪视角分析"""
-    fiske_analyst = FiskeAnalyst()
+    context = state.get("context")
+    if not context:
+        return {"fiske_analysis": "错误：缺少上下文信息"}
+    fiske_analyst = FiskeAnalyst(context=context)
     analysis = fiske_analyst.analyze(state.get("stock_data", {}))
     return {"fiske_analysis": analysis}
 
@@ -149,8 +150,12 @@ def summarize_node(state):
     return {"summary": summary, "result": summary}
 
 
-def create_stock_analysis_subgraph():
-    """创建股票分析子图"""
+def create_stock_analysis_subgraph(context: "RuntimeContext"):
+    """创建股票分析子图
+    
+    Args:
+        context: 运行时上下文
+    """
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node("get_stock_data", get_stock_data)

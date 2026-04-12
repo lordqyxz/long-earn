@@ -22,10 +22,8 @@ Requires-Dist: langgraph-checkpoint-sqlite>=2.0.11
 Requires-Dist: akshare>=1.10.0
 Requires-Dist: langchain-qdrant>=0.2.1
 Requires-Dist: qdrant-client>=1.16.1
-Requires-Dist: pytest>=9.0.2
 Requires-Dist: tavily-python>=0.7.23
-Requires-Dist: pyqlib>=0.9.7
+Requires-Dist: httpx>=0.25.0
 Provides-Extra: dev
-Requires-Dist: pytest; extra == "dev"
 Requires-Dist: black; extra == "dev"
 Requires-Dist: isort; extra == "dev"

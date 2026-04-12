@@ -1,12 +1,13 @@
 import os
-from langchain_ollama import ChatOllama
+
 from langchain_core.language_models import BaseLanguageModel
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 
 def create_llm(
     llm_type: str = "ollama",
-    model_name: str = "qwen3.5:9b",
+    model_name: str = "qwen3.5:cloud",
     base_url: str = "http://localhost:11434",
     **kwargs,
 ) -> BaseLanguageModel:

@@ -1,6 +1,7 @@
+from typing import TYPE_CHECKING
+
 from langgraph.graph import END, START, StateGraph
 
-from long_earn.utils.logger import LOGGER
 from ..tools.backtest import run_backtest
 from ..tools.store import save_experience
 from .agents.strategy_develop_agent import StrategyDevelopAgent
@@ -8,16 +9,25 @@ from .agents.strategy_rd_supervisor import StrategyRdSupervisor
 from .agents.strategy_research_agent import StrategyResearchAgent
 from .state import State
 
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 MAX_CODE_REFINES = 3
 MAX_RETRIEVALS = 3
 
 
-def create_strategy_rd_subgraph():
-    """创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索"""
-    research_agent = StrategyResearchAgent()
-    supervisor = StrategyRdSupervisor()
-    develop_agent = StrategyDevelopAgent()
+def create_strategy_rd_subgraph(context: "RuntimeContext"):
+    """创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索
+    
+    Args:
+        context: 运行时上下文
+    """
+    research_agent = StrategyResearchAgent(context=context)
+    supervisor = StrategyRdSupervisor(context=context)
+    develop_agent = StrategyDevelopAgent(context=context)
+    
+    # 从 context 获取 logger
+    logger = context.logger
 
     workflow = StateGraph(State)
 
@@ -60,9 +70,10 @@ def create_strategy_rd_subgraph():
             query, current_context
         )
 
-        LOGGER.info(
-            f"检索评估 (第{retrieval_count}轮): 需要检索={should_retrieve}, 关键词={keywords}"
-        )
+        if logger:
+            logger.info(
+                f"检索评估 (第{retrieval_count}轮): 需要检索={should_retrieve}, 关键词={keywords}"
+            )
 
         return {"retrieval_needed": should_retrieve, "retrieval_keywords": keywords}
 
@@ -84,9 +95,10 @@ def create_strategy_rd_subgraph():
 
         history.extend(new_results)
 
-        LOGGER.info(
-            f"自适应检索第{retrieval_count}轮完成，新增{len(new_results)}条知识"
-        )
+        if logger:
+            logger.info(
+                f"自适应检索第{retrieval_count}轮完成，新增{len(new_results)}条知识"
+            )
 
         return {
             "knowledge_context": current_context,
@@ -126,7 +138,7 @@ def create_strategy_rd_subgraph():
 
         if backtest_result is None:
             return {"backtest_result": {"error": "回测失败"}, "code_valid": False}
-        
+
         if backtest_result.get("error"):
             return {"backtest_result": backtest_result, "code_valid": False}
 
@@ -138,10 +150,11 @@ def create_strategy_rd_subgraph():
         strategy_code = state.get("strategy_code", "")
         backtest_result = state.get("backtest_result", {})
         error_message = backtest_result.get("error", "Unknown error")
-        
+
         refine_count = len(develop_agent.get_error_history())
         if refine_count >= MAX_CODE_REFINES:
-            LOGGER.warning(f"已达到最大修复次数 ({MAX_CODE_REFINES})")
+            if logger:
+                logger.warning(f"已达到最大修复次数 ({MAX_CODE_REFINES})")
             return {"code_valid": False}
 
         refined_code = develop_agent.refine_code(
@@ -149,7 +162,7 @@ def create_strategy_rd_subgraph():
             error_message=error_message,
             failed_code=strategy_code,
         )
-        
+
         return {"strategy_code": refined_code, "code_valid": False}
 
     def reflection_node(state):
@@ -195,13 +208,16 @@ def create_strategy_rd_subgraph():
         optimized_strategy_code = state.get("optimized_strategy_code", "")
 
         if not optimized_strategy_code:
-            return {"backtest_result": {"error": "优化后的策略代码为空"}, "code_valid": False}
+            return {
+                "backtest_result": {"error": "优化后的策略代码为空"},
+                "code_valid": False,
+            }
 
         backtest_result = run_backtest(strategy_code=optimized_strategy_code)
 
         if backtest_result is None:
             return {"backtest_result": {"error": "回测失败"}, "code_valid": False}
-        
+
         if backtest_result.get("error"):
             return {"backtest_result": backtest_result, "code_valid": False}
 
@@ -215,7 +231,7 @@ def create_strategy_rd_subgraph():
         backtest_result = state.get("backtest_result", {})
         reflection = state.get("reflection", "")
         error_history = develop_agent.get_error_history()
-        
+
         success = save_experience(
             strategy_code=strategy_code,
             strategy_name=strategy_name,
@@ -224,7 +240,7 @@ def create_strategy_rd_subgraph():
             reflection=reflection,
             error_history=error_history if error_history else None,
         )
-        
+
         return {"experience_saved": success}
 
     def supervisor_node(state):
@@ -271,29 +287,35 @@ def create_strategy_rd_subgraph():
 
     workflow.add_conditional_edges(
         "evaluate_retrieval",
-        lambda state: "adaptive_retrieval" if state.get("retrieval_needed", False) else "research",
+        lambda state: (
+            "adaptive_retrieval" if state.get("retrieval_needed", False) else "research"
+        ),
         {"adaptive_retrieval": "adaptive_retrieval", "research": "research"},
     )
 
     workflow.add_edge("adaptive_retrieval", "evaluate_retrieval")
     workflow.add_edge("research", "develop")
     workflow.add_edge("develop", "backtest")
-    
+
     workflow.add_edge("backtest", "refine")
     workflow.add_edge("refine", "backtest")
-    
+
     workflow.add_conditional_edges(
         "backtest",
         lambda state: "reflection" if state.get("code_valid", False) else "refine",
         {"refine": "refine", "reflection": "reflection"},
     )
-    
+
     workflow.add_conditional_edges(
         "refine",
-        lambda state: "backtest" if len(develop_agent.get_error_history()) < MAX_CODE_REFINES else "reflection",
+        lambda state: (
+            "backtest"
+            if len(develop_agent.get_error_history()) < MAX_CODE_REFINES
+            else "reflection"
+        ),
         {"backtest": "backtest", "reflection": "reflection"},
     )
-    
+
     workflow.add_edge("reflection", "save_experience")
     workflow.add_edge("save_experience", "supervisor")
 
@@ -305,7 +327,7 @@ def create_strategy_rd_subgraph():
 
     workflow.add_edge("optimize", "develop_optimized")
     workflow.add_edge("develop_optimized", "backtest_optimized")
-    
+
     workflow.add_conditional_edges(
         "backtest_optimized",
         lambda state: "reflection" if state.get("code_valid", False) else "refine",

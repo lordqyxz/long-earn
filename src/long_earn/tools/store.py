@@ -1,26 +1,28 @@
 import json
 import os
 import re
+
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from langchain_community.document_loaders import (
-    TextLoader,
     PythonLoader,
+    TextLoader,
 )
 from langchain_ollama import OllamaEmbeddings
 from langchain_qdrant import QdrantVectorStore
-
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+from long_earn.services.logger_service import LoggerServiceImpl
+
 from long_earn.tools.md_splitter import MarkdownHeadingSplitter
-from long_earn.utils.logger import LOGGER
+
+LOGGER = LoggerServiceImpl()
 
 COLLECTION_NAME = "knowledge_base"
-INIT_DIR = Path(__file__).parent.parent.parent / "init"
-
+INIT_DIR = Path(os.getenv("INIT_DIR", "./init"))
 vector_store: Optional[QdrantVectorStore] = None
 _client: Optional[QdrantClient] = None
 
@@ -40,7 +42,6 @@ def _get_embeddings():
 
 
 from langchain_core.documents import Document
-
 
 
 def _load_document(file_path: Path) -> Optional[list]:

@@ -1,19 +1,26 @@
+from dotenv import load_dotenv
+
 from long_earn.agent import create_main_agent
+
+load_dotenv()
 
 
 def main():
     """主函数"""
-    from long_earn.tools.store import init_system
+    from long_earn.context_init import create_runtime_context
 
-    init_system()
+    # 创建运行时上下文
+    context = create_runtime_context()
 
-    agent = create_main_agent()
+    # 初始化知识库（通过服务）
+    context.knowledge_service.initialize()
 
-    result = agent.invoke({"user_query": "测试策略"})
-    print(result)
+    # 创建主 Agent
+    agent = create_main_agent(context)
 
-    result = agent.invoke({"user_query": "测试股票"})
-    print(result)
+    # 使用示例
+    # result = agent.invoke({"user_query": "分析贵州茅台"})
+    # print(result)
 
 
 if __name__ == "__main__":

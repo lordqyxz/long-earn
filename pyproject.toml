@@ -25,9 +25,8 @@ dependencies = [
     "akshare>=1.10.0",
     "langchain-qdrant>=0.2.1",
     "qdrant-client>=1.16.1",
-    "pytest>=9.0.2",
     "tavily-python>=0.7.23",
-    "pyqlib>=0.9.7",
+    "httpx>=0.25.0",
 ]
 
 [project.scripts]
@@ -35,7 +34,6 @@ long_earn = "long_earn.__main__:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
     "black",
     "isort",
 ]
@@ -81,6 +79,6 @@ lines_between_types = 1
 combine_as_imports = false
 order_by_type = true
 case_sensitive = true
-src_paths = ["src", "tests"]
+src_paths = ["src"]
 skip = [".venv", "build", "dist"]
 known_first_party = ["long_earn"]

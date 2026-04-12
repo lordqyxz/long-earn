@@ -1,8 +1,11 @@
 import json
-from typing import Any, Dict, List, Optional
 
-from long_earn.utils.logger import LOGGER
-from long_earn.utils.llm_factory import create_llm
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from long_earn.services import KnowledgeService, LLMService, LoggerService
+
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 OPTIMIZATION_DIRECTIONS = {
     "收益增强": {
@@ -51,22 +54,24 @@ NODE_CATEGORIES = {
 
 
 class StrategyResearchAgent:
-    """策略研究智能体"""
+    """策略研究智能体
 
-    def __init__(
-        self, llm_type: str = "ollama", model_name: str = "", base_url: str = ""
-    ):
-        self.llm_type = llm_type
-        self.model_name = model_name
-        self.base_url = base_url
+    参考 LangGraph Runtime 实践：
+    1. 依赖通过 context 传递，而非硬编码
+    2. 支持在测试时注入 Mock 依赖
+    """
+
+    def __init__(self, context: "RuntimeContext"):
+        """初始化策略研究 Agent
+
+        Args:
+            context: 运行时上下文
+        """
+        self.context = context
+        self.llm_service = context.llm_service
+        self.knowledge_service = context.knowledge_service
+        self.logger = context.logger
         self._knowledge_cache: Dict[str, List[str]] = {}
-
-    def _create_llm(self):
-        return create_llm(
-            llm_type=self.llm_type or "ollama",
-            model_name=self.model_name or "qwen3.5:9b",
-            base_url=self.base_url or "http://localhost:11434",
-        )
 
     def _create_retrieval_decision_prompt(self, query: str, context: str) -> str:
         return f"""<task>
@@ -92,11 +97,13 @@ class StrategyResearchAgent:
 - 如果已足够: "SUFFICIENT"
 """
 
-    def _should_retrieve(self, query: str, current_context: str) -> tuple[bool, list[str]]:
-        """判断是否需要检索，返回(是否需要, 检索关键词列表)"""
-        llm = self._create_llm()
-        prompt = self._create_retrieval_decision_prompt(query, current_context)
-        response = llm.invoke(prompt)
+    def _should_retrieve(
+        self, query: str, current_context: str
+    ) -> tuple[bool, list[str]]:
+        """判断是否需要检索，返回 (是否需要，检索关键词列表)"""
+        response = self.llm_service.invoke(
+            self._create_retrieval_decision_prompt(query, current_context)
+        )
 
         content = response.content.strip()
         if content.startswith("SUFFICIENT"):
@@ -114,12 +121,13 @@ class StrategyResearchAgent:
     ) -> List[str]:
         """搜索知识库获取相关参考信息"""
         try:
-            from long_earn.tools.store import search_knowledge
-
-            results = search_knowledge(query, k=3, categories=categories, terms=terms)
+            results = self.knowledge_service.search(
+                query, k=3, categories=categories, terms=terms
+            )
             return results
         except Exception as e:
-            LOGGER.warning(f"搜索知识库失败: {e}")
+            if self.logger:
+                self.logger.warning(f"搜索知识库失败：{e}")
             return []
 
     def _get_knowledge_context(
@@ -152,8 +160,6 @@ class StrategyResearchAgent:
 
         from .strategy_research_prompt import create_strategy_research_prompt
 
-        llm = self._create_llm()
-
         knowledge_context = self._get_knowledge_context(query, node_type="research")
 
         prompt = create_strategy_research_prompt(
@@ -166,8 +172,9 @@ class StrategyResearchAgent:
             messages = prompt.format_messages()
         else:
             messages = prompt
-        response = llm.invoke(messages)
-        LOGGER.info(f"策略研究代理生成策略完成：{query}")
+        response = self.llm_service.invoke(messages)
+        if self.logger:
+            self.logger.info(f"策略研究代理生成策略完成：{query}")
 
         return {
             "strategy_name": "研究策略",
@@ -179,24 +186,32 @@ class StrategyResearchAgent:
         self, query: str, knowledge_context: str = ""
     ) -> Dict[str, Any]:
         """使用已有上下文的研究策略"""
-        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
         from .strategy_research_prompt import create_strategy_research_prompt
 
-        llm = self._create_llm()
-
-        prompt = create_strategy_research_prompt(
+        prompt_template = create_strategy_research_prompt(
             target_market="stock",
             query=query,
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
-        if isinstance(prompt, ChatPromptTemplate):
-            messages = prompt.format_messages()
+        
+        if isinstance(prompt_template, ChatPromptTemplate):
+            messages = prompt_template.format_messages()
+        elif isinstance(prompt_template, PromptTemplate):
+            messages = prompt_template.format(
+                target_market="stock",
+                query=query,
+                strategy_examples="无",
+                strategy_context=knowledge_context if knowledge_context else "无",
+            )
         else:
-            messages = prompt
-        response = llm.invoke(messages)
-        LOGGER.info(f"策略研究代理生成策略完成（使用自适应检索上下文）")
+            messages = prompt_template
+            
+        response = self.llm_service.invoke(messages)
+        if self.logger:
+            self.logger.info(f"策略研究代理生成策略完成（使用自适应检索上下文）")
 
         return {
             "strategy_name": "研究策略",
@@ -379,9 +394,11 @@ class StrategyResearchAgent:
                         ),
                     }
                 )
-                LOGGER.info(f"ToT 分支 {direction} 完成")
+                if self.logger:
+                    self.logger.info(f"ToT 分支 {direction} 完成")
             except Exception as e:
-                LOGGER.warning(f"ToT 分支 {direction} 执行失败: {e}")
+                if self.logger:
+                    self.logger.warning(f"ToT 分支 {direction} 执行失败：{e}")
                 continue
 
         if not branches:
@@ -440,10 +457,12 @@ class StrategyResearchAgent:
     ) -> Dict[str, Any]:
         """反思 - 分析回测结果并生成改进建议（支持 ToT 模式）"""
         try:
-            LOGGER.info("开始 ToT 多分支反思")
+            if self.logger:
+                self.logger.info("开始 ToT 多分支反思")
             return self.reflect_with_tot(strategy, backtest_result)
         except Exception as e:
-            LOGGER.warning(f"ToT 反思失败，使用极简 fallback: {e}")
+            if self.logger:
+                self.logger.warning(f"ToT 反思失败，使用极简 fallback: {e}")
             return self._simple_fallback(strategy, backtest_result)
 
     def optimize_strategy(
@@ -451,8 +470,6 @@ class StrategyResearchAgent:
     ) -> Dict[str, Any]:
         """优化策略 - 根据改进建议优化策略"""
         from .strategy_research_prompt import strategy_optimize_prompt
-
-        llm = self._create_llm()
 
         suggestions_str = "\n".join([f"- {s}" for s in improvement_suggestions])
         knowledge_context = self._get_knowledge_context(
@@ -465,11 +482,12 @@ class StrategyResearchAgent:
             backtest_history="无",
             market_characteristics=knowledge_context if knowledge_context else "无",
         )
-        response = llm.invoke(prompt)
+        response = self.llm_service.invoke(prompt)
 
         optimized = strategy.copy()
         optimized["description"] = response.content
         optimized["optimized"] = True
-        LOGGER.info("策略优化完成")
+        if self.logger:
+            self.logger.info("策略优化完成")
 
         return optimized
