@@ -9,14 +9,15 @@
 """
 
 from unittest.mock import MagicMock
+
 from long_earn.config import AppConfig, RuntimeContext
-from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
-from long_earn.services.llm_service import LLMService
+from long_earn.services.backtest_service import BacktestService
 from long_earn.services.knowledge_service import KnowledgeService
+from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
 from long_earn.services.monitoring_service import MonitoringService
 from long_earn.services.stock_service import StockService
-from long_earn.services.backtest_service import BacktestService
+from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
 
 
 def create_mock_context() -> RuntimeContext:
@@ -33,24 +34,24 @@ def create_mock_context() -> RuntimeContext:
         "risk_management": "止损 5%"
     }"""
     mock_llm.invoke.return_value = mock_response
-    
+
     # Mock 知识服务
     mock_knowledge = MagicMock(spec=KnowledgeService)
     mock_knowledge.search.return_value = ["测试知识 1", "测试知识 2"]
     mock_knowledge.save.return_value = True
-    
+
     # Mock 日志服务
     mock_logger = MagicMock(spec=LoggerService)
-    
+
     # Mock 监控服务
     mock_monitoring = MagicMock(spec=MonitoringService)
-    
+
     # Mock 股票服务
     mock_stock = MagicMock(spec=StockService)
-    
+
     # Mock 回测服务
     mock_backtest = MagicMock(spec=BacktestService)
-    
+
     # Mock 配置
     mock_config = MagicMock(spec=AppConfig)
     mock_config.llm_type = "ollama"
@@ -63,7 +64,7 @@ def create_mock_context() -> RuntimeContext:
     mock_config.max_iterations = 3
     mock_config.backtest_start_date = "2020-01-01"
     mock_config.backtest_end_date = "2023-12-31"
-    
+
     # 创建上下文
     context = RuntimeContext(
         llm_service=mock_llm,
@@ -74,7 +75,7 @@ def create_mock_context() -> RuntimeContext:
         monitoring=mock_monitoring,
         config=mock_config,
     )
-    
+
     return context
 
 
@@ -83,25 +84,26 @@ def test_agent_creation():
     print("=" * 60)
     print("测试 1: Agent 创建验证")
     print("=" * 60)
-    
+
     try:
         context = create_mock_context()
         agent = StrategyResearchAgent(context=context)
-        
+
         assert agent is not None, "Agent 创建失败"
         assert agent.context is not None, "Agent context 未设置"
         assert agent.llm_service is not None, "Agent llm_service 未设置"
         assert agent.knowledge_service is not None, "Agent knowledge_service 未设置"
-        
+
         print("✅ StrategyResearchAgent 创建成功")
         print(f"   - context: {type(agent.context).__name__}")
         print(f"   - llm_service: {type(agent.llm_service).__name__}")
         print(f"   - knowledge_service: {type(agent.knowledge_service).__name__}")
-        
+
         return True
     except Exception as e:
         print(f"❌ Agent 创建失败：{e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -111,34 +113,35 @@ def test_research_strategy():
     print("\n" + "=" * 60)
     print("测试 2: 策略研究功能验证")
     print("=" * 60)
-    
+
     try:
         context = create_mock_context()
         agent = StrategyResearchAgent(context=context)
-        
+
         # 测试查询
         test_query = "创建一个基于动量的策略"
-        
+
         # 调用 research_strategy_with_context
         strategy = agent.research_strategy_with_context(test_query)
-        
+
         # 验证返回结果
         assert strategy is not None, "策略研究返回 None"
         assert "strategy_name" in strategy, "策略缺少 strategy_name 字段"
         assert "description" in strategy, "策略缺少 description 字段"
-        
+
         print("✅ 策略研究功能正常")
         print(f"   - 策略名称：{strategy.get('strategy_name')}")
         print(f"   - 描述：{strategy.get('description', '')[:50]}...")
-        
+
         # 验证 LLM 被调用
         assert context.llm_service.invoke.called, "LLM 服务未被调用"
         print(f"   - LLM 调用次数：{context.llm_service.invoke.call_count}")
-        
+
         return True
     except Exception as e:
         print(f"❌ 策略研究功能失败：{e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -148,31 +151,32 @@ def test_knowledge_retrieval():
     print("\n" + "=" * 60)
     print("测试 3: 知识检索功能验证")
     print("=" * 60)
-    
+
     try:
         context = create_mock_context()
         agent = StrategyResearchAgent(context=context)
-        
+
         # 测试知识检索
         test_query = "动量策略"
         knowledge = agent._get_knowledge_context(test_query, node_type="research")
-        
+
         # 验证知识检索结果
         assert knowledge is not None, "知识检索返回 None"
         assert isinstance(knowledge, str), "知识检索返回类型不正确"
-        
+
         print("✅ 知识检索功能正常")
         print(f"   - 检索到的知识长度：{len(knowledge)}")
         print(f"   - 知识预览：{knowledge[:100]}...")
-        
+
         # 验证知识服务被调用
         assert context.knowledge_service.search.called, "知识服务未被调用"
         print(f"   - 知识服务调用次数：{context.knowledge_service.search.call_count}")
-        
+
         return True
     except Exception as e:
         print(f"❌ 知识检索功能失败：{e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -182,34 +186,37 @@ def test_adaptive_retrieval():
     print("\n" + "=" * 60)
     print("测试 4: 自适应检索逻辑验证")
     print("=" * 60)
-    
+
     try:
         context = create_mock_context()
         agent = StrategyResearchAgent(context=context)
-        
+
         # 测试自适应检索
         test_query = "复杂的量化策略"
-        
+
         # 模拟检索评估为不充分，需要追加检索
         mock_response = MagicMock()
-        mock_response.content = '{"is_sufficient": false, "missing_aspects": ["风险管理", "退出机制"]}'
+        mock_response.content = (
+            '{"is_sufficient": false, "missing_aspects": ["风险管理", "退出机制"]}'
+        )
         context.llm_service.invoke.return_value = mock_response
-        
+
         knowledge = agent._get_knowledge_context(test_query, node_type="research")
-        
+
         # 验证知识检索结果
         assert knowledge is not None, "自适应检索返回 None"
-        
+
         print("✅ 自适应检索逻辑正常")
         print(f"   - 检索到的知识长度：{len(knowledge)}")
-        
+
         # 验证知识服务被多次调用（初始 + 追加）
         print(f"   - 知识服务调用次数：{context.knowledge_service.search.call_count}")
-        
+
         return True
     except Exception as e:
         print(f"❌ 自适应检索逻辑失败：{e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -219,18 +226,18 @@ def test_error_handling():
     print("\n" + "=" * 60)
     print("测试 5: 错误处理验证")
     print("=" * 60)
-    
+
     try:
         context = create_mock_context()
-        
+
         # 模拟 LLM 服务错误
         context.llm_service.invoke.side_effect = Exception("LLM 服务错误")
-        
+
         agent = StrategyResearchAgent(context=context)
-        
+
         # 测试错误处理
         test_query = "测试查询"
-        
+
         try:
             strategy = agent.research_strategy_with_context(test_query)
             # 如果没有抛出异常，检查是否返回了合理的默认值
@@ -238,11 +245,12 @@ def test_error_handling():
         except Exception as e:
             print(f"✅ 错误处理正常：{e}")
             return True
-        
+
         return True
     except Exception as e:
         print(f"❌ 错误处理失败：{e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -252,7 +260,7 @@ def main():
     print("\n" + "=" * 60)
     print("StrategyResearchAgent - 单元测试")
     print("=" * 60)
-    
+
     tests = [
         ("Agent 创建", test_agent_creation),
         ("策略研究功能", test_research_strategy),
@@ -260,7 +268,7 @@ def main():
         ("自适应检索逻辑", test_adaptive_retrieval),
         ("错误处理", test_error_handling),
     ]
-    
+
     results = []
     for name, test_func in tests:
         try:
@@ -269,21 +277,21 @@ def main():
         except Exception as e:
             print(f"\n❌ {name} 测试异常：{e}")
             results.append((name, False))
-    
+
     # 汇总结果
     print("\n" + "=" * 60)
     print("测试结果汇总")
     print("=" * 60)
-    
+
     passed = sum(1 for _, result in results if result)
     total = len(results)
-    
+
     for name, result in results:
         status = "✅ 通过" if result else "❌ 失败"
         print(f"{status} - {name}")
-    
+
     print(f"\n总计：{passed}/{total} 测试通过")
-    
+
     if passed == total:
         print("\n✅ 所有测试通过！")
         return True

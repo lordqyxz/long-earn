@@ -1,8 +1,5 @@
 import json
-
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
-
-from long_earn.services import KnowledgeService, LLMService, LoggerService
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -71,7 +68,7 @@ class StrategyResearchAgent:
         self.llm_service = context.llm_service
         self.knowledge_service = context.knowledge_service
         self.logger = context.logger
-        self._knowledge_cache: Dict[str, List[str]] = {}
+        self._knowledge_cache: dict[str, list[str]] = {}
 
     def _create_retrieval_decision_prompt(self, query: str, context: str) -> str:
         return f"""<task>
@@ -101,11 +98,16 @@ class StrategyResearchAgent:
         self, query: str, current_context: str
     ) -> tuple[bool, list[str]]:
         """判断是否需要检索，返回 (是否需要，检索关键词列表)"""
+        if self.logger:
+            self.logger.info("[检索评估] 调用 LLM 判断是否需要更多检索...")
+
         response = self.llm_service.invoke(
             self._create_retrieval_decision_prompt(query, current_context)
         )
 
         content = response.content.strip()
+        if self.logger:
+            self.logger.info(f"[检索评估] LLM 响应: {content[:80]}")
         if content.startswith("SUFFICIENT"):
             return False, []
         elif content.startswith("RETRIEVE:"):
@@ -116,9 +118,9 @@ class StrategyResearchAgent:
     def _search_knowledge(
         self,
         query: str,
-        categories: Optional[List[str]] = None,
-        terms: Optional[List[str]] = None,
-    ) -> List[str]:
+        categories: list[str] | None = None,
+        terms: list[str] | None = None,
+    ) -> list[str]:
         """搜索知识库获取相关参考信息"""
         try:
             results = self.knowledge_service.search(
@@ -133,7 +135,7 @@ class StrategyResearchAgent:
     def _get_knowledge_context(
         self,
         query: str,
-        node_type: Optional[str] = None,
+        node_type: str | None = None,
     ) -> str:
         """获取知识库上下文，如果缓存中没有则搜索
 
@@ -146,7 +148,7 @@ class StrategyResearchAgent:
         if cache_key in self._knowledge_cache:
             return "\n".join(self._knowledge_cache[cache_key])
 
-        categories = NODE_CATEGORIES.get(node_type, None) if node_type else None
+        categories = NODE_CATEGORIES.get(node_type) if node_type else None
 
         results = self._search_knowledge(query, categories=categories)
         if results:
@@ -154,7 +156,7 @@ class StrategyResearchAgent:
             return "\n".join(results)
         return ""
 
-    def research_strategy(self, query: str) -> Dict[str, Any]:
+    def research_strategy(self, query: str) -> dict[str, Any]:
         """研究策略 - 根据用户查询生成初始策略"""
         from langchain_core.prompts import ChatPromptTemplate
 
@@ -184,11 +186,14 @@ class StrategyResearchAgent:
 
     def research_strategy_with_context(
         self, query: str, knowledge_context: str = ""
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """使用已有上下文的研究策略"""
         from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
         from .strategy_research_prompt import create_strategy_research_prompt
+
+        if self.logger:
+            self.logger.info(f"[策略研究Agent] 开始研究: {query}")
 
         prompt_template = create_strategy_research_prompt(
             target_market="stock",
@@ -196,7 +201,7 @@ class StrategyResearchAgent:
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
-        
+
         if isinstance(prompt_template, ChatPromptTemplate):
             messages = prompt_template.format_messages()
         elif isinstance(prompt_template, PromptTemplate):
@@ -208,10 +213,10 @@ class StrategyResearchAgent:
             )
         else:
             messages = prompt_template
-            
+
         response = self.llm_service.invoke(messages)
         if self.logger:
-            self.logger.info(f"策略研究代理生成策略完成（使用自适应检索上下文）")
+            self.logger.info("策略研究代理生成策略完成（使用自适应检索上下文）")
 
         return {
             "strategy_name": "研究策略",
@@ -219,7 +224,7 @@ class StrategyResearchAgent:
             "query": query,
         }
 
-    def _identify_primary_issue(self, backtest_result: Dict[str, Any]) -> str:
+    def _identify_primary_issue(self, backtest_result: dict[str, Any]) -> str:
         """根据回测指标自动判断主要问题方向"""
         metrics = backtest_result.get("metrics", {})
         if not metrics:
@@ -239,7 +244,7 @@ class StrategyResearchAgent:
             return "收益增强"
 
     def _build_reflection_prompt(
-        self, direction: str, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
+        self, direction: str, strategy: dict[str, Any], backtest_result: dict[str, Any]
     ) -> str:
         """构建特定方向的反思提示"""
         direction_config = OPTIMIZATION_DIRECTIONS.get(
@@ -262,7 +267,7 @@ class StrategyResearchAgent:
 </backtest_result>
 
 <focus>
-{direction_config['focus']}
+{direction_config["focus"]}
 </focus>
 
 <analysis_framework>
@@ -302,10 +307,11 @@ class StrategyResearchAgent:
         return prompt
 
     def _run_branch_reflection(
-        self, direction: str, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, direction: str, strategy: dict[str, Any], backtest_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """运行单个方向的反思"""
-        llm = self._create_llm()
+        if self.logger:
+            self.logger.info(f"[ToT反思] 开始分支: {direction}")
 
         knowledge_context = self._get_knowledge_context(
             f"策略{direction}方法", node_type="reflection"
@@ -315,9 +321,12 @@ class StrategyResearchAgent:
         if knowledge_context:
             prompt = prompt + f"\n\n## 参考知识:\n{knowledge_context}"
 
-        response = llm.invoke(prompt)
+        response = self.llm_service.invoke(prompt)
 
         content = response.content.strip()
+        if self.logger:
+            self.logger.info(f"[ToT反思] {direction} 分支 LLM 响应: {content[:80]}")
+
         if content.startswith("```json"):
             content = content[7:]
         if content.startswith("```"):
@@ -330,8 +339,8 @@ class StrategyResearchAgent:
         return result
 
     def _evaluate_branches(
-        self, branches: List[Dict[str, Any]], backtest_result: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
+        self, branches: list[dict[str, Any]], backtest_result: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         """评估各分支的改进建议"""
         metrics = backtest_result.get("metrics", {})
 
@@ -375,12 +384,12 @@ class StrategyResearchAgent:
         return sorted(branches, key=lambda x: x["score"], reverse=True)
 
     def reflect_with_tot(
-        self, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """使用思维树(ToT)模型进行多分支反思"""
         branches = []
 
-        for direction in OPTIMIZATION_DIRECTIONS.keys():
+        for direction in OPTIMIZATION_DIRECTIONS:
             try:
                 result = self._run_branch_reflection(
                     direction, strategy, backtest_result
@@ -417,8 +426,8 @@ class StrategyResearchAgent:
         }
 
     def _simple_fallback(
-        self, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """极简兜底 - 基于规则的通用建议"""
         metrics = backtest_result.get("metrics", {})
         if not metrics:
@@ -453,8 +462,8 @@ class StrategyResearchAgent:
         }
 
     def reflect(
-        self, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """反思 - 分析回测结果并生成改进建议（支持 ToT 模式）"""
         try:
             if self.logger:
@@ -466,8 +475,8 @@ class StrategyResearchAgent:
             return self._simple_fallback(strategy, backtest_result)
 
     def optimize_strategy(
-        self, strategy: Dict[str, Any], improvement_suggestions: list
-    ) -> Dict[str, Any]:
+        self, strategy: dict[str, Any], improvement_suggestions: list
+    ) -> dict[str, Any]:
         """优化策略 - 根据改进建议优化策略"""
         from .strategy_research_prompt import strategy_optimize_prompt
 

@@ -11,31 +11,31 @@ tags:
 
 ### 上下文
 当前状态：
-- 迭代次数：{iteration} / {max_iterations}
-- 剩余迭代机会：{remaining_iterations}
+- 迭代次数：{{iteration}} / {{max_iterations}}
+- 剩余迭代机会：{{remaining_iterations}}
 
 策略信息：
 ```
-{strategy}
+{{strategy}}
 ```
 
 回测结果：
 ```
-{backtest_result}
+{{backtest_result}}
 ```
 
 反思内容：
 ```
-{reflection}
+{{reflection}}
 ```
 
 改进建议：
 ```
-{improvement_suggestions}
+{{improvement_suggestions}}
 ```
 
 迭代历史：
-{iteration_history}
+{{iteration_history}}
 
 目标条件：
 - 年化收益率 > 10%

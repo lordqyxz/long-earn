@@ -4,11 +4,11 @@
 """
 
 import time
-
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Callable, Generator, Optional
+from typing import Any
 
 from long_earn.services import LoggerService, MonitoringService
 
@@ -133,7 +133,8 @@ class MonitoringServiceImpl(MonitoringService):
             self._prompt_metrics[name] = PerformanceMetrics()
         return self._prompt_metrics[name]
 
-    def track(self, node_name: str) -> Generator[MonitoringContext, None, None]:
+    @contextmanager
+    def track(self, node_name: str):
         """创建监控上下文管理器
 
         用法:
@@ -147,10 +148,9 @@ class MonitoringServiceImpl(MonitoringService):
         Yields:
             MonitoringContext 实例
         """
-        if not self.enabled:
-            yield MonitoringContext(self, node_name)
-        else:
-            yield MonitoringContext(self, node_name)
+        ctx = MonitoringContext(self, node_name)
+        with ctx:
+            yield ctx
 
     def monitor_node(self, node_name: str):
         """节点监控装饰器
@@ -175,7 +175,7 @@ class MonitoringServiceImpl(MonitoringService):
                     metrics.execution_count += 1
                     metrics.success_count += 1
                     return result
-                except Exception as e:
+                except Exception:
                     metrics.execution_count += 1
                     metrics.error_count += 1
                     raise
@@ -210,7 +210,7 @@ class MonitoringServiceImpl(MonitoringService):
                     metrics.execution_count += 1
                     metrics.success_count += 1
                     return result
-                except Exception as e:
+                except Exception:
                     metrics.execution_count += 1
                     metrics.error_count += 1
                     raise
@@ -241,7 +241,7 @@ class MonitoringServiceImpl(MonitoringService):
                     self._get_metrics("global").token_usage[key] = 0
                 self._get_metrics("global").token_usage[key] += value
 
-    def get_metrics(self, name: str) -> Optional[PerformanceMetrics]:
+    def get_metrics(self, name: str) -> PerformanceMetrics | None:
         """获取节点性能指标
 
         Args:
@@ -252,7 +252,7 @@ class MonitoringServiceImpl(MonitoringService):
         """
         return self._metrics.get(name)
 
-    def get_prompt_metrics(self, name: str) -> Optional[PerformanceMetrics]:
+    def get_prompt_metrics(self, name: str) -> PerformanceMetrics | None:
         """获取提示词性能指标
 
         Args:

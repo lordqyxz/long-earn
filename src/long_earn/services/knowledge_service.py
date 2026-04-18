@@ -4,12 +4,10 @@
 """
 
 import json
-import os
 import re
-
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from langchain_community.document_loaders import PythonLoader, TextLoader
 from langchain_core.documents import Document
@@ -18,8 +16,8 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
-from long_earn.config import AppConfig, RuntimeContext
-from long_earn.services import KnowledgeService, LoggerService
+from long_earn.config import RuntimeContext
+from long_earn.services import KnowledgeService
 from long_earn.tools.md_splitter import MarkdownHeadingSplitter
 
 
@@ -43,9 +41,9 @@ class KnowledgeServiceImpl(KnowledgeService):
         self.context = context
         self.config = context.config
         self.logger = context.logger
-        self._client: Optional[QdrantClient] = None
-        self._embeddings: Optional[OllamaEmbeddings] = None
-        self._vector_store: Optional[QdrantVectorStore] = None
+        self._client: QdrantClient | None = None
+        self._embeddings: OllamaEmbeddings | None = None
+        self._vector_store: QdrantVectorStore | None = None
         self._initialized = False
 
     def _get_client(self) -> QdrantClient:
@@ -179,7 +177,7 @@ class KnowledgeServiceImpl(KnowledgeService):
             self.logger.warning(f"检查 Collection 状态失败：{e}，将尝试加载")
             return True
 
-    def _load_document(self, file_path: Path) -> Optional[list]:
+    def _load_document(self, file_path: Path) -> list | None:
         """根据文件类型加载文档
 
         Args:
@@ -237,9 +235,9 @@ class KnowledgeServiceImpl(KnowledgeService):
         self,
         query: str,
         k: int = 3,
-        categories: Optional[list[str]] = None,
-        terms: Optional[list[str]] = None,
-        source_files: Optional[list[str]] = None,
+        categories: list[str] | None = None,
+        terms: list[str] | None = None,
+        source_files: list[str] | None = None,
         **kwargs,
     ) -> list[str]:
         """搜索知识
@@ -333,7 +331,7 @@ class KnowledgeServiceImpl(KnowledgeService):
         design_rationale: str,
         backtest_result: dict,
         reflection: str,
-        error_history: Optional[list[dict]] = None,
+        error_history: list[dict] | None = None,
     ) -> bool:
         """保存策略开发经验到知识库
 
@@ -376,7 +374,7 @@ class KnowledgeServiceImpl(KnowledgeService):
 
             content += f"""
 ---
-**创建时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**创建时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
 
             return self.save(
@@ -399,7 +397,7 @@ class KnowledgeServiceImpl(KnowledgeService):
         self,
         query: str,
         k: int = 3,
-        min_sharpe: Optional[float] = None,
+        min_sharpe: float | None = None,
     ) -> list[dict]:
         """搜索历史策略经验
 

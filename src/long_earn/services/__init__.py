@@ -3,7 +3,8 @@
 提供核心服务的抽象接口和实现。
 """
 
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 
 class LLMService(Protocol):

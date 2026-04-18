@@ -5,8 +5,6 @@
 
 import sys
 
-from typing import Optional
-
 from loguru import logger as loguru_logger
 
 from long_earn.services import LoggerService
@@ -29,7 +27,7 @@ class LoggerServiceImpl(LoggerService):
         logger.info("消息")
     """
 
-    def __init__(self, level: str = "INFO", format: Optional[str] = None):
+    def __init__(self, level: str = "INFO", format: str | None = None):
         """初始化日志服务
 
         Args:

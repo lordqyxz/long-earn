@@ -9,21 +9,21 @@
 - https://langchain-ai.github.io/langgraph/how-tos/testing/
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock
+
 from long_earn.config import AppConfig, RuntimeContext
-from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
-from long_earn.strategy_rd.state import State
-from long_earn.services.llm_service import LLMService
+from long_earn.services.backtest_service import BacktestService
 from long_earn.services.knowledge_service import KnowledgeService
+from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
 from long_earn.services.monitoring_service import MonitoringService
 from long_earn.services.stock_service import StockService
-from long_earn.services.backtest_service import BacktestService
+from long_earn.strategy_rd.state import State
+from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
 
 
 def create_mock_context() -> RuntimeContext:
     """创建 Mock 运行时上下文"""
-    from long_earn.config import AppConfig
 
     # Mock LLM 服务
     mock_llm = MagicMock(spec=LLMService)
@@ -181,9 +181,9 @@ def test_subgraph_structure():
         # 验证 init 连接到 initial_retrieval
         init_edges = [e for e in edges if e.source == "init"]
         assert len(init_edges) > 0, "init 缺少输出边"
-        assert (
-            init_edges[0].target == "initial_retrieval"
-        ), "init 应连接到 initial_retrieval"
+        assert init_edges[0].target == "initial_retrieval", (
+            "init 应连接到 initial_retrieval"
+        )
 
         print("✅ init -> initial_retrieval 连接正确")
 
@@ -239,7 +239,7 @@ def test_init_node():
         assert "iteration" in result, "init 未设置 iteration"
         assert "retrieval_count" in result, "init 未设置 retrieval_count"
 
-        print(f"✅ init 节点输出正确:")
+        print("✅ init 节点输出正确:")
         print(f"   - iteration: {result.get('iteration')}")
         print(f"   - retrieval_count: {result.get('retrieval_count')}")
 

@@ -10,14 +10,15 @@
 
 import json
 from unittest.mock import MagicMock
+
 from long_earn.config import AppConfig, RuntimeContext
-from long_earn.strategy_rd.agents.strategy_rd_supervisor import StrategyRdSupervisor
-from long_earn.services.llm_service import LLMService
+from long_earn.services.backtest_service import BacktestService
 from long_earn.services.knowledge_service import KnowledgeService
+from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
 from long_earn.services.monitoring_service import MonitoringService
 from long_earn.services.stock_service import StockService
-from long_earn.services.backtest_service import BacktestService
+from long_earn.strategy_rd.agents.strategy_rd_supervisor import StrategyRdSupervisor
 
 
 def create_mock_context() -> RuntimeContext:
@@ -319,7 +320,7 @@ def test_max_iterations_reached():
         assert should_continue is False, "达到最大迭代次数时应停止"
 
         print("✅ 最大迭代次数判断正常")
-        print(f"   - 当前迭代：3/3")
+        print("   - 当前迭代：3/3")
         print(f"   - 是否继续：{should_continue}")
 
         return True

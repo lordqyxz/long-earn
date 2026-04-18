@@ -1,20 +1,11 @@
-import importlib.util
-import os
-import tempfile
 import logging
-from pathlib import Path
-from types import ModuleType
-from typing import Dict, Optional
+import os
 
 import httpx
-import pandas as pd
-
-from importlib.machinery import ModuleSpec
 
 # 配置日志
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -27,8 +18,8 @@ def run_backtest(
     strategy_code: str = "",
     start_date: str = "2020-01-01",
     end_date: str = "2023-12-31",
-    stock_list: Optional[list] = None,
-) -> Optional[Dict]:
+    stock_list: list | None = None,
+) -> dict | None:
     """
     回测交易策略（通过远程服务）
 
@@ -47,15 +38,15 @@ def run_backtest(
         if strategy_code:
             code = strategy_code
         elif strategy_path:
-            with open(strategy_path, 'r', encoding='utf-8') as f:
+            with open(strategy_path, encoding="utf-8") as f:
                 code = f.read()
         else:
             logger.error("必须提供 strategy_path 或 strategy_code")
             return None
-        
+
         # 调用远程回测服务
         logger.info(f"调用回测服务：{BACKTEST_SERVICE_URL}")
-        
+
         with httpx.Client(timeout=300.0) as client:
             response = client.post(
                 f"{BACKTEST_SERVICE_URL}/api/v1/backtest",
@@ -64,9 +55,9 @@ def run_backtest(
                     "start_date": start_date,
                     "end_date": end_date,
                     "stock_list": stock_list,
-                }
+                },
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 if result["success"]:
@@ -83,13 +74,17 @@ def run_backtest(
                     logger.error(f"回测失败：{result['message']}")
                     return None
             else:
-                logger.error(f"回测服务返回错误：{response.status_code} - {response.text}")
+                logger.error(
+                    f"回测服务返回错误：{response.status_code} - {response.text}"
+                )
                 return None
-                
+
     except httpx.ConnectError as e:
         error_msg = f"无法连接到回测服务 ({BACKTEST_SERVICE_URL}): {e}"
         logger.error(error_msg)
-        logger.error("请确保回测服务正在运行：cd backtest_service && uv run python -m long_earn_backtest")
+        logger.error(
+            "请确保回测服务正在运行：cd backtest_service && uv run python -m long_earn_backtest"
+        )
         return None
     except Exception as e:
         error_msg = f"回测失败：{e}"

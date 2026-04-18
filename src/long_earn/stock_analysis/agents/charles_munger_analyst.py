@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 
@@ -30,7 +30,7 @@ class CharlesMungerAnalyst:
             __file__,
         )
 
-    def analyze(self, stock_data: Dict[str, Any]) -> str:
+    def analyze(self, stock_data: dict[str, Any]) -> str:
         """分析股票"""
         # 格式化提示词
         formatted_prompt = self.prompt.format(stock_data=stock_data)

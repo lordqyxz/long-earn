@@ -1,4 +1,4 @@
-from typing import Any, Dict, TypedDict
+from typing import Any, TypedDict
 
 
 class State(TypedDict, total=True):
@@ -12,4 +12,4 @@ class State(TypedDict, total=True):
     stock_analysis_result: dict
     summary: str
     error: str
-    metrics: Dict[str, Any]
+    metrics: dict[str, Any]

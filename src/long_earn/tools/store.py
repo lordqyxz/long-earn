@@ -1,10 +1,8 @@
 import json
 import os
 import re
-
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 from langchain_community.document_loaders import (
     PythonLoader,
@@ -16,15 +14,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
 from long_earn.services.logger_service import LoggerServiceImpl
-
 from long_earn.tools.md_splitter import MarkdownHeadingSplitter
 
 LOGGER = LoggerServiceImpl()
 
 COLLECTION_NAME = "knowledge_base"
 INIT_DIR = Path(os.getenv("INIT_DIR", "./init"))
-vector_store: Optional[QdrantVectorStore] = None
-_client: Optional[QdrantClient] = None
+vector_store: QdrantVectorStore | None = None
+_client: QdrantClient | None = None
 
 
 def _get_client() -> QdrantClient:
@@ -44,7 +41,7 @@ def _get_embeddings():
 from langchain_core.documents import Document
 
 
-def _load_document(file_path: Path) -> Optional[list]:
+def _load_document(file_path: Path) -> list | None:
     """根据文件类型加载文档"""
     suffix = file_path.suffix.lower()
 
@@ -65,7 +62,7 @@ def _load_document(file_path: Path) -> Optional[list]:
         return None
 
 
-def _load_markdown_file(file_path: Path) -> List[Document]:
+def _load_markdown_file(file_path: Path) -> list[Document]:
     """加载 Markdown 文件，使用标题感知切分"""
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -185,10 +182,10 @@ def get_vector_store() -> QdrantVectorStore:
 def search_knowledge(
     query: str,
     k: int = 3,
-    categories: Optional[List[str]] = None,
-    terms: Optional[List[str]] = None,
-    source_files: Optional[List[str]] = None,
-) -> List[str]:
+    categories: list[str] | None = None,
+    terms: list[str] | None = None,
+    source_files: list[str] | None = None,
+) -> list[str]:
     """搜索知识库
 
     Args:
@@ -250,7 +247,6 @@ def search_knowledge(
 
 def init_system():
     """系统初始化函数 - 启动时调用"""
-    import os
 
     LOGGER.info("开始系统初始化...")
     _init_knowledge_base()
@@ -263,7 +259,7 @@ def save_experience(
     design_rationale: str,
     backtest_result: dict,
     reflection: str,
-    error_history: Optional[List[dict]] = None,
+    error_history: list[dict] | None = None,
 ) -> bool:
     """保存策略开发经验到知识库
 
@@ -308,7 +304,7 @@ def save_experience(
 
         content += f"""
 ---
-**创建时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**创建时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
 
         doc = Document(
@@ -337,8 +333,8 @@ def save_experience(
 def search_experience(
     query: str,
     k: int = 3,
-    min_sharpe: Optional[float] = None,
-) -> List[dict]:
+    min_sharpe: float | None = None,
+) -> list[dict]:
     """搜索历史策略经验
 
     Args:

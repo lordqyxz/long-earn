@@ -1,17 +1,15 @@
 """回测服务 API 模块"""
 
 import logging
-import tempfile
 import os
+import tempfile
 import traceback
 from pathlib import Path
-from typing import Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-
 from qlib import init as qlib_init
 from qlib.data import D
 
@@ -41,7 +39,7 @@ class BacktestRequest(BaseModel):
     strategy_code: str
     start_date: str = "2020-01-01"
     end_date: str = "2023-12-31"
-    stock_list: Optional[list] = None
+    stock_list: list | None = None
 
 
 class BacktestResponse(BaseModel):
@@ -49,12 +47,12 @@ class BacktestResponse(BaseModel):
 
     success: bool
     message: str
-    total_return: Optional[float] = None
-    annual_return: Optional[float] = None
-    sharpe_ratio: Optional[float] = None
-    max_drawdown: Optional[float] = None
-    win_rate: Optional[float] = None
-    trading_days: Optional[int] = None
+    total_return: float | None = None
+    annual_return: float | None = None
+    sharpe_ratio: float | None = None
+    max_drawdown: float | None = None
+    win_rate: float | None = None
+    trading_days: int | None = None
 
 
 @app.post("/api/v1/backtest", response_model=BacktestResponse)
@@ -138,7 +136,7 @@ async def run_backtest(request: BacktestRequest):
 
                 # 每 10 个交易日记录一次进度
                 if (i + 1) % 10 == 0:
-                    logger.info(f"回测进度：{i+1}/{len(dates_list)}")
+                    logger.info(f"回测进度：{i + 1}/{len(dates_list)}")
 
                 try:
                     signals = strategy.generate_signals(date_str)

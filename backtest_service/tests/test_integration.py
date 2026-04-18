@@ -1,18 +1,19 @@
 """回测服务集成测试 - 验证完整的数据提取和回测流程"""
 
-import requests
-import time
 import sys
+
+import requests
+
 
 def test_backtest_service():
     """测试回测服务的完整流程"""
-    
+
     print("=" * 60)
     print("回测服务集成测试")
     print("=" * 60)
-    
+
     base_url = "http://localhost:8001"
-    
+
     # 测试 1: 健康检查
     print("\n1. 健康检查...")
     try:
@@ -25,10 +26,10 @@ def test_backtest_service():
     except requests.exceptions.ConnectionError:
         print("❌ 服务未启动，请先运行：uv run --active python -m long_earn_backtest")
         return False
-    
+
     # 测试 2: 运行简单回测
     print("\n2. 运行回测测试...")
-    
+
     # 简单的买入持有策略
     strategy_code = '''
 """简单的买入持有策略"""
@@ -47,21 +48,19 @@ class SimpleStrategy:
             signals[stock] = 1.0
         return signals
 '''
-    
+
     backtest_request = {
         "strategy_code": strategy_code,
         "start_date": "2023-01-01",
         "end_date": "2023-01-31",
-        "stock_list": ["sh600519", "sz000001"]
+        "stock_list": ["sh600519", "sz000001"],
     }
-    
+
     try:
         response = requests.post(
-            f"{base_url}/api/v1/backtest",
-            json=backtest_request,
-            timeout=60
+            f"{base_url}/api/v1/backtest", json=backtest_request, timeout=60
         )
-        
+
         if response.status_code == 200:
             result = response.json()
             print(f"✅ 回测成功：{result['message']}")
@@ -76,7 +75,7 @@ class SimpleStrategy:
             print(f"❌ 回测失败：{response.status_code}")
             print(f"   错误信息：{response.json()}")
             return False
-            
+
     except requests.exceptions.Timeout:
         print("❌ 请求超时")
         return False
@@ -88,7 +87,7 @@ class SimpleStrategy:
 def main():
     """运行集成测试"""
     success = test_backtest_service()
-    
+
     print("\n" + "=" * 60)
     if success:
         print("✅ 集成测试通过！")

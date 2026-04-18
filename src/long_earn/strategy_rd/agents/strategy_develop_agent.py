@@ -1,8 +1,6 @@
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
-from long_earn.services import KnowledgeService, LLMService, LoggerService
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -26,13 +24,13 @@ class StrategyDevelopAgent:
         self.llm_service = context.llm_service
         self.knowledge_service = context.knowledge_service
         self.logger = context.logger
-        self._error_history: List[dict] = []
+        self._error_history: list[dict] = []
 
     def _search_knowledge(
         self,
         query: str,
-        source_files: Optional[List[str]] = None,
-    ) -> List[str]:
+        source_files: list[str] | None = None,
+    ) -> list[str]:
         """搜索知识库获取相关参考信息
 
         Args:
@@ -74,7 +72,7 @@ class StrategyDevelopAgent:
             return "\n".join(results)
         return ""
 
-    def develop_strategy(self, strategy: Dict[str, Any]) -> str:
+    def develop_strategy(self, strategy: dict[str, Any]) -> str:
         """将策略转化为 pyqlib 回测格式"""
         if not hasattr(self, "_develop_prompt"):
             self._develop_prompt = MarkdownPromptTemplate(
@@ -137,7 +135,7 @@ class StrategyDevelopAgent:
 
     def refine_code(
         self,
-        strategy: Dict[str, Any],
+        strategy: dict[str, Any],
         error_message: str,
         failed_code: str,
     ) -> str:
@@ -196,8 +194,8 @@ class StrategyDevelopAgent:
     def _search_experience(
         self,
         query: str,
-        min_sharpe: Optional[float] = None,
-    ) -> List[dict]:
+        min_sharpe: float | None = None,
+    ) -> list[dict]:
         """搜索历史策略经验
 
         Args:
@@ -216,7 +214,7 @@ class StrategyDevelopAgent:
                 self.logger.warning(f"搜索经验失败：{e}")
             return []
 
-    def get_error_history(self) -> List[dict]:
+    def get_error_history(self) -> list[dict]:
         """获取错误历史"""
         return self._error_history.copy()
 

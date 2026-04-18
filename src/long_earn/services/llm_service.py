@@ -13,6 +13,9 @@ from long_earn.utils.llm_factory import create_llm
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
+# LLM 调用默认超时（秒）
+DEFAULT_LLM_TIMEOUT = 300
+
 
 class LLMServiceImpl(LLMService):
     """LLM 服务实现
@@ -37,6 +40,7 @@ class LLMServiceImpl(LLMService):
         """
         self.context = context
         self._llm: BaseLanguageModel | None = None
+        self._invoke_count: int = 0
 
     @property
     def llm(self) -> BaseLanguageModel:
@@ -63,7 +67,27 @@ class LLMServiceImpl(LLMService):
         Returns:
             LLM 响应
         """
-        return self.llm.invoke(prompt)
+        self._invoke_count += 1
+        call_id = self._invoke_count
+        logger = self.context.logger
+
+        if logger:
+            logger.debug(f"LLM 调用 #{call_id} 开始...")
+
+        try:
+            response = self.llm.invoke(prompt)
+            if logger:
+                content_preview = (
+                    response.content[:100] if hasattr(response, "content") else str(response)[:100]
+                )
+                logger.debug(
+                    f"LLM 调用 #{call_id} 完成，响应预览: {content_preview!r}"
+                )
+            return response
+        except Exception as e:
+            if logger:
+                logger.error(f"LLM 调用 #{call_id} 异常: {e}")
+            raise
 
     def get_llm(self) -> BaseLanguageModel:
         """获取底层 LLM 实例

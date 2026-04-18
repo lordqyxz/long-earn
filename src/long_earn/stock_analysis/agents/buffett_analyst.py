@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 
@@ -23,7 +23,7 @@ class BuffettAnalyst:
         self.context = context
         self.llm = context.llm_service.get_llm()
         self.logger = context.logger
-        
+
         # 使用新的提示词加载服务
         self.prompt = MarkdownPromptTemplate(
             name="buffett_prompt",
@@ -31,7 +31,7 @@ class BuffettAnalyst:
             input_variables=["stock_data"],
         )
 
-    def analyze(self, stock_data: Dict[str, Any]) -> str:
+    def analyze(self, stock_data: dict[str, Any]) -> str:
         """分析股票"""
         # 格式化提示词
         formatted_prompt = self.prompt.format(stock_data=stock_data)

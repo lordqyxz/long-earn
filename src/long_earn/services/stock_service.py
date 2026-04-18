@@ -4,7 +4,6 @@
 """
 
 import re
-
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +13,6 @@ from long_earn.services import StockService
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-    from long_earn.services import LoggerService
 
 
 class StockServiceImpl(StockService):
@@ -98,7 +96,7 @@ class StockServiceImpl(StockService):
                 },
             }
         except Exception as e:
-            error_msg = f"获取股票数据时出错：{str(e)}"
+            error_msg = f"获取股票数据时出错：{e!s}"
             if self.logger:
                 self.logger.exception(error_msg)
             return {
@@ -160,7 +158,7 @@ class StockServiceImpl(StockService):
                 "raw_data": financial_df.to_dict(orient="records"),
             }
         except Exception as e:
-            error_msg = f"获取股票财务指标时出错：{str(e)}"
+            error_msg = f"获取股票财务指标时出错：{e!s}"
             if self.logger:
                 self.logger.exception(error_msg)
             return {

@@ -5,9 +5,7 @@
 """
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
-
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from long_earn.services import (
     BacktestService,
@@ -78,7 +76,7 @@ class AppConfig:
     llm_model: str = "qwen3.5:cloud"
     llm_base_url: str = "http://localhost:11434"
     qdrant_url: str = ":memory:"
-    qdrant_api_key: Optional[str] = None
+    qdrant_api_key: str | None = None
     embedding_model: str = "qwen3-embedding:0.6b"
     init_dir: str = "./init"
     max_iterations: int = 3

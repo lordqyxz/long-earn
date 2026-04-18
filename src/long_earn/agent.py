@@ -72,7 +72,7 @@ def create_main_agent(context: "RuntimeContext"):
                 if hasattr(response, "usage_metadata") and response.usage_metadata:
                     monitoring.track_tokens(response.usage_metadata)
                 routing_decision = response.content.strip()
-                logger.debug(f"LLM 响应：{repr(routing_decision)}")
+                logger.debug(f"LLM 响应：{routing_decision!r}")
 
                 route = "unknown"
                 reason = ""
@@ -105,17 +105,17 @@ def create_main_agent(context: "RuntimeContext"):
                         route, reason = decide_route(user_query)
 
                 except json.JSONDecodeError as e:
-                    logger.exception(f"JSON 解析失败：{str(e)}，使用关键词匹配")
+                    logger.exception(f"JSON 解析失败：{e!s}，使用关键词匹配")
                     route, reason = decide_route(user_query)
                 except Exception as e:
-                    logger.error(f"JSON 处理异常：{str(e)}，使用关键词匹配")
+                    logger.error(f"JSON 处理异常：{e!s}，使用关键词匹配")
                     route, reason = decide_route(user_query)
 
                 logger.info(f"路由决策：{route}，理由：{reason}")
                 return {"route": route, "routing_reason": reason}
 
             except Exception as e:
-                logger.error(f"意图分析异常：{str(e)}")
+                logger.error(f"意图分析异常：{e!s}")
                 if "策略" in user_query:
                     logger.info("异常情况下使用关键词匹配：策略相关")
                     return {
@@ -197,7 +197,7 @@ def create_main_agent(context: "RuntimeContext"):
                 logger.debug(f"汇总结果：{summary}")
                 return {"summary": summary}
             except Exception as e:
-                logger.error(f"汇总异常：{str(e)}")
+                logger.error(f"汇总异常：{e!s}")
                 summary = ""
                 if strategy_result:
                     summary += f"策略研究结果：{strategy_result}\n"

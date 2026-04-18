@@ -24,6 +24,7 @@ src/long_earn/stock_analysis/state.py
 src/long_earn/stock_analysis/subgraph.py
 src/long_earn/stock_analysis/agents/buffett_analyst.py
 src/long_earn/stock_analysis/agents/charles_munger_analyst.py
+src/long_earn/stock_analysis/agents/extract_prompt.py
 src/long_earn/stock_analysis/agents/fiske_analyst.py
 src/long_earn/stock_analysis/agents/petter_analyst.py
 src/long_earn/strategy_rd/__init__.py
@@ -31,7 +32,10 @@ src/long_earn/strategy_rd/state.py
 src/long_earn/strategy_rd/subgraph.py
 src/long_earn/strategy_rd/agents/strategy_develop_agent.py
 src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py
+src/long_earn/strategy_rd/agents/strategy_rd_supervisor_prompt.py
+src/long_earn/strategy_rd/agents/strategy_reflection_prompt.py
 src/long_earn/strategy_rd/agents/strategy_research_agent.py
+src/long_earn/strategy_rd/agents/strategy_research_prompt.py
 src/long_earn/tools/__init__.py
 src/long_earn/tools/backtest.py
 src/long_earn/tools/get_stock_info.py

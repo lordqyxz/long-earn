@@ -1,6 +1,5 @@
 import json
-
-from typing import Any, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -20,7 +19,7 @@ class StrategyRdSupervisor:
         self.logger = context.logger
 
     def evaluate_strategy(
-        self, strategy: Dict[str, Any], backtest_result: Dict[str, Any]
+        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
     ) -> bool:
         """评估策略 - 判断是否接受优化建议"""
         from .strategy_rd_supervisor_prompt import strategy_rd_supervisor_prompt
@@ -45,8 +44,8 @@ class StrategyRdSupervisor:
         self,
         iteration: int,
         max_iterations: int,
-        strategy: Dict[str, Any],
-        backtest_result: Dict[str, Any],
+        strategy: dict[str, Any],
+        backtest_result: dict[str, Any],
         reflection: str,
         improvement_suggestions: str,
     ) -> bool:

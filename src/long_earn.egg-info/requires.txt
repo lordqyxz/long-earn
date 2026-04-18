@@ -20,5 +20,4 @@ tavily-python>=0.7.23
 httpx>=0.25.0
 
 [dev]
-black
-isort
+ruff>=0.15.11

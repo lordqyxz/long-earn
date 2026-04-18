@@ -41,7 +41,7 @@ __version__ = "1.0.0"
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from langchain_core.prompts import PromptTemplate
 
@@ -62,9 +62,9 @@ class MarkdownPromptTemplate(PromptTemplate):
     def __init__(
         self,
         template_file: str,
-        input_variables: Optional[List[str]] = None,
-        caller_file: Optional[str] = None,
-        partial_variables: Optional[Dict[str, Any]] = None,
+        input_variables: list[str] | None = None,
+        caller_file: str | None = None,
+        partial_variables: dict[str, Any] | None = None,
         validate_template: bool = True,
     ):
         """初始化 Markdown 提示词模板
@@ -129,7 +129,7 @@ class MarkdownPromptTemplate(PromptTemplate):
         self.description = metadata.get("description", "")
 
     @staticmethod
-    def _parse_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
+    def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         """解析 Markdown frontmatter 元数据
 
         支持 YAML 格式的 frontmatter：
@@ -233,7 +233,7 @@ class MarkdownPromptTemplate(PromptTemplate):
         return template_path.read_text(encoding="utf-8")
 
     @staticmethod
-    def _extract_variables(template_content: str) -> List[str]:
+    def _extract_variables(template_content: str) -> list[str]:
         """从模板内容中提取变量名
 
         只支持双大括号格式，且只在非代码块区域提取：
@@ -264,8 +264,9 @@ class MarkdownPromptTemplate(PromptTemplate):
         """将 {{variable}} 转换为 {variable} 格式
         智能转换：
         1. 跳过代码块内的内容（``` 包裹的部分）
-        2. 只转换独立的变量标记
-        3. 将代码块中的 {} 转义为 {{}} 以避免被 langchain 误识别
+        2. 跳过内联代码（` 包裹的部分）
+        3. 只转换独立的变量标记
+        4. 将代码块和内联代码中的 {} 转义为 {{}} 以避免被 langchain 误识别
         """
         lines = template_body.split("\n")
         result_lines = []
@@ -280,17 +281,41 @@ class MarkdownPromptTemplate(PromptTemplate):
 
             if in_code_block:
                 # 代码块内不转换变量，但需要转义大括号
-                # 将单个大括号转义为双大括号，避免被 langchain 误识别
                 escaped_line = line.replace("{", "{{").replace("}", "}}")
                 result_lines.append(escaped_line)
             else:
-                # 非代码块，进行转换
-                converted_line = re.sub(
-                    r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}", r"{\1}", line
-                )
+                # 非代码块，需要处理内联代码和变量转换
+                # 先转义内联代码中的大括号，再转换变量标记
+                converted_line = MarkdownPromptTemplate._convert_inline_line(line)
                 result_lines.append(converted_line)
 
         return "\n".join(result_lines)
+
+    @staticmethod
+    def _convert_inline_line(line: str) -> str:
+        """处理非代码块行的变量转换
+
+        1. 先保护内联代码（反引号包裹的内容）中的大括号
+        2. 再将 {{variable}} 转换为 {variable}
+        3. 最后恢复内联代码中的大括号（转义形式）
+        """
+        # 分割行为内联代码段和非内联代码段
+        parts = re.split(r"(`[^`]+`)", line)
+        result_parts = []
+
+        for i, part in enumerate(parts):
+            if part.startswith("`") and part.endswith("`") and len(part) > 2:
+                # 内联代码段：转义大括号以避免被 langchain 误识别
+                escaped_part = part.replace("{", "{{").replace("}", "}}")
+                result_parts.append(escaped_part)
+            else:
+                # 非内联代码段：将 {{variable}} 转换为 {variable}
+                converted_part = re.sub(
+                    r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}", r"{\1}", part
+                )
+                result_parts.append(converted_part)
+
+        return "".join(result_parts)
 
     def __repr__(self) -> str:
         return (
@@ -298,6 +323,3 @@ class MarkdownPromptTemplate(PromptTemplate):
             f"file='{self.template_file}', "
             f"variables={self.input_variables})"
         )
-
-
-

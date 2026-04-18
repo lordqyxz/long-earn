@@ -1,7 +1,5 @@
 import re
 
-from typing import List
-
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -35,7 +33,7 @@ class MarkdownHeadingSplitter:
         self.length_function = len
         self.heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$")
 
-    def split_text(self, text: str) -> List[Document]:
+    def split_text(self, text: str) -> list[Document]:
         """分割文本为 Document 列表
 
         Args:
@@ -99,10 +97,7 @@ class MarkdownHeadingSplitter:
                     flush_term()
                     current_h2 = title
                     current_h3 = ""
-                elif level == 3:
-                    flush_term()
-                    current_h3 = title
-                elif level == 4:
+                elif level == 3 or level == 4:
                     flush_term()
                     current_h3 = title
                 else:

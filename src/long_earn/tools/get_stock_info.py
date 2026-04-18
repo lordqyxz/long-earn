@@ -1,7 +1,6 @@
 import re
-
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import akshare as ak
 
@@ -41,7 +40,7 @@ def get_market_info():
     return stock_sse_summary_df.set_index("项目").to_dict(orient="index")
 
 
-def get_stock_data(stock_code: str, logger: Optional[Any] = None) -> Dict[str, Any]:
+def get_stock_data(stock_code: str, logger: Any | None = None) -> dict[str, Any]:
     """获取股票数据
         返回字段:
            item               value
@@ -54,14 +53,14 @@ def get_stock_data(stock_code: str, logger: Optional[Any] = None) -> Dict[str, A
     6  流通市值   45278422271.14
     7    行业             房地产开发
     8   上市时间           19910129
-    
+
     Args:
         stock_code: 股票代码
         logger: 可选的日志记录器，如果提供则记录日志
     """
     if logger is None:
         logger = default_logger
-        
+
     try:
         # 根据 akshare 官方文档，直接调用 stock_individual_info_em 获取股票信息
         stock_info = ak.stock_individual_info_em(symbol=stock_code)
@@ -111,7 +110,7 @@ def get_stock_data(stock_code: str, logger: Optional[Any] = None) -> Dict[str, A
         }
     except Exception as e:
         # 如果出现错误，返回错误信息
-        error_msg = f"获取股票数据时出错：{str(e)}"
+        error_msg = f"获取股票数据时出错：{e!s}"
         logger.exception(error_msg)
         return {
             "error": error_msg,
@@ -121,10 +120,8 @@ def get_stock_data(stock_code: str, logger: Optional[Any] = None) -> Dict[str, A
 
 
 def get_financial_metrics(
-    stock_code: str = "600519", 
-    start_year: str = "2021",
-    logger: Optional[Any] = None
-) -> Dict[str, Any]:
+    stock_code: str = "600519", start_year: str = "2021", logger: Any | None = None
+) -> dict[str, Any]:
     """获取股票财务指标
 
     Args:
@@ -137,7 +134,7 @@ def get_financial_metrics(
     """
     if logger is None:
         logger = default_logger
-        
+
     try:
         financial_df = ak.stock_financial_analysis_indicator(
             symbol=stock_code, start_year=start_year
@@ -176,7 +173,7 @@ def get_financial_metrics(
             "raw_data": financial_df.to_dict(orient="records"),
         }
     except Exception as e:
-        error_msg = f"获取股票财务指标时出错：{str(e)}"
+        error_msg = f"获取股票财务指标时出错：{e!s}"
         logger.exception(error_msg)
         return {
             "error": error_msg,

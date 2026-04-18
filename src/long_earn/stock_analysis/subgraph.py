@@ -13,8 +13,8 @@ from long_earn.tools.get_stock_info import (
     get_financial_metrics,
     get_price_history,
     get_stock_code_by_name,
+    get_stock_data as akshare_get_stock_data,
 )
-from long_earn.tools.get_stock_info import get_stock_data as akshare_get_stock_data
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 def get_stock_data(state: StockAnalysisState) -> StockAnalysisState:
     """获取股票数据，带重试机制
-    
+
     Args:
         state: 状态
     """
@@ -152,7 +152,7 @@ def summarize_node(state):
 
 def create_stock_analysis_subgraph(context: "RuntimeContext"):
     """创建股票分析子图
-    
+
     Args:
         context: 运行时上下文
     """
