@@ -20,11 +20,12 @@ if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
 
-def get_stock_data(state: StockAnalysisState) -> StockAnalysisState:
+def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> StockAnalysisState:
     """获取股票数据，带重试机制
 
     Args:
         state: 状态
+        context: 运行时上下文
     """
     # 首先尝试从状态中获取股票代码
     stock_code = state.get("stock_code", "")
@@ -32,8 +33,8 @@ def get_stock_data(state: StockAnalysisState) -> StockAnalysisState:
     # 如果没有股票代码，尝试从查询中提取
     if not stock_code:
         if not stock_name:
-            # 使用 context 中的 LLM - 从状态中获取
-            llm_service = state.get("context", {}).get("llm_service")
+            # 使用 context 中的 LLM
+            llm_service = context.llm_service
             if llm_service:
                 query = state.get("query", "")
                 formatted_prompt = extract_prompt.format(query=query)
@@ -88,41 +89,29 @@ def route_stock_data(state):
         ]
 
 
-def petter_analysis_node(state):
+def petter_analysis_node(state, context: "RuntimeContext"):
     """彼得林奇视角分析"""
-    context = state.get("context")
-    if not context:
-        return {"petter_analysis": "错误：缺少上下文信息"}
     petter_analyst = PetterAnalyst(context=context)
     analysis = petter_analyst.analyze(state.get("stock_data", {}))
     return {"petter_analysis": analysis}
 
 
-def charles_munger_analysis_node(state):
+def charles_munger_analysis_node(state, context: "RuntimeContext"):
     """查理芒格视角分析"""
-    context = state.get("context")
-    if not context:
-        return {"charles_munger_analysis": "错误：缺少上下文信息"}
     charles_munger_analyst = CharlesMungerAnalyst(context=context)
     analysis = charles_munger_analyst.analyze(state.get("stock_data", {}))
     return {"charles_munger_analysis": analysis}
 
 
-def buffett_analysis_node(state):
+def buffett_analysis_node(state, context: "RuntimeContext"):
     """巴菲特视角分析"""
-    context = state.get("context")
-    if not context:
-        return {"buffett_analysis": "错误：缺少上下文信息"}
     buffett_analyst = BuffettAnalyst(context=context)
     analysis = buffett_analyst.analyze(state.get("stock_data", {}))
     return {"buffett_analysis": analysis}
 
 
-def fiske_analysis_node(state):
+def fiske_analysis_node(state, context: "RuntimeContext"):
     """费雪视角分析"""
-    context = state.get("context")
-    if not context:
-        return {"fiske_analysis": "错误：缺少上下文信息"}
     fiske_analyst = FiskeAnalyst(context=context)
     analysis = fiske_analyst.analyze(state.get("stock_data", {}))
     return {"fiske_analysis": analysis}
@@ -158,11 +147,11 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     """
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
-    workflow.add_node("get_stock_data", get_stock_data)
-    workflow.add_node("petter_analysis", petter_analysis_node)
-    workflow.add_node("charles_munger_analysis", charles_munger_analysis_node)
-    workflow.add_node("buffett_analysis", buffett_analysis_node)
-    workflow.add_node("fiske_analysis", fiske_analysis_node)
+    workflow.add_node("get_stock_data", lambda state: get_stock_data(state, context))
+    workflow.add_node("petter_analysis", lambda state: petter_analysis_node(state, context))
+    workflow.add_node("charles_munger_analysis", lambda state: charles_munger_analysis_node(state, context))
+    workflow.add_node("buffett_analysis", lambda state: buffett_analysis_node(state, context))
+    workflow.add_node("fiske_analysis", lambda state: fiske_analysis_node(state, context))
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("error_handler", error_handler_node)
 

@@ -70,6 +70,8 @@ class AppConfig:
         max_iterations: 最大迭代次数
         backtest_start_date: 回测开始日期
         backtest_end_date: 回测结束日期
+        strategy_keywords: 策略研究路由关键词列表
+        stock_analysis_keywords: 股票分析路由关键词列表
     """
 
     llm_type: str = "ollama"
@@ -82,6 +84,8 @@ class AppConfig:
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
+    strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
+    stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -90,6 +94,9 @@ class AppConfig:
         Returns:
             AppConfig 实例
         """
+        strategy_env = os.getenv("STRATEGY_KEYWORDS", "策略,思路,投资策略")
+        stock_analysis_env = os.getenv("STOCK_ANALYSIS_KEYWORDS", "股票,分析,公司")
+
         return cls(
             llm_type=os.getenv("LLM_TYPE", "ollama"),
             llm_model=os.getenv("LLM_MODEL", "qwen3.5:cloud"),
@@ -101,6 +108,8 @@ class AppConfig:
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
+            strategy_keywords=tuple(k.strip() for k in strategy_env.split(",") if k.strip()),
+            stock_analysis_keywords=tuple(k.strip() for k in stock_analysis_env.split(",") if k.strip()),
         )
 
     def validate(self) -> list[str]:
