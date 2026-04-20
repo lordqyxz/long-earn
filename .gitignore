@@ -13,3 +13,6 @@ checkpoint.db-wal
 **.egg-info
 
 temp/
+.claude/
+.trae/
+temp/

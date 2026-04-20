@@ -1,11 +1,16 @@
 import re
-
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any
 
 import akshare as ak
 
-from long_earn.utils import LOGGER
+if TYPE_CHECKING:
+    from loguru import logger as default_logger
+else:
+    try:
+        from loguru import logger as default_logger
+    except ImportError:
+        default_logger = None  # type: ignore
 
 
 def get_stock_code_by_name(stock_name: str) -> str:
@@ -35,28 +40,35 @@ def get_market_info():
     return stock_sse_summary_df.set_index("项目").to_dict(orient="index")
 
 
-def get_stock_data(stock_code: str) -> Dict[str, Any]:
+def get_stock_data(stock_code: str, logger: Any | None = None) -> dict[str, Any]:
     """获取股票数据
         返回字段:
            item               value
     0    最新                4.66
     1  股票代码            000002
-    2  股票简称             万  科Ａ
+    2  股票简称             万  科 A
     3   总股本      11930709471.0
     4   流通股       9716399629.0
     5   总市值   55597106134.86
     6  流通市值   45278422271.14
     7    行业             房地产开发
     8   上市时间           19910129
+
+    Args:
+        stock_code: 股票代码
+        logger: 可选的日志记录器，如果提供则记录日志
     """
+    if logger is None:
+        logger = default_logger
+
     try:
-        # 根据akshare官方文档，直接调用stock_individual_info_em获取股票信息
+        # 根据 akshare 官方文档，直接调用 stock_individual_info_em 获取股票信息
         stock_info = ak.stock_individual_info_em(symbol=stock_code)
         # 检查返回的数据是否为空
         if stock_info.empty:
             # 如果没有找到对应股票，返回错误信息
-            error_msg = f"错误: 未找到股票代码 {stock_code} 的数据。"
-            LOGGER.error(error_msg)
+            error_msg = f"错误：未找到股票代码 {stock_code} 的数据。"
+            logger.error(error_msg)
             return {
                 "error": error_msg,
                 "code": stock_code,
@@ -98,8 +110,8 @@ def get_stock_data(stock_code: str) -> Dict[str, Any]:
         }
     except Exception as e:
         # 如果出现错误，返回错误信息
-        error_msg = f"获取股票数据时出错: {str(e)}"
-        LOGGER.exception(error_msg)
+        error_msg = f"获取股票数据时出错：{e!s}"
+        logger.exception(error_msg)
         return {
             "error": error_msg,
             "code": stock_code,
@@ -108,25 +120,29 @@ def get_stock_data(stock_code: str) -> Dict[str, Any]:
 
 
 def get_financial_metrics(
-    stock_code: str = "600519", start_year: str = "2021"
-) -> Dict[str, Any]:
+    stock_code: str = "600519", start_year: str = "2021", logger: Any | None = None
+) -> dict[str, Any]:
     """获取股票财务指标
 
     Args:
         stock_code: 股票代码，如 "600519" 或 "000001"
         start_year: 起始年份，如 "2020"
+        logger: 可选的日志记录器，如果提供则记录日志
 
     Returns:
         包含财务指标的字典
     """
+    if logger is None:
+        logger = default_logger
+
     try:
         financial_df = ak.stock_financial_analysis_indicator(
             symbol=stock_code, start_year=start_year
         )
 
         if financial_df.empty:
-            error_msg = f"错误: 未找到股票代码 {stock_code} 的财务指标数据。"
-            LOGGER.error(error_msg)
+            error_msg = f"错误：未找到股票代码 {stock_code} 的财务指标数据。"
+            logger.error(error_msg)
             return {
                 "error": error_msg,
                 "code": stock_code,
@@ -157,8 +173,8 @@ def get_financial_metrics(
             "raw_data": financial_df.to_dict(orient="records"),
         }
     except Exception as e:
-        error_msg = f"获取股票财务指标时出错: {str(e)}"
-        LOGGER.exception(error_msg)
+        error_msg = f"获取股票财务指标时出错：{e!s}"
+        logger.exception(error_msg)
         return {
             "error": error_msg,
             "code": stock_code,

@@ -16,11 +16,8 @@ langgraph-checkpoint-sqlite>=2.0.11
 akshare>=1.10.0
 langchain-qdrant>=0.2.1
 qdrant-client>=1.16.1
-pytest>=9.0.2
 tavily-python>=0.7.23
-pyqlib>=0.9.7
+httpx>=0.25.0
 
 [dev]
-pytest
-black
-isort
+ruff>=0.15.11

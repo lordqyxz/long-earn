@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: long_earn
-Version: 0.5.0
+Version: 0.7.0
 Summary: 自我进化的量化交易系统
 Author-email: shiyz <shiyz@eoutlook.com>
 Requires-Python: ==3.11.*
@@ -22,10 +22,7 @@ Requires-Dist: langgraph-checkpoint-sqlite>=2.0.11
 Requires-Dist: akshare>=1.10.0
 Requires-Dist: langchain-qdrant>=0.2.1
 Requires-Dist: qdrant-client>=1.16.1
-Requires-Dist: pytest>=9.0.2
 Requires-Dist: tavily-python>=0.7.23
-Requires-Dist: pyqlib>=0.9.7
+Requires-Dist: httpx>=0.25.0
 Provides-Extra: dev
-Requires-Dist: pytest; extra == "dev"
-Requires-Dist: black; extra == "dev"
-Requires-Dist: isort; extra == "dev"
+Requires-Dist: ruff>=0.15.11; extra == "dev"

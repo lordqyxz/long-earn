@@ -1,11 +1,10 @@
 import os
-
-from typing import Any, Dict, List
+from typing import Any
 
 from openai import OpenAI
 
 
-def kimi_web_search(query: str) -> List[Dict[str, Any]]:
+def kimi_web_search(query: str) -> list[dict[str, Any]]:
     """使用Kimi API的$web_search内置函数进行联网搜索
 
     Args:

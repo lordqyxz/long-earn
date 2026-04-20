@@ -1,26 +1,36 @@
-import os
+from typing import TYPE_CHECKING, Any
 
-from typing import Any, Dict, Optional
+from long_earn.core.prompt_loader import MarkdownPromptTemplate
 
-from langchain_core.language_models import BaseLanguageModel
-
-from long_earn.utils.llm_factory import create_llm
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 
 class FiskeAnalyst:
-    """费雪视角的股票分析智能体"""
+    """费雪视角的股票分析智能体
 
-    def __init__(self, llm: Optional[BaseLanguageModel] = None):
-        self.llm = llm or create_llm(
-            llm_type=os.getenv("LLM_TYPE", "ollama"),
-            model_name=os.getenv("LLM_MODEL", "qwen3.5:cloud"),
+    参考 LangGraph Runtime 实践：
+    1. 依赖通过 context 传递
+    2. 支持测试时注入 Mock
+    """
+
+    def __init__(self, context: "RuntimeContext"):
+        """初始化费雪分析师
+
+        Args:
+            context: 运行时上下文
+        """
+        self.context = context
+        self.llm = context.llm_service.get_llm()
+        self.logger = context.logger
+        # 使用新的提示词加载服务
+        self.prompt = MarkdownPromptTemplate(
+            "fiske_prompt.md",
+            ["stock_data"],
+            __file__,
         )
-        # 动态导入prompt以避免循环导入
-        from .fiske_prompt import fiske_prompt
 
-        self.prompt = fiske_prompt
-
-    def analyze(self, stock_data: Dict[str, Any]) -> str:
+    def analyze(self, stock_data: dict[str, Any]) -> str:
         """分析股票"""
         # 格式化提示词
         formatted_prompt = self.prompt.format(stock_data=stock_data)

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, TypedDict
+from typing import Any, TypedDict
 
 
 class StockAnalysisState(TypedDict, total=False):
@@ -7,12 +7,12 @@ class StockAnalysisState(TypedDict, total=False):
     query: str
     stock_code: str
     stock_name: str
-    stock_data: Optional[Dict[str, Any]]
-    petter_analysis: Optional[str]
-    charles_munger_analysis: Optional[str]
-    buffett_analysis: Optional[str]
-    fiske_analysis: Optional[str]
-    summary: Optional[str]
-    result: Optional[str]
-    error: Optional[str]
+    stock_data: dict[str, Any] | None
+    petter_analysis: str | None
+    charles_munger_analysis: str | None
+    buffett_analysis: str | None
+    fiske_analysis: str | None
+    summary: str | None
+    result: str | None
+    error: str | None
     retry_count: int

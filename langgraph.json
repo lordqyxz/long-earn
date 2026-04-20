@@ -8,9 +8,9 @@
   "dependencies": {
     "langgraph": "^0.2.0",
     "langchain": "^0.2.0",
-    "ollama": "^0.1.0",
+    "ollama": "^0.2.0",
     "pyqlib": "^0.9.0",
-    "qrant": "^0.1.0",
+    "qdrant-client": "^1.16.0",
     "akshare": "^1.0.0",
     "loguru": "^0.7.0"
   },

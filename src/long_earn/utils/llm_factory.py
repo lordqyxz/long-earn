@@ -1,22 +1,27 @@
 import os
-from langchain_ollama import ChatOllama
+
 from langchain_core.language_models import BaseLanguageModel
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+
+# 默认超时（秒）
+DEFAULT_TIMEOUT = 300
 
 
 def create_llm(
     llm_type: str = "ollama",
-    model_name: str = "qwen3.5:9b",
+    model_name: str = "qwen3.5:cloud",
     base_url: str = "http://localhost:11434",
+    timeout: int = DEFAULT_TIMEOUT,
     **kwargs,
 ) -> BaseLanguageModel:
-    """
-    根据类型创建LLM实例
+    """根据类型创建LLM实例
 
     Args:
         llm_type: LLM类型，可选值: ollama, dashscope, openai
         model_name: 模型名称，如果不提供则使用默认值
         base_url: 自定义API基础URL（用于OpenAI兼容模型）
+        timeout: 请求超时时间（秒），默认300秒
         **kwargs: 额外参数
 
     Returns:
@@ -26,7 +31,13 @@ def create_llm(
         # 默认使用ollama的qwen3.5:cloud模型
         if model_name is None:
             model_name = "qwen3.5:cloud"
-        return ChatOllama(model=model_name, **kwargs)
+        return ChatOllama(
+            model=model_name,
+            client_kwargs={
+                "timeout": timeout,
+            },
+            **kwargs,
+        )
 
     elif llm_type == "dashscope":
         # 阿里云DashScope模型
@@ -38,6 +49,7 @@ def create_llm(
             model=model_name,
             api_key=os.getenv("DASHSCOPE_API_KEY"),  # type: ignore
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            timeout=timeout,
             **kwargs,
         )
 
@@ -50,7 +62,12 @@ def create_llm(
             base_url = "https://localhost:11434/v1"
         # 注意：使用OpenAI需要设置环境变量
         # OPENAI_API_KEY
-        return ChatOpenAI(model=model_name, base_url=base_url, **kwargs)
+        return ChatOpenAI(
+            model=model_name,
+            base_url=base_url,
+            timeout=timeout,
+            **kwargs,
+        )
 
     else:
         raise ValueError(f"不支持的LLM类型: {llm_type}")
