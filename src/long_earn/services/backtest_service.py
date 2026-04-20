@@ -34,6 +34,7 @@ class BacktestServiceImpl(BacktestService):
         strategy_code: str,
         start_date: str | None = None,
         end_date: str | None = None,
+        stock_list: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """运行回测（通过远程 HTTP API）
 
@@ -41,6 +42,7 @@ class BacktestServiceImpl(BacktestService):
             strategy_code: 策略代码
             start_date: 开始日期，默认使用配置中的日期
             end_date: 结束日期，默认使用配置中的日期
+            stock_list: 股票池列表，可选
 
         Returns:
             回测结果字典
@@ -59,6 +61,7 @@ class BacktestServiceImpl(BacktestService):
             strategy_code=strategy_code,
             start_date=start_date,
             end_date=end_date,
+            stock_list=stock_list,
         )
 
         if result is not None and self.logger:

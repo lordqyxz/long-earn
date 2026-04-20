@@ -58,11 +58,12 @@ class LLMServiceImpl(LLMService):
             )
         return self._llm
 
-    def invoke(self, prompt: str) -> Any:
+    def invoke(self, prompt: str, format: str = "") -> Any:
         """调用 LLM
 
         Args:
             prompt: 提示词
+            format: 输出格式，可选 "json" 强制 JSON 输出
 
         Returns:
             LLM 响应
@@ -75,7 +76,20 @@ class LLMServiceImpl(LLMService):
             logger.debug(f"LLM 调用 #{call_id} 开始...")
 
         try:
-            response = self.llm.invoke(prompt)
+            # 根据 format 参数绑定模型配置
+            llm = self.llm
+            if format == "json":
+                config = self.context.config
+                if config.llm_type == "ollama":
+                    # Ollama 原生支持 format="json"
+                    llm = self.llm.bind(format="json")
+                elif config.llm_type in ("dashscope", "openai"):
+                    # OpenAI 兼容 API 使用 response_format
+                    llm = self.llm.bind(
+                        response_format={"type": "json_object"}
+                    )
+
+            response = llm.invoke(prompt)
             if logger:
                 content_preview = (
                     response.content[:100] if hasattr(response, "content") else str(response)[:100]

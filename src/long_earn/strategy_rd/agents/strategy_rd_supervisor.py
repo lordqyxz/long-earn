@@ -1,6 +1,8 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+from long_earn.core.llm_utils import parse_llm_json
+
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
@@ -29,10 +31,10 @@ class StrategyRdSupervisor:
             backtest_result=backtest_result,
             decision_history="无",
         )
-        response = self.llm_service.invoke(prompt)
+        response = self.llm_service.invoke(prompt, format="json")
 
         content = response.content.strip()
-        result = json.loads(content)
+        result = parse_llm_json(content)
         decision = result.get("decision", "接受")
         if self.logger:
             self.logger.info(
@@ -71,10 +73,10 @@ class StrategyRdSupervisor:
             decision_history="无",
             iteration_history="无",
         )
-        response = self.llm_service.invoke(prompt)
+        response = self.llm_service.invoke(prompt, format="json")
 
         content = response.content.strip()
-        result = json.loads(content)
+        result = parse_llm_json(content)
         should_continue = result.get("should_continue", False)
         if self.logger:
             self.logger.info(

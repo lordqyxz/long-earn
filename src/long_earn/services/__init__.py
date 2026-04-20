@@ -10,11 +10,12 @@ from typing import Any, Protocol
 class LLMService(Protocol):
     """LLM 服务接口"""
 
-    def invoke(self, prompt: str) -> Any:
+    def invoke(self, prompt: str, format: str = "") -> Any:
         """调用 LLM
 
         Args:
             prompt: 提示词
+            format: 输出格式，可选 "json" 强制 JSON 输出
 
         Returns:
             LLM 响应
@@ -55,6 +56,48 @@ class KnowledgeService(Protocol):
 
         Returns:
             是否保存成功
+        """
+        ...
+
+    def save_experience(
+        self,
+        strategy_code: str,
+        strategy_name: str,
+        design_rationale: str,
+        backtest_result: dict[str, Any],
+        reflection: str,
+        error_history: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """保存策略开发经验到知识库
+
+        Args:
+            strategy_code: 可运行的策略代码
+            strategy_name: 策略名称
+            design_rationale: 设计思路
+            backtest_result: 回测结果
+            reflection: 反思结论
+            error_history: 错误历史（可选）
+
+        Returns:
+            是否保存成功
+        """
+        ...
+
+    def search_experience(
+        self,
+        query: str,
+        k: int = 3,
+        min_sharpe: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """搜索历史策略经验
+
+        Args:
+            query: 搜索查询
+            k: 返回结果数量
+            min_sharpe: 最小夏普比率过滤
+
+        Returns:
+            经验列表，每条包含 code, rationale, metrics
         """
         ...
 
@@ -122,6 +165,7 @@ class BacktestService(Protocol):
         strategy_code: str,
         start_date: str = "2020-01-01",
         end_date: str = "2023-12-31",
+        stock_list: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """运行回测
 

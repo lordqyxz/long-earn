@@ -4,8 +4,6 @@ from typing import TYPE_CHECKING
 
 from langgraph.graph import END, START, StateGraph
 
-from ..tools.backtest import run_backtest
-from ..tools.store import save_experience
 from .agents.strategy_develop_agent import StrategyDevelopAgent
 from .agents.strategy_rd_supervisor import StrategyRdSupervisor
 from .agents.strategy_research_agent import StrategyResearchAgent
@@ -28,8 +26,10 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     supervisor = StrategyRdSupervisor(context=context)
     develop_agent = StrategyDevelopAgent(context=context)
 
-    # 从 context 获取 logger
+    # 从 context 获取服务
     logger = context.logger
+    backtest_service = context.backtest_service
+    knowledge_service = context.knowledge_service
 
     workflow = StateGraph(State)
 
@@ -175,7 +175,7 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         if logger:
             logger.info("[回测] 开始执行回测...")
 
-        backtest_result = run_backtest(strategy_code=strategy_code)
+        backtest_result = backtest_service.run_backtest(strategy_code=strategy_code)
 
         if backtest_result is None:
             if logger:
@@ -298,7 +298,9 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         if logger:
             logger.info("[回测-优化版] 开始回测优化后的策略...")
 
-        backtest_result = run_backtest(strategy_code=optimized_strategy_code)
+        backtest_result = backtest_service.run_backtest(
+            strategy_code=optimized_strategy_code
+        )
 
         if backtest_result is None:
             return {"backtest_result": {"error": "回测失败"}, "code_valid": False}
@@ -330,7 +332,7 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         if logger:
             logger.info(f"[保存经验] 保存策略经验: {strategy_name}")
 
-        success = save_experience(
+        success = knowledge_service.save_experience(
             strategy_code=strategy_code,
             strategy_name=strategy_name,
             design_rationale=design_rationale,

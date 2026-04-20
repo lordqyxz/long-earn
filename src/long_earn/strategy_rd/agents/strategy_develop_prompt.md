@@ -8,6 +8,18 @@
 - `{{target_market}}`: 目标市场（A 股/美股/ crypto 等）
 - `{{backtest_params}}`: 回测参数配置
 
+## 策略信息
+
+{{strategy}}
+
+## 目标市场
+
+{{target_market}}
+
+## 回测参数
+
+{{backtest_params}}
+
 ## 回测系统接口要求
 
 策略类**不需要继承任何基类**，但必须实现以下接口才能被回测系统正确执行：
@@ -207,7 +219,7 @@ class LowValueStrategy:
 
 ## 输出格式
 
-请严格按照以下 **JSON Schema** 返回：
+请严格按照以下 **JSON Schema** 返回，**直接输出纯 JSON，不要用 markdown 代码块（```）包裹**：
 
 ```json
 {
@@ -243,6 +255,7 @@ class LowValueStrategy:
 7. **空值处理**：检查 df 是否为 None 或 empty
 8. **代码可执行**：生成的代码必须无语法错误，可直接运行
 9. **股票池**：必须支持通过 stock_list 参数接收股票池
+10. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点（如 ，（）：等），必须使用英文半角标点（如 ,():）
 
 ## 思维链引导
 

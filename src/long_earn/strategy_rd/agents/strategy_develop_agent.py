@@ -1,3 +1,4 @@
+import json
 from typing import TYPE_CHECKING, Any
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
@@ -110,28 +111,23 @@ class StrategyDevelopAgent:
 
     def _extract_code_from_response(self, response: str) -> str:
         """从响应中提取代码"""
-        import json
+        from long_earn.core.llm_utils import parse_llm_json, sanitize_code
 
         # 尝试解析 JSON
         try:
-            # 查找 JSON 块
-            if "```json" in response:
-                json_str = response.split("```json")[1].split("```")[0].strip()
-                data = json.loads(json_str)
-                code = data.get("code", "")
-            else:
-                # 直接尝试解析整个响应
-                data = json.loads(response)
-                code = data.get("code", "")
-
-            # code 字段已经是纯文本，直接返回
-            return code.strip()
+            data = parse_llm_json(response)
+            code = data.get("code", "")
+            if code:
+                return sanitize_code(code.strip())
         except (json.JSONDecodeError, KeyError):
-            # JSON 解析失败，直接提取代码块作为降级方案
-            for start, end in [("```python", "```"), ("```", "```")]:
-                if start in response:
-                    return response.split(start)[1].split(end)[0].strip()
-            return response
+            pass
+
+        # JSON 解析失败，直接提取代码块作为降级方案
+        for start, end in [("```python", "```"), ("```", "```")]:
+            if start in response:
+                code = response.split(start)[1].split(end)[0].strip()
+                return sanitize_code(code)
+        return sanitize_code(response)
 
     def refine_code(
         self,
@@ -206,9 +202,9 @@ class StrategyDevelopAgent:
             经验列表
         """
         try:
-            from long_earn.tools.store import search_experience
-
-            return search_experience(query, k=2, min_sharpe=min_sharpe)
+            return self.knowledge_service.search_experience(
+                query, k=2, min_sharpe=min_sharpe
+            )
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"搜索经验失败：{e}")

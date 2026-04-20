@@ -1,6 +1,8 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+from long_earn.core.llm_utils import parse_llm_json
+
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
@@ -321,21 +323,13 @@ class StrategyResearchAgent:
         if knowledge_context:
             prompt = prompt + f"\n\n## 参考知识:\n{knowledge_context}"
 
-        response = self.llm_service.invoke(prompt)
+        response = self.llm_service.invoke(prompt, format="json")
 
         content = response.content.strip()
         if self.logger:
             self.logger.info(f"[ToT反思] {direction} 分支 LLM 响应: {content[:80]}")
 
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-
-        result = json.loads(content)
+        result = parse_llm_json(content)
         return result
 
     def _evaluate_branches(

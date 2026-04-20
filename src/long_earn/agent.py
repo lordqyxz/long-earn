@@ -5,6 +5,8 @@
 import json
 from typing import TYPE_CHECKING
 
+from long_earn.core.llm_utils import parse_llm_json
+
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
@@ -67,7 +69,8 @@ def create_main_agent(context: "RuntimeContext"):
 
             try:
                 response = llm_service.invoke(
-                    routing_prompt.format(user_query=user_query)
+                    routing_prompt.format(user_query=user_query),
+                    format="json",
                 )
                 if hasattr(response, "usage_metadata") and response.usage_metadata:
                     monitoring.track_tokens(response.usage_metadata)
@@ -95,7 +98,7 @@ def create_main_agent(context: "RuntimeContext"):
 
                 try:
                     logger.debug(f"响应：{routing_decision}")
-                    decision = json.loads(routing_decision)
+                    decision = parse_llm_json(routing_decision)
                     route = decision.get("route", "").strip()
                     reason = decision.get("reason", "")
                     logger.debug(f"JSON 解析成功，路由：{route}, 理由：{reason}")

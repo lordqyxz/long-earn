@@ -31,7 +31,8 @@ def run_backtest(
         stock_list: 股票池列表，可选
 
     Returns:
-        dict: 回测结果字典，包含总收益率、夏普比率、最大回撤等指标
+        dict: 回测结果字典，成功时包含绩效指标；
+              失败时包含 error_category（"code_logic" 或 "strategy_logic"）和 error_detail
     """
     try:
         # 读取策略代码
@@ -71,8 +72,25 @@ def run_backtest(
                         "trading_days": result["trading_days"],
                     }
                 else:
-                    logger.error(f"回测失败：{result['message']}")
-                    return None
+                    # 构建精准错误信息
+                    category = result.get("error_category", "")
+                    detail = result.get("error_detail", "")
+                    if category == "code_logic":
+                        error_msg = f"【代码逻辑错误】{result['message']}"
+                    elif category == "strategy_logic":
+                        error_msg = f"【策略逻辑错误】{result['message']}"
+                    else:
+                        error_msg = f"回测失败：{result['message']}"
+                    if detail:
+                        error_msg += f"\n{detail}"
+                    logger.error(error_msg)
+                    # 包含 error 字段以兼容调用方 `result.get("error")` 检查
+                    return {
+                        "error": error_msg,
+                        "error_category": category,
+                        "error_detail": detail,
+                        "message": result["message"],
+                    }
             else:
                 logger.error(
                     f"回测服务返回错误：{response.status_code} - {response.text}"

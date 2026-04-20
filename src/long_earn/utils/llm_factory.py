@@ -31,7 +31,13 @@ def create_llm(
         # 默认使用ollama的qwen3.5:cloud模型
         if model_name is None:
             model_name = "qwen3.5:cloud"
-        return ChatOllama(model=model_name, timeout=timeout, **kwargs)
+        return ChatOllama(
+            model=model_name,
+            client_kwargs={
+                "timeout": timeout,
+            },
+            **kwargs,
+        )
 
     elif llm_type == "dashscope":
         # 阿里云DashScope模型
@@ -43,7 +49,7 @@ def create_llm(
             model=model_name,
             api_key=os.getenv("DASHSCOPE_API_KEY"),  # type: ignore
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            request_timeout=timeout,
+            timeout=timeout,
             **kwargs,
         )
 
@@ -59,7 +65,7 @@ def create_llm(
         return ChatOpenAI(
             model=model_name,
             base_url=base_url,
-            request_timeout=timeout,
+            timeout=timeout,
             **kwargs,
         )
 
