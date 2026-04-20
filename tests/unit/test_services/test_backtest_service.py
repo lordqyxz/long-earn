@@ -79,6 +79,7 @@ class TestRunBacktest:
             start_date="2023-01-01",
             end_date="2023-03-31",
             stock_list=None,
+            timeout=30.0,
         )
         assert result is not None
         assert result["total_return"] == 0.15
@@ -98,6 +99,7 @@ class TestRunBacktest:
             start_date="2023-01-01",
             end_date="2023-03-31",
             stock_list=None,
+            timeout=30.0,
         )
 
     @patch("long_earn.services.backtest_service.run_backtest")
@@ -129,6 +131,7 @@ class TestRunBacktest:
             start_date="2023-01-01",
             end_date="2023-03-31",
             stock_list=stock_list,
+            timeout=30.0,
         )
 
     @patch("long_earn.services.backtest_service.run_backtest")

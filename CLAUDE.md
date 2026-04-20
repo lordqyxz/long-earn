@@ -84,6 +84,7 @@ prompt = prompt_template.format(query=query)
 
 * **依赖隔离**：拥有独立的 `pyproject.toml`、`uv.lock` 和虚拟环境，避免 qlib、protobuf 等包与主项目版本冲突。**主项目不再 import qlib**，所有回测通过 HTTP API 远程调用
 * **远程调用**：主项目通过 `httpx` 调用回测服务 API（默认 `http://localhost:8001`），地址由 `BACKTEST_SERVICE_URL` 环境变量控制
+* **超时控制**：HTTP 请求默认超时 30 秒，可通过 `BACKTEST_TIMEOUT` 环境变量自定义
 * **启动方式**：`cd backtest_service && uv sync && uv run python -m long_earn_backtest`
 * **API 端点**：`POST /api/v1/backtest`（执行回测）、`GET /health`（健康检查）
 * **主项目入口**：`src/long_earn/tools/backtest.py` 中的 `run_backtest()` 和 `check_service_health()`

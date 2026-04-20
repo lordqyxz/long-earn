@@ -1,5 +1,6 @@
 import json
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -20,6 +21,56 @@ if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
 
+MAX_RETRIES = 3
+BASE_DELAY = 1.0
+
+
+def _retry_with_exponential_backoff(
+    func: Any,
+    *args: Any,
+    max_retries: int = MAX_RETRIES,
+    base_delay: float = BASE_DELAY,
+    logger: Any | None = None,
+    **kwargs: Any,
+) -> tuple[Any, int]:
+    """指数退避重试装饰器/函数
+
+    Args:
+        func: 要重试的函数
+        *args: 函数位置参数
+        max_retries: 最大重试次数
+        base_delay: 基础延迟时间（秒）
+        logger: 可选的日志记录器
+        **kwargs: 函数关键字参数
+
+    Returns:
+        (函数返回值, 最终重试次数)
+    """
+    last_exception: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            result = func(*args, **kwargs)
+            if attempt > 0 and logger:
+                logger.info(f"{func.__name__} 在第 {attempt + 1} 次尝试后成功")
+            return result, attempt
+        except Exception as e:
+            last_exception = e
+            if logger:
+                logger.warning(f"{func.__name__} 第 {attempt + 1} 次尝试失败: {e!s}")
+
+            if attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                if logger:
+                    logger.info(f"等待 {delay:.1f} 秒后重试...")
+                time.sleep(delay)
+
+    if logger and last_exception:
+        logger.error(f"{func.__name__} 全部 {max_retries} 次尝试均失败: {last_exception!s}")
+
+    return {"error": str(last_exception) if last_exception else "未知错误"}, max_retries
+
+
 def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> StockAnalysisState:
     """获取股票数据，带重试机制
 
@@ -27,13 +78,13 @@ def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> Stoc
         state: 状态
         context: 运行时上下文
     """
-    # 首先尝试从状态中获取股票代码
+    logger = context.get("logger") if context else None
     stock_code = state.get("stock_code", "")
     stock_name = state.get("stock_name", "")
-    # 如果没有股票代码，尝试从查询中提取
+    current_retry_count = state.get("retry_count", 0)
+
     if not stock_code:
         if not stock_name:
-            # 使用 context 中的 LLM
             llm_service = context.llm_service
             if llm_service:
                 query = state.get("query", "")
@@ -43,7 +94,6 @@ def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> Stoc
                     response.content if hasattr(response, "content") else str(response)
                 )
 
-                # 解析 LLM 响应
                 try:
                     extraction_result = json.loads(response_content)
                     stock_name = extraction_result.get("stock_name", "")
@@ -51,20 +101,36 @@ def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> Stoc
                 except json.JSONDecodeError:
                     stock_name = ""
                     stock_code = ""
+
     if stock_name and not stock_code:
         stock_code = get_stock_code_by_name(stock_name)
 
-    stock_info = akshare_get_stock_data(stock_code)
-    stock_financial_metrics = get_financial_metrics(stock_code)
-    price_history = get_price_history(stock_code)
+    stock_info, info_retries = _retry_with_exponential_backoff(
+        akshare_get_stock_data, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+    )
+    stock_financial_metrics, metrics_retries = _retry_with_exponential_backoff(
+        get_financial_metrics, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+    )
+    price_history, price_retries = _retry_with_exponential_backoff(
+        get_price_history, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+    )
+
+    total_retries = info_retries + metrics_retries + price_retries
+    if logger and total_retries > 0:
+        logger.info(f"股票 {stock_code} 数据获取完成，总重试次数: {total_retries}")
+
     stock_data = {
         "stock_info": stock_info,
         "stock_financial_metrics": stock_financial_metrics,
         "price_history": price_history,
     }
+
+    if "error" in stock_info or "error" in stock_financial_metrics:
+        stock_data["error"] = stock_info.get("error") or stock_financial_metrics.get("error")
+
     return {
         "stock_data": stock_data,
-        "retry_count": 0,
+        "retry_count": current_retry_count + total_retries,
         "stock_code": stock_code,
         "stock_name": stock_name,
     }

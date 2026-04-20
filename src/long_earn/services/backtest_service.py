@@ -62,6 +62,7 @@ class BacktestServiceImpl(BacktestService):
             start_date=start_date,
             end_date=end_date,
             stock_list=stock_list,
+            timeout=self.config.backtest_timeout,
         )
 
         if result is not None and self.logger:

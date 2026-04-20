@@ -89,8 +89,8 @@ def create_main_agent(context: "RuntimeContext"):
                         return ("unknown", "无法确定路由")
 
                 config = context.config
-                strategy_keywords = config.strategy_keywords if config else ("策略", "思路", "投资策略")
-                stock_analysis_keywords = config.stock_analysis_keywords if config else ("股票", "分析", "公司")
+                strategy_keywords = config.strategy_keywords if config else ()
+                stock_analysis_keywords = config.stock_analysis_keywords if config else ()
 
                 try:
                     logger.debug(f"响应：{routing_decision}")
@@ -115,8 +115,8 @@ def create_main_agent(context: "RuntimeContext"):
 
             except Exception as e:
                 logger.error(f"意图分析异常：{e!s}")
-                strategy_keywords = context.config.strategy_keywords if context.config else ("策略", "思路", "投资策略")
-                stock_analysis_keywords = context.config.stock_analysis_keywords if context.config else ("股票", "分析", "公司")
+                strategy_keywords = context.config.strategy_keywords if context.config else ()
+                stock_analysis_keywords = context.config.stock_analysis_keywords if context.config else ()
                 if any(kw in user_query for kw in strategy_keywords):
                     logger.info("异常情况下使用关键词匹配：策略相关")
                     return {

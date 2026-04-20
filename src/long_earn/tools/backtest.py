@@ -19,6 +19,7 @@ def run_backtest(
     start_date: str = "2020-01-01",
     end_date: str = "2023-12-31",
     stock_list: list | None = None,
+    timeout: float = 30.0,
 ) -> dict | None:
     """
     回测交易策略（通过远程服务）
@@ -29,6 +30,7 @@ def run_backtest(
         start_date: 回测开始日期
         end_date: 回测结束日期
         stock_list: 股票池列表，可选
+        timeout: HTTP 请求超时时间（秒），默认 30.0
 
     Returns:
         dict: 回测结果字典，成功时包含绩效指标；
@@ -48,7 +50,7 @@ def run_backtest(
         # 调用远程回测服务
         logger.info(f"调用回测服务：{BACKTEST_SERVICE_URL}")
 
-        with httpx.Client(timeout=300.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{BACKTEST_SERVICE_URL}/api/v1/backtest",
                 json={
