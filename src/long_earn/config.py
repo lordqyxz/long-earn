@@ -13,6 +13,7 @@ from long_earn.services import (
     LLMService,
     LoggerService,
     MonitoringService,
+    ServiceManager,
     StockService,
 )
 
@@ -48,6 +49,7 @@ class RuntimeContext:
     knowledge_service: KnowledgeService
     stock_service: StockService
     backtest_service: BacktestService
+    service_manager: ServiceManager
 
     # 可选服务
     logger: LoggerService
@@ -84,7 +86,9 @@ class AppConfig:
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
+    backtest_service_url: str = "http://localhost:8001"
     backtest_timeout: float = 30.0
+    service_manager_type: str = "local"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
 
@@ -109,9 +113,17 @@ class AppConfig:
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
+            backtest_service_url=os.getenv(
+                "BACKTEST_SERVICE_URL", "http://localhost:8001"
+            ),
             backtest_timeout=float(os.getenv("BACKTEST_TIMEOUT", "30.0")),
-            strategy_keywords=tuple(k.strip() for k in strategy_env.split(",") if k.strip()),
-            stock_analysis_keywords=tuple(k.strip() for k in stock_analysis_env.split(",") if k.strip()),
+            service_manager_type=os.getenv("SERVICE_MANAGER_TYPE", "local"),
+            strategy_keywords=tuple(
+                k.strip() for k in strategy_env.split(",") if k.strip()
+            ),
+            stock_analysis_keywords=tuple(
+                k.strip() for k in stock_analysis_env.split(",") if k.strip()
+            ),
         )
 
     def validate(self) -> list[str]:

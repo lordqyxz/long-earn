@@ -9,7 +9,7 @@ Validates that previously broken functionality now works:
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from long_earn.config import RuntimeContext
 from long_earn.services.backtest_service import BacktestService
@@ -48,11 +48,14 @@ def _make_mock_context() -> RuntimeContext:
     mock_config.backtest_start_date = "2020-01-01"
     mock_config.backtest_end_date = "2023-12-31"
 
+    mock_service_manager = MagicMock()
+
     return RuntimeContext(
         llm_service=mock_llm,
         knowledge_service=mock_knowledge,
         stock_service=mock_stock,
         backtest_service=mock_backtest,
+        service_manager=mock_service_manager,
         logger=mock_logger,
         monitoring=mock_monitoring,
         config=mock_config,

@@ -66,12 +66,16 @@ def _retry_with_exponential_backoff(
                 time.sleep(delay)
 
     if logger and last_exception:
-        logger.error(f"{func.__name__} 全部 {max_retries} 次尝试均失败: {last_exception!s}")
+        logger.error(
+            f"{func.__name__} 全部 {max_retries} 次尝试均失败: {last_exception!s}"
+        )
 
     return {"error": str(last_exception) if last_exception else "未知错误"}, max_retries
 
 
-def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> StockAnalysisState:
+def get_stock_data(
+    state: StockAnalysisState, context: "RuntimeContext"
+) -> StockAnalysisState:
     """获取股票数据，带重试机制
 
     Args:
@@ -106,13 +110,25 @@ def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> Stoc
         stock_code = get_stock_code_by_name(stock_name)
 
     stock_info, info_retries = _retry_with_exponential_backoff(
-        akshare_get_stock_data, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+        akshare_get_stock_data,
+        stock_code,
+        logger=logger,
+        max_retries=MAX_RETRIES,
+        base_delay=BASE_DELAY,
     )
     stock_financial_metrics, metrics_retries = _retry_with_exponential_backoff(
-        get_financial_metrics, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+        get_financial_metrics,
+        stock_code,
+        logger=logger,
+        max_retries=MAX_RETRIES,
+        base_delay=BASE_DELAY,
     )
     price_history, price_retries = _retry_with_exponential_backoff(
-        get_price_history, stock_code, logger=logger, max_retries=MAX_RETRIES, base_delay=BASE_DELAY
+        get_price_history,
+        stock_code,
+        logger=logger,
+        max_retries=MAX_RETRIES,
+        base_delay=BASE_DELAY,
     )
 
     total_retries = info_retries + metrics_retries + price_retries
@@ -126,7 +142,9 @@ def get_stock_data(state: StockAnalysisState, context: "RuntimeContext") -> Stoc
     }
 
     if "error" in stock_info or "error" in stock_financial_metrics:
-        stock_data["error"] = stock_info.get("error") or stock_financial_metrics.get("error")
+        stock_data["error"] = stock_info.get("error") or stock_financial_metrics.get(
+            "error"
+        )
 
     return {
         "stock_data": stock_data,
@@ -214,10 +232,19 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node("get_stock_data", lambda state: get_stock_data(state, context))
-    workflow.add_node("petter_analysis", lambda state: petter_analysis_node(state, context))
-    workflow.add_node("charles_munger_analysis", lambda state: charles_munger_analysis_node(state, context))
-    workflow.add_node("buffett_analysis", lambda state: buffett_analysis_node(state, context))
-    workflow.add_node("fiske_analysis", lambda state: fiske_analysis_node(state, context))
+    workflow.add_node(
+        "petter_analysis", lambda state: petter_analysis_node(state, context)
+    )
+    workflow.add_node(
+        "charles_munger_analysis",
+        lambda state: charles_munger_analysis_node(state, context),
+    )
+    workflow.add_node(
+        "buffett_analysis", lambda state: buffett_analysis_node(state, context)
+    )
+    workflow.add_node(
+        "fiske_analysis", lambda state: fiske_analysis_node(state, context)
+    )
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("error_handler", error_handler_node)
 

@@ -166,7 +166,7 @@ class BacktestService(Protocol):
         start_date: str = "2020-01-01",
         end_date: str = "2023-12-31",
         stock_list: list[str] | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """运行回测
 
         Args:
@@ -175,7 +175,8 @@ class BacktestService(Protocol):
             end_date: 结束日期
 
         Returns:
-            回测结果字典
+            回测结果字典。成功时包含绩效指标；失败时包含 error、
+            error_category 和 error_detail 字段，绝不返回 None。
         """
         ...
 
@@ -229,4 +230,36 @@ class MonitoringService(Protocol):
 
     def log_report(self, logger: LoggerService) -> None:
         """输出性能报告"""
+        ...
+
+
+class ServiceManager(Protocol):
+    """服务管理器接口
+
+    管理外部子服务（如 backtest_service）的生命周期。
+    本地部署时提供启动/停止能力；远程部署时为空实现。
+    """
+
+    def start(self) -> bool:
+        """启动服务
+
+        Returns:
+            是否启动成功
+        """
+        ...
+
+    def stop(self) -> bool:
+        """停止服务
+
+        Returns:
+            是否停止成功
+        """
+        ...
+
+    def is_running(self) -> bool:
+        """检查服务是否正在运行
+
+        Returns:
+            服务是否在运行
+        """
         ...

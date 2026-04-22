@@ -12,6 +12,7 @@ src/long_earn.egg-info/dependency_links.txt
 src/long_earn.egg-info/entry_points.txt
 src/long_earn.egg-info/requires.txt
 src/long_earn.egg-info/top_level.txt
+src/long_earn/core/llm_utils.py
 src/long_earn/core/prompt_loader.py
 src/long_earn/services/__init__.py
 src/long_earn/services/backtest_service.py

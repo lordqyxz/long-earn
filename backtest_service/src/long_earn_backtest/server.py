@@ -1,4 +1,8 @@
-"""回测服务 API 模块"""
+"""回测服务 API 模块
+
+TODO: 提供面向大模型的 CLI 实现，支持主项目与子服务之间通过命令行互相调用
+（替代当前 HTTP API 方案，降低部署复杂度）。
+"""
 
 import bisect
 import logging
@@ -10,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from qlib import init as qlib_init
 from qlib.data import D
@@ -360,7 +364,7 @@ async def run_backtest(request: BacktestRequest):
                 except Exception as e:
                     logger.error(f"计算组合收益失败 ({date_str}): {e}")
                     error_count += 1
-                    raise
+                    continue
 
             logger.info(
                 f"回测完成，有效交易日：{len(daily_returns)}, 错误数：{error_count}, 空信号数：{empty_signal_count}"
@@ -439,12 +443,15 @@ async def run_backtest(request: BacktestRequest):
                 os.unlink(temp_path)
                 logger.debug(f"临时文件已清理：{temp_path}")
 
-    except HTTPException:
-        raise
     except Exception as e:
         error_details = traceback.format_exc()
         logger.error(f"回测失败：{e}\n{error_details}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        return BacktestResponse(
+            success=False,
+            message="回测服务内部错误",
+            error_category="service_error",
+            error_detail=f"服务端内部异常：{e}\n{error_details}",
+        )
 
 
 def _preload_close_prices(
@@ -469,10 +476,14 @@ def _preload_close_prices(
         return cache
 
     try:
-        logger.info(f"预加载收盘价：{len(stock_list)} 只股票, {start_date} ~ {end_date}")
+        logger.info(
+            f"预加载收盘价：{len(stock_list)} 只股票, {start_date} ~ {end_date}"
+        )
         close_data = D.features(
-            stock_list, ["$close"],
-            start_time=start_date, end_time=end_date,
+            stock_list,
+            ["$close"],
+            start_time=start_date,
+            end_time=end_date,
         )
         if close_data is None or close_data.empty:
             logger.warning("预加载收盘价数据为空")
@@ -542,8 +553,10 @@ def _get_portfolio_return(
                 end_date = pd.Timestamp(date_str)
                 start_date = end_date - pd.Timedelta(days=10)
                 close_data = D.features(
-                    [stock], ["$close"],
-                    start_time=start_date, end_time=end_date,
+                    [stock],
+                    ["$close"],
+                    start_time=start_date,
+                    end_time=end_date,
                 )
                 if close_data is not None and not close_data.empty:
                     stock_data = close_data.loc[(stock, slice(None)), "$close"]
@@ -563,7 +576,7 @@ def _get_portfolio_return(
 
     except Exception as e:
         logger.error(f"获取数据失败 ({date_str}): {e}")
-        raise
+        return None
 
 
 @app.get("/health")

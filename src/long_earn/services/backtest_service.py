@@ -17,6 +17,11 @@ class BacktestServiceImpl(BacktestService):
 
     通过 HTTP API 远程调用 backtest_service 执行回测，
     避免主项目直接依赖 qlib/protobuf 等重量级包。
+
+    特性：
+    - 连接池复用（模块级 httpx.Client 单例）
+    - 内建断路器（连续失败 3 次自动熔断）
+    - 支持 Unix Domain Socket（零 TCP 开销）
     """
 
     def __init__(self, context: "RuntimeContext"):
@@ -35,7 +40,7 @@ class BacktestServiceImpl(BacktestService):
         start_date: str | None = None,
         end_date: str | None = None,
         stock_list: list[str] | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """运行回测（通过远程 HTTP API）
 
         Args:
@@ -45,7 +50,8 @@ class BacktestServiceImpl(BacktestService):
             stock_list: 股票池列表，可选
 
         Returns:
-            回测结果字典
+            回测结果字典。成功时包含绩效指标；失败时包含 error、error_category
+            和 error_detail 字段，绝不返回 None。
         """
         if start_date is None:
             start_date = self.config.backtest_start_date
@@ -53,9 +59,7 @@ class BacktestServiceImpl(BacktestService):
             end_date = self.config.backtest_end_date
 
         if self.logger:
-            self.logger.info(
-                f"调用远程回测服务: {start_date} ~ {end_date}"
-            )
+            self.logger.info(f"调用远程回测服务: {start_date} ~ {end_date}")
 
         result = run_backtest(
             strategy_code=strategy_code,
@@ -63,6 +67,7 @@ class BacktestServiceImpl(BacktestService):
             end_date=end_date,
             stock_list=stock_list,
             timeout=self.config.backtest_timeout,
+            service_url=self.config.backtest_service_url,
         )
 
         if result is not None and self.logger:

@@ -5,11 +5,10 @@
 import json
 from typing import TYPE_CHECKING
 
-from long_earn.core.llm_utils import parse_llm_json
-
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
+from long_earn.core.llm_utils import parse_llm_json
 from long_earn.state import State
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
 from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
@@ -90,7 +89,9 @@ def create_main_agent(context: "RuntimeContext"):
 
                 config = context.config
                 strategy_keywords = config.strategy_keywords if config else ()
-                stock_analysis_keywords = config.stock_analysis_keywords if config else ()
+                stock_analysis_keywords = (
+                    config.stock_analysis_keywords if config else ()
+                )
 
                 try:
                     logger.debug(f"响应：{routing_decision}")
@@ -101,22 +102,32 @@ def create_main_agent(context: "RuntimeContext"):
 
                     if route not in ["strategy_rd", "stock_analysis"]:
                         logger.warning(f"解析得到无效路由值：{route}，使用关键词匹配")
-                        route, reason = decide_route(user_query, strategy_keywords, stock_analysis_keywords)
+                        route, reason = decide_route(
+                            user_query, strategy_keywords, stock_analysis_keywords
+                        )
 
                 except json.JSONDecodeError as e:
                     logger.exception(f"JSON 解析失败：{e!s}，使用关键词匹配")
-                    route, reason = decide_route(user_query, strategy_keywords, stock_analysis_keywords)
+                    route, reason = decide_route(
+                        user_query, strategy_keywords, stock_analysis_keywords
+                    )
                 except Exception as e:
                     logger.error(f"JSON 处理异常：{e!s}，使用关键词匹配")
-                    route, reason = decide_route(user_query, strategy_keywords, stock_analysis_keywords)
+                    route, reason = decide_route(
+                        user_query, strategy_keywords, stock_analysis_keywords
+                    )
 
                 logger.info(f"路由决策：{route}，理由：{reason}")
                 return {"route": route, "routing_reason": reason}
 
             except Exception as e:
                 logger.error(f"意图分析异常：{e!s}")
-                strategy_keywords = context.config.strategy_keywords if context.config else ()
-                stock_analysis_keywords = context.config.stock_analysis_keywords if context.config else ()
+                strategy_keywords = (
+                    context.config.strategy_keywords if context.config else ()
+                )
+                stock_analysis_keywords = (
+                    context.config.stock_analysis_keywords if context.config else ()
+                )
                 if any(kw in user_query for kw in strategy_keywords):
                     logger.info("异常情况下使用关键词匹配：策略相关")
                     return {

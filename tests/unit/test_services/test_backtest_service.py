@@ -5,8 +5,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from long_earn.config import AppConfig, RuntimeContext
 from long_earn.services.backtest_service import BacktestServiceImpl
 
@@ -23,6 +21,7 @@ def _make_context():
     mock_knowledge = MagicMock()
     mock_stock = MagicMock()
     mock_monitoring = MagicMock()
+    mock_service_manager = MagicMock()
 
     context = RuntimeContext(
         config=config,
@@ -31,6 +30,7 @@ def _make_context():
         llm_service=mock_llm,
         knowledge_service=mock_knowledge,
         stock_service=mock_stock,
+        service_manager=mock_service_manager,
         monitoring=mock_monitoring,
     )
     return context
@@ -80,6 +80,7 @@ class TestRunBacktest:
             end_date="2023-03-31",
             stock_list=None,
             timeout=30.0,
+            service_url="http://localhost:8001",
         )
         assert result is not None
         assert result["total_return"] == 0.15
@@ -100,18 +101,25 @@ class TestRunBacktest:
             end_date="2023-03-31",
             stock_list=None,
             timeout=30.0,
+            service_url="http://localhost:8001",
         )
 
     @patch("long_earn.services.backtest_service.run_backtest")
-    def test_returns_none_on_remote_failure(self, mock_run_backtest):
-        """远程服务失败时应返回 None"""
-        mock_run_backtest.return_value = None
+    def test_returns_structured_error_on_remote_failure(self, mock_run_backtest):
+        """远程服务失败时应返回包含 error 的结构化字典，绝不返回 None"""
+        mock_run_backtest.return_value = {
+            "error": "回测服务暂时不可用",
+            "error_category": "service_unavailable",
+            "error_detail": "断路器处于 OPEN 状态",
+        }
 
         context = _make_context()
         svc = BacktestServiceImpl(context)
 
         result = svc.run_backtest(strategy_code="bad code")
-        assert result is None
+        assert result is not None
+        assert "error" in result
+        assert result["error_category"] == "service_unavailable"
 
     @patch("long_earn.services.backtest_service.run_backtest")
     def test_passes_stock_list(self, mock_run_backtest):
@@ -122,9 +130,7 @@ class TestRunBacktest:
         svc = BacktestServiceImpl(context)
 
         stock_list = ["SH600519", "SZ000001"]
-        svc.run_backtest(
-            strategy_code="test", stock_list=stock_list
-        )
+        svc.run_backtest(strategy_code="test", stock_list=stock_list)
 
         mock_run_backtest.assert_called_once_with(
             strategy_code="test",
@@ -132,6 +138,7 @@ class TestRunBacktest:
             end_date="2023-03-31",
             stock_list=stock_list,
             timeout=30.0,
+            service_url="http://localhost:8001",
         )
 
     @patch("long_earn.services.backtest_service.run_backtest")

@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from long_earn.tools.backtest import BACKTEST_SERVICE_URL
+# 回测服务地址（从环境变量读取，与 backtest.py 保持一致）
+BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://localhost:8001")
 
 # 回测服务项目目录
 BACKTEST_SERVICE_DIR = os.path.join(
@@ -100,7 +101,7 @@ def backtest_service():
                     if text:
                         print(f"[backtest] {text}")
                         last_output = text
-            except (IOError, BlockingIOError):
+            except (OSError, BlockingIOError):
                 pass
             finally:
                 fcntl.fcntl(fd, fcntl.F_SETFL, fl)

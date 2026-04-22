@@ -10,9 +10,12 @@ checkpoint.db-shm
 checkpoint.db-wal
 .venv/
 
-**.egg-info
+**.egg-info/
 
 temp/
 .claude/
 .trae/
 temp/
+
+.ruff_cache/
+.agents/
