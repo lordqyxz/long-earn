@@ -268,7 +268,12 @@ src/long_earn/memory/
 | 策略开发 Agent | `src/long_earn/strategy_rd/agents/strategy_develop_agent.py` |
 | 策略研发 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_prompt.md` |
 | 代码修复 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_refine_prompt.md` |
+| 策略研究 Prompt 模块 | `src/long_earn/strategy_rd/agents/strategy_research_prompt.py` |
+| 策略研究 Prompt | `src/long_earn/strategy_rd/agents/strategy_research_prompt.md` |
 | 策略研究 Agent | `src/long_earn/strategy_rd/agents/strategy_research_agent.py` |
+| 监督器 Prompt 模块 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_prompt.py` |
+| 监督器 Prompt | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_prompt.md` |
+| 继续迭代 Prompt | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_continue_prompt.md` |
 | 策略监督器 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py` |
 | 股票分析子图 | `src/long_earn/stock_analysis/subgraph.py` |
 | 股票分析状态 | `src/long_earn/stock_analysis/state.py` |
@@ -277,3 +282,4 @@ src/long_earn/memory/
 | 股票信息工具 | `src/long_earn/tools/get_stock_info.py` |
 | 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
 | LangGraph 部署配置 | `langgraph.json` |
+| 环境变量模板 | `.env.example` |

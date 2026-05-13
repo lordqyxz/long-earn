@@ -312,7 +312,7 @@ tests/
 - [ ] `save()` 方法
 - [ ] 过滤逻辑（类别、源文件、词条）
 - [ ] 自适应检索
-- [ ] Qdrant 连接管理
+- [ ] 记忆系统连接管理
 
 **优先级**: 🟡 中
 
@@ -323,7 +323,7 @@ tests/
 - [ ] `backtest()` 方法
 - [ ] 绩效指标计算
 - [ ] 错误处理
-- [ ] pyqlib 集成
+- [ ] 内嵌回测引擎集成
 
 **优先级**: 🟢 低
 
@@ -379,7 +379,7 @@ tests/
 - [ ] `save_experience()` 函数
 - [ ] `search_knowledge()` 函数
 - [ ] `init_system()` 函数
-- [ ] Qdrant 集成
+- [ ] 记忆系统集成
 
 **优先级**: 🟡 中
 
@@ -433,8 +433,8 @@ tests/
 
 **依赖**:
 - 真实 LLM 配置
-- Qdrant 向量数据库
-- pyqlib 回测环境
+- 3-Tier 记忆系统
+- 内嵌回测引擎
 
 ### 股票分析集成测试
 
@@ -465,22 +465,22 @@ tests/
 **优先级**: 🟡 中
 
 **依赖**:
-- Qdrant 向量数据库
+- 3-Tier 记忆系统
 
 ### 回测集成测试
 
 **文件**: `tests/integration/test_backtest_integration.py`
 
 **测试内容**:
-- [ ] pyqlib 初始化
-- [ ] 策略回测流程
+- [ ] 回测引擎初始化
+- [ ] YAML DSL 策略解析
 - [ ] 绩效指标计算
 - [ ] 数据预处理
 
 **优先级**: 🟡 中
 
 **依赖**:
-- pyqlib 环境
+- 内嵌回测引擎
 - 股票数据
 
 ### LLM 集成测试
@@ -629,9 +629,8 @@ LLM_BASE_URL=http://localhost:11434
 # Moonshot API（用于 Web 搜索）
 MOONSHOT_API_KEY=your_test_api_key
 
-# Qdrant 配置
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=your_test_api_key
+# 记忆系统配置
+MEMORY_PATH=~/.long_earn/memory.npz
 
 # 测试专用配置
 TEST_MODE=true

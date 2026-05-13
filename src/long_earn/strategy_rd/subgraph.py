@@ -94,10 +94,10 @@ def _adaptive_retrieval_node(
     logger: LoggerService,
 ) -> dict:
     """自适应检索节点 - 根据关键词执行检索"""
-    keywords = state.get("retrieval_keywords", [])
+    keywords = state.get("retrieval_keywords", []) or []
     current_context = state.get("knowledge_context", "")
     retrieval_count = state.get("retrieval_count", 0)
-    history = state.get("adaptive_retrieval_history", [])
+    history = state.get("adaptive_retrieval_history", []) or []
 
     if logger:
         logger.info(f"[自适应检索] 第{retrieval_count + 1}轮, 关键词: {keywords}")
@@ -157,7 +157,7 @@ def _develop_node(
     logger: LoggerService,
 ) -> dict:
     """开发节点 - 将策略转化为代码"""
-    strategy = state.get("strategy", {})
+    strategy = state.get("strategy", {}) or {}
 
     if logger:
         logger.info("[策略开发] 开始将策略转化为代码...")
@@ -213,9 +213,11 @@ def _refine_node(
     logger: LoggerService,
 ) -> dict:
     """代码修复节点 - 根据错误修复代码"""
-    strategy = state.get("strategy", {})
-    strategy_code = state.get("strategy_yaml", "") or state.get("strategy_code", "")
-    backtest_result = state.get("backtest_result", {})
+    strategy = state.get("strategy", {}) or {}
+    strategy_code = (
+        state.get("strategy_yaml", "") or state.get("strategy_code", "") or ""
+    )
+    backtest_result = state.get("backtest_result", {}) or {}
     error_message = backtest_result.get("error", "Unknown error")
 
     refine_count = len(develop_agent.get_error_history())
@@ -245,8 +247,8 @@ def _reflection_node(
     logger: LoggerService,
 ) -> dict:
     """反思节点 - 分析回测结果并生成改进建议"""
-    strategy = state.get("strategy", {})
-    backtest_result = state.get("backtest_result", {})
+    strategy = state.get("strategy", {}) or {}
+    backtest_result = state.get("backtest_result", {}) or {}
 
     if logger:
         logger.info("[反思] 开始 ToT 多分支反思...")
@@ -275,8 +277,8 @@ def _optimize_node(
     logger: LoggerService,
 ) -> dict:
     """优化节点 - 根据改进建议优化策略"""
-    strategy = state.get("strategy", {})
-    improvement_suggestions = state.get("improvement_suggestions", [])
+    strategy = state.get("strategy", {}) or {}
+    improvement_suggestions: list[str] = state.get("improvement_suggestions", []) or []
 
     if isinstance(improvement_suggestions, str):
         improvement_suggestions = [improvement_suggestions]
@@ -300,7 +302,7 @@ def _develop_optimized_node(
     logger: LoggerService,
 ) -> dict:
     """开发优化后的策略代码"""
-    optimized_strategy = state.get("optimized_strategy", {})
+    optimized_strategy = state.get("optimized_strategy", {}) or {}
 
     if logger:
         logger.info("[策略开发-优化版] 开始开发优化后的策略代码...")
@@ -358,11 +360,13 @@ def _save_experience_node(
     logger: LoggerService,
 ) -> dict:
     """保存经验节点 - 将成功的策略保存到知识库"""
-    strategy_name = state.get("strategy_name", "CustomStrategy")
-    design_rationale = state.get("design_rationale", "")
-    strategy_code = state.get("strategy_yaml", "") or state.get("strategy_code", "")
-    backtest_result = state.get("backtest_result", {})
-    reflection = state.get("reflection", "")
+    strategy_name = state.get("strategy_name", "CustomStrategy") or "CustomStrategy"
+    design_rationale = state.get("design_rationale", "") or ""
+    strategy_code = (
+        state.get("strategy_yaml", "") or state.get("strategy_code", "") or ""
+    )
+    backtest_result = state.get("backtest_result", {}) or {}
+    reflection = state.get("reflection", "") or ""
     error_history = develop_agent.get_error_history()
 
     if logger:
@@ -392,10 +396,10 @@ def _supervisor_node(
     current_iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 3)
 
-    strategy = state.get("strategy", {})
-    backtest_result = state.get("backtest_result", {})
-    reflection = state.get("reflection", "")
-    improvement_suggestions = state.get("improvement_suggestions", [])
+    strategy = state.get("strategy", {}) or {}
+    backtest_result = state.get("backtest_result", {}) or {}
+    reflection = state.get("reflection", "") or ""
+    improvement_suggestions = state.get("improvement_suggestions", []) or []
 
     if logger:
         logger.info(
@@ -408,7 +412,7 @@ def _supervisor_node(
         strategy=strategy,
         backtest_result=backtest_result,
         reflection=reflection,
-        improvement_suggestions=improvement_suggestions,
+        improvement_suggestions="\n".join(improvement_suggestions),
     )
 
     next_iteration = current_iteration + 1
