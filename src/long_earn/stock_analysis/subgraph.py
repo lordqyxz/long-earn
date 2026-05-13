@@ -87,24 +87,23 @@ def get_stock_data(
     stock_name = state.get("stock_name", "")
     current_retry_count = state.get("retry_count", 0)
 
-    if not stock_code:
-        if not stock_name:
-            llm_service = context.llm_service
-            if llm_service:
-                query = state.get("query", "")
-                formatted_prompt = extract_prompt.format(query=query)
-                response = llm_service.invoke(formatted_prompt)
-                response_content = (
-                    response.content if hasattr(response, "content") else str(response)
-                )
+    if not stock_code and not stock_name:
+        llm_service = context.llm_service
+        if llm_service:
+            query = state.get("query", "")
+            formatted_prompt = extract_prompt.format(query=query)
+            response = llm_service.invoke(formatted_prompt)
+            response_content = (
+                response.content if hasattr(response, "content") else str(response)
+            )
 
-                try:
-                    extraction_result = json.loads(response_content)
-                    stock_name = extraction_result.get("stock_name", "")
-                    stock_code = extraction_result.get("stock_code", "")
-                except json.JSONDecodeError:
-                    stock_name = ""
-                    stock_code = ""
+            try:
+                extraction_result = json.loads(response_content)
+                stock_name = extraction_result.get("stock_name", "")
+                stock_code = extraction_result.get("stock_code", "")
+            except json.JSONDecodeError:
+                stock_name = ""
+                stock_code = ""
 
     if stock_name and not stock_code:
         stock_code = get_stock_code_by_name(stock_name)

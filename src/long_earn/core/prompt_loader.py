@@ -41,9 +41,11 @@ __version__ = "1.0.0"
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from langchain_core.prompts import PromptTemplate
+
+_MIN_INLINE_CODE_LEN = 2
 
 
 class MarkdownPromptTemplate(PromptTemplate):
@@ -57,7 +59,7 @@ class MarkdownPromptTemplate(PromptTemplate):
     - 支持 Markdown frontmatter 元数据（版本、描述等）
     """
 
-    model_config = {"extra": "allow"}
+    model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
     def __init__(
         self,
@@ -149,8 +151,6 @@ class MarkdownPromptTemplate(PromptTemplate):
         Returns:
             (metadata, body) 元组，包含元数据字典和正文字符串
         """
-        import re
-
         # 匹配 frontmatter 块
         frontmatter_pattern = r"^---\s*\n(.*?)\n---\s*\n(.*)$"
         match = re.search(frontmatter_pattern, content, re.DOTALL)
@@ -303,8 +303,12 @@ class MarkdownPromptTemplate(PromptTemplate):
         parts = re.split(r"(`[^`]+`)", line)
         result_parts = []
 
-        for i, part in enumerate(parts):
-            if part.startswith("`") and part.endswith("`") and len(part) > 2:
+        for _i, part in enumerate(parts):
+            if (
+                part.startswith("`")
+                and part.endswith("`")
+                and len(part) > _MIN_INLINE_CODE_LEN
+            ):
                 # 内联代码段：转义大括号以避免被 langchain 误识别
                 escaped_part = part.replace("{", "{{").replace("}", "}}")
                 result_parts.append(escaped_part)
