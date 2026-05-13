@@ -22,20 +22,30 @@ uv run lint-imports                        # 架构依赖校验
 long_earn/
 ├── src/long_earn/           # 主项目源码
 │   ├── backtest/            # 内嵌回测引擎
-│   │   ├── domain/           #   领域模型（实体、值对象、异常）
-│   │   ├── engine/           #   向量化回测引擎 + AST 安全求值器
-│   │   └── data/             #   数据提供（akshare + DuckDB 缓存）
+│   │   ├── domain/          #   领域模型（实体、值对象、异常）
+│   │   ├── engine/          #   向量化回测引擎 + AST 安全求值器
+│   │   └── data/            #   数据提供（akshare + DuckDB 缓存）
 │   ├── core/                # 核心工具（prompt_loader, llm_utils）
 │   ├── memory/              # 记忆系统（TF-IDF + 关系图，numpy/pandas）
 │   ├── services/            # 服务接口与实现
+│   ├── state.py             # 主图状态定义
 │   ├── strategy_rd/         # 策略研发子图
 │   │   └── agents/          # 策略研发 Agent（含同目录 .md prompt）
 │   ├── stock_analysis/      # 股票分析子图
-│   │   └── agents/          # 多视角分析师 Agent（含同目录 .md prompt）
-│   └── tools/               # 工具函数（回测、知识库、股票信息）
+│   │   └── agents/          # 多视角分析师 Agent（含同目录 .py prompt）
+│   ├── tools/               # 工具函数（回测、知识库、股票信息）
+│   └── utils/               # 通用工具（llm_factory, logger）
 ├── tests/                   # 测试
-│   ├── unit/
-│   └── integration/
+│   ├── unit/                # 单元测试
+│   │   ├── test_backtest/  # 回测引擎测试
+│   │   ├── test_memory/    # 记忆系统测试
+│   │   ├── test_services/  # 服务层测试
+│   │   ├── test_strategy_rd/ # 策略研发测试
+│   │   └── test_config.py  # 配置测试
+│   └── integration/         # 集成测试
+├── docs/                    # 文档
+│   ├── adr/                 # 架构决策记录
+│   └── research/            # 调研文档
 └── langgraph.json           # LangGraph 部署配置
 ```
 
@@ -44,7 +54,7 @@ long_earn/
 ```
 AppConfig.from_env()
     ↓
-create_runtime_context(config)
+create_runtime_context(config) / initialize_context(config)
     ↓
 RuntimeContext(dataclass)
     ├── llm_service: LLMService (Protocol)
@@ -58,7 +68,7 @@ RuntimeContext(dataclass)
 
 主图（`agent.py`）路由到子图：
 
-- **strategy\_rd**：策略研发（init → 自适应检索循环 → research → develop → backtest → 代码修复循环（最多3次）→ reflection → save\_experience → supervisor → optimize 循环）
+- **strategy\_rd**：策略研发（start → init\_iteration → initial\_retrieval → adaptive\_retrieval 循环 → develop → backtest → 代码修复循环（最多3次）→ reflection → save\_experience → supervisor → optimize 循环）
 - **stock\_analysis**：股票分析（4 视角并行分析后汇总）
 
 ## 编码规范
@@ -67,7 +77,7 @@ RuntimeContext(dataclass)
 - 所有函数和参数必须添加类型注解
 - `str` 类型参数默认值 `""`
 - 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
-- 类型检查：mypy（渐进式，warn_return_any + check_untyped_defs）
+- 类型检查：mypy（渐进式，warn\_return\_any + check\_untyped\_defs）
 - 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
 - 中文注释和文档字符串
 
@@ -120,14 +130,16 @@ prompt = prompt_template.format(query=query)
 - [ADR-002](docs/adr/002-partial-node-injection.md): `functools.partial` 替代闭包进行节点注入
 - [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库
+
 ## 调研文档
 
 - [量化交易 + Agent 记忆系统最佳实践](docs/research/agent-memory-quant-best-practices.md): 3-Tier 记忆、领域服务分层、Agent 设计模式
 
 ## 测试说明
 
-- **根级测试文件**：`tests/` 根目录下存在独立的集成测试文件（如 `test_develop_backtest.py`），运行 `uv run pytest tests/ -v` 时会一并执行
-- **集成测试依赖 `.env`**：在项目根目录创建 `.env` 文件，至少配置以下变量：
+- **单元测试**：`tests/unit/` 下按模块组织（test\_backtest/、test\_memory/、test\_services/、test\_strategy\_rd/）
+- **集成测试**：`tests/integration/` 需配置 `.env` 环境变量
+- **覆盖率**：pytest-cov 配置已就绪，当前覆盖率约 57%
 
 ```sh
 LLM_TYPE=ollama
@@ -145,10 +157,14 @@ LLM_BASE_URL=http://localhost:11434
 src/long_earn/backtest/
 ├── __init__.py              # 对外暴露 BacktestResult, VectorizedBacktestEngine 等
 ├── models.py                # BacktestResult Pydantic 模型
+├── domain/
+│   ├── entities.py          # 领域实体（Portfolio, DateRange）+ 值对象（PerformanceMetrics）
+│   └── exceptions.py        # 领域异常层次（BacktestDomainError 子类）
 ├── engine/
 │   ├── __init__.py
 │   ├── core.py              # 向量化回测引擎（Pandas MultiIndex 矩阵运算）
-│   └── dsl.py               # YAML DSL 解析器（StrategyDSL + 字段校验）
+│   ├── dsl.py               # YAML DSL 解析器（StrategyDSL + 字段校验）
+│   └── evaluator.py         # AST 白名单表达式求值器
 └── data/
     ├── __init__.py
     ├── cache.py             # DuckDB 本地缓存（行情/财务/成分股）
@@ -158,10 +174,28 @@ src/long_earn/backtest/
 
 - **YAML DSL 策略**：LLM 直接生成 YAML 策略描述（因子、信号、权重、风控），引擎解析后执行向量化回测
 - **因子表达式**：支持 `shift(field, n)`、`rank(field)`、`np`/`pd` 函数调用
-- **可用字段**：10 个行情字段（open/high/low/close/volume）和 7 个财务字段（roe/eps/net_profit_yoy 等）
-- **股票池**：支持全 A/csi300/csi500/main_board/gem/star_board 及组合
+- **可用字段**：10 个行情字段（open/high/low/close/volume）和 7 个财务字段（roe/eps/net\_profit\_yoy 等）
+- **股票池**：支持全 A/csi300/csi500/main\_board/gem/star\_board 及组合
 - **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，减少 akshare 请求
 - **兼容旧接口**：`BacktestServiceImpl._convert_code_to_yaml()` 可将旧 Python 代码转为基础 YAML
+
+## 记忆系统
+
+基于 numpy/pandas 的 3-Tier 记忆系统，替代 Qdrant 向量数据库：
+
+```txt
+src/long_earn/memory/
+├── __init__.py              # MemoryTier 枚举 + 便捷函数
+├── store.py                 # 3-Tier 记忆存储（Working/Core/Archival）
+├── tfidf.py                 # TF-IDF 向量化器 + 余弦相似度检索
+└── graph.py                 # 关系图存储（entity-relation graph）
+```
+
+- **Working**：会话级临时上下文（当前推理窗口）
+- **Core**：持久化事实、策略规则、用户偏好
+- **Archival**：历史经验、过往回测结果、已过期的规则
+- **持久化**：`~/.long_earn/memory.npz`
+- **检索**：`recall()` 支持按层级、关键词、分类过滤；`search()` 返回格式化字符串
 
 ## 环境变量
 
@@ -170,58 +204,62 @@ src/long_earn/backtest/
 | LLM_TYPE | ollama | LLM 类型（ollama/dashscope/openai）|
 | LLM_MODEL | qwen3.5:cloud | 模型名称 |
 | LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
-| MEMORY_PATH | ~/.long_earn/memory.npz | 记忆持久化路径 |
+| MEMORY_PATH | ~/.long\_earn/memory.npz | 记忆持久化路径 |
+| INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
 | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
 | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
+| STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔）|
+| STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔）|
 
 ## 关键约束
 
 - 服务接口定义为 `Protocol` 类（`services/__init__.py`），具体实现在各 `*_service.py` 中
 - `context_init.py` 中 `initialize_context()` 会额外调用 `memory.initialize()` 加载记忆
+- `create_runtime_context()` 创建服务实例但不初始化记忆；`initialize_context()` 包含完整初始化
 - 测试中使用 Mock 替代真实服务，无需 API 调用
+- import-linter 合约：`backtest.data` 不依赖上层模块，`services` 不依赖 `tools`
 
 ## 关键文件
 
-| 用途                    | 路径                                              |
-| ----------------------- | ------------------------------------------------- |
-| 入口                    | `src/long_earn/__main__.py`                       |
-| 主图                    | `src/long_earn/agent.py`                          |
-| 主图状态                | `src/long_earn/state.py`                          |
-| 配置 & RuntimeContext   | `src/long_earn/config.py`                         |
-| 上下文初始化            | `src/long_earn/context_init.py`                   |
-| Prompt 加载器           | `src/long_earn/core/prompt_loader.py`             |
-| LLM 工具                | `src/long_earn/core/llm_utils.py`                 |
-| 服务接口                | `src/long_earn/services/__init__.py`              |
-| 回测服务实现            | `src/long_earn/services/backtest_service.py`      |
-| 记忆服务实现            | `src/long_earn/services/memory_service.py`        |
-| LLM 服务实现            | `src/long_earn/services/llm_service.py`           |
-| 股票信息服务            | `src/long_earn/services/stock_service.py`         |
-| 记忆存储引擎            | `src/long_earn/memory/store.py`                   |
-| TF-IDF 向量化器         | `src/long_earn/memory/tfidf.py`                   |
-| 关系图存储              | `src/long_earn/memory/graph.py`                   |
-| 领域实体 & 值对象       | `src/long_earn/backtest/domain/entities.py`       |
-| 领域异常                | `src/long_earn/backtest/domain/exceptions.py`     |
-| 回测引擎核心            | `src/long_earn/backtest/engine/core.py`           |
-| YAML DSL 解析器         | `src/long_earn/backtest/engine/dsl.py`            |
-| 安全表达式求值器        | `src/long_earn/backtest/engine/evaluator.py`      |
-| 数据模型                | `src/long_earn/backtest/models.py`                |
-| 数据提供者              | `src/long_earn/backtest/data/provider.py`         |
-| DuckDB 缓存             | `src/long_earn/backtest/data/cache.py`            |
-| 股票池管理              | `src/long_earn/backtest/data/universe.py`         |
-| 策略研发子图            | `src/long_earn/strategy_rd/subgraph.py`           |
-| 策略研发状态            | `src/long_earn/strategy_rd/state.py`              |
-| 知识检索 Mixin          | `src/long_earn/strategy_rd/agents/mixins.py`          |
-| 策略开发 Agent          | `src/long_earn/strategy_rd/agents/strategy_develop_agent.py` |
-| 策略研发 Prompt         | `src/long_earn/strategy_rd/agents/strategy_develop_prompt.md` |
-| 代码修复 Prompt         | `src/long_earn/strategy_rd/agents/strategy_develop_refine_prompt.md` |
-| 策略研究 Agent          | `src/long_earn/strategy_rd/agents/strategy_research_agent.py` |
-| 策略监督器              | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py` |
-| 股票分析子图            | `src/long_earn/stock_analysis/subgraph.py`        |
-| 股票分析状态            | `src/long_earn/stock_analysis/state.py`           |
-| 知识库工具              | `src/long_earn/tools/store.py`                    |
-| 回测工具                | `src/long_earn/tools/backtest.py`                 |
-| 股票信息工具            | `src/long_earn/tools/get_stock_info.py`           |
-| 文本分割工具            | `src/long_earn/tools/md_splitter.py`              |
-| LangGraph 部署配置      | `langgraph.json`                                  |
-
+| 用途 | 路径 |
+|------|------|
+| 入口 | `src/long_earn/__main__.py` |
+| 主图 | `src/long_earn/agent.py` |
+| 主图状态 | `src/long_earn/state.py` |
+| 配置 & RuntimeContext | `src/long_earn/config.py` |
+| 上下文初始化 | `src/long_earn/context_init.py` |
+| Prompt 加载器 | `src/long_earn/core/prompt_loader.py` |
+| LLM 工具 | `src/long_earn/core/llm_utils.py` |
+| 服务接口 | `src/long_earn/services/__init__.py` |
+| 回测服务实现 | `src/long_earn/services/backtest_service.py` |
+| 记忆服务实现 | `src/long_earn/services/memory_service.py` |
+| LLM 服务实现 | `src/long_earn/services/llm_service.py` |
+| 股票信息服务 | `src/long_earn/services/stock_service.py` |
+| 记忆存储引擎 | `src/long_earn/memory/store.py` |
+| TF-IDF 向量化器 | `src/long_earn/memory/tfidf.py` |
+| 关系图存储 | `src/long_earn/memory/graph.py` |
+| 领域实体 & 值对象 | `src/long_earn/backtest/domain/entities.py` |
+| 领域异常 | `src/long_earn/backtest/domain/exceptions.py` |
+| 回测引擎核心 | `src/long_earn/backtest/engine/core.py` |
+| YAML DSL 解析器 | `src/long_earn/backtest/engine/dsl.py` |
+| 安全表达式求值器 | `src/long_earn/backtest/engine/evaluator.py` |
+| 数据模型 | `src/long_earn/backtest/models.py` |
+| 数据提供者 | `src/long_earn/backtest/data/provider.py` |
+| DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
+| 股票池管理 | `src/long_earn/backtest/data/universe.py` |
+| 策略研发子图 | `src/long_earn/strategy_rd/subgraph.py` |
+| 策略研发状态 | `src/long_earn/strategy_rd/state.py` |
+| 知识检索 Mixin | `src/long_earn/strategy_rd/agents/mixins.py` |
+| 策略开发 Agent | `src/long_earn/strategy_rd/agents/strategy_develop_agent.py` |
+| 策略研发 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_prompt.md` |
+| 代码修复 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_refine_prompt.md` |
+| 策略研究 Agent | `src/long_earn/strategy_rd/agents/strategy_research_agent.py` |
+| 策略监督器 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py` |
+| 股票分析子图 | `src/long_earn/stock_analysis/subgraph.py` |
+| 股票分析状态 | `src/long_earn/stock_analysis/state.py` |
+| 知识库工具 | `src/long_earn/tools/store.py` |
+| 回测工具 | `src/long_earn/tools/backtest.py` |
+| 股票信息工具 | `src/long_earn/tools/get_stock_info.py` |
+| 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
+| LangGraph 部署配置 | `langgraph.json` |
