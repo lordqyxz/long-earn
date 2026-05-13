@@ -139,7 +139,21 @@ prompt = prompt_template.format(query=query)
 
 - **单元测试**：`tests/unit/` 下按模块组织（test\_backtest/、test\_memory/、test\_services/、test\_strategy\_rd/）
 - **集成测试**：`tests/integration/` 需配置 `.env` 环境变量
-- **覆盖率**：pytest-cov 配置已就绪，当前覆盖率约 57%
+
+### 单元测试原则
+
+单元测试只覆盖以下两类场景，不写冗余测试：
+
+1. **接口对接正确性**：服务 Protocol 是否正确代理、子图能否编译、Prompt 模块能否加载并格式化、配置/上下文是否正确注入
+2. **核心域逻辑正确性**：DSL 解析与校验、AST 安全求值器（白名单与禁止列表）、引擎执行主流程、记忆系统检索与持久化、TF-IDF 向量化
+
+**不写的测试**：
+
+- 简单数据类的构造/默认值/不可变性（Python dataclass 行为已由语言保证）
+- 显而易见的错误路径（文件不存在抛 FileNotFoundError、空输入返回空列表）
+- 重复边界用例（同一逻辑的多个细微变体，如 `min_weight` 过滤 vs 不过滤）
+- 实现细节（日志是否调用、属性是否赋值、`repr()` 格式）
+- 需要大量 mock 链的端到端子图流程（属于集成测试范畴）
 
 ```sh
 LLM_TYPE=ollama
