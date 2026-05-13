@@ -1,6 +1,5 @@
 """策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索"""
 
-import json
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -369,42 +368,14 @@ def _save_experience_node(
     if logger:
         logger.info(f"[保存经验] 保存策略经验: {strategy_name}")
 
-    content = f"""# 策略经验：{strategy_name}
-
-## 设计思路
-{design_rationale}
-
-## 策略代码
-```python
-{strategy_code}
-```
-
-## 回测结果
-```json
-{json.dumps(backtest_result, ensure_ascii=False, indent=2)}
-```
-
-## 反思结论
-{reflection}
-"""
-    if error_history:
-        content += f"""
-## 错误历史
-{json.dumps(error_history, ensure_ascii=False, indent=2)}
-"""
-
-    try:
-        memory.remember(
-            content,
-            tier="core",
-            term=strategy_name,
-            category="策略经验",
-            experience_type="strategy",
-            backtest_metrics=backtest_result.get("metrics", {}),
-        )
-        success = True
-    except Exception:
-        success = False
+    success = memory.save_experience(
+        strategy_code=strategy_code,
+        strategy_name=strategy_name,
+        design_rationale=design_rationale,
+        backtest_result=backtest_result,
+        reflection=reflection,
+        error_history=error_history if error_history else None,
+    )
 
     if logger:
         logger.info(f"[保存经验] {'成功' if success else '失败'}")

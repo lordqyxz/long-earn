@@ -32,6 +32,7 @@ def _make_mock_context() -> RuntimeContext:
     mock_memory.recall.return_value = [
         {"content": "test", "metadata": {}, "similarity": 0.9}
     ]
+    mock_memory.save_experience.return_value = True
 
     mock_logger = MagicMock(spec=LoggerService)
     mock_monitoring = MagicMock(spec=MonitoringService)
@@ -68,15 +69,11 @@ class TestPromptModuleImports:
     def test_strategy_research_prompt_import(self):
         from long_earn.strategy_rd.agents.strategy_research_prompt import (
             create_strategy_research_prompt,
-            strategy_generation_prompt,
             strategy_optimize_prompt,
-            strategy_update_prompt,
         )
 
         assert callable(create_strategy_research_prompt)
         assert hasattr(strategy_optimize_prompt, "format")
-        assert hasattr(strategy_generation_prompt, "format")
-        assert hasattr(strategy_update_prompt, "format")
 
     def test_strategy_rd_supervisor_prompt_import(self):
         from long_earn.strategy_rd.agents.strategy_rd_supervisor_prompt import (

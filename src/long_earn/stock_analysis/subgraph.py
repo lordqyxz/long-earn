@@ -10,12 +10,6 @@ from long_earn.stock_analysis.agents.extract_prompt import extract_prompt
 from long_earn.stock_analysis.agents.fiske_analyst import FiskeAnalyst
 from long_earn.stock_analysis.agents.petter_analyst import PetterAnalyst
 from long_earn.stock_analysis.state import StockAnalysisState
-from long_earn.tools.get_stock_info import (
-    get_financial_metrics,
-    get_price_history,
-    get_stock_code_by_name,
-    get_stock_data as akshare_get_stock_data,
-)
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -82,7 +76,8 @@ def get_stock_data(
         state: 状态
         context: 运行时上下文
     """
-    logger = context.get("logger") if context else None
+    logger = context.logger
+    stock_service = context.stock_service
     stock_code = state.get("stock_code", "")
     stock_name = state.get("stock_name", "")
     current_retry_count = state.get("retry_count", 0)
@@ -106,24 +101,24 @@ def get_stock_data(
                 stock_code = ""
 
     if stock_name and not stock_code:
-        stock_code = get_stock_code_by_name(stock_name)
+        stock_code = stock_service.get_stock_code_by_name(stock_name)
 
     stock_info, info_retries = _retry_with_exponential_backoff(
-        akshare_get_stock_data,
+        stock_service.get_stock_data,
         stock_code,
         logger=logger,
         max_retries=MAX_RETRIES,
         base_delay=BASE_DELAY,
     )
     stock_financial_metrics, metrics_retries = _retry_with_exponential_backoff(
-        get_financial_metrics,
+        stock_service.get_financial_metrics,
         stock_code,
         logger=logger,
         max_retries=MAX_RETRIES,
         base_delay=BASE_DELAY,
     )
     price_history, price_retries = _retry_with_exponential_backoff(
-        get_price_history,
+        stock_service.get_price_history,
         stock_code,
         logger=logger,
         max_retries=MAX_RETRIES,
@@ -140,10 +135,12 @@ def get_stock_data(
         "price_history": price_history,
     }
 
-    if "error" in stock_info or "error" in stock_financial_metrics:
-        stock_data["error"] = stock_info.get("error") or stock_financial_metrics.get(
-            "error"
-        )
+    if isinstance(stock_info, dict) and "error" in stock_info:
+        stock_data["error"] = stock_info["error"]
+    elif (
+        isinstance(stock_financial_metrics, dict) and "error" in stock_financial_metrics
+    ):
+        stock_data["error"] = stock_financial_metrics["error"]
 
     return {
         "stock_data": stock_data,

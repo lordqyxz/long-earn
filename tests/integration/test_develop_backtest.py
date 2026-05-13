@@ -22,9 +22,7 @@ from dotenv import load_dotenv
 
 from long_earn.config import RuntimeContext
 from long_earn.context_init import create_runtime_context
-from long_earn.core.llm_utils import sanitize_code
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
-from long_earn.tools.backtest import check_service_health
 
 load_dotenv()
 
@@ -239,29 +237,19 @@ class TestDevelop:
         print(f"代码预览:\n{code[:300]}...")
         assert_valid_strategy_code(code)
 
-    def test_sanitize_code_removes_fullwidth(self):
-        """sanitize_code 应清除全角字符（含句号）"""
-        dirty = "x = [1，2（3）]  # 注释：测试。"
-        clean = sanitize_code(dirty)
-        assert "，" not in clean
-        assert "（" not in clean
-        assert "）" not in clean
-        assert "。" not in clean
-        assert clean == "x = [1,2(3)]  # 注释:测试."
-
 
 # ── 测试：回测服务 ───────────────────────────────────────────────────────
 
 
 class TestBacktest:
-    """回测服务测试：直接调用 backtest_service"""
+    """回测服务测试：通过 RuntimeContext 调用内嵌回测引擎"""
 
     def test_backtest_known_good_code(
         self, context: RuntimeContext, backtest_dates: tuple[str, str]
     ):
-        """用已知可用代码测试回测服务正常执行"""
+        """用已知可用 YAML 策略测试回测服务正常执行"""
         start, end = backtest_dates
-        print("\n使用已知可用代码测试回测...")
+        print("\n使用已知可用 YAML 策略测试回测...")
         result = run_backtest_via_context(
             context, KNOWN_GOOD_CODE, start, end, stock_list=DEFAULT_STOCK_LIST
         )
@@ -278,11 +266,6 @@ class TestBacktest:
         )
         assert result is not None, "语法错误应返回错误结果，而非 None"
         assert "error" in result, "语法错误应在 result.error 中反映"
-
-    def test_health_check(self):
-        """check_service_health 应返回布尔值"""
-        result = check_service_health()
-        assert isinstance(result, bool)
 
 
 # ── 测试：端到端 develop → backtest ──────────────────────────────────────

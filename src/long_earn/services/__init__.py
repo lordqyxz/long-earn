@@ -111,6 +111,48 @@ class MemoryService(Protocol):
         """初始化记忆系统（加载持久化数据）"""
         ...
 
+    def save_experience(  # noqa: PLR0913
+        self,
+        strategy_code: str,
+        strategy_name: str,
+        design_rationale: str,
+        backtest_result: dict[str, Any],
+        reflection: str,
+        error_history: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """保存策略经验到记忆系统
+
+        Args:
+            strategy_code: 策略代码/YAML
+            strategy_name: 策略名称
+            design_rationale: 设计思路
+            backtest_result: 回测结果字典
+            reflection: 反思结论
+            error_history: 错误历史（可选）
+
+        Returns:
+            是否保存成功
+        """
+        ...
+
+    def search_experience(
+        self,
+        query: str,
+        k: int = 3,
+        min_sharpe: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """搜索历史策略经验
+
+        Args:
+            query: 查询文本
+            k: 返回结果数
+            min_sharpe: 最低夏普比率过滤
+
+        Returns:
+            匹配的经验列表，每项包含 name, code, rationale, metrics
+        """
+        ...
+
 
 # ── LLM Service ──────────────────────────────────────────────────
 

@@ -13,9 +13,6 @@ from long_earn.utils.llm_factory import create_llm
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
-# LLM 调用默认超时（秒）
-DEFAULT_LLM_TIMEOUT = 300
-
 
 class LLMServiceImpl(LLMService):
     """LLM 服务实现
