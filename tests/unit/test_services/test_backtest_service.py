@@ -1,6 +1,6 @@
 """BacktestServiceImpl 单元测试
 
-测试远程 HTTP API 回测服务的实现。
+测试向量化回测引擎的直接调用实现。
 """
 
 from unittest.mock import MagicMock, patch
@@ -21,16 +21,14 @@ def _make_context():
     mock_knowledge = MagicMock()
     mock_stock = MagicMock()
     mock_monitoring = MagicMock()
-    mock_service_manager = MagicMock()
 
     context = RuntimeContext(
         config=config,
         logger=mock_logger,
         backtest_service=mock_backtest,
         llm_service=mock_llm,
-        knowledge_service=mock_knowledge,
+        memory=mock_knowledge,
         stock_service=mock_stock,
-        service_manager=mock_service_manager,
         monitoring=mock_monitoring,
     )
     return context
@@ -49,129 +47,130 @@ class TestBacktestServiceImplInit:
         assert svc.config is context.config
 
 
-# ---------- 测试：run_backtest ----------
+# ---------- 测试：run ----------
 
 
 class TestRunBacktest:
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_delegates_to_remote_service(self, mock_run_backtest):
-        """run_backtest 应委托给远程 HTTP API"""
-        mock_run_backtest.return_value = {
-            "total_return": 0.15,
-            "annual_return": 0.12,
-            "sharpe_ratio": 0.8,
-            "max_drawdown": -0.1,
-            "win_rate": 0.6,
-            "trading_days": 60,
-        }
+    @patch("long_earn.services.backtest_service._run_backtest")
+    def test_delegates_to_local_engine(self, mock_run):
+        """run 应直接调用向量化回测引擎"""
+        from long_earn.backtest.models import BacktestResult
+
+        mock_run.return_value = BacktestResult(
+            success=True,
+            message="回测成功",
+            total_return=0.15,
+            annual_return=0.12,
+            sharpe_ratio=0.8,
+            max_drawdown=-0.1,
+            win_rate=0.6,
+            trading_days=60,
+            volatility=0.05,
+            calmar_ratio=1.2,
+            sortino_ratio=1.0,
+            daily_returns=[],
+            positions_history=[],
+        )
 
         context = _make_context()
         svc = BacktestServiceImpl(context)
 
-        result = svc.run_backtest(
-            strategy_code="class TestStrategy: pass",
+        result = svc.run(
+            strategy_yaml="strategy:\n  name: Test\n",
             start_date="2023-01-01",
             end_date="2023-03-31",
         )
 
-        mock_run_backtest.assert_called_once_with(
-            strategy_code="class TestStrategy: pass",
-            start_date="2023-01-01",
-            end_date="2023-03-31",
-            stock_list=None,
-            timeout=30.0,
-            service_url="http://localhost:8001",
-        )
+        mock_run.assert_called_once()
         assert result is not None
         assert result["total_return"] == 0.15
 
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_uses_config_defaults(self, mock_run_backtest):
+    @patch("long_earn.services.backtest_service._run_backtest")
+    def test_uses_config_defaults(self, mock_run):
         """未指定日期时应使用配置中的默认日期"""
-        mock_run_backtest.return_value = {"total_return": 0.1}
+        from long_earn.backtest.models import BacktestResult
 
-        context = _make_context()
-        svc = BacktestServiceImpl(context)
-
-        svc.run_backtest(strategy_code="test code")
-
-        mock_run_backtest.assert_called_once_with(
-            strategy_code="test code",
-            start_date="2023-01-01",
-            end_date="2023-03-31",
-            stock_list=None,
-            timeout=30.0,
-            service_url="http://localhost:8001",
+        mock_run.return_value = BacktestResult(
+            success=True,
+            message="回测成功",
+            total_return=0.1,
+            annual_return=0.08,
+            sharpe_ratio=0.5,
+            max_drawdown=-0.05,
+            win_rate=0.55,
+            trading_days=60,
+            volatility=0.04,
+            calmar_ratio=1.0,
+            sortino_ratio=0.8,
+            daily_returns=[],
+            positions_history=[],
         )
 
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_returns_structured_error_on_remote_failure(self, mock_run_backtest):
-        """远程服务失败时应返回包含 error 的结构化字典，绝不返回 None"""
-        mock_run_backtest.return_value = {
-            "error": "回测服务暂时不可用",
-            "error_category": "service_unavailable",
-            "error_detail": "断路器处于 OPEN 状态",
-        }
+        context = _make_context()
+        svc = BacktestServiceImpl(context)
+
+        svc.run(strategy_yaml="strategy:\n  name: Test\n")
+
+        # 策略 YAML 中会被注入默认日期（通过 _run 内部解析）
+        mock_run.assert_called_once()
+
+    @patch("long_earn.services.backtest_service._run_backtest")
+    def test_returns_error_on_engine_failure(self, mock_run):
+        """回测引擎失败时应返回包含 error 的结构化字典"""
+        from long_earn.backtest.models import BacktestResult
+
+        mock_run.return_value = BacktestResult(
+            success=False,
+            message="策略引用了不存在的字段",
+            error_category="strategy_validation",
+            error_detail="可用字段: [...]，缺失字段: ['foo']",
+        )
 
         context = _make_context()
         svc = BacktestServiceImpl(context)
 
-        result = svc.run_backtest(strategy_code="bad code")
+        result = svc.run(strategy_yaml="bad strategy")
         assert result is not None
         assert "error" in result
-        assert result["error_category"] == "service_unavailable"
+        assert result["error_category"] == "strategy_validation"
 
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_passes_stock_list(self, mock_run_backtest):
-        """应正确传递 stock_list 参数"""
-        mock_run_backtest.return_value = {"total_return": 0.1}
+    @patch("long_earn.services.backtest_service._run_backtest")
+    def test_logs_on_success(self, mock_run):
+        """成功回测应记录日志"""
+        from long_earn.backtest.models import BacktestResult
 
-        context = _make_context()
-        svc = BacktestServiceImpl(context)
-
-        stock_list = ["SH600519", "SZ000001"]
-        svc.run_backtest(strategy_code="test", stock_list=stock_list)
-
-        mock_run_backtest.assert_called_once_with(
-            strategy_code="test",
-            start_date="2023-01-01",
-            end_date="2023-03-31",
-            stock_list=stock_list,
-            timeout=30.0,
-            service_url="http://localhost:8001",
+        mock_run.return_value = BacktestResult(
+            success=True,
+            message="回测成功",
+            total_return=0.15,
+            annual_return=0.12,
+            sharpe_ratio=0.8,
+            max_drawdown=-0.1,
+            win_rate=0.6,
+            trading_days=60,
+            volatility=0.05,
+            calmar_ratio=1.2,
+            sortino_ratio=1.0,
+            daily_returns=[],
+            positions_history=[],
         )
 
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_logs_on_success(self, mock_run_backtest):
-        """成功回测应记录日志"""
-        mock_run_backtest.return_value = {
-            "total_return": 0.15,
-            "sharpe_ratio": 0.8,
-            "max_drawdown": -0.1,
-        }
-
         context = _make_context()
         svc = BacktestServiceImpl(context)
 
-        svc.run_backtest(strategy_code="test")
+        svc.run(strategy_yaml="strategy:\n  name: Test\n")
 
         # 验证调用了 logger.info
         context.logger.info.assert_called()
 
-    @patch("long_earn.services.backtest_service.run_backtest")
-    def test_returns_error_result(self, mock_run_backtest):
-        """远程服务返回错误结果时应原样返回"""
-        error_result = {
-            "error": "代码逻辑错误",
-            "error_category": "code_logic",
-            "error_detail": "SyntaxError",
-            "message": "invalid syntax",
-        }
-        mock_run_backtest.return_value = error_result
-
+    @patch("long_earn.services.backtest_service._run_backtest")
+    def test_returns_error_when_no_strategy(self, mock_run):
+        """未提供任何策略时应返回客户端错误"""
         context = _make_context()
         svc = BacktestServiceImpl(context)
 
-        result = svc.run_backtest(strategy_code="bad code")
+        result = svc.run(strategy_yaml="")
         assert result is not None
         assert "error" in result
+        assert result["error_category"] == "client_error"
+        mock_run.assert_not_called()

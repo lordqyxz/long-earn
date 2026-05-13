@@ -1,27 +1,24 @@
 """回测服务实现
 
-通过 HTTP API 调用远程回测服务（backtest_service），实现依赖隔离。
+直接调用向量化回测引擎，无需 HTTP 远程调用。
 """
 
 from typing import TYPE_CHECKING, Any
 
+from long_earn.backtest.engine.core import run_backtest as _run_backtest
 from long_earn.services import BacktestService
-from long_earn.tools.backtest import run_backtest
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
 
 class BacktestServiceImpl(BacktestService):
-    """回测服务实现
-
-    通过 HTTP API 远程调用 backtest_service 执行回测，
-    避免主项目直接依赖 qlib/protobuf 等重量级包。
+    """回测服务实现（直接调用向量化引擎）
 
     特性：
-    - 连接池复用（模块级 httpx.Client 单例）
-    - 内建断路器（连续失败 3 次自动熔断）
-    - 支持 Unix Domain Socket（零 TCP 开销）
+    - 直接调用 long_earn.backtest 引擎，零网络开销
+    - 支持 YAML DSL 策略描述
+    - 自动数据缓存（DuckDB）
     """
 
     def __init__(self, context: "RuntimeContext"):
@@ -34,47 +31,64 @@ class BacktestServiceImpl(BacktestService):
         self.logger = context.logger
         self.config = context.config
 
-    def run_backtest(
+    def run(
         self,
-        strategy_code: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        stock_list: list[str] | None = None,
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
     ) -> dict[str, Any]:
-        """运行回测（通过远程 HTTP API）
+        """运行回测
 
         Args:
-            strategy_code: 策略代码
-            start_date: 开始日期，默认使用配置中的日期
-            end_date: 结束日期，默认使用配置中的日期
-            stock_list: 股票池列表，可选
+            strategy_yaml: YAML DSL 策略描述
+            start_date: 回测起始日期（覆盖策略默认值）
+            end_date: 回测结束日期（覆盖策略默认值）
 
         Returns:
             回测结果字典。成功时包含绩效指标；失败时包含 error、error_category
-            和 error_detail 字段，绝不返回 None。
+            和 error_detail 字段。
         """
-        if start_date is None:
-            start_date = self.config.backtest_start_date
-        if end_date is None:
-            end_date = self.config.backtest_end_date
+        start_date = start_date or getattr(
+            self.config, "backtest_start_date", "2020-01-01"
+        )
+        end_date = end_date or getattr(self.config, "backtest_end_date", "2023-12-31")
+
+        if not strategy_yaml:
+            return {
+                "error": "必须提供 strategy_yaml",
+                "error_category": "client_error",
+                "error_detail": "调用方未传入策略",
+            }
 
         if self.logger:
-            self.logger.info(f"调用远程回测服务: {start_date} ~ {end_date}")
+            self.logger.info(f"执行回测: {start_date} ~ {end_date}")
 
-        result = run_backtest(
-            strategy_code=strategy_code,
-            start_date=start_date,
-            end_date=end_date,
-            stock_list=stock_list,
-            timeout=self.config.backtest_timeout,
-            service_url=self.config.backtest_service_url,
-        )
+        result = _run_backtest(strategy_yaml)
 
-        if result is not None and self.logger:
+        if self.logger:
             self.logger.info(
-                f"回测完成: 总收益率={result.get('total_return', 'N/A')}, "
-                f"夏普比率={result.get('sharpe_ratio', 'N/A')}, "
-                f"最大回撤={result.get('max_drawdown', 'N/A')}"
+                f"回测完成: total_return={result.total_return}, "
+                f"sharpe={result.sharpe_ratio}, "
+                f"max_drawdown={result.max_drawdown}"
             )
 
-        return result
+        if result.success:
+            return {
+                "total_return": result.total_return,
+                "annual_return": result.annual_return,
+                "sharpe_ratio": result.sharpe_ratio,
+                "max_drawdown": result.max_drawdown,
+                "win_rate": result.win_rate,
+                "trading_days": result.trading_days,
+                "volatility": result.volatility,
+                "calmar_ratio": result.calmar_ratio,
+                "sortino_ratio": result.sortino_ratio,
+                "daily_returns": result.daily_returns,
+                "positions_history": result.positions_history,
+            }
+
+        return {
+            "error": result.message,
+            "error_category": result.error_category or "unknown",
+            "error_detail": result.error_detail or "",
+        }

@@ -20,13 +20,13 @@
 import pytest
 from dotenv import load_dotenv
 
-load_dotenv()
-
 from long_earn.config import RuntimeContext
 from long_earn.context_init import create_runtime_context
 from long_earn.core.llm_utils import sanitize_code
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 from long_earn.tools.backtest import check_service_health
+
+load_dotenv()
 
 # ── 默认股票池（沪深 300 部分成分股，qlib 格式 SH/PREFIX） ──────────────
 
@@ -117,7 +117,7 @@ def context() -> RuntimeContext:
     """创建真实运行时上下文"""
     ctx = create_runtime_context()
     try:
-        ctx.knowledge_service.initialize()
+        ctx.memory.initialize()
     except Exception as e:
         pytest.skip(f"知识库初始化失败: {e}")
     return ctx
@@ -161,14 +161,13 @@ def run_backtest_via_context(
     code: str,
     start_date: str = "",
     end_date: str = "",
-    stock_list: list[str] | None = None,
+    **_unused,
 ) -> dict:
     """通过 RuntimeContext 的 backtest_service 执行回测"""
-    return context.backtest_service.run_backtest(
-        strategy_code=code,
+    return context.backtest_service.run(
+        strategy_yaml=code,
         start_date=start_date or context.config.backtest_start_date,
         end_date=end_date or context.config.backtest_end_date,
-        stock_list=stock_list,
     )
 
 
