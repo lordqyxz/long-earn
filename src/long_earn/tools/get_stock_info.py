@@ -76,7 +76,7 @@ def get_stock_data(stock_code: str, logger: Any | None = None) -> dict[str, Any]
             }
 
         # 根据akshare返回的DataFrame格式，转换为字典
-        stock_dict = dict(zip(stock_info["item"], stock_info["value"]))
+        stock_dict = dict(zip(stock_info["item"], stock_info["value"], strict=False))
 
         code = stock_code
         name = stock_dict.get("股票简称", "未知股票")

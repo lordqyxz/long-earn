@@ -6,6 +6,8 @@ class State(TypedDict, total=False):
 
     query: str
     strategy: dict[str, Any] | None
+    strategy_yaml: str | None
+    # Deprecated: 保留 strategy_code 以兼容旧代码
     strategy_code: str | None
     strategy_name: str | None
     design_rationale: str | None
@@ -13,6 +15,8 @@ class State(TypedDict, total=False):
     reflection: str | None
     improvement_suggestions: list[str] | None
     optimized_strategy: dict[str, Any] | None
+    optimized_strategy_yaml: str | None
+    # Deprecated: 保留以兼容旧代码
     optimized_strategy_code: str | None
     iteration: int
     max_iterations: int

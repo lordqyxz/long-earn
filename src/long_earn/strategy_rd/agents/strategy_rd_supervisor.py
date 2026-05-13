@@ -2,6 +2,11 @@ from typing import TYPE_CHECKING, Any
 
 from long_earn.core.llm_utils import parse_llm_json
 
+from .strategy_rd_supervisor_prompt import (
+    strategy_rd_supervisor_continue_prompt,
+    strategy_rd_supervisor_prompt,
+)
+
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
@@ -23,7 +28,6 @@ class StrategyRdSupervisor:
         self, strategy: dict[str, Any], backtest_result: dict[str, Any]
     ) -> bool:
         """评估策略 - 判断是否接受优化建议"""
-        from .strategy_rd_supervisor_prompt import strategy_rd_supervisor_prompt
 
         prompt = strategy_rd_supervisor_prompt.format(
             strategy=strategy,
@@ -41,7 +45,7 @@ class StrategyRdSupervisor:
             )
         return decision == "接受"
 
-    def should_continue(
+    def should_continue(  # noqa: PLR0913
         self,
         iteration: int,
         max_iterations: int,
@@ -51,9 +55,6 @@ class StrategyRdSupervisor:
         improvement_suggestions: str,
     ) -> bool:
         """判断是否继续迭代"""
-        from .strategy_rd_supervisor_prompt import (
-            strategy_rd_supervisor_continue_prompt,
-        )
 
         if iteration >= max_iterations:
             if self.logger:

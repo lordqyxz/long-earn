@@ -4,7 +4,7 @@ Validates that previously broken functionality now works:
 1. Prompt module imports (were missing .py files)
 2. _run_branch_reflection (was calling non-existent _create_llm())
 3. Graph structure (redundant edge removed)
-4. qdrant_client compatibility (EnumTypeWrapper patch)
+4. Memory system compatibility (numpy/pandas based)
 5. State type consistency (improvement_suggestions now List[str])
 """
 
@@ -12,8 +12,8 @@ import json
 from unittest.mock import MagicMock
 
 from long_earn.config import RuntimeContext
+from long_earn.services import MemoryService
 from long_earn.services.backtest_service import BacktestService
-from long_earn.services.knowledge_service import KnowledgeService
 from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
 from long_earn.services.monitoring_service import MonitoringService
@@ -27,9 +27,11 @@ def _make_mock_context() -> RuntimeContext:
     mock_response.content = "test response"
     mock_llm.invoke.return_value = mock_response
 
-    mock_knowledge = MagicMock(spec=KnowledgeService)
-    mock_knowledge.search.return_value = ["test knowledge"]
-    mock_knowledge.save.return_value = True
+    mock_memory = MagicMock(spec=MemoryService)
+    mock_memory.search.return_value = ["test knowledge"]
+    mock_memory.recall.return_value = [
+        {"content": "test", "metadata": {}, "similarity": 0.9}
+    ]
 
     mock_logger = MagicMock(spec=LoggerService)
     mock_monitoring = MagicMock(spec=MonitoringService)
@@ -40,22 +42,17 @@ def _make_mock_context() -> RuntimeContext:
     mock_config.llm_type = "ollama"
     mock_config.llm_model = "test"
     mock_config.llm_base_url = "http://localhost"
-    mock_config.qdrant_url = ":memory:"
-    mock_config.qdrant_api_key = None
-    mock_config.embedding_model = "test"
+    mock_config.memory_path = "~/.long_earn/memory.npz"
     mock_config.init_dir = "./init"
     mock_config.max_iterations = 1
     mock_config.backtest_start_date = "2020-01-01"
     mock_config.backtest_end_date = "2023-12-31"
 
-    mock_service_manager = MagicMock()
-
     return RuntimeContext(
         llm_service=mock_llm,
-        knowledge_service=mock_knowledge,
+        memory=mock_memory,
         stock_service=mock_stock,
         backtest_service=mock_backtest,
-        service_manager=mock_service_manager,
         logger=mock_logger,
         monitoring=mock_monitoring,
         config=mock_config,
@@ -302,24 +299,6 @@ class TestGraphStructure:
         assert len(refine_edges) > 0, "refine should have outgoing edges"
 
 
-# ─── Fix 4: qdrant_client compatibility ─────────────────────────────
-
-
-class TestQdrantCompat:
-    """Verify the EnumTypeWrapper patch allows qdrant_client import."""
-
-    def test_qdrant_import_succeeds(self):
-        from langchain_qdrant import QdrantVectorStore
-
-        assert QdrantVectorStore is not None
-
-    def test_compat_patch_applied(self):
-        from google.protobuf.internal.enum_type_wrapper import EnumTypeWrapper
-
-        assert hasattr(EnumTypeWrapper, "__or__")
-        assert hasattr(EnumTypeWrapper, "__ror__")
-
-
 # ─── Fix 5: State type consistency ──────────────────────────────────
 
 
@@ -431,7 +410,7 @@ class TestFullSubgraphFlow:
         context.llm_service.invoke.side_effect = lambda *args, **kwargs: next(responses)
 
         # Mock backtest_service to succeed (回测通过 context.backtest_service 调用)
-        context.backtest_service.run_backtest.return_value = {
+        context.backtest_service.run.return_value = {
             "total_return": 0.15,
             "sharpe_ratio": 0.8,
             "max_drawdown": -0.1,
