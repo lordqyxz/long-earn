@@ -1,27 +1,14 @@
-import atexit
-
 from dotenv import load_dotenv
 
 from long_earn.agent import create_main_agent
+from long_earn.context_init import initialize_context
 
 load_dotenv()
 
 
 def main():
     """主函数"""
-    from long_earn.context_init import initialize_context
-
-    # 初始化运行时上下文（本地模式下自动启动回测服务）
     context = initialize_context()
-
-    # 注册退出时停止本地回测服务
-    atexit.register(
-        lambda: (
-            context.service_manager.stop()
-            if context.config.service_manager_type == "local"
-            else None
-        )
-    )
 
     # 创建主 Agent
     agent = create_main_agent(context)

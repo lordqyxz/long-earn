@@ -9,11 +9,10 @@ from dataclasses import dataclass
 
 from long_earn.services import (
     BacktestService,
-    KnowledgeService,
     LLMService,
     LoggerService,
+    MemoryService,
     MonitoringService,
-    ServiceManager,
     StockService,
 )
 
@@ -30,13 +29,13 @@ class RuntimeContext:
     用法:
         context = RuntimeContext(
             config=AppConfig(),
-            llm_service=LLMServiceImpl(config),
-            knowledge_service=KnowledgeServiceImpl(context),
+            llm_service=LLMServiceImpl(context),
+            memory=MemoryServiceImpl(context),
         )
 
         # 在节点或工具中使用（直接属性访问）
         response = context.llm_service.invoke(prompt)
-        results = context.knowledge_service.search(query)
+        facts = context.memory.recall(query)
 
         # 使用提示词模板
         from long_earn.core.prompt_loader import MarkdownPromptTemplate
@@ -44,14 +43,13 @@ class RuntimeContext:
         prompt = prompt_template.format(query=query)
     """
 
-    # 核心服务（必须提供）
+    # 核心服务
     llm_service: LLMService
-    knowledge_service: KnowledgeService
+    memory: MemoryService
     stock_service: StockService
     backtest_service: BacktestService
-    service_manager: ServiceManager
 
-    # 可选服务
+    # 基础设施
     logger: LoggerService
     monitoring: MonitoringService
     config: "AppConfig"
@@ -65,10 +63,8 @@ class AppConfig:
         llm_type: LLM 类型，可选值：ollama, dashscope, openai
         llm_model: LLM 模型名称
         llm_base_url: LLM API 基础 URL
-        qdrant_url: Qdrant 向量数据库 URL
-        qdrant_api_key: Qdrant API 密钥
-        embedding_model: 嵌入模型名称
         init_dir: 知识库初始化目录
+        memory_path: 记忆持久化路径
         max_iterations: 最大迭代次数
         backtest_start_date: 回测开始日期
         backtest_end_date: 回测结束日期
@@ -79,16 +75,11 @@ class AppConfig:
     llm_type: str = "ollama"
     llm_model: str = "qwen3.5:cloud"
     llm_base_url: str = "http://localhost:11434"
-    qdrant_url: str = ":memory:"
-    qdrant_api_key: str | None = None
-    embedding_model: str = "qwen3-embedding:0.6b"
+    memory_path: str = "~/.long_earn/memory.npz"
     init_dir: str = "./init"
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
-    backtest_service_url: str = "http://localhost:8001"
-    backtest_timeout: float = 30.0
-    service_manager_type: str = "local"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
 
@@ -106,18 +97,11 @@ class AppConfig:
             llm_type=os.getenv("LLM_TYPE", "ollama"),
             llm_model=os.getenv("LLM_MODEL", "qwen3.5:cloud"),
             llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
-            qdrant_url=os.getenv("QDRANT_URL", ":memory:"),
-            qdrant_api_key=os.getenv("QDRANT_KEY"),
-            embedding_model=os.getenv("EMBEDDING_MODEL", "qwen3-embedding:0.6b"),
+            memory_path=os.getenv("MEMORY_PATH", "~/.long_earn/memory.npz"),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
-            backtest_service_url=os.getenv(
-                "BACKTEST_SERVICE_URL", "http://localhost:8001"
-            ),
-            backtest_timeout=float(os.getenv("BACKTEST_TIMEOUT", "30.0")),
-            service_manager_type=os.getenv("SERVICE_MANAGER_TYPE", "local"),
             strategy_keywords=tuple(
                 k.strip() for k in strategy_env.split(",") if k.strip()
             ),
@@ -137,10 +121,6 @@ class AppConfig:
         # 验证 LLM 类型
         if self.llm_type not in ["ollama", "dashscope", "openai"]:
             errors.append(f"无效的 LLM 类型：{self.llm_type}")
-
-        # 验证 Qdrant URL
-        if not self.qdrant_url:
-            errors.append("Qdrant URL 不能为空")
 
         # 验证迭代次数
         if self.max_iterations < 1:

@@ -1,14 +1,122 @@
-"""服务层模块
+"""服务层 — 核心抽象接口
 
-提供核心服务的抽象接口和实现。
+所有服务均定义为 Protocol（结构化鸭子类型），便于测试 Mock 和实现替换。
+遵循 Clean Architecture：本层定义抽象，infrastructure 层实现。
 """
 
-from collections.abc import Callable
 from typing import Any, Protocol
+
+# ── Memory Service (3-Tier Memory) ───────────────────────────────
+
+
+class MemoryService(Protocol):
+    """三级记忆系统 — 遵循 Letta/MemGPT 分级记忆模式
+
+    Working: 会话级临时上下文（当前推理窗口）
+    Core:    持久化事实、策略规则、用户偏好
+    Archival: 历史经验、过往回测结果、已过期的规则
+    """
+
+    def recall(
+        self,
+        query: str,
+        tier: str = "core",
+        k: int = 3,
+        **filters,
+    ) -> list[dict[str, Any]]:
+        """从指定记忆层级检索
+
+        Args:
+            query: 自然语言查询
+            tier: 记忆层级 (working | core | archival)
+            k: 返回结果数
+            **filters: 元数据过滤 (category, term, source_file 等)
+
+        Returns:
+            [{content, metadata, similarity}, ...]
+        """
+        ...
+
+    def remember(
+        self,
+        content: str,
+        tier: str = "core",
+        **metadata,
+    ) -> str:
+        """存入记忆
+
+        Args:
+            content: 文本内容
+            tier: 目标层级
+            **metadata: 元数据 (term, category, experience_type 等)
+
+        Returns:
+            事实 ID
+        """
+        ...
+
+    def search(
+        self,
+        query: str,
+        k: int = 3,
+        **filters,
+    ) -> list[str]:
+        """便捷检索 — 返回格式化字符串结果
+
+        Args:
+            query: 自然语言查询
+            k: 返回结果数
+            **filters: 元数据过滤
+
+        Returns:
+            ["【来源: ...】\\n...", ...]
+        """
+        ...
+
+    def reflect(
+        self,
+        session_summary: str,
+    ) -> list[str]:
+        """反思整合 — 将会话经验提炼为持久规则
+
+        这是 Agent 反思循环的核心：每次策略研发完成后，
+        将学到的教训提升到 Core，过期的规则归档到 Archival。
+
+        Args:
+            session_summary: 会话总结（设计思路、回测结果、反思结论）
+
+        Returns:
+            新创建/更新的事实 ID 列表
+        """
+        ...
+
+    def relate(
+        self,
+        source: str,
+        target: str,
+        relation: str = "related_to",
+        weight: float = 1.0,
+    ) -> None:
+        """建立知识实体间的关系边
+
+        Args:
+            source: 源实体 ID
+            target: 目标实体 ID
+            relation: 关系类型 (related_to | depends_on | contradicts | improves)
+            weight: 关系强度 0-1
+        """
+        ...
+
+    def initialize(self) -> None:
+        """初始化记忆系统（加载持久化数据）"""
+        ...
+
+
+# ── LLM Service ──────────────────────────────────────────────────
 
 
 class LLMService(Protocol):
-    """LLM 服务接口"""
+    """LLM 调用服务"""
 
     def invoke(self, prompt: str, format: str = "") -> Any:
         """调用 LLM
@@ -23,200 +131,86 @@ class LLMService(Protocol):
         ...
 
     def get_llm(self) -> Any:
-        """获取底层 LLM 实例
-
-        Returns:
-            LLM 实例
-        """
+        """获取底层 LLM 实例"""
         ...
 
 
-class KnowledgeService(Protocol):
-    """知识存储服务接口"""
+# ── Backtest Service ─────────────────────────────────────────────
 
-    def search(self, query: str, k: int = 3, **kwargs) -> list[str]:
-        """搜索知识
 
-        Args:
-            query: 搜索查询
-            k: 返回结果数量
-            **kwargs: 额外参数
+class BacktestService(Protocol):
+    """回测服务 — 执行 YAML DSL 策略回测"""
 
-        Returns:
-            搜索结果列表
-        """
-        ...
-
-    def save(self, content: str, metadata: dict[str, Any]) -> bool:
-        """保存知识
-
-        Args:
-            content: 内容
-            metadata: 元数据
-
-        Returns:
-            是否保存成功
-        """
-        ...
-
-    def save_experience(
+    def run(
         self,
-        strategy_code: str,
-        strategy_name: str,
-        design_rationale: str,
-        backtest_result: dict[str, Any],
-        reflection: str,
-        error_history: list[dict[str, Any]] | None = None,
-    ) -> bool:
-        """保存策略开发经验到知识库
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        """运行回测
 
         Args:
-            strategy_code: 可运行的策略代码
-            strategy_name: 策略名称
-            design_rationale: 设计思路
-            backtest_result: 回测结果
-            reflection: 反思结论
-            error_history: 错误历史（可选）
+            strategy_yaml: YAML DSL 策略描述
+            start_date: 回测起始日期（覆盖策略中的默认值）
+            end_date: 回测结束日期（覆盖策略中的默认值）
 
         Returns:
-            是否保存成功
+            回测结果字典。成功时包含 performance 指标；
+            失败时包含 error, error_category, error_detail 字段。
         """
         ...
 
-    def search_experience(
-        self,
-        query: str,
-        k: int = 3,
-        min_sharpe: float | None = None,
-    ) -> list[dict[str, Any]]:
-        """搜索历史策略经验
 
-        Args:
-            query: 搜索查询
-            k: 返回结果数量
-            min_sharpe: 最小夏普比率过滤
-
-        Returns:
-            经验列表，每条包含 code, rationale, metrics
-        """
-        ...
-
-    def initialize(self) -> None:
-        """初始化知识库"""
-        ...
+# ── Stock Service ────────────────────────────────────────────────
 
 
 class StockService(Protocol):
-    """股票数据服务接口"""
+    """股票数据查询服务"""
 
     def get_stock_data(self, stock_code: str) -> dict[str, Any]:
-        """获取股票数据
-
-        Args:
-            stock_code: 股票代码
-
-        Returns:
-            股票数据字典
-        """
+        """获取股票实时数据（行情 + 基本信息）"""
         ...
 
     def get_financial_metrics(
         self, stock_code: str, start_year: str = "2021"
     ) -> dict[str, Any]:
-        """获取财务指标
-
-        Args:
-            stock_code: 股票代码
-            start_year: 起始年份
-
-        Returns:
-            财务指标字典
-        """
+        """获取财务指标（ROE, EPS, 营收增长率等）"""
         ...
 
     def get_price_history(self, stock_code: str) -> list:
-        """获取价格历史
-
-        Args:
-            stock_code: 股票代码
-
-        Returns:
-            价格历史列表
-        """
+        """获取历史价格序列"""
         ...
 
     def get_stock_code_by_name(self, stock_name: str) -> str:
-        """根据股票名称获取代码
-
-        Args:
-            stock_name: 股票名称
-
-        Returns:
-            股票代码
-        """
+        """按股票名称查询代码"""
         ...
 
 
-class BacktestService(Protocol):
-    """回测服务接口"""
-
-    def run_backtest(
-        self,
-        strategy_code: str,
-        start_date: str = "2020-01-01",
-        end_date: str = "2023-12-31",
-        stock_list: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """运行回测
-
-        Args:
-            strategy_code: 策略代码
-            start_date: 开始日期
-            end_date: 结束日期
-
-        Returns:
-            回测结果字典。成功时包含绩效指标；失败时包含 error、
-            error_category 和 error_detail 字段，绝不返回 None。
-        """
-        ...
+# ── Observability ────────────────────────────────────────────────
 
 
 class LoggerService(Protocol):
-    """日志服务接口"""
+    """日志服务"""
 
-    def debug(self, message: str) -> None:
-        """调试日志"""
-        ...
-
-    def info(self, message: str) -> None:
-        """信息日志"""
-        ...
-
-    def warning(self, message: str) -> None:
-        """警告日志"""
-        ...
-
-    def error(self, message: str) -> None:
-        """错误日志"""
-        ...
-
-    def exception(self, message: str) -> None:
-        """异常日志"""
-        ...
+    def debug(self, message: str) -> None: ...
+    def info(self, message: str) -> None: ...
+    def warning(self, message: str) -> None: ...
+    def error(self, message: str) -> None: ...
+    def exception(self, message: str) -> None: ...
 
 
 class MonitoringService(Protocol):
-    """监控服务接口"""
+    """监控服务 — 性能追踪和 Token 统计"""
 
     def track(self, node_name: str) -> Any:
         """创建监控上下文管理器"""
         ...
 
-    def monitor_node(self, node_name: str) -> Callable:
+    def monitor_node(self, node_name: str) -> Any:
         """节点监控装饰器"""
         ...
 
-    def monitor_prompt(self, prompt_name: str) -> Callable:
+    def monitor_prompt(self, prompt_name: str) -> Any:
         """提示词监控装饰器"""
         ...
 
@@ -230,36 +224,4 @@ class MonitoringService(Protocol):
 
     def log_report(self, logger: LoggerService) -> None:
         """输出性能报告"""
-        ...
-
-
-class ServiceManager(Protocol):
-    """服务管理器接口
-
-    管理外部子服务（如 backtest_service）的生命周期。
-    本地部署时提供启动/停止能力；远程部署时为空实现。
-    """
-
-    def start(self) -> bool:
-        """启动服务
-
-        Returns:
-            是否启动成功
-        """
-        ...
-
-    def stop(self) -> bool:
-        """停止服务
-
-        Returns:
-            是否停止成功
-        """
-        ...
-
-    def is_running(self) -> bool:
-        """检查服务是否正在运行
-
-        Returns:
-            服务是否在运行
-        """
         ...
