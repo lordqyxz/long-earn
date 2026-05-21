@@ -38,3 +38,9 @@ class UniverseError(BacktestDomainError):
     """股票池错误"""
 
     pass
+
+
+class OrderExecutionError(BacktestDomainError):
+    """订单执行失败 — 无效订单参数、价格条件不满足等"""
+
+    pass
