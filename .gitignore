@@ -21,3 +21,4 @@ temp/
 .agents/
 .coverage
 htmlcov/
+pi-session-*.html

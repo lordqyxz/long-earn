@@ -1,6 +1,6 @@
 # Long Earn
 
-自我进化的量化交易系统（v0.8.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+自我进化的量化交易系统（v1.0.1）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
 
 ## 系统概览
 
@@ -80,6 +80,8 @@ uv run lint-imports                        # 架构依赖校验
 | `LLM_TYPE` | LLM 类型（ollama/dashscope/openai） | `ollama` |
 | `LLM_MODEL` | 模型名称 | `qwen3.5:cloud` |
 | `LLM_BASE_URL` | LLM API 地址 | `http://localhost:11434` |
+| `DASHSCOPE_API_KEY` | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） | — |
+| `OPENAI_API_KEY` | OpenAI API Key（LLM_TYPE=openai 时必填） | — |
 | `MEMORY_PATH` | 记忆持久化路径 | `~/.long_earn/memory.npz` |
 | `INIT_DIR` | 知识库初始化目录 | `./init` |
 | `BACKTEST_START_DATE` | 回测默认起始日期 | `2020-01-01` |

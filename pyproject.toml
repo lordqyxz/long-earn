@@ -1,6 +1,6 @@
 [project]
 name = "long_earn"
-version = "0.8.0"
+version = "1.0.1"
 description = "自我进化的量化交易系统"
 authors = [
     { name = "shiyz", email = "shiyz@eoutlook.com" },
@@ -8,6 +8,7 @@ authors = [
 requires-python = "==3.11.*"
 dependencies = [
     "pandas>=2.0.0",
+    "polars>=1.0.0",
     "numpy>=1.24.0",
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
@@ -27,6 +28,7 @@ dependencies = [
     "pyyaml>=6.0.0",
     "tavily-python>=0.7.23",
     "httpx>=0.25.0",
+    "pyarrow>=24.0.0",
 ]
 
 [project.scripts]
@@ -35,6 +37,9 @@ long_earn = "long_earn.__main__:main"
 [project.optional-dependencies]
 dev = [
     "ruff>=0.15.11",
+]
+embed = [
+    "sentence-transformers>=3.0.0",
 ]
 [tool.uv]
 package = true
@@ -122,4 +127,6 @@ dev = [
     "import-linter>=2.0",
     "pyright>=1.1.409",
     "pytest-cov>=7.1.0",
+    "types-pyyaml>=6.0.12.20260510",
+    "types-pytz>=2026.2.0.20260506",
 ]

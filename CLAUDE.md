@@ -1,6 +1,6 @@
 # long\_earn
 
-自我进化的量化交易系统（v0.8.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+自我进化的量化交易系统（v1.0.1）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
 
 ## 常用命令
 
@@ -33,6 +33,8 @@ long_earn/
 │   │   └── agents/          # 策略研发 Agent（含同目录 .md prompt）
 │   ├── stock_analysis/      # 股票分析子图
 │   │   └── agents/          # 多视角分析师 Agent（含同目录 .py prompt）
+│   ├── dashboard/           # 可视化仪表盘（分析器 + API + 前端）
+│   │   └── templates/       #   HTML 仪表盘模板
 │   ├── tools/               # 工具函数（回测、知识库、股票信息）
 │   └── utils/               # 通用工具（llm_factory, logger）
 ├── tests/                   # 测试
@@ -130,6 +132,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-002](docs/adr/002-partial-node-injection.md): `functools.partial` 替代闭包进行节点注入
 - [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库
+- [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
 
 ## 调研文档
 
@@ -140,20 +143,36 @@ prompt = prompt_template.format(query=query)
 - **单元测试**：`tests/unit/` 下按模块组织（test\_backtest/、test\_memory/、test\_services/、test\_strategy\_rd/）
 - **集成测试**：`tests/integration/` 需配置 `.env` 环境变量
 
-### 单元测试原则
+### 测试编写原则
 
-单元测试只覆盖以下两类场景，不写冗余测试：
+测试只写在两个地方：
 
-1. **接口对接正确性**：服务 Protocol 是否正确代理、子图能否编译、Prompt 模块能否加载并格式化、配置/上下文是否正确注入
-2. **核心域逻辑正确性**：DSL 解析与校验、AST 安全求值器（白名单与禁止列表）、引擎执行主流程、记忆系统检索与持久化、TF-IDF 向量化
+1. **接口层**：验证接口实现符合契约（服务 Protocol 代理、配置注入、子图编译、Prompt 加载）
+2. **系统关键环节**：引擎主流程、风控触发、Walk-Forward、安全求值器等不可出错的核心链路
+
+其余代码（数据类、工具函数、内部辅助方法）不写测试 —— Python 已保证其正确性，测试只是重复声明。
 
 **不写的测试**：
 
-- 简单数据类的构造/默认值/不可变性（Python dataclass 行为已由语言保证）
+- 简单数据类的构造/默认值/不可变性
 - 显而易见的错误路径（文件不存在抛 FileNotFoundError、空输入返回空列表）
-- 重复边界用例（同一逻辑的多个细微变体，如 `min_weight` 过滤 vs 不过滤）
-- 实现细节（日志是否调用、属性是否赋值、`repr()` 格式）
+- 重复边界用例（同一逻辑的多个细微变体）
+- 实现细节（日志调用、属性赋值、`repr()` 格式）
 - 需要大量 mock 链的端到端子图流程（属于集成测试范畴）
+
+### 核心引擎测试 (test_engine.py)
+
+引擎测试覆盖关键链路而非内部实现细节，使用 `unittest.TestCase`：
+
+| 测试类 | 覆盖点 | 用例数 |
+|--------|--------|--------|
+| `TestEngineInit` | 构造函数默认值和自定义参数 | 2 |
+| `TestEngineRun` | run() 主流程、空数据处理、异常捕获 | 3 |
+| `TestRiskChecks` | 止损触发、最大回撤触发、风控关闭场景 | 3 |
+| `TestWalkForward` | Walk-Forward 折叠结构和平均指标 | 1 |
+| `TestAuditTrail` | 审计跟踪记录事件类型完整性 | 1 |
+
+通过 `MockDataProvider` + 内联策略桩（`_SimpleStrategy` / `_EmptyStrategy` / `_RaisingStrategy`）注入测试数据，避免对外部数据源的依赖。
 
 ```sh
 LLM_TYPE=ollama
@@ -161,37 +180,38 @@ LLM_MODEL=qwen3.5:cloud
 LLM_BASE_URL=http://localhost:11434
 ```
 
-## 回测引擎（内嵌）
+## 回测引擎（事件驱动）
 
-回测引擎已整合到主项目中 (`src/long_earn/backtest/`)，通过 YAML DSL 描述策略，无需 HTTP 远程调用。
+回测引擎已从向量化架构迁移至 **事件驱动 (Event-Driven)** 架构，旨在实现与 LLM Agent 的共同进化。
+
+**核心设计哲学：**
+- **Agent 友好度 (Agent-Centric)**：接口设计优先考虑 LLM 的认知成本和生成正确率（杜绝索引幻觉），而非传统量化框架习惯。
+- **金融级可信 (Financial Fidelity)**：通过严格的事件流控制时间线，在架构层面绝对杜绝“未来函数”。
+- **复杂表达力 (Expressiveness)**：支持状态化策略，允许 Agent 定义复杂的执行逻辑和动态风控。
 
 **引擎结构：**
-
 ```txt
 src/long_earn/backtest/
-├── __init__.py              # 对外暴露 BacktestResult, VectorizedBacktestEngine 等
+├── __init__.py              # 对外暴露 BacktestResult, EventEngine 等
 ├── models.py                # BacktestResult Pydantic 模型
 ├── domain/
-│   ├── entities.py          # 领域实体（Portfolio, DateRange）+ 值对象（PerformanceMetrics）
-│   └── exceptions.py        # 领域异常层次（BacktestDomainError 子类）
+│   ├── entities.py          # 领域实体（Portfolio, Event, Order）
+│   └── exceptions.py        # 领域异常层次
 ├── engine/
-│   ├── __init__.py
-│   ├── core.py              # 向量化回测引擎（Pandas MultiIndex 矩阵运算）
-│   ├── dsl.py               # YAML DSL 解析器（StrategyDSL + 字段校验）
-│   └── evaluator.py         # AST 白名单表达式求值器
+│   ├── core.py              # 事件循环核心 (Event Loop)
+│   ├── dsl.py               # 状态化策略 DSL 解析器
+│   ├── evaluator.py         # AST 安全求值器
+│   └── broker.py            # 模拟撮合与成本计算 (Slippage, Commission)
 └── data/
     ├── __init__.py
-    ├── cache.py             # DuckDB 本地缓存（行情/财务/成分股）
-    ├── provider.py          # Akshare 数据获取（行情 + 财务前向填充）
-    └── universe.py          # 股票池管理（沪深300/中证500/板块等）
+    ├── cache.py             # DuckDB 本地缓存
+    ├── provider.py          # Akshare 数据获取
+    └── universe.py          # 股票池管理
 ```
 
-- **YAML DSL 策略**：LLM 直接生成 YAML 策略描述（因子、信号、权重、风控），引擎解析后执行向量化回测
-- **因子表达式**：支持 `shift(field, n)`、`rank(field)`、`np`/`pd` 函数调用
-- **可用字段**：10 个行情字段（open/high/low/close/volume）和 7 个财务字段（roe/eps/net\_profit\_yoy 等）
-- **股票池**：支持全 A/csi300/csi500/main\_board/gem/star\_board 及组合
-- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，减少 akshare 请求
-- **兼容旧接口**：`BacktestServiceImpl._convert_code_to_yaml()` 可将旧 Python 代码转为基础 YAML
+- **状态化策略**：LLM 生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行。
+- **数据隔离**：策略仅能通过 `engine.current_data` 访问当前时刻数据，确保回测真实性。
+- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，优化大规模数据的喂入速度。
 
 ## 记忆系统
 
@@ -218,6 +238,8 @@ src/long_earn/memory/
 | LLM_TYPE | ollama | LLM 类型（ollama/dashscope/openai）|
 | LLM_MODEL | qwen3.5:cloud | 模型名称 |
 | LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
+| DASHSCOPE_API_KEY | — | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填）|
+| OPENAI_API_KEY | — | OpenAI API Key（LLM_TYPE=openai 时必填）|
 | MEMORY_PATH | ~/.long\_earn/memory.npz | 记忆持久化路径 |
 | INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
@@ -255,13 +277,28 @@ src/long_earn/memory/
 | 关系图存储 | `src/long_earn/memory/graph.py` |
 | 领域实体 & 值对象 | `src/long_earn/backtest/domain/entities.py` |
 | 领域异常 | `src/long_earn/backtest/domain/exceptions.py` |
+| 抽象接口 (AuditProvider) | `src/long_earn/backtest/domain/interfaces.py` |
 | 回测引擎核心 | `src/long_earn/backtest/engine/core.py` |
+| 策略基类 (BaseStrategy) | `src/long_earn/backtest/engine/strategy.py` |
+| 可见性守护 (防未来函数) | `src/long_earn/backtest/engine/visibility.py` |
+| 撮合经纪人 (Broker) | `src/long_earn/backtest/engine/broker.py` |
+| 投资组合管理 (Portfolio) | `src/long_earn/backtest/engine/portfolio.py` |
+| 审计日志 (Audit) | `src/long_earn/backtest/engine/audit.py` |
+| 可观测性 (Telemetry) | `src/long_earn/backtest/engine/telemetry.py` |
+| ML 策略 & 特征工程 | `src/long_earn/backtest/engine/ml_strategy.py` |
 | YAML DSL 解析器 | `src/long_earn/backtest/engine/dsl.py` |
 | 安全表达式求值器 | `src/long_earn/backtest/engine/evaluator.py` |
+| 审计提供者 | `src/long_earn/backtest/engine/audit.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
 | 数据提供者 | `src/long_earn/backtest/data/provider.py` |
 | DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
 | 股票池管理 | `src/long_earn/backtest/data/universe.py` |
+| Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
+| Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
+| Dashboard HTML | `src/long_earn/dashboard/templates/dashboard.html` |
+| Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
+| Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
+| Dashboard HTML 模板 | `src/long_earn/dashboard/templates/dashboard.html` |
 | 策略研发子图 | `src/long_earn/strategy_rd/subgraph.py` |
 | 策略研发状态 | `src/long_earn/strategy_rd/state.py` |
 | 知识检索 Mixin | `src/long_earn/strategy_rd/agents/mixins.py` |
@@ -283,3 +320,31 @@ src/long_earn/memory/
 | 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
 | LangGraph 部署配置 | `langgraph.json` |
 | 环境变量模板 | `.env.example` |
+
+## 开发待办 (TODO)
+
+### 1. 回测引擎 (Backtest Engine)
+- [x] **Event-Driven 核心链路实现**：开发 `EventEngine` $\to$ `DataHandler` $\to$ `Strategy` $\to$ `Portfolio` $\to$ `Broker` 闭环。
+- [x] **Agent 友好 API 设计**：构建一套低认知成本的策略接口，支持 LLM 高正确率生成状态化策略。
+- [x] **金融级可信验证**：通过严格的事件流隔离，验证回测结果不存在未来函数（Look-ahead bias）。
+- [x] **机器学习样本外验证 (OOS)**：实现时间窗切分，支持模型在样本外数据的性能验证。
+- [x] **高级状态化风控**：实现基于事件触发的动态止损、追踪止盈及最大回撤限制。
+- [x] **扩展数据字段**：增加更多技术指标（如 MACD, RSI）和财务指标。
+- [x] **Dashboard 模块独立**：将可视化分析抽取为 `dashboard/` 模块，与 Agent 共享审计接口。
+
+### 2. 记忆系统 (Memory System)
+- [ ] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。
+- [ ] **记忆压缩与总结**：实现自动将冗余事实合并为概括性知识的能力。
+- [ ] **记忆衰减机制**：引入时间衰减因子，降低陈旧事实的检索权重。
+- [ ] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。
+
+### 3. 策略研发与分析 (Strategy RD & Analysis)
+- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
+- [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
+- [ ] **实时数据对接**：将 `akshare` 静态回测扩展到支持近实时的行情监控与预警。
+- [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
+
+### 4. 工程化与质量 (Engineering & Quality)
+- [ ] **集成测试增强**：针对 `strategy_rd` 的全链路流程编写更多端到端集成测试。
+- [ ] **性能监控**：在 `MonitoringService` 中增加对 LLM Token 消耗和回测耗时的统计。
+- [ ] **配置中心化**：将 `.env` 变量扩展为支持多环境配置的 `config.yaml`。
