@@ -229,7 +229,11 @@ class SafeExpressionEvaluator:
                 raise SafeExpressionError(f"禁止的函数调用: {func_name}()")
             func = self._namespace[func_name]
             args = [self._eval_node(arg) for arg in node.args]
-            kwargs = {kw.arg: self._eval_node(kw.value) for kw in node.keywords}
+            kwargs = {
+                kw.arg: self._eval_node(kw.value)
+                for kw in node.keywords
+                if kw.arg is not None
+            }
             return func(*args, **kwargs)
 
         elif isinstance(node.func, ast.Attribute):
@@ -239,7 +243,11 @@ class SafeExpressionEvaluator:
                 raise SafeExpressionError(f"对象无此属性: {attr}")
             method = getattr(obj, attr)
             args = [self._eval_node(arg) for arg in node.args]
-            kwargs = {kw.arg: self._eval_node(kw.value) for kw in node.keywords}
+            kwargs = {
+                kw.arg: self._eval_node(kw.value)
+                for kw in node.keywords
+                if kw.arg is not None
+            }
             return method(*args, **kwargs)
 
         raise SafeExpressionError("不支持的函数调用形式")

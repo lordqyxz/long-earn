@@ -1,458 +1,700 @@
-"""向量化回测引擎核心
+"""事件驱动回测引擎核心
 
-基于 Pandas MultiIndex 的矩阵运算回测，支持 YAML DSL 策略。
+实现 T 维度迭代 × S 维度向量化 (Slab) 的执行链路。
 """
 
 import logging
+import uuid
 from typing import Any
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
-from long_earn.backtest.data.provider import AkshareDataProvider, get_data_provider
-from long_earn.backtest.data.universe import AkshareUniverseProvider
-from long_earn.backtest.engine.dsl import (
-    StrategyDSL,
-    parse_strategy_yaml,
-    validate_fields,
+from long_earn.backtest.domain.entities import (
+    MarketDataEvent,
+    OrderEvent,
+    PerformanceMetrics,
 )
-from long_earn.backtest.engine.evaluator import (
-    SafeExpressionError,
-    SafeExpressionEvaluator,
-)
+from long_earn.backtest.engine.broker import Broker, TradingCostConfig
+from long_earn.backtest.engine.ml_strategy import TimeSeriesSplit
+from long_earn.backtest.engine.portfolio import Portfolio
+from long_earn.backtest.engine.strategy import BaseStrategy
+from long_earn.backtest.engine.visibility import VisibilityGuard
 from long_earn.backtest.models import BacktestResult
 
 logger = logging.getLogger(__name__)
 
-_MULTIINDEX_EXTRA_LEVEL = 2
 
-# 内置可用字段（行情 + 财务）
-AVAILABLE_FIELDS = [
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "net_profit_yoy",
-    "revenue_yoy",
-    "roe",
-    "gross_margin",
-    "eps",
-    "net_profit",
-    "revenue",
-]
+def _empty_bm() -> dict[str, float]:
+    return {
+        "alpha": 0.0,
+        "beta": 0.0,
+        "information_ratio": 0.0,
+        "tracking_error": 0.0,
+        "benchmark_return": 0.0,
+    }
 
 
-class VectorizedBacktestEngine:
-    """向量化回测引擎"""
+class InMemoryAuditTrail:
+    """内存审计跟踪，用于测试和快速查询因果链"""
 
-    def __init__(
-        self,
-        data_provider: AkshareDataProvider | None = None,
-        universe_provider: AkshareUniverseProvider | None = None,
-    ):
-        self.data_provider = data_provider or get_data_provider()
-        self.universe_provider = universe_provider or AkshareUniverseProvider(
-            getattr(self.data_provider, "cache", None)
-        )
+    def __init__(self):
+        self.trail: list[dict[str, Any]] = []
 
-    def run(self, strategy: StrategyDSL) -> BacktestResult:
-        """执行回测"""
-        try:
-            # 1. 校验字段
-            missing = validate_fields(strategy, AVAILABLE_FIELDS)
-            if missing:
-                return BacktestResult(
-                    success=False,
-                    message=f"策略引用了不存在的字段: {missing}",
-                    error_category="strategy_validation",
-                    error_detail=f"可用字段: {AVAILABLE_FIELDS}，缺失字段: {missing}",
-                )
+    def log_transition(self, **kwargs) -> None:
+        self.trail.append(kwargs)
 
-            start_date = strategy.start_date or "2020-01-01"
-            end_date = strategy.end_date or "2023-12-31"
-
-            # 2. 获取股票池
-            symbols = self.universe_provider.get_symbols(
-                strategy.universe.type, start_date
-            )
-            if not symbols:
-                return BacktestResult(
-                    success=False,
-                    message="股票池为空",
-                    error_category="data_error",
-                    error_detail=f"无法获取股票池: {strategy.universe.type}",
-                )
-            logger.info(f"股票池: {strategy.universe.type}, {len(symbols)} 只股票")
-
-            # 3. 加载数据面板
-            data = self._load_data(symbols, start_date, end_date, strategy)
-            if data.empty:
-                return BacktestResult(
-                    success=False,
-                    message="数据加载失败",
-                    error_category="data_error",
-                    error_detail="无法获取回测所需的行情或财务数据",
-                )
-
-            # 4. 计算因子
-            factors = self._compute_factors(data, strategy.factors)
-
-            # 5. 生成信号
-            signals = self._generate_signals(factors, strategy.signals)
-
-            # 6. 计算权重
-            weights = self._calculate_weights(signals, strategy.weights)
-
-            # 7. 风控处理
-            weights = self._apply_risk_control(weights, strategy.risk_control)
-
-            # 8. 模拟交易
-            returns, positions = self._simulate_trades(data["close"], weights)
-
-            # 9. 计算指标
-            metrics = self._calculate_metrics(returns)
-
-            # 10. 构建详细数据
-            daily_returns = [
-                {"date": str(d), "return": float(r)} for d, r in returns.items()
-            ]
-            positions_history = self._format_positions(positions)
-
-            return BacktestResult(
-                success=True,
-                message="回测成功",
-                total_return=metrics["total_return"],
-                annual_return=metrics["annual_return"],
-                sharpe_ratio=metrics["sharpe_ratio"],
-                max_drawdown=metrics["max_drawdown"],
-                win_rate=metrics["win_rate"],
-                trading_days=metrics["trading_days"],
-                volatility=metrics["volatility"],
-                calmar_ratio=metrics["calmar_ratio"],
-                sortino_ratio=metrics["sortino_ratio"],
-                daily_returns=daily_returns,
-                positions_history=positions_history,
-            )
-
-        except Exception as e:
-            logger.exception("回测执行失败")
-            return BacktestResult(
-                success=False,
-                message="回测引擎内部错误",
-                error_category="engine_error",
-                error_detail=str(e),
-            )
-
-    def _load_data(
-        self,
-        symbols: list[str],
-        start_date: str,
-        end_date: str,
-        _strategy: StrategyDSL,
-    ) -> pd.DataFrame:
-        """加载合并的数据面板"""
-        price_fields = ["close", "volume"]
-        fin_fields = []
-
-        for field in AVAILABLE_FIELDS:
-            if field in ["open", "high", "low", "close", "volume"]:
-                if field not in price_fields:
-                    price_fields.append(field)
-            else:
-                fin_fields.append(field)
-
-        data = self.data_provider.get_merged_panel(
-            symbols=symbols,
-            start_date=start_date,
-            end_date=end_date,
-            price_fields=price_fields,
-            financial_fields=fin_fields,
-        )
-        logger.info(
-            f"数据面板: {len(data)} 条记录, "
-            f"{data.index.get_level_values('symbol').nunique()} 只股票"
-        )
-        return data
-
-    def _compute_factors(
-        self, data: pd.DataFrame, factor_defs: dict[str, str]
-    ) -> pd.DataFrame:
-        """计算自定义因子"""
-        df = data.copy()
-        for alias, expr in factor_defs.items():
-            try:
-                df[alias] = self._eval_expression(df, expr)
-                logger.debug(f"因子计算: {alias} = {expr}")
-            except Exception as e:
-                logger.warning(f"因子 {alias} 计算失败: {e}")
-                df[alias] = np.nan
-        return df
-
-    def _generate_signals(
-        self, data: pd.DataFrame, signal_steps: list[dict[str, Any]]
-    ) -> pd.DataFrame:
-        """生成交易信号"""
-        df = data.copy()
-        mask = pd.Series(True, index=df.index)
-
-        for step in signal_steps:
-            step_type = step.get("type", "")
-
-            if step_type == "filter":
-                condition = step.get("condition", "")
-                try:
-                    result = self._eval_expression(df, condition)
-                    if isinstance(result, pd.Series):
-                        mask = mask & result.fillna(False)
-                    logger.debug(f"信号过滤: {condition}, 剩余 {mask.sum()} 条")
-                except Exception as e:
-                    logger.warning(f"过滤条件执行失败: {condition}, 错误: {e}")
-
-            elif step_type == "rank":
-                by_field = step.get("by", "")
-                ascending = step.get("ascending", False)
-                top_n = step.get("top", 10)
-                try:
-                    df = self._rank_within_group(df, by_field, ascending, top_n, mask)
-                    mask = pd.Series(True, index=df.index)
-                except Exception as e:
-                    logger.warning(f"排序失败: {e}")
-
-            elif step_type == "expression":
-                alias = step.get("alias", "")
-                formula = step.get("formula", "")
-                try:
-                    df[alias] = self._eval_expression(df, formula)
-                except Exception as e:
-                    logger.warning(f"表达式计算失败: {formula}, 错误: {e}")
-                    df[alias] = np.nan
-
-        df = df[mask]
-        return df
-
-    def _calculate_weights(
-        self, signals: pd.DataFrame, weight_config: Any
-    ) -> pd.DataFrame:
-        """计算持仓权重"""
-        method = weight_config.method
-
-        if method == "equal":
-            return self._equal_weights(signals)
-        elif method == "signal":
-            field = weight_config.signal_field or "signal"
-            return self._signal_weights(signals, field)
-        elif method == "custom_formula":
-            formula = weight_config.formula or "1.0"
-            return self._formula_weights(signals, formula)
-        else:
-            logger.warning(f"未知的权重方法: {method}，使用等权重")
-            return self._equal_weights(signals)
-
-    def _equal_weights(self, signals: pd.DataFrame) -> pd.DataFrame:
-        """等权重（向量化实现）"""
-        df = signals.copy()
-        # 使用 transform 避免 apply 返回 DataFrame 的问题
-        counts = df.groupby(level="date").size()
-        date_idx = df.index.get_level_values("date")
-        weights = 1.0 / counts.reindex(date_idx).values
-        weights = np.where(np.isfinite(weights), weights, 0.0)
-        df["weight"] = weights
-        return df
-
-    def _signal_weights(self, signals: pd.DataFrame, field: str) -> pd.DataFrame:
-        """基于信号值加权（向量化实现）"""
-        df = signals.copy()
-        vals = df[field].fillna(0.0)
-        # 使用 transform 归一化
-        totals = vals.groupby(level="date").transform(lambda x: x.abs().sum())
-        weights = np.where(totals > 0, vals / totals, 0.0)
-        df["weight"] = weights
-        return df
-
-    def _formula_weights(self, signals: pd.DataFrame, formula: str) -> pd.DataFrame:
-        """基于公式加权（向量化实现）"""
-        df = signals.copy()
-        try:
-            raw_weights = self._eval_expression(df, formula)
-            if isinstance(raw_weights, pd.Series):
-                totals = raw_weights.abs().groupby(level="date").transform("sum")
-                weights = np.where(totals > 0, raw_weights / totals, 0.0)
-                df["weight"] = weights
-            else:
-                df["weight"] = 1.0 / len(df) if len(df) > 0 else 0.0
-        except Exception as e:
-            logger.warning(f"公式权重计算失败: {e}")
-            df["weight"] = 1.0 / len(df) if len(df) > 0 else 0.0
-        return df
-
-    def _apply_risk_control(
-        self, weights_df: pd.DataFrame, risk_config: Any
-    ) -> pd.DataFrame:
-        """应用风控规则"""
-        df = weights_df.copy()
-        if hasattr(risk_config, "max_position_per_stock"):
-            max_pos = risk_config.max_position_per_stock
-            df["weight"] = df["weight"].clip(upper=max_pos)
-        return df
-
-    def _simulate_trades(
-        self,
-        close_prices: pd.Series,
-        weights_df: pd.DataFrame,
-    ) -> tuple[pd.Series, pd.DataFrame]:
-        """模拟交易并计算组合收益"""
-        dates = close_prices.index.get_level_values("date").unique().sort_values()
-        symbols = close_prices.index.get_level_values("symbol").unique()
-
-        # 创建权重面板 (date × symbol)
-        weight_panel = pd.DataFrame(0.0, index=dates, columns=symbols)
-        for (date, symbol), row in weights_df.iterrows():
-            if date in weight_panel.index and symbol in weight_panel.columns:
-                weight_panel.loc[date, symbol] = row.get("weight", 0.0)
-
-        # 创建收盘价面板 (date × symbol)
-        close_panel = close_prices.unstack(level="symbol")
-        # 对齐日期
-        common_dates = weight_panel.index.intersection(close_panel.index)
-        weight_panel = weight_panel.loc[common_dates]
-        close_panel = close_panel.loc[common_dates]
-
-        # 计算每日收益率
-        daily_returns_panel = close_panel.pct_change()
-
-        # 组合收益 = 昨日权重 × 今日收益率（T+1 执行）
-        shifted_weights = weight_panel.shift(1)
-        portfolio_returns = (shifted_weights * daily_returns_panel).sum(axis=1)
-        portfolio_returns = portfolio_returns.fillna(0.0)
-
-        # 持仓面板
-        positions = shifted_weights.fillna(0.0)
-
-        return portfolio_returns, positions
-
-    def _calculate_metrics(self, returns: pd.Series) -> dict[str, float]:
-        """计算回测绩效指标"""
-        returns = returns.dropna()
-        if len(returns) == 0:
-            return {
-                "total_return": 0.0,
-                "annual_return": 0.0,
-                "sharpe_ratio": 0.0,
-                "max_drawdown": 0.0,
-                "win_rate": 0.0,
-                "trading_days": 0,
-                "volatility": 0.0,
-                "calmar_ratio": 0.0,
-                "sortino_ratio": 0.0,
-            }
-
-        total_return = (1 + returns).cumprod().iloc[-1] - 1
-
-        n_years = len(returns) / 252
-        annual_return = (1 + total_return) ** (1 / n_years) - 1 if n_years > 0 else 0.0
-
-        volatility = returns.std() * np.sqrt(252)
-
-        risk_free_rate = 0.03
-        sharpe = (
-            (returns.mean() * 252 - risk_free_rate) / volatility
-            if volatility > 0
-            else 0.0
-        )
-
-        cumulative = (1 + returns).cumprod()
-        peak = cumulative.expanding().max()
-        drawdown = (peak - cumulative) / peak
-        max_drawdown = drawdown.max()
-
-        win_rate = (returns > 0).sum() / len(returns) if len(returns) > 0 else 0.0
-
-        calmar = annual_return / max_drawdown if max_drawdown > 0 else 0.0
-
-        downside_returns = returns[returns < 0]
-        downside_std = (
-            downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else 0.0
-        )
-        sortino = (
-            (returns.mean() * 252 - risk_free_rate) / downside_std
-            if downside_std > 0
-            else 0.0
-        )
-
-        return {
-            "total_return": float(total_return),
-            "annual_return": float(annual_return),
-            "sharpe_ratio": float(sharpe),
-            "max_drawdown": float(max_drawdown),
-            "win_rate": float(win_rate),
-            "trading_days": len(returns),
-            "volatility": float(volatility),
-            "calmar_ratio": float(calmar),
-            "sortino_ratio": float(sortino),
-        }
-
-    def _eval_expression(self, df: pd.DataFrame, expr: str) -> pd.Series:
-        """安全地评估表达式（AST 白名单求值，无 eval）"""
-        evaluator = SafeExpressionEvaluator(df)
-        try:
-            return evaluator.evaluate(expr)
-        except SafeExpressionError:
-            raise
-        except Exception as e:
-            raise ValueError(f"表达式执行失败: {expr}, 错误: {e}") from e
-
-    def _rank_within_group(
-        self,
-        df: pd.DataFrame,
-        by_field: str,
-        ascending: bool,
-        top_n: int,
-        mask: pd.Series,
-    ) -> pd.DataFrame:
-        """在每组内排序并选取前 N"""
-        df = df[mask].copy()
-        if by_field not in df.columns:
-            logger.warning(f"排序字段不存在: {by_field}")
-            return df
-
-        def select_top(group):
-            sorted_group = group.sort_values(by_field, ascending=ascending)
-            return sorted_group.head(top_n)
-
-        result = df.groupby(level="date").apply(select_top)
-        if (
-            isinstance(result.index, pd.MultiIndex)
-            and len(result.index.levels) > _MULTIINDEX_EXTRA_LEVEL
-        ):
-            result = result.droplevel(0)
-        return result
-
-    def _format_positions(self, positions: pd.DataFrame) -> list[dict[str, Any]]:
-        """格式化持仓历史为列表"""
-        records = []
-        for date, row in positions.iterrows():
-            holdings = {k: float(v) for k, v in row.items() if v > 0}
-            if holdings:
-                records.append({"date": str(date), "holdings": holdings})
-        return records
+    def get_full_trail(self) -> list[dict[str, Any]]:
+        return self.trail
 
 
-def run_backtest(strategy_yaml: str) -> BacktestResult:
-    """便捷函数：直接运行 YAML 策略回测
+class EventDrivenBacktestEngine:
+    """
+    事件驱动回测引擎
 
-    可以被 LangGraph 节点直接调用
+    执行流程：
+    T-Loop → MarketDataEvent → Strategy.on_bar → SignalEvent → Portfolio → OrderEvent → Broker → FillEvent → Portfolio.update
     """
 
-    try:
-        strategy = parse_strategy_yaml(strategy_yaml)
-    except ValueError as e:
-        return BacktestResult(
-            success=False,
-            message="策略解析失败",
-            error_category="dsl_error",
-            error_detail=str(e),
+    MIN_TRADING_DAYS = 2
+    MIN_BM_POINTS = 2
+
+    def __init__(  # noqa: PLR0913
+        self,
+        data_provider: Any = None,
+        universe_provider: Any = None,
+        cost_config: TradingCostConfig | None = None,
+        audit_provider: Any = None,
+        stop_loss: float | None = None,
+        max_drawdown_limit: float | None = None,
+        max_position_pct: float = 1.0,
+        max_positions: int = 0,
+    ):
+        self.data_provider = data_provider
+        self.universe_provider = universe_provider
+        self.cost_config = cost_config or TradingCostConfig()
+        self.audit_provider = audit_provider
+        self.audit_logger = InMemoryAuditTrail()
+        self.stop_loss = stop_loss
+        self.max_drawdown_limit = max_drawdown_limit
+        self.max_position_pct = max_position_pct
+        self.max_positions = max_positions
+
+    # ── 主入口 ────────────────────────────────────────────────
+
+    def run(
+        self,
+        strategy: BaseStrategy,
+        start_date: str,
+        end_date: str,
+        symbols: list[str],
+        benchmark_symbol: str = "",
+    ) -> BacktestResult:
+        """执行回测
+
+        Args:
+            strategy: 策略实例
+            start_date: 起始日期
+            end_date: 结束日期
+            symbols: 候选股票列表
+            benchmark_symbol: 基准指数代码（如 "000300"），用于计算 Alpha/Beta 等
+        """
+        try:
+            full_data = self._prepare_data(symbols, start_date, end_date)
+            if full_data.is_empty():
+                return BacktestResult(success=False, message="加载数据为空")
+
+            guard = VisibilityGuard(full_data)
+            portfolio = Portfolio()
+            broker = Broker(self.cost_config)
+            broker.reset()
+            strategy.init()
+
+            run_id = str(uuid.uuid4())
+            self.audit_logger.trail.clear()
+            db_audit = self._init_db_audit(run_id)
+
+            timestamps = self._get_timestamps(full_data)
+
+            for bar_idx, ts in enumerate(timestamps):
+                self._process_timestamp(
+                    ts, guard, portfolio, broker, strategy, db_audit, bar_idx
+                )
+
+            self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
+            return self._build_result(
+                portfolio,
+                len(timestamps),
+                full_data,
+                benchmark_symbol,
+            )
+
+        except Exception as e:
+            logger.exception("回测引擎执行失败")
+            return BacktestResult(success=False, message=str(e))
+
+    # ── 初始化辅助 ────────────────────────────────────────────
+
+    def _init_db_audit(self, run_id: str) -> Any:
+        if not self.audit_provider:
+            return None
+        from long_earn.backtest.engine.audit import AuditLogger  # noqa: PLC0415
+
+        return AuditLogger(self.audit_provider, run_id)
+
+    @staticmethod
+    def _get_timestamps(full_data: pl.DataFrame) -> list[Any]:
+        return (
+            full_data.select("timestamp")
+            .unique()
+            .sort("timestamp")
+            .to_series()
+            .to_list()
         )
 
-    engine = VectorizedBacktestEngine()
-    return engine.run(strategy)
+    # ── 单时间戳处理 ──────────────────────────────────────────
+
+    def _process_timestamp(  # noqa: PLR0913
+        self,
+        ts: Any,
+        guard: VisibilityGuard,
+        portfolio: Portfolio,
+        broker: Broker,
+        strategy: BaseStrategy,
+        db_audit: Any,
+        bar_idx: int = 0,
+    ) -> None:
+        guard.set_time(ts)
+        slab = guard.read_current_slab()
+        mkt_event = MarketDataEvent(
+            timestamp=ts,
+            trace_id=str(uuid.uuid4()),
+            event_id=f"mkt_{ts.isoformat()}",
+            slab=slab,
+        )
+
+        portfolio.update_market_values(slab)
+
+        # 检查待成交订单（限价/止损单）
+        price_lookup = {
+            sym: float(price)
+            for sym, price in zip(
+                slab.select("symbol").to_series().to_list(),
+                slab.select("close").to_series().to_list(),
+            )
+        }
+        pending_fills = broker.check_pending_orders(
+            bar_idx=bar_idx, price_lookup=price_lookup
+        )
+        for pf in pending_fills:
+            portfolio.update_from_fill(pf)
+            self._log_audit(
+                "FILL",
+                pf.trace_id,
+                f"pend_{pf.order_id}",
+                "Broker",
+                "SUCCESS",
+                {
+                    "symbol": pf.symbol,
+                    "type": pf.order_type,
+                    "price": pf.fill_price,
+                    "quantity": pf.fill_quantity,
+                    "from_pending": True,
+                    "portfolio_value": portfolio.total_value,
+                },
+                db_audit,
+            )
+
+        risk_triggered = self._run_risk_checks(portfolio, slab, ts, broker)
+        self._log_audit(
+            "MARKET_DATA",
+            mkt_event.trace_id,
+            None,
+            "Engine",
+            "SUCCESS",
+            {
+                "timestamp": ts,
+                "portfolio_value": portfolio.total_value,
+                "strategy_state": strategy._state,
+                "risk_triggered": risk_triggered,
+            },
+            db_audit,
+        )
+
+        if risk_triggered:
+            return
+
+        signal_event = strategy.on_bar(slab, guard.get_context())
+        if signal_event is None:
+            return
+
+        self._log_audit(
+            "SIGNAL",
+            signal_event.trace_id,
+            mkt_event.trace_id,
+            "Strategy",
+            "SUCCESS",
+            {
+                "signals": str(signal_event.signals),
+                "strategy_id": signal_event.strategy_id,
+            },
+            db_audit,
+        )
+
+        self._execute_signals(signal_event, portfolio, slab, broker, db_audit)
+
+    # ── 风控检查 ──────────────────────────────────────────────
+
+    def _run_risk_checks(
+        self,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        ts: Any,
+        broker: Broker,
+    ) -> bool:
+        """执行止损 + 最大回撤检查，返回是否触发风控"""
+        triggered = False
+        if self.stop_loss is not None:
+            triggered = self._check_stop_loss(portfolio, slab, ts, broker)
+        if self.max_drawdown_limit is not None and not triggered:
+            triggered = self._check_max_drawdown(portfolio, slab, ts, broker)
+        return triggered
+
+    def _check_stop_loss(
+        self,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        ts: Any,
+        broker: Broker,
+    ) -> bool:
+        assert self.stop_loss is not None
+        triggered = False
+        for symbol, pos in list(portfolio.positions.items()):
+            pnl_pct = (
+                (pos.current_price - pos.avg_cost) / pos.avg_cost
+                if pos.avg_cost > 0
+                else 0.0
+            )
+            if pnl_pct > -self.stop_loss:
+                continue
+
+            price = self._lookup_price(slab, symbol)
+            if price is not None:
+                order = OrderEvent(
+                    timestamp=ts,
+                    trace_id=str(uuid.uuid4()),
+                    event_id=f"sl_{ts.isoformat()}_{symbol}",
+                    symbol=symbol,
+                    order_type="SELL",
+                    quantity=pos.shares,
+                    price=price,
+                )
+                fill = broker.execute_order(order, price)
+                portfolio.update_from_fill(fill)
+            triggered = True
+        return triggered
+
+    def _check_max_drawdown(
+        self,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        ts: Any,
+        broker: Broker,
+    ) -> bool:
+        assert self.max_drawdown_limit is not None
+        peak_value = (
+            max(portfolio.equity_curve)
+            if portfolio.equity_curve
+            else portfolio.total_value
+        )
+        dd = (
+            (portfolio.total_value - peak_value) / peak_value if peak_value > 0 else 0.0
+        )
+        if dd > -self.max_drawdown_limit:
+            return False
+
+        for symbol, pos in list(portfolio.positions.items()):
+            price = self._lookup_price(slab, symbol)
+            if price is not None:
+                order = OrderEvent(
+                    timestamp=ts,
+                    trace_id=str(uuid.uuid4()),
+                    event_id=f"dd_{ts.isoformat()}_{symbol}",
+                    symbol=symbol,
+                    order_type="SELL",
+                    quantity=pos.shares,
+                    price=price,
+                )
+                fill = broker.execute_order(order, price)
+                portfolio.update_from_fill(fill)
+        return True
+
+    @staticmethod
+    def _lookup_price(slab: pl.DataFrame, symbol: str) -> float | None:
+        price_series = (
+            slab.filter(pl.col("symbol") == symbol).select("close").to_series()
+        )
+        if price_series.is_empty():
+            return None
+        return price_series[0]  # type: ignore[no-any-return]
+
+    # ── 信号执行 ──────────────────────────────────────────────
+
+    def _execute_signals(
+        self,
+        signal_event: Any,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        broker: Broker,
+        db_audit: Any,
+    ) -> None:
+        orders = portfolio.process_signal(signal_event, slab, self.max_positions)
+        for order in orders:
+            self._log_audit(
+                "ORDER",
+                order.trace_id,
+                signal_event.trace_id,
+                "Portfolio",
+                "SUCCESS",
+                {
+                    "symbol": order.symbol,
+                    "type": order.order_type,
+                    "quantity": order.quantity,
+                },
+                db_audit,
+            )
+
+            price = self._lookup_price(slab, order.symbol)
+            if price is None:
+                continue
+
+            fill = broker.execute_order(order, price)
+            portfolio.update_from_fill(fill)
+
+            self._log_audit(
+                "FILL",
+                fill.trace_id,
+                order.trace_id,
+                "Broker",
+                "SUCCESS",
+                {
+                    "symbol": fill.symbol,
+                    "type": fill.order_type,
+                    "price": fill.fill_price,
+                    "quantity": fill.fill_quantity,
+                    "portfolio_value": portfolio.total_value,
+                },
+                db_audit,
+            )
+
+    # ── 审计日志 ──────────────────────────────────────────────
+
+    def _log_audit(  # noqa: PLR0913
+        self,
+        event_type: str,
+        trace_id: str,
+        parent_id: str | None,
+        component: str,
+        status: str,
+        payload: dict[str, Any],
+        db_audit: Any,
+    ) -> None:
+        entry = {
+            "event_type": event_type,
+            "trace_id": trace_id,
+            "parent_id": parent_id,
+            "component": component,
+            "status": status,
+            "payload": payload,
+        }
+        self.audit_logger.log_transition(**entry)
+        if db_audit:
+            db_audit.log_transition(
+                event_type=event_type,
+                trace_id=trace_id,
+                parent_id=parent_id,
+                component=component,
+                status=status,
+                payload=payload,
+            )
+
+    # ── 最终处理 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _finalize_mark_to_market(
+        portfolio: Portfolio,
+        full_data: pl.DataFrame,
+        last_ts: Any,
+    ) -> None:
+        portfolio.update_market_values(full_data.filter(pl.col("timestamp") == last_ts))
+
+    def _build_result(
+        self,
+        portfolio: Portfolio,
+        trading_days: int,
+        full_data: pl.DataFrame | None = None,
+        benchmark_symbol: str = "",
+    ) -> BacktestResult:
+        metrics = self._calculate_metrics(portfolio)
+        bm = self._benchmark_or_none(
+            full_data, benchmark_symbol, portfolio.equity_curve
+        )
+
+        return BacktestResult(
+            success=True,
+            message="回测成功",
+            total_return=metrics.total_return,
+            annual_return=metrics.annual_return,
+            sharpe_ratio=metrics.sharpe_ratio,
+            max_drawdown=metrics.max_drawdown,
+            win_rate=metrics.win_rate,
+            trading_days=trading_days,
+            volatility=metrics.volatility,
+            calmar_ratio=metrics.calmar_ratio,
+            sortino_ratio=metrics.sortino_ratio,
+            alpha=bm["alpha"],
+            beta=bm["beta"],
+            information_ratio=bm["information_ratio"],
+            tracking_error=bm["tracking_error"],
+            benchmark_return=bm["benchmark_return"],
+            daily_returns=[
+                {"day": i, "value": v} for i, v in enumerate(portfolio.equity_curve)
+            ],
+            trade_count=portfolio.trade_count,
+            attribution=dict(portfolio.pnl_by_symbol),
+        )
+
+    @staticmethod
+    def _benchmark_or_none(
+        full_data: pl.DataFrame | None,
+        benchmark_symbol: str,
+        equity_curve: list[float],
+    ) -> dict[str, float]:
+        if full_data is None or not benchmark_symbol:
+            return _empty_bm()
+        return EventDrivenBacktestEngine._calculate_benchmark_metrics(
+            equity_curve,
+            full_data,
+            benchmark_symbol,
+        )
+
+    # ── 基准对比 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _calculate_benchmark_metrics(
+        equity_curve: list[float],
+        full_data: pl.DataFrame,
+        benchmark_symbol: str,
+    ) -> dict[str, float]:
+        """计算 Alpha、Beta、信息比率等基准对比指标"""
+        bm_data = (
+            full_data.filter(pl.col("symbol") == benchmark_symbol)
+            .sort("timestamp")
+            .select("close")
+            .to_series()
+            .to_list()
+        )
+        if len(bm_data) < EventDrivenBacktestEngine.MIN_BM_POINTS or not bm_data[0]:
+            return _empty_bm()
+
+        bm_prices = [float(p) for p in bm_data if p is not None]
+        if len(bm_prices) < EventDrivenBacktestEngine.MIN_BM_POINTS:
+            return _empty_bm()
+
+        n = min(len(equity_curve), len(bm_prices))
+        if n < EventDrivenBacktestEngine.MIN_BM_POINTS:
+            return _empty_bm()
+
+        eq_trimmed = np.array(equity_curve[:n], dtype=float)
+        bm_trimmed = np.array(bm_prices[:n], dtype=float)
+
+        port_returns = np.diff(eq_trimmed) / eq_trimmed[:-1]
+        bm_returns = np.diff(bm_trimmed) / bm_trimmed[:-1]
+
+        if len(port_returns) < EventDrivenBacktestEngine.MIN_TRADING_DAYS:
+            return {
+                "alpha": 0.0,
+                "beta": 0.0,
+                "information_ratio": 0.0,
+                "tracking_error": 0.0,
+                "benchmark_return": float(bm_returns[-1]),
+            }
+
+        excess = port_returns - bm_returns
+        cov = float(np.cov(port_returns, bm_returns)[0, 1])
+        var_bm = float(np.var(bm_returns, ddof=1))
+        beta = cov / var_bm if var_bm > 0 else 0.0
+
+        annual_excess = float(np.mean(excess)) * 252
+        tracking_error = float(np.std(excess, ddof=1)) * np.sqrt(252)
+        information_ratio = (
+            annual_excess / tracking_error if tracking_error > 0 else 0.0
+        )
+        alpha = annual_excess
+        benchmark_return = float((bm_prices[-1] / bm_prices[0]) - 1)
+
+        return {
+            "alpha": round(alpha, 6),
+            "beta": round(beta, 4),
+            "information_ratio": round(information_ratio, 4),
+            "tracking_error": round(tracking_error, 6),
+            "benchmark_return": round(benchmark_return, 6),
+        }
+
+    # ── Walk-Forward 回测 ────────────────────────────────────
+
+    def walk_forward_run(  # noqa: PLR0913
+        self,
+        strategy: BaseStrategy,
+        start_date: str,
+        end_date: str,
+        symbols: list[str],
+        n_splits: int = 3,
+        benchmark_symbol: str = "",
+    ) -> dict[str, Any]:
+        """执行 Walk-Forward 滚动回测（自动样本外验证）
+
+        Args:
+            strategy: 策略实例（每次折叠的 init() 会被调用）
+            start_date: 起始日期
+            end_date: 结束日期
+            symbols: 候选股票列表
+            n_splits: 时间窗折叠数
+            benchmark_symbol: 基准指数代码
+
+        Returns:
+            {
+                "fold_results": [{fold_id, train, test}],
+                "average_metrics": {train: {}, test: {}},
+                "n_splits": n,
+            }
+        """
+
+        full_data = self._prepare_data(symbols, start_date, end_date)
+        if full_data.is_empty():
+            return {"error": "加载数据为空"}
+
+        timestamps = self._get_timestamps(full_data)
+        splitter = TimeSeriesSplit(n_splits=n_splits)
+        splits = splitter.split(timestamps)
+
+        fold_results: list[dict[str, Any]] = []
+        all_train_metrics: list[dict[str, float]] = []
+        all_test_metrics: list[dict[str, float]] = []
+
+        for fold_idx, (train_ts, test_ts) in enumerate(splits):
+            train_start = str(train_ts[0])
+            train_end = str(train_ts[-1])
+            test_start = str(test_ts[0]) if test_ts else train_end
+            test_end = str(test_ts[-1]) if test_ts else train_end
+
+            # 训练期回测
+            strategy.init()
+            train_result = self.run(
+                strategy,
+                train_start,
+                train_end,
+                symbols,
+                benchmark_symbol,
+            )
+            train_metrics = {
+                "total_return": train_result.total_return or 0.0,
+                "sharpe_ratio": train_result.sharpe_ratio or 0.0,
+                "max_drawdown": train_result.max_drawdown or 0.0,
+                "alpha": train_result.alpha or 0.0,
+            }
+            all_train_metrics.append(train_metrics)
+
+            # 测试期回测
+            test_result = self.run(
+                strategy,
+                test_start,
+                test_end,
+                symbols,
+                benchmark_symbol,
+            )
+            test_metrics = {
+                "total_return": test_result.total_return or 0.0,
+                "sharpe_ratio": test_result.sharpe_ratio or 0.0,
+                "max_drawdown": test_result.max_drawdown or 0.0,
+                "alpha": test_result.alpha or 0.0,
+            }
+            all_test_metrics.append(test_metrics)
+
+            fold_results.append(
+                {
+                    "fold_id": fold_idx,
+                    "train": {"start": train_start, "end": train_end, **train_metrics},
+                    "test": {"start": test_start, "end": test_end, **test_metrics},
+                }
+            )
+
+        def _avg(metrics_list: list[dict[str, float]]) -> dict[str, float]:
+            if not metrics_list:
+                return {}
+            return {
+                k: float(np.mean([m[k] for m in metrics_list])) for k in metrics_list[0]
+            }
+
+        return {
+            "fold_results": fold_results,
+            "average_metrics": {
+                "train": _avg(all_train_metrics),
+                "test": _avg(all_test_metrics),
+            },
+            "n_splits": n_splits,
+        }
+
+    # ── 数据与指标 ────────────────────────────────────────────
+
+    def _prepare_data(self, symbols: list[str], start: str, end: str) -> pl.DataFrame:
+        """准备 Polars 格式的数据面板"""
+        if self.data_provider is not None:
+            df = self.data_provider.get_merged_panel_as_polars(symbols, start, end)
+            if df is not None and not df.is_empty():
+                return df  # type: ignore[no-any-return]
+        return pl.DataFrame()
+
+    def _calculate_metrics(self, portfolio: Portfolio) -> PerformanceMetrics:
+        """计算最终绩效指标"""
+        equity = portfolio.equity_curve
+        if len(equity) < self.MIN_TRADING_DAYS:
+            return PerformanceMetrics()
+
+        returns = np.diff(equity) / equity[:-1]
+        if len(returns) == 0:
+            return PerformanceMetrics()
+
+        total_return = (equity[-1] / equity[0]) - 1
+        trading_days = len(returns)
+        annual_factor = 252 / trading_days if trading_days > 0 else 1.0
+        annual_return = (1 + total_return) ** annual_factor - 1
+        volatility = float(np.std(returns, ddof=1)) * np.sqrt(252)
+        sharpe = annual_return / volatility if volatility > 0 else 0.0
+
+        peak = np.maximum.accumulate(equity)
+        drawdown = (equity - peak) / peak
+        max_dd = float(np.min(drawdown))
+
+        win_rate = (
+            float(np.sum(returns > 0) / len(returns)) if len(returns) > 0 else 0.0
+        )
+        calmar = annual_return / abs(max_dd) if max_dd != 0 else 0.0
+
+        downside = returns[returns < 0]
+        downside_std = (
+            float(np.std(downside, ddof=1)) * np.sqrt(252) if len(downside) > 0 else 0.0
+        )
+        sortino = annual_return / downside_std if downside_std > 0 else 0.0
+
+        return PerformanceMetrics(
+            total_return=total_return,
+            annual_return=annual_return,
+            sharpe_ratio=sharpe,
+            max_drawdown=max_dd,
+            win_rate=win_rate,
+            trading_days=trading_days,
+            volatility=volatility,
+            calmar_ratio=calmar,
+            sortino_ratio=sortino,
+        )

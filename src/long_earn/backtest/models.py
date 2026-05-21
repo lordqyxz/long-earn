@@ -24,10 +24,21 @@ class BacktestResult(BaseModel):
     calmar_ratio: float | None = Field(default=None, description="卡玛比率")
     sortino_ratio: float | None = Field(default=None, description="索提诺比率")
 
+    # 基准对比指标
+    alpha: float | None = Field(default=None, description="Alpha 超额收益")
+    beta: float | None = Field(default=None, description="Beta 市场敏感度")
+    information_ratio: float | None = Field(default=None, description="信息比率")
+    tracking_error: float | None = Field(default=None, description="跟踪误差")
+    benchmark_return: float | None = Field(default=None, description="基准收益率")
+
     # 详细数据
     daily_returns: list[dict[str, Any]] | None = Field(
         default=None, description="每日收益率序列"
     )
     positions_history: list[dict[str, Any]] | None = Field(
         default=None, description="每日持仓权重历史"
+    )
+    trade_count: int | None = Field(default=None, description="总交易次数")
+    attribution: dict[str, float] | None = Field(
+        default=None, description="每只股票的 P&L 归因"
     )

@@ -41,6 +41,24 @@ class SignalExpression(BaseModel):
 SignalStep = SignalFilter | SignalRank | SignalExpression
 
 
+class TradingCostConfig(BaseModel):
+    """交易成本配置 (默认 A 股参数)"""
+
+    commission_rate: float = Field(
+        default=0.0003, description="单边佣金率，如 0.0003 表示万三"
+    )
+    stamp_duty: float = Field(
+        default=0.0005, description="卖出印花税率，如 0.0005 表示万五"
+    )
+    slippage_bps: float = Field(
+        default=2.0, description="滑点基点，2.0 表示 2bps = 0.0002"
+    )
+
+    @property
+    def slippage_rate(self) -> float:
+        return self.slippage_bps * 0.0001
+
+
 class WeightConfig(BaseModel):
     """权重配置"""
 
@@ -101,6 +119,7 @@ class StrategyDSL(BaseModel):
     )
     weights: WeightConfig = Field(default_factory=WeightConfig)
     risk_control: RiskControlConfig = Field(default_factory=RiskControlConfig)
+    trading_cost: TradingCostConfig = Field(default_factory=TradingCostConfig)
 
     @field_validator("signals", mode="before")
     @classmethod
@@ -168,6 +187,14 @@ def validate_fields(strategy: StrategyDSL, available_fields: list[str]) -> list[
     """校验策略中引用的字段是否在可用字段列表中"""
     used_fields = set()
 
+    # 1. 首先收集所有定义的别名 (Aliases)
+    defined_aliases = set()
+    for step in strategy.signals:
+        if step.get("type") == "expression":
+            alias = step.get("alias")
+            if alias:
+                defined_aliases.add(alias)
+
     # 从 factors 中提取字段
     for expr in strategy.factors.values():
         used_fields.update(_extract_field_names(expr))
@@ -187,8 +214,10 @@ def validate_fields(strategy: StrategyDSL, available_fields: list[str]) -> list[
     if strategy.weights.signal_field:
         used_fields.add(strategy.weights.signal_field)
 
-    # 过滤出缺失的字段（factors 的别名也是合法字段）
-    valid_fields = set(available_fields) | set(strategy.factors.keys())
+    # 过滤出缺失的字段（factors 的别名和 signals 定义的 alias 都是合法字段）
+    valid_fields = (
+        set(available_fields) | set(strategy.factors.keys()) | defined_aliases
+    )
     missing = (
         used_fields
         - valid_fields
@@ -214,8 +243,10 @@ def _extract_field_names(expression: str) -> set[str]:
     expr = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
     # 移除数字
     expr = re.sub(r"\b\d+\.?\d*\b", "", expr)
-    # 移除常见函数名和运算符
-    funcs = r"\b(shift|rank|sum|mean|std|abs|max|min|where|clip|log|exp|sqrt)\b"
+    # 移除常见函数名、运算符及 Python 逻辑关键字
+    funcs = (
+        r"\b(shift|rank|sum|mean|std|abs|max|min|where|clip|log|exp|sqrt|and|or|not)\b"
+    )
     expr = re.sub(funcs, "", expr)
     # 移除比较运算符和逻辑运算符
     expr = re.sub(r"[><=!&|+\-*/()\[\],\.\:\%\^]", " ", expr)
