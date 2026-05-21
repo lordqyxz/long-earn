@@ -1,6 +1,15 @@
 """记忆存储 — 综合事实 + 向量检索 + 关系图的统一记忆系统
 
 基于 numpy/pandas 技术底座，无外部向量数据库依赖。
+
+功能：
+- 事实管理（增删改查、持久化）
+- TF-IDF 语义检索（支持元数据过滤）
+- 记忆衰减（按时间降低旧事实权重）
+- 冲突检测（识别相互矛盾的记忆）
+- 记忆压缩（合并相似事实降低冗余）
+
+v2.0 新增：记忆衰减、冲突检测、记忆压缩
 """
 
 import logging
@@ -16,6 +25,15 @@ from long_earn.memory.graph import RelationGraph
 from long_earn.memory.tfidf import TfidfVectorizer, cosine_similarity
 
 logger = logging.getLogger(__name__)
+
+# ── 时间常量 ─────────────────────────────────────────────────────
+SECONDS_PER_DAY = 86400.0
+DEFAULT_DECAY_HALF_LIFE = 90.0  # 默认衰减半衰期（天）
+CONFLICT_SIMILARITY_THRESHOLD = 0.7  # 冲突检测的相似度阈值
+DECAY_THRESHOLD = 0.3  # 衰减判定阈值（decay < 0.3 视为已衰减）
+COMPRESS_SIMILARITY_THRESHOLD = 0.6  # 压缩聚类的相似度阈值
+_CONTRADICT_THRESHOLD = 3  # 矛盾判定阈值
+_MIN_CLUSTER_SIZE = 2  # 压缩最小聚类大小
 
 
 class MemoryStore:
@@ -96,6 +114,326 @@ class MemoryStore:
     def fact_count(self) -> int:
         return len(self._facts)
 
+    # ── 记忆衰减 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _calc_decay(
+        created_at: str,
+        now: datetime | None = None,
+        half_life_days: float = DEFAULT_DECAY_HALF_LIFE,
+    ) -> float:
+        """计算时间衰减因子
+
+        使用指数衰减曲线: decay = exp(-age_days / half_life_days)
+        半衰期为 half_life_days 天后，衰减因子降至 0.5。
+
+        Args:
+            created_at: ISO 格式创建时间
+            now: 当前时间（默认 datetime.now()）
+            half_life_days: 衰减半衰期（天）
+
+        Returns:
+            衰减因子 [0, 1]
+        """
+        if now is None:
+            now = datetime.now()
+        try:
+            created = datetime.fromisoformat(created_at)
+            age = (now - created).total_seconds()
+            age_days = age / SECONDS_PER_DAY
+            if age_days <= 0:
+                return 1.0
+            return float(np.exp(-age_days / half_life_days))
+        except (ValueError, TypeError):
+            return 1.0
+
+    def decay(self, half_life_days: float = DEFAULT_DECAY_HALF_LIFE) -> int:
+        """对所有事实执行记忆衰减
+
+        过旧的事实会被标记为 `decayed=True`，降低检索权重。
+
+        Args:
+            half_life_days: 衰减半衰期（天）
+
+        Returns:
+            衰减的事实数量（decay < 0.3 的视为已衰减）
+        """
+        now = datetime.now()
+        decayed_count = 0
+        for fact in self._facts:
+            created_at = fact["metadata"].get("created_at", "")
+            decay_factor = self._calc_decay(created_at, now, half_life_days)
+            fact["metadata"]["decay_factor"] = round(decay_factor, 4)
+            if decay_factor < DECAY_THRESHOLD:
+                fact["metadata"]["decayed"] = True
+                decayed_count += 1
+            else:
+                fact["metadata"]["decayed"] = False
+        self._dirty = True
+        logger.info(f"记忆衰减完成: {decayed_count}/{self.fact_count} 条已衰减")
+        return decayed_count
+
+    # ── 冲突检测 ──────────────────────────────────────────────
+
+    def find_conflicts(
+        self,
+        content: str,
+        min_similarity: float = CONFLICT_SIMILARITY_THRESHOLD,
+    ) -> list[dict[str, Any]]:
+        """检测新内容与现有记忆的潜在冲突
+
+        通过 TF-IDF 余弦相似度查找高相关事实，
+        并对比核心元数据判断是否存在冲突。
+
+        Args:
+            content: 待检测的文本内容
+            min_similarity: 冲突相似度阈值
+
+        Returns:
+            可能存在冲突的事实列表（含 similarity 和 conflict_reason）
+        """
+        self._ensure_vectors()
+        if self._doc_matrix is None or self._doc_matrix.size == 0:
+            return []
+
+        query_vec = self._vectorizer.transform([content])[0]
+        similarities = cosine_similarity(query_vec, self._doc_matrix)
+
+        conflicts: list[dict[str, Any]] = []
+        for idx, score in enumerate(similarities):
+            if score < min_similarity:
+                continue
+            fact = self._facts[idx]
+            meta = fact["metadata"]
+
+            # 检查是否有显式冲突标记
+            conflict_group = meta.get("conflict_group", "")
+            if conflict_group:
+                conflicts.append(
+                    {
+                        "content": fact["content"],
+                        "metadata": meta,
+                        "similarity": float(score),
+                        "conflict_reason": f"与冲突组 [{conflict_group}] 中的记忆相似",
+                    }
+                )
+                continue
+
+            # 检查同一词条下的相反观点
+            term = meta.get("term", "")
+            if term and self._is_contradictory(content, fact["content"]):
+                conflicts.append(
+                    {
+                        "content": fact["content"],
+                        "metadata": meta,
+                        "similarity": float(score),
+                        "conflict_reason": f"关于 [{term}] 的观点可能存在矛盾",
+                    }
+                )
+
+        return conflicts
+
+    @staticmethod
+    def _is_contradictory(a: str, b: str) -> bool:
+        """粗略判断两段文本是否存在矛盾
+
+        基于正负面关键词的简单对比。
+        """
+        positive = {"利好", "上涨", "买入", "推荐", "增长", "提升", "优秀", "看好"}
+        negative = {"利空", "下跌", "卖出", "减持", "下降", "恶化", "风险", "看空"}
+
+        def _sentiment_score(text: str) -> float:
+            pos = sum(1 for w in positive if w in text)
+            neg = sum(1 for w in negative if w in text)
+            return pos - neg
+
+        score_a = _sentiment_score(a)
+        score_b = _sentiment_score(b)
+        return abs(score_a - score_b) >= _CONTRADICT_THRESHOLD
+
+    def resolve_conflict(
+        self,
+        existing_idx: int,
+        new_content: str,
+        new_metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """解决冲突：将冲突记忆编入同一冲突组
+
+        在冲突事实之间建立 `conflict_group` 关联，
+        确保后续检索时双方都被返回。
+
+        Args:
+            existing_idx: 已有事实索引
+            new_content: 新事实内容
+            new_metadata: 新事实元数据
+
+        Returns:
+            新事实索引
+        """
+        # 获取已有事实的冲突组 ID
+        existing = self._facts[existing_idx]
+        conflict_group = existing["metadata"].get("conflict_group", "")
+
+        if not conflict_group:
+            # 从已有事实的 term 创建冲突组
+            term = existing["metadata"].get("term", "unknown")
+            conflict_group = f"conflict_{term}_{existing_idx}"
+
+        # 标记已有事实
+        existing["metadata"]["conflict_group"] = conflict_group
+        existing["metadata"]["conflict_version"] = existing["metadata"].get(
+            "conflict_version", 1
+        )
+
+        # 添加新事实并标记冲突
+        meta = dict(new_metadata or {})
+        meta["conflict_group"] = conflict_group
+        meta["conflict_version"] = existing["metadata"].get("conflict_version", 0) + 1
+        meta["is_conflict_entry"] = True
+
+        self._facts.append({"content": new_content, "metadata": meta})
+        self._fact_texts.append(new_content)
+        self._dirty = True
+        logger.info(f"冲突已标记，冲突组: {conflict_group}")
+        return len(self._facts) - 1
+
+    # ── 记忆压缩与总结 ────────────────────────────────────────
+
+    def compress(
+        self,
+        min_similarity: float = COMPRESS_SIMILARITY_THRESHOLD,
+        max_cluster_size: int = 10,
+    ) -> int:
+        """压缩冗余事实
+
+        将语义高度相似的事实聚类，每组只保留一份摘要。
+
+        Args:
+            min_similarity: 聚类相似度阈值
+            max_cluster_size: 每个聚类最多允许的事实数
+
+        Returns:
+            合并后减少的事实数
+        """
+        self._ensure_vectors()
+        if self._doc_matrix is None or self._doc_matrix.size < _MIN_CLUSTER_SIZE:
+            return 0
+
+        # 计算文档间相似度矩阵
+        n = len(self._facts)
+        sim_matrix = self._doc_matrix @ self._doc_matrix.T
+
+        # 贪心聚类：找到相似的文档对并合并
+        merged_indices: set[int] = set()
+        clusters: list[list[int]] = []
+
+        for i in range(n):
+            if i in merged_indices:
+                continue
+            cluster = [i]
+            for j in range(i + 1, n):
+                if j in merged_indices:
+                    continue
+                if len(cluster) >= max_cluster_size:
+                    break
+                if sim_matrix[i, j] >= min_similarity:
+                    cluster.append(j)
+                    merged_indices.add(j)
+
+            if len(cluster) > 1:
+                clusters.append(cluster)
+
+        total_removed = 0
+        for cluster in clusters:
+            removed = self._merge_cluster(cluster)
+            total_removed += removed
+
+        if total_removed > 0:
+            logger.info(
+                f"记忆压缩完成: {len(clusters)} 组, 减少 {total_removed} 条事实"
+            )
+
+        return total_removed
+
+    def _merge_cluster(self, indices: list[int]) -> int:
+        """合并一组相似事实
+
+        保留第一条作为主事实，将其余事实的关键信息追加到主事实。
+
+        Args:
+            indices: 相似事实的索引列表（含主事实）
+
+        Returns:
+            移除的事实数
+        """
+        if len(indices) <= 1:
+            return 0
+
+        # 主事实：索引最小的
+        keep_idx = indices[0]
+        keep_fact = self._facts[keep_idx]
+
+        # 收集去重内容
+        merged_content = [keep_fact["content"]]
+        for idx in indices[1:]:
+            fact = self._facts[idx]
+            content = fact["content"]
+            if content not in merged_content:
+                merged_content.append(content)
+
+            # 合并元数据中的 term 和 category
+            meta = fact["metadata"]
+            for key in ("term", "category", "source_file"):
+                val = meta.get(key)
+                if val and val not in str(keep_fact["metadata"].get(key, "")):
+                    existing = keep_fact["metadata"].get(key, "")
+                    keep_fact["metadata"][key] = (
+                        f"{existing},{val}" if existing else val
+                    )
+
+        # 更新主事实
+        separator = "\n\n---\n\n"
+        keep_fact["content"] = separator.join(merged_content)
+        keep_fact["metadata"]["compressed"] = True
+        keep_fact["metadata"]["merged_count"] = len(indices)
+        keep_fact["metadata"].pop("decayed", None)  # 如果被衰减，清除标记
+
+        # 移除其余事实（从后往前删以避免索引偏移）
+        removed = 0
+        for idx in sorted(indices[1:], reverse=True):
+            self._facts.pop(idx)
+            self._fact_texts.pop(idx)
+            removed += 1
+
+        self._dirty = True
+        return removed
+
+    def summarize_topic(self, topic: str, k: int = 5) -> str:
+        """生成某个主题的总结
+
+        Args:
+            topic: 主题关键词
+            k: 检索相关事实数量
+
+        Returns:
+            主题总结文本
+        """
+        related = self.search(topic, k=k, min_similarity=0.1)
+        if not related:
+            return f"未找到关于「{topic}」的记忆"
+
+        lines: list[str] = [f"# 主题总结：{topic}\n"]
+        for i, r in enumerate(related, 1):
+            content = r["content"][:300]
+            meta = r["metadata"]
+            created = meta.get("created_at", "unknown")[:10]
+            source = meta.get("source_file", "unknown")
+            lines.append(f"## {i}. [来源: {source} | {created}]")
+            lines.append(content)
+            lines.append("")
+
+        return "\n".join(lines)
+
     # ── 向量化与检索 ──────────────────────────────────────────
 
     def _ensure_vectors(self) -> None:
@@ -110,7 +448,7 @@ class MemoryStore:
         self._doc_matrix = self._vectorizer.fit_transform(self._fact_texts)
         self._dirty = False
 
-    def search(  # noqa: PLR0913
+    def search(  # noqa: PLR0913, PLR0912
         self,
         query: str,
         k: int = 3,
@@ -118,6 +456,9 @@ class MemoryStore:
         terms: list[str] | None = None,
         source_files: list[str] | None = None,
         min_similarity: float = 0.0,
+        apply_decay: bool = True,
+        half_life_days: float = DEFAULT_DECAY_HALF_LIFE,
+        include_decayed: bool = False,
     ) -> list[dict[str, Any]]:
         """搜索记忆库
 
@@ -128,6 +469,9 @@ class MemoryStore:
             terms: 按词条名称过滤
             source_files: 按源文件过滤
             min_similarity: 最小相似度阈值
+            apply_decay: 是否应用时间衰减
+            half_life_days: 衰减半衰期（天）
+            include_decayed: 是否包含已衰减的结果
 
         Returns:
             搜索结果列表，每项包含 content, metadata, similarity
@@ -143,6 +487,14 @@ class MemoryStore:
         # 计算余弦相似度
         similarities = cosine_similarity(query_vec, self._doc_matrix)
 
+        # 应用时间衰减
+        if apply_decay:
+            now = datetime.now()
+            for idx in range(len(similarities)):
+                created_at = self._facts[idx]["metadata"].get("created_at", "")
+                decay = self._calc_decay(created_at, now, half_life_days)
+                similarities[idx] *= decay
+
         # 排序并过滤
         scored = sorted(
             enumerate(similarities),
@@ -157,6 +509,10 @@ class MemoryStore:
 
             fact = self._facts[idx]
             meta = fact["metadata"]
+
+            # 过滤已衰减的事实
+            if not include_decayed and meta.get("decayed", False):
+                continue
 
             # 元数据过滤
             if categories:
