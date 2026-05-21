@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>回测可视化仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 24px; color: #f8fafc; }
+  .runs-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 24px; }
+  .runs-bar button { background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+  .runs-bar button:hover { border-color: #3b82f6; color: #e2e8f0; }
+  .runs-bar button.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+  .refresh-btn { background: #3b82f6; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-left: auto; transition: background 0.2s; }
+  .refresh-btn:hover { background: #2563eb; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+  .card h3 { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; }
+  .card .value.positive { color: #22c55e; }
+  .card .value.negative { color: #ef4444; }
+  .card .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .chart-container { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 24px; position: relative; }
+  .chart-container h3 { font-size: 14px; color: #94a3b8; margin-bottom: 16px; }
+  .chart-wrapper { position: relative; width: 100%; height: 360px; }
+  canvas { width: 100% !important; height: 100% !important; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #64748b; font-weight: 500; border-bottom: 1px solid #334155; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  tr:hover td { background: #0f172a; }
+  .loading { text-align: center; padding: 80px 20px; color: #64748b; }
+  .spinner { width: 40px; height: 40px; margin: 0 auto 16px; border: 3px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { color: #ef4444; text-align: center; padding: 40px; }
+  .error-box { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 8px; padding: 24px; text-align: center; }
+  .error-box .error-title { font-size: 16px; font-weight: 600; color: #ef4444; margin-bottom: 8px; }
+  .error-box .error-detail { font-size: 13px; color: #94a3b8; }
+  .retry-btn { background: #3b82f6; color: #fff; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 12px; }
+  .retry-btn:hover { background: #2563eb; }
+  .compare-btn { background: #0d9488; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
+  .compare-btn:hover { background: #0f766e; }
+  .compare-btn.active { background: #f59e0b; }
+  .compare-table-container { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 24px; }
+  .compare-table-container h3 { font-size: 14px; color: #94a3b8; margin-bottom: 16px; }
+  .compare-table-scroll { overflow-x: auto; }
+  .benchmark-section { margin-bottom: 24px; }
+  .benchmark-section h3 { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    .runs-bar { flex-direction: column; align-items: stretch; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>回测可视化仪表盘</h1>
+  <div class="runs-bar" id="runsBar">
+    <span class="loading" style="padding:8px 0;text-align:left;">加载运行列表</span>
+  </div>
+  <button class="compare-btn" id="compareBtn" onclick="toggleCompare()" style="margin-bottom:16px;">多策略对比</button>
+  <div id="content"><div class="loading"><div class="spinner"></div>加载中</div></div>
+  <div id="compareContent" style="display:none;"></div>
+</div>
+<script>
+const API = '';  // 空 = 同源
+
+// ── Chart.js 实例引用（用于销毁重建） ──
+let equityChart = null;
+let returnsChart = null;
+let eventChart = null;
+
+// ── Chart.js 深色主题通用配置 ──
+function chartBaseOptions() {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { labels: { color: '#94a3b8', font: { size: 12 } } },
+      tooltip: {
+        backgroundColor: '#1e293b',
+        titleColor: '#f8fafc',
+        bodyColor: '#e2e8f0',
+        borderColor: '#334155',
+        borderWidth: 1,
+        padding: 12,
+        cornerRadius: 8,
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: '#64748b', maxTicksLimit: 12, font: { size: 11 } },
+        grid: { color: 'rgba(51,65,85,0.4)', drawBorder: false },
+        border: { color: '#334155' },
+      },
+      y: {
+        ticks: { color: '#64748b', font: { size: 11 }, callback: v => formatCurrency(v) },
+        grid: { color: 'rgba(51,65,85,0.4)', drawBorder: false },
+        border: { color: '#334155' },
+      },
+    },
+  };
+}
+
+function formatCurrency(v) {
+  if (Math.abs(v) >= 1e6) return '¥' + (v / 1e6).toFixed(1) + 'M';
+  if (Math.abs(v) >= 1e4) return '¥' + (v / 1e4).toFixed(1) + '万';
+  return '¥' + v.toFixed(0);
+}
+
+// ── 加载运行列表 ──
+async function loadRuns() {
+  const bar = document.getElementById('runsBar');
+  bar.innerHTML = '<span class="loading" style="padding:8px 0;text-align:left;"><div class="spinner" style="width:20px;height:20px;display:inline-block;vertical-align:middle;margin:0 8px 0 0;"></div>加载运行列表</span>';
+  try {
+    const res = await fetch(API + '/api/runs');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.runs || data.runs.length === 0) {
+      bar.innerHTML = '';
+      document.getElementById('content').innerHTML = '<div class="error-box"><div class="error-title">暂无回测运行记录</div><div class="error-detail">请先执行一次回测后再查看仪表盘</div></div>';
+      return;
+    }
+    bar.innerHTML = '';
+    data.runs.forEach((r, idx) => {
+      const btn = document.createElement('button');
+      btn.textContent = r.run_id.slice(0, 8) + '…' + (r.started ? ' ' + r.started.slice(0, 10) : '');
+      btn.onclick = () => selectRun(r.run_id, btn);
+      btn.dataset.runId = r.run_id;
+      bar.appendChild(btn);
+    });
+    // 添加刷新按钮
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'refresh-btn';
+    refreshBtn.textContent = '刷新';
+    refreshBtn.onclick = loadRuns;
+    bar.appendChild(refreshBtn);
+
+    // 自动加载第一个 run
+    const firstBtn = bar.querySelector('button[data-run-id]');
+    if (firstBtn) selectRun(firstBtn.dataset.runId, firstBtn);
+  } catch (e) {
+    document.getElementById('content').innerHTML = '<div class="error-box"><div class="error-title">无法连接 API 服务</div><div class="error-detail">请确认回测可视化服务已启动</div><button class="retry-btn" onclick="loadRuns()">重试</button></div>';
+  }
+}
+
+// ── 选中 run ──
+function selectRun(runId, btn) {
+  document.querySelectorAll('.runs-bar button[data-run-id]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadDashboard(runId);
+}
+
+// ── 加载仪表盘数据 ──
+async function loadDashboard(runId) {
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载回测数据</div>';
+  try {
+    const res = await fetch(API + '/api/runs/' + runId + '/dashboard');
+    if (!res.ok) {
+      if (res.status === 404) throw new Error('回测记录未找到');
+      throw new Error('服务异常 (HTTP ' + res.status + ')');
+    }
+    const data = await res.json();
+    renderDashboard(data, runId);
+  } catch (e) {
+    content.innerHTML = '<div class="error-box"><div class="error-title">加载失败</div><div class="error-detail">' + e.message + '</div><button class="retry-btn" onclick="selectRun(\'' + runId + '\', document.querySelector(\'.runs-bar button.active\'))">重试</button></div>';
+  }
+}
+
+// ── 渲染仪表盘 ──
+function renderDashboard(data, runId) {
+  // 销毁旧图表实例
+  if (equityChart) { equityChart.destroy(); equityChart = null; }
+  if (returnsChart) { returnsChart.destroy(); returnsChart = null; }
+  if (eventChart) { eventChart.destroy(); eventChart = null; }
+
+  const equity = data.equity_curve || [];
+  const trades = data.trade_journal || [];
+  const signals = data.signal_history || [];
+  const events = data.event_breakdown || {};
+  const benchmark = data.benchmark || {};
+  const risk = data.risk_metrics || {};
+
+  const startVal = equity.length > 0 ? equity[0].value : 1_000_000;
+  const endVal = equity.length > 0 ? equity[equity.length - 1].value : startVal;
+  const totalReturn = ((endVal - startVal) / startVal * 100).toFixed(2);
+  const tradeCount = trades.length;
+  const eventTypes = Object.entries(events).map(([k, v]) => k + ': ' + v).join(', ');
+
+  const content = document.getElementById('content');
+  let html = '';
+
+  // ── 指标卡片 ──
+  html += '<div class="grid">';
+  html += card('总收益率', totalReturn + '%', parseFloat(totalReturn) >= 0, '期间: ' + (equity.length > 0 ? equity[0].time + ' ~ ' + equity[equity.length - 1].time : '-'));
+  html += card('最终权益', '¥' + endVal.toLocaleString('zh-CN', { maximumFractionDigits: 0 }), true, '初始: ¥' + startVal.toLocaleString('zh-CN', { maximumFractionDigits: 0 }));
+  html += card('交易次数', tradeCount.toString(), true, '');
+  html += card('事件总数', (data.total_events || 0).toString(), true, eventTypes);
+  html += '</div>';
+
+  // ── 风险指标卡片 ──
+  if (risk && Object.keys(risk).length > 0 && risk.total_return !== undefined) {
+    html += '<div class="benchmark-section"><h3>风险指标</h3>';
+    html += '<div class="grid">';
+    html += card('年化收益率', (risk.annual_return !== undefined ? (risk.annual_return * 100).toFixed(2) : '-') + '%', (risk.annual_return || 0) >= 0, '');
+    html += card('年化波动率', (risk.annual_volatility !== undefined ? (risk.annual_volatility * 100).toFixed(2) : '-') + '%', false, '');
+    html += card('夏普比率', risk.sharpe_ratio !== undefined ? risk.sharpe_ratio.toFixed(2) : '-', (risk.sharpe_ratio || 0) > 1, '');
+    html += card('最大回撤', risk.max_drawdown !== undefined ? (risk.max_drawdown * 100).toFixed(2) + '%' : '-', false, '持续 ' + (risk.max_drawdown_duration_days || 0) + ' 天');
+    html += card('VaR (95%)', risk.var_95 !== undefined ? (risk.var_95 * 100).toFixed(2) + '%' : '-', false, '日收益率 5% 分位');
+    html += card('VaR (99%)', risk.var_99 !== undefined ? (risk.var_99 * 100).toFixed(2) + '%' : '-', false, '日收益率 1% 分位');
+    html += card('CVaR (95%)', risk.cvar_95 !== undefined ? (risk.cvar_95 * 100).toFixed(2) + '%' : '-', false, '条件 VaR / 期望损失');
+    html += '</div></div>';
+  }
+
+  // ── 基准对比指标 ──
+  if (benchmark && (benchmark.alpha != null || benchmark.beta != null || benchmark.information_ratio != null || benchmark.tracking_error != null)) {
+    html += '<div class="benchmark-section"><h3>基准对比</h3>';
+    html += '<div class="grid">';
+    html += card('Alpha', (benchmark.alpha || 0).toFixed(4), (benchmark.alpha || 0) > 0, '超额收益');
+    html += card('Beta', (benchmark.beta || 0).toFixed(4), true, '市场敏感度');
+    html += card('信息比率', (benchmark.information_ratio || 0).toFixed(4), (benchmark.information_ratio || 0) > 0, '风险调整后超额');
+    html += card('跟踪误差', (benchmark.tracking_error || 0).toFixed(4), false, '追踪偏离度');
+    html += '</div></div>';
+  }
+
+  // ── 权益曲线 + 事件分布 ──
+  html += '<div class="two-col">';
+  html += '<div class="chart-container"><h3>权益曲线</h3><div class="chart-wrapper"><canvas id="equityChart"></canvas></div></div>';
+  html += '<div class="chart-container"><h3>事件分布</h3><div class="chart-wrapper"><canvas id="eventChart"></canvas></div></div>';
+  html += '</div>';
+
+  // ── 日收益率分布 ──
+  html += '<div class="chart-container"><h3>日收益率分布</h3><div class="chart-wrapper"><canvas id="returnsChart"></canvas></div></div>';
+
+  // ── 交易明细 ──
+  if (trades.length > 0) {
+    html += '<div class="chart-container"><h3>交易明细 (' + trades.length + ' 笔)</h3><table><tr><th>时间</th><th>标的</th><th>方向</th><th>价格</th><th>数量</th><th>持仓市值</th></tr>';
+    trades.slice(-50).reverse().forEach(t => {
+      html += '<tr><td>' + (t.time || '').slice(0, 16) + '</td><td>' + (t.symbol || '') + '</td><td>' + (t.type || '') + '</td><td>' + (t.price || 0).toFixed(2) + '</td><td>' + (t.quantity || 0).toFixed(0) + '</td><td>¥' + (t.portfolio_value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + '</td></tr>';
+    });
+    html += '</table></div>';
+  }
+
+  content.innerHTML = html;
+
+  // 绘制图表
+  drawEquityChart(equity);
+  drawEventChart(events);
+  drawReturnsChart(equity);
+}
+
+function card(title, value, positive, sub) {
+  const cls = typeof positive === 'boolean' ? (positive ? 'positive' : (String(value).startsWith('-') ? 'negative' : '')) : '';
+  return '<div class="card"><h3>' + title + '</h3><div class="value ' + cls + '">' + value + '</div>' + (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
+}
+
+// ── 权益曲线（Chart.js 折线图） ──
+function drawEquityChart(data) {
+  const canvas = document.getElementById('equityChart');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+
+  if (!data || data.length < 2) {
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('数据不足，无法绘制权益曲线', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  const labels = data.map(d => d.time || '');
+  const values = data.map(d => d.value);
+
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: '权益',
+        data: values,
+        borderColor: '#3b82f6',
+        backgroundColor: (ctx) => {
+          const gradient = ctx.chart.ctx.createLinearGradient(0, 0, 0, ctx.chart.height);
+          gradient.addColorStop(0, 'rgba(59,130,246,0.2)');
+          gradient.addColorStop(1, 'rgba(59,130,246,0.01)');
+          return gradient;
+        },
+        fill: true,
+        tension: 0.15,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        pointHoverBackgroundColor: '#3b82f6',
+        pointHoverBorderColor: '#fff',
+        borderWidth: 2,
+      }],
+    },
+    options: chartBaseOptions(),
+  });
+}
+
+// ── 日收益率分布（Chart.js 柱状图） ──
+function drawReturnsChart(equityData) {
+  const canvas = document.getElementById('returnsChart');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+
+  // 从权益曲线计算日收益率
+  if (!equityData || equityData.length < 2) {
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('数据不足，无法计算日收益率', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  // 按日期聚合（取每日最后一个权益值）
+  const dailyMap = new Map();
+  equityData.forEach(d => {
+    const date = (d.time || '').slice(0, 10);
+    if (date) dailyMap.set(date, d.value);
+  });
+
+  const dates = Array.from(dailyMap.keys()).sort();
+  if (dates.length < 2) {
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('跨日数据不足，无法计算日收益率', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  const dailyReturns = [];
+  const returnLabels = [];
+  for (let i = 1; i < dates.length; i++) {
+    const prevVal = dailyMap.get(dates[i - 1]);
+    const currVal = dailyMap.get(dates[i]);
+    const ret = prevVal > 0 ? ((currVal - prevVal) / prevVal) * 100 : 0;
+    dailyReturns.push(ret);
+    returnLabels.push(dates[i]);
+  }
+
+  // 正收益绿色，负收益红色
+  const colors = dailyReturns.map(r => r >= 0 ? 'rgba(34,197,94,0.7)' : 'rgba(239,68,68,0.7)');
+  const borderColors = dailyReturns.map(r => r >= 0 ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)');
+
+  returnsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: returnLabels,
+      datasets: [{
+        label: '日收益率 (%)',
+        data: dailyReturns,
+        backgroundColor: colors,
+        borderColor: borderColors,
+        borderWidth: 1,
+        borderRadius: 2,
+      }],
+    },
+    options: Object.assign({}, chartBaseOptions(), {
+      scales: {
+        x: Object.assign({}, chartBaseOptions().scales.x, { ticks: Object.assign({}, chartBaseOptions().scales.x.ticks, { maxTicksLimit: 10 }) }),
+        y: Object.assign({}, chartBaseOptions().scales.y, {
+          ticks: Object.assign({}, chartBaseOptions().scales.y.ticks, {
+            callback: v => v.toFixed(2) + '%',
+          }),
+          title: { display: true, text: '收益率 (%)', color: '#64748b', font: { size: 11 } },
+        }),
+      },
+    }),
+  });
+}
+
+// ── 事件分布饼图 ──
+function drawEventChart(events) {
+  const canvas = document.getElementById('eventChart');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+  const labels = Object.keys(events || {});
+  const values = Object.values(events || {});
+  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899'];
+
+  if (labels.length === 0) {
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('暂无事件数据', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  eventChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: labels,
+      datasets: [{
+        data: values,
+        backgroundColor: labels.map((_, i) => colors[i % colors.length]),
+        borderColor: '#1e293b',
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: '#94a3b8', font: { size: 11 }, padding: 14 },
+        },
+        tooltip: {
+          backgroundColor: '#1e293b',
+          titleColor: '#f8fafc',
+          bodyColor: '#e2e8f0',
+          borderColor: '#334155',
+          borderWidth: 1,
+          padding: 12,
+          cornerRadius: 8,
+          callbacks: {
+            label: ctx => ctx.label + ': ' + ctx.parsed + ' 次',
+          },
+        },
+      },
+    },
+  });
+}
+
+// ── 多策略对比 ──
+let compareMode = false;
+
+async function toggleCompare() {
+  compareMode = !compareMode;
+  const btn = document.getElementById('compareBtn');
+  const compareDiv = document.getElementById('compareContent');
+
+  if (compareMode) {
+    btn.classList.add('active');
+    btn.textContent = '退出对比';
+    await loadCompare();
+    compareDiv.style.display = 'block';
+  } else {
+    btn.classList.remove('active');
+    btn.textContent = '多策略对比';
+    compareDiv.style.display = 'none';
+  }
+}
+
+async function loadCompare() {
+  const compareDiv = document.getElementById('compareContent');
+  compareDiv.innerHTML = '<div class="loading"><div class="spinner"></div>加载对比数据</div>';
+
+  try {
+    const res = await fetch(API + '/api/runs');
+    const data = await res.json();
+    if (!data.runs || data.runs.length === 0) {
+      compareDiv.innerHTML = '<div class="error-box"><div class="error-title">暂无回测运行记录</div></div>';
+      return;
+    }
+    const allRunIds = data.runs.map(r => r.run_id);
+
+    const compRes = await fetch(API + '/api/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_ids: allRunIds }),
+    });
+    if (!compRes.ok) throw new Error('HTTP ' + compRes.status);
+    const compData = await compRes.json();
+
+    if (!compData.comparison || compData.comparison.length === 0) {
+      compareDiv.innerHTML = '<div class="error-box"><div class="error-title">无对比数据</div></div>';
+      return;
+    }
+
+    renderCompareTable(compData.comparison);
+  } catch (e) {
+    compareDiv.innerHTML = '<div class="error-box"><div class="error-title">对比加载失败</div><div class="error-detail">' + e.message + '</div><button class="retry-btn" onclick="loadCompare()">重试</button></div>';
+  }
+}
+
+function renderCompareTable(comparison) {
+  const compareDiv = document.getElementById('compareContent');
+  if (!comparison || comparison.length === 0) {
+    compareDiv.innerHTML = '<div class="error-box"><div class="error-title">无对比数据</div></div>';
+    return;
+  }
+
+  const columns = Object.keys(comparison[0]).filter(k => k !== 'run_id');
+  const colLabels = {
+    total_return: '总收益率', annual_return: '年化收益率',
+    annual_volatility: '年化波动率', sharpe_ratio: '夏普比率',
+    max_drawdown: '最大回撤', max_drawdown_duration_days: '回撤持续(天)',
+    var_95: 'VaR 95%', var_99: 'VaR 99%', cvar_95: 'CVaR 95%',
+    trade_count: '交易次数',
+  };
+  const costCols = ['max_drawdown', 'max_drawdown_duration_days', 'annual_volatility', 'var_95', 'var_99', 'cvar_95'];
+
+  let html = '<div class="compare-table-container"><h3>多策略对比 (' + comparison.length + ' 个运行)</h3>';
+  html += '<div class="compare-table-scroll"><table><thead><tr><th>指标</th>';
+  comparison.forEach(r => {
+    html += '<th>' + (r.run_id || '').slice(0, 12) + '...</th>';
+  });
+  html += '<th style="color:#f59e0b">最佳</th></tr></thead><tbody>';
+
+  columns.forEach(col => {
+    html += '<tr><td>' + (colLabels[col] || col) + '</td>';
+    const vals = comparison.map(r => {
+      const v = r[col];
+      if (v === undefined || v === null) return { disp: '-', num: null };
+      if (col === 'trade_count' || col === 'max_drawdown_duration_days') {
+        return { disp: String(v), num: v };
+      }
+      return { disp: (v * 100).toFixed(2) + '%', num: v };
+    });
+
+    const isCost = costCols.indexOf(col) >= 0;
+
+    vals.forEach(v => {
+      html += '<td>' + v.disp + '</td>';
+    });
+
+    const nums = vals.filter(v => v.num !== null).map(v => v.num);
+    if (nums.length > 0) {
+      const best = isCost ? Math.min.apply(null, nums) : Math.max.apply(null, nums);
+      const bestDisplay = (col === 'trade_count' || col === 'max_drawdown_duration_days')
+        ? String(best) : (best * 100).toFixed(2) + '%';
+      html += '<td style="color:#22c55e;font-weight:600">' + bestDisplay + '</td>';
+    } else {
+      html += '<td>-</td>';
+    }
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div></div>';
+  compareDiv.innerHTML = html;
+}
+
+loadRuns();
+</script>
+</body>
+</html>
