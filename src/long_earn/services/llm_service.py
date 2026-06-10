@@ -13,9 +13,6 @@ from long_earn.utils.llm_factory import create_llm
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
-# LLM 调用默认超时（秒）
-DEFAULT_LLM_TIMEOUT = 300
-
 
 class LLMServiceImpl(LLMService):
     """LLM 服务实现
@@ -85,18 +82,16 @@ class LLMServiceImpl(LLMService):
                     llm = self.llm.bind(format="json")
                 elif config.llm_type in ("dashscope", "openai"):
                     # OpenAI 兼容 API 使用 response_format
-                    llm = self.llm.bind(
-                        response_format={"type": "json_object"}
-                    )
+                    llm = self.llm.bind(response_format={"type": "json_object"})
 
             response = llm.invoke(prompt)
             if logger:
                 content_preview = (
-                    response.content[:100] if hasattr(response, "content") else str(response)[:100]
+                    response.content[:100]
+                    if hasattr(response, "content")
+                    else str(response)[:100]
                 )
-                logger.debug(
-                    f"LLM 调用 #{call_id} 完成，响应预览: {content_preview!r}"
-                )
+                logger.debug(f"LLM 调用 #{call_id} 完成，响应预览: {content_preview!r}")
             return response
         except Exception as e:
             if logger:

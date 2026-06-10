@@ -3,6 +3,10 @@ import re
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+_H2_LEVEL = 2
+_H3_LEVEL = 3
+_H4_LEVEL = 4
+
 
 class MarkdownHeadingSplitter:
     """Markdown 标题感知切分器
@@ -33,7 +37,7 @@ class MarkdownHeadingSplitter:
         self.length_function = len
         self.heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$")
 
-    def split_text(self, text: str) -> list[Document]:
+    def split_text(self, text: str) -> list[Document]:  # noqa: PLR0915
         """分割文本为 Document 列表
 
         Args:
@@ -93,11 +97,11 @@ class MarkdownHeadingSplitter:
                     current_h2 = ""
                     current_h3 = ""
                     current_content = []
-                elif level == 2:
+                elif level == _H2_LEVEL:
                     flush_term()
                     current_h2 = title
                     current_h3 = ""
-                elif level == 3 or level == 4:
+                elif level in {_H3_LEVEL, _H4_LEVEL}:
                     flush_term()
                     current_h3 = title
                 else:

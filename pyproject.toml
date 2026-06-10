@@ -1,6 +1,6 @@
 [project]
 name = "long_earn"
-version = "0.7.0"
+version = "1.0.1"
 description = "自我进化的量化交易系统"
 authors = [
     { name = "shiyz", email = "shiyz@eoutlook.com" },
@@ -8,6 +8,7 @@ authors = [
 requires-python = "==3.11.*"
 dependencies = [
     "pandas>=2.0.0",
+    "polars>=1.0.0",
     "numpy>=1.24.0",
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
@@ -23,10 +24,11 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4.3",
     "langgraph-checkpoint-sqlite>=2.0.11",
     "akshare>=1.10.0",
-    "langchain-qdrant>=0.2.1",
-    "qdrant-client>=1.16.1",
+    "duckdb>=0.10.0",
+    "pyyaml>=6.0.0",
     "tavily-python>=0.7.23",
     "httpx>=0.25.0",
+    "pyarrow>=24.0.0",
 ]
 
 [project.scripts]
@@ -35,6 +37,9 @@ long_earn = "long_earn.__main__:main"
 [project.optional-dependencies]
 dev = [
     "ruff>=0.15.11",
+]
+embed = [
+    "sentence-transformers>=3.0.0",
 ]
 [tool.uv]
 package = true
@@ -54,14 +59,74 @@ src = ["src", "tests"]
 exclude = [".venv", "build", "dist"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF", "C", "PL", "ARG"]
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLC0415", "PLR2004", "ARG001", "ARG002", "ARG005", "PLR0913"]
+"tests/integration/conftest.py" = ["PLC0415", "PLR2004", "PLR0912", "PLR0915", "PLW2901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.ruff.lint.isort]
 known-first-party = ["long_earn"]
 combine-as-imports = true
 
+[tool.mypy]
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true
+exclude = ["tests/"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=long_earn --cov-report=term --cov-report=html --cov-fail-under=0"
+python_files = ["test_*.py"]
+
+[tool.coverage.run]
+source = ["src/long_earn"]
+omit = ["tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true
+skip_covered = false
+
+[tool.importlinter]
+root_package = "long_earn"
+
+[[tool.importlinter.contracts]]
+id = "backtest_data_independent"
+name = "数据层不依赖上层模块"
+type = "independence"
+modules = ["long_earn.backtest.data"]
+message = "backtest.data 层不应依赖 engine/services/tools"
+
+[[tool.importlinter.contracts]]
+id = "service_architecture"
+name = "服务层不依赖 tools"
+type = "independence"
+modules = ["long_earn.services"]
+message = "services 层不应依赖 tools 模块"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "ruff>=0.15.11",
+    "mypy>=1.0.0",
+    "import-linter>=2.0",
+    "pyright>=1.1.409",
+    "pytest-cov>=7.1.0",
+    "types-pyyaml>=6.0.12.20260510",
+    "types-pytz>=2026.2.0.20260506",
 ]

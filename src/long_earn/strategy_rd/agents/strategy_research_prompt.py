@@ -84,15 +84,3 @@ strategy_optimize_prompt = PromptTemplate(
 ```
 """,
 )
-
-# 占位提示词 - 当前代码未使用
-strategy_generation_prompt = PromptTemplate(
-    input_variables=["query"],
-    template="{query}",
-)
-
-# 占位提示词 - 当前代码未使用
-strategy_update_prompt = PromptTemplate(
-    input_variables=["strategy"],
-    template="{strategy}",
-)

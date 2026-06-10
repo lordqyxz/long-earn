@@ -1,508 +1,209 @@
-<!-- 使用code生成之前先导入本文件 -->
+# Long Earn
 
-# Quic Start
-本项目包管理器采用 [uv](https://docs.astral.sh/uv/)
-## 安装依赖
+自我进化的量化交易系统（v1.0.1）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+
+## 系统概览
+
+Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
+
+- **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
+- **策略研发** — 基于 Reflexion 框架的闭环策略研发：研究 → 开发 → 回测 → 反思 → 优化，支持多轮迭代和自适应知识检索
+- **多视角股票分析** — 从巴菲特、查理芒格、彼得林奇、费雪四个投资大师视角并行分析股票
+- **自我进化** — 策略经验自动沉淀到 3-Tier 记忆系统，后续研发可检索历史经验作为参考
+- **内嵌回测引擎** — 向量化回测引擎直接集成在主项目中，通过 YAML DSL 描述策略，无需外部服务
+
+## 工作流
+
+```
+用户查询
+  └─ 主图（意图识别 + 路由）
+       ├─ 策略研究子图
+       │    └─ 初始检索 → 自适应检索 → 研究 → 开发 → 回测
+       │         └─ 回测成功 → 反思 → 保存经验 → 监督器 → 优化（循环）
+       │         └─ 回测失败 → 代码修复 → 重新回测（最多 3 次）
+       └─ 股票分析子图
+            └─ 数据获取 → 四视角并行分析 → 汇总
+                 ├─ 巴菲特视角（价值投资）
+                 ├─ 查理芒格视角（多学科思维）
+                 ├─ 彼得林奇视角（PEG 策略）
+                 └─ 费雪视角（成长股投资）
+```
+
+## 快速开始
+
+### 前置条件
+
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/) 包管理器
+- LLM 服务（默认 Ollama，也支持 DashScope / OpenAI 兼容 API）
+
+### 安装
 
 ```sh
+# 克隆仓库
+git clone https://github.com/lordqyxz/long-earn.git
+cd long-earn
+
+# 安装依赖
 uv sync
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env，至少配置 LLM 相关变量
 ```
 
-## 开始开发
-
-```bash
-uv pip install -e .
-```
-## 运行项目
+### 运行
 
 ```sh
+# 启动主项目
 uv run python -m long_earn
 ```
 
----
+### 常用命令
 
-# 项目设计 v0.8
-
-## 重要更新 (v0.8) - 依赖注入重构
-
-本次重构基于 **Clean Architecture** 理念，参考 **LangGraph Runtime 和 Context 实践**，实现了完整的依赖注入架构：
-
-### 核心改进
-
-- ✅ 使用 `RuntimeContext` 集中管理依赖和配置
-- ✅ 所有核心功能服务化（LLM、知识库、股票、回测等）
-- ✅ Agent 类统一使用构造函数注入依赖（必须传入 context）
-- ✅ 移除全局状态和向后兼容代码
-- ✅ 移除 pytest 测试，使用手动测试脚本
-
-### 使用方式
-
-```python
-from long_earn.config import AppConfig
-from long_earn.context_init import create_runtime_context
-
-# 创建上下文
-context = create_runtime_context()
-
-# 在节点中使用（类型安全）
-def my_node(state: State, context: RuntimeContext):
-    # 推荐：使用 get_typed() 方法（类型安全）
-    llm_service = context.get_typed("llm_service")
-    knowledge_service = context.get_typed("knowledge_service")
-    
-    response = llm_service.invoke(prompt)  # ✅ 类型检查通过
-    results = knowledge_service.search(query)  # ✅ 类型检查通过
-    
-    # 或者使用泛型函数（更严格的类型检查）
-    # from long_earn.config import get_service
-    # llm_service = get_service(context, "llm_service", LLMServiceImpl)
+```sh
+uv sync                                    # 安装依赖
+uv run python -m long_earn                 # 运行项目
+uv run pytest tests/ -v                    # 运行全部测试
+uv run pytest tests/unit/ -v               # 仅运行单元测试
+uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
+uv run ruff check .                        # 代码检查
+uv run ruff format .                       # 代码格式化
+uv run mypy src/                           # 类型检查
+uv run lint-imports                        # 架构依赖校验
 ```
 
-### 验证测试
+### 环境变量
 
-```bash
-uv run python scripts/test_refactor.py
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `LLM_TYPE` | LLM 类型（ollama/dashscope/openai） | `ollama` |
+| `LLM_MODEL` | 模型名称 | `qwen3.5:cloud` |
+| `LLM_BASE_URL` | LLM API 地址 | `http://localhost:11434` |
+| `DASHSCOPE_API_KEY` | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） | — |
+| `OPENAI_API_KEY` | OpenAI API Key（LLM_TYPE=openai 时必填） | — |
+| `MEMORY_PATH` | 记忆持久化路径 | `~/.long_earn/memory.npz` |
+| `INIT_DIR` | 知识库初始化目录 | `./init` |
+| `BACKTEST_START_DATE` | 回测默认起始日期 | `2020-01-01` |
+| `BACKTEST_END_DATE` | 回测默认结束日期 | `2023-12-31` |
+| `MAX_ITERATIONS` | 策略研发最大迭代次数 | `3` |
+| `STRATEGY_KEYWORDS` | 策略研究路由关键词（逗号分隔） | `策略,思路,投资策略` |
+| `STOCK_ANALYSIS_KEYWORDS` | 股票分析路由关键词（逗号分隔） | `股票,分析,公司` |
+
+## 架构
+
+系统采用依赖注入架构，所有服务通过 `RuntimeContext` 统一传递：
+
+```
+AppConfig.from_env()
+    ↓
+create_runtime_context(config) / initialize_context(config)
+    ↓
+RuntimeContext
+    ├── llm_service        — LLM 调用
+    ├── memory_service     — 3-Tier 记忆系统（检索与存储）
+    ├── stock_service      — 股票数据获取
+    ├── backtest_service   — 内嵌回测引擎
+    ├── logger             — 日志记录
+    ├── monitoring         — 性能监控
+    └── config             — 应用配置
 ```
 
-预期输出：
-```
-============================================================
-✅ 所有测试通过！
-============================================================
-```
+服务接口定义为 `Protocol` 类，可在测试中轻松替换为 Mock 实现。
 
----
+### 策略研究子图
 
-## 测试指南
+基于 [Reflexion](https://www.promptingguide.ai/zh/techniques/reflexion) 框架，闭环迭代优化策略：
 
-### 测试计划
+1. **自适应检索** — 根据查询自动从记忆系统检索相关信息，评估是否需要补充检索
+2. **策略研究** — LLM 结合知识上下文生成投资策略
+3. **策略开发** — 将策略转化为 YAML DSL 策略描述
+4. **回测** — 通过内嵌向量化回测引擎执行回测，失败时自动修复代码（最多 3 次）
+5. **反思** — 基于 Tree of Thought 多分支反思，分析回测结果并提出改进方向
+6. **保存经验** — 将策略和反思沉淀到 3-Tier 记忆系统
+7. **监督器** — 评估是否继续迭代（终止条件：年化收益率 > 10% 且夏普比率 > 0.5）
 
-完整的测试计划和进度请参考 [tests/README.md](tests/README.md)。
+### 股票分析子图
 
-**当前测试覆盖率**: 15.8% (9/57 个测试用例)
+从四个投资大师视角并行分析股票内在价值，通过 akshare 获取股票和财务数据，支持指数退避重试。
 
-**里程碑**:
-- M1: 核心测试完成（v0.9）- 2026-03-30
-- M2: 完整测试覆盖（v0.10）- 2026-04-25
-- M3: 性能优化（v0.11）- 2026-05-15
+### 回测引擎（内嵌）
 
-### 策略研究子图测试
+回测引擎已整合到主项目中（`src/long_earn/backtest/`），通过 YAML DSL 描述策略，无需 HTTP 远程调用。
 
-本项目采用分层测试策略，提供三种类型的测试：
+**引擎结构：**
 
-#### 1. 单元测试（无 LLM 依赖）
-
-测试子图结构、状态流转、节点逻辑，无需真实 API 调用。
-
-**运行所有单元测试**：
-```bash
-uv run langgraph dev
-```
-
-**运行特定测试**：
-```bash
-# 运行策略研究子图单元测试
-uv run python tests/test_strategy_rd_unit.py
-
-# 运行特定测试用例
-uv run pytest tests/unit/test_strategy_rd/test_subgraph.py::test_subgraph_creation -v
+```txt
+src/long_earn/backtest/
+├── models.py                # BacktestResult Pydantic 模型
+├── domain/
+│   ├── entities.py          # 领域实体（Portfolio、DateRange）+ 值对象（PerformanceMetrics）
+│   └── exceptions.py        # 领域异常层次
+├── engine/
+│   ├── core.py              # 向量化回测引擎（Pandas MultiIndex 矩阵运算）
+│   ├── dsl.py               # YAML DSL 解析器（StrategyDSL + 字段校验）
+│   └── evaluator.py         # AST 白名单表达式求值器
+└── data/
+    ├── cache.py             # DuckDB 本地缓存（行情 / 财务 / 成分股）
+    ├── provider.py          # Akshare 数据获取（行情 + 财务前向填充）
+    └── universe.py          # 股票池管理（沪深 300 / 中证 500 / 板块等）
 ```
 
-**测试内容**：
-- ✅ State 定义验证
-- ✅ 子图创建和节点注册
-- ✅ 子图结构和边连接
-- ✅ Mock 服务响应处理
-- ⏳ Agent 单元测试（进行中）
-- ⏳ 节点级别测试（计划中）
+- **YAML DSL 策略**：LLM 直接生成 YAML 策略描述（因子、信号、权重、风控），引擎解析后执行向量化回测
+- **因子表达式**：支持 `shift(field, n)`、`rank(field)`、`np`/`pd` 函数调用
+- **可用字段**：10 个行情字段（open/high/low/close/volume）和 7 个财务字段（roe/eps/net_profit_yoy 等）
+- **股票池**：支持全 A / csi300 / csi500 / main_board / gem / star_board 及组合
+- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，减少 akshare 请求
 
-**优势**：
-- 快速执行（秒级）
-- 无需 API 调用
-- 可持续集成
+### 记忆系统
 
-#### 2. 集成测试（使用真实 LLM）
+基于 numpy/pandas 的 3-Tier 记忆系统，无需外部向量数据库：
 
-测试完整的策略研究流程，需要配置好 LLM 和相关服务。
+```txt
+src/long_earn/memory/
+├── store.py                 # 3-Tier 记忆存储（Working / Core / Archival）
+├── tfidf.py                 # TF-IDF 向量化器 + 余弦相似度检索
+└── graph.py                 # 关系图存储（entity-relation graph）
+```
 
-**运行所有集成测试**：
-```bash
+- **Working**：会话级临时上下文（当前推理窗口）
+- **Core**：持久化事实、策略规则、用户偏好
+- **Archival**：历史经验、过往回测结果、已过期的规则
+- **持久化**：`~/.long_earn/memory.npz`
+- **检索**：`recall()` 支持按层级、关键词、分类过滤；`search()` 返回格式化字符串
+
+## 技术栈
+
+| 类别 | 技术 |
+|------|------|
+| 语言 | Python 3.11 |
+| 工作流框架 | LangGraph |
+| LLM | Ollama（默认）/ DashScope / OpenAI 兼容 API |
+| 回测引擎 | 自研向量化回测引擎（Pandas + NumPy） |
+| 记忆系统 | 3-Tier 记忆（TF-IDF + 余弦相似度 + 关系图） |
+| 数据缓存 | DuckDB |
+| 证券数据 | akshare |
+| Web 搜索 | Kimi Web Search / Tavily |
+| 日志 | loguru |
+| 包管理 | uv |
+
+## 测试
+
+```sh
+# 单元测试（无需 API 调用）
+uv run pytest tests/unit/ -v
+
+# 集成测试（需要 .env 配置）
 uv run pytest tests/integration/ -v
+
+# 代码格式化和检查
+uv run ruff check . && uv run ruff format .
 ```
 
-**运行特定测试**：
-```bash
-# 运行策略研究集成测试
-uv run python tests/test_strategy_rd_integration.py
-```
+## 知识库
 
-**测试内容**：
-- ✅ 回测功能集成
-- ✅ 真实上下文子图运行
-- ✅ 知识检索功能
-- ✅ 策略生成和代码开发
-- ✅ 完整流程简化版
-- ⏳ 股票分析集成测试（计划中）
-- ⏳ 知识库集成测试（计划中）
+系统启动时自动加载 `init/` 目录下的文档到 3-Tier 记忆系统，支持 .md、.txt、.py 格式。策略研发过程中自动检索相关知识，成功的策略经验也会沉淀回记忆系统，实现系统的自我进化。
 
-**注意**：需要正确配置 `.env` 文件才能运行。
+## 许可
 
-#### 3. 端到端测试（E2E）
-
-测试完整的用户场景和业务流程。
-
-**运行 E2E 测试**：
-```bash
-uv run pytest tests/e2e/ -v
-```
-
-**测试内容**：
-- ⏳ 完整流程测试（计划中）
-- ⏳ 用户场景测试（计划中）
-- ⏳ 回归测试（计划中）
-
-### 生成测试覆盖率报告
-
-```bash
-# 生成 HTML 报告
-uv run pytest tests/unit/ --cov=src/long_earn --cov-report=html
-
-# 生成终端报告
-uv run pytest tests/unit/ --cov=src/long_earn --cov-report=term-missing
-```
-
-### 性能测试
-
-```bash
-# 运行基准测试
-uv run pytest tests/performance/test_benchmark.py -v
-
-# 运行负载测试
-uv run pytest tests/performance/test_load.py -v
-```
-
----
-
----
-
-## 初识知识库系统
-
-- 系统启动时自动加载 `init/` 目录下的文档到 Qdrant 向量数据库
-- 支持保存和搜索交易经验，实现策略迭代的知识积累
-- 策略生成时自动搜索知识库获取参考信息
-- 支持 .md、.txt、.py 文件格式
-
----
-
-## 智能体设计
-### 角色
-你是一个证券交易顾问智能体,能够回答顾客关于股票信息，深度分析，交易策略回测等问题。
-
-### 技能
-作为一个证券交易顾问智能体，你具有以下功能：
-
-### 1. 意图识别与路由
-
-- 分析用户查询，路由到相应子图处理
-- 基于 LangGraph 的 [subgraphs 机制](https://docs.langchain.com/oss/python/langgraph/subgraphs)
-
-### 2. 证券分析子图
-
-分析证券内在价值，生成投资建议：
-
-- **数据收集**
-  - [kimi web search](https://platform.moonshot.cn/docs/guide/use-web-search#web_search-声明)
-  - [akshare](https://akshare.akfamily.xyz)
-- **多视角分析**
-  - 彼得林奇视角（PEG 策略）
-  - 查理芒格视角（多学科思维）
-  - 巴菲特视角（价值投资）
-  - 费雪视角（成长股投资）
-- **生成报告**
-
-### 3. 策略研究子图（Strategy RD）
-
-基于 [Reflexion 框架](https://www.promptingguide.ai/zh/techniques/reflexion) 的量化策略研发：
-
-- **工作流程**
-  1. 生成初始策略代码（research → develop）
-  2. 回测分析（backtest）
-  3. 反思策略，提出优化建议（reflection，支持 ToT 多分支）
-  4. 监督器评估是否继续迭代（supervisor）
-  5. 优化并重新回测（optimize → 循环）
-  6. 达到目标或最大迭代次数后结束
-
-- **迭代控制**
-  - max_iterations：默认 3 次
-  - 终止条件：年化收益率 > 10% 且夏普比率 > 0.5
-  - 使用 LangGraph [Interrupt 机制](https://docs.langchain.com/oss/python/langgraph/interrupts)
-
-### 4. 交易执行
-
-- 运行策略，提供交易信号和建议
-- 最终交易由人工或 xtquant 执行
-
-### 5. Callback 机制
-
-- 日志记录
-- 异常处理
-- 性能监控
-- token 统计
-
----
-
-## 技术栈摘要
-
-| 类别 | 技术选型 |
-|------|---------|
-| **开发语言** | Python 3.11 |
-| **工作流框架** | LangGraph |
-| **LLM** | Ollama（默认）/ DashScope / OpenAI（兼容 lmstudio） |
-| **回测框架** | pyqlib（完整量化流程） |
-| **向量数据库** | Qdrant |
-| **记忆组件** | langchain-qdrant |
-| **日志库** | loguru |
-| **证券数据** | [akshare](https://akshare.akfamily.xyz) |
-
----
-
-## 系统模块
-- src/long_earn/agent.py 实现主图的智能体
-- src/long_earn/state.py 定义主图的状态
-- src/long_earn/strategy_rd/state：策略研究子图的状态（Reflexion 模式）
-    - subgraph.py 实现策略研究子图的文件
-    - state.py 定义策略研究子图的状态
-    - agents/ 实现策略研究子图的智能体
-        - strategy_research_agent.py 反思策略表现，提出优化建议，生成策略，优化目标（收益权重 > 回撤 > 其他）。
-        - strategy_research_prompt.py 实现策略研究子图的智能体的提示模板
-        - strategy_rd_supervisor.py 实现策略研究子图的监督器，判断是否接受优化建议并重新回测。
-        - strategy_rd_supervisor_prompt.py 实现策略研究子图的监督器的提示模板
-        - strategy_develop_agent.py 将策略转化成能让 pyqlib 回测的格式：Python 代码文件 + qlib Strategy 注册
-        - strategy_develop_prompt.py 实现策略开发子图的智能体的提示模板
-    - pyqlib 数据获取、因子计算、回测分析
-- src/long_earn/stock_analysis：股票分析子图，用于获取股票数据和计算因子
-    - state.py 定义股票分析子图的状态
-    - subgraph.py 实现股票分析子图的文件
-    - state.py 定义股票分析子图的状态
-    - agents/ 实现股票分析子图的智能体
-        - petter_analyst.py 实现彼得林奇视角的股票分析智能体
-        - petter_prompt.py 实现彼得林奇视角的股票分析智能体的提示模板
-        - charles_munger_analyst.py 实现查理芒格视角的股票分析智能体
-        - charles_munger_prompt.py 实现查理芒格视角的股票分析智能体的提示模板
-        - buffett_analyst.py 实现巴菲特视角的股票分析智能体
-        - buffett_prompt.py 实现巴菲特视角的股票分析智能体的提示模板
-        - fiske_analyst.py 实现费雪视角的股票分析智能体
-        - fiske_prompt.py 实现费雪视角的股票分析智能体的提示模板
-- src/long_earn/tools/：自定义工具
-    - subgraph_tool.py 将子图封装为工具，用于在主图中调用
-    - kimi_web_search.py 实现kimi web search工具
-    - akshare.py 实现akshare工具，用于获取股票/财务数据
-    - tavily_search.py 实现tavily search工具，用于搜索互联网
-    - code_safety_check.py 实现代码安全检查工具
-- src/long_earn/config：配置管理
-- src/long_earn/callbacks/：回调函数包
-    - logger.py 实现日志记录回调函数
-    - exception.py 实现异常处理回调函数
-    - performance.py 实现性能监控回调函数
-    - token.py 实现token统计回调函数
-- src/long_earn/utils/
-    - logger.py 实现日志记录工具,使用loguru库
-    - llm_factory.py 实现LLM工厂，用于创建LLM实例
-- tests/ 测试用例
-    - test_strategy_rd.py 测试策略研究子图
-    - test_stock_analysis.py 测试股票分析子图
-    - test_tools.py 测试自定义工具
-    - test_memory.py 测试向量数据库记忆组件
-    - test_strategy_develop.py 测试策略开发子图
-    - test_main.py 测试主图
-    - test_backtest.py 测试回测机制
-- langgraph.json 主图配置文件
-- .env 环境变量配置文件
-
-#### 主图与控制
-- `src/long_earn/agent.py` - 主图智能体（使用 context 注入）
-- `src/long_earn/state.py` - 主图状态定义
-- `src/long_earn/config.py` - 配置管理和 RuntimeContext
-- `src/long_earn/context_init.py` - 上下文初始化
-
-#### 策略研究子图
-- `src/long_earn/strategy_rd/state.py` - 策略研究子图状态
-- `src/long_earn/strategy_rd/subgraph.py` - 策略研究子图实现
-- `src/long_earn/strategy_rd/agents/`
-  - `strategy_research_agent.py` - 策略研究 Agent（支持 ToT 反思）
-  - `strategy_develop_agent.py` - 策略开发 Agent
-  - `strategy_rd_supervisor.py` - 监督器
-  - 相关 prompt 文件（版本：0.1.0）
-
-#### 股票分析子图
-- `src/long_earn/stock_analysis/state.py` - 股票分析子图状态
-- `src/long_earn/stock_analysis/subgraph.py` - 股票分析子图实现
-- `src/long_earn/stock_analysis/agents/`
-  - `petter_analyst.py` - 彼得林奇视角
-  - `buffett_analyst.py` - 巴菲特视角
-  - `charles_munger_analyst.py` - 查理芒格视角
-  - `fiske_analyst.py` - 费雪视角
-  - 相关 prompt 文件
-
-#### 服务层（依赖注入）
-- `src/long_earn/services/`
-  - `__init__.py` - 服务接口定义（Protocol）
-  - `llm_service.py` - LLM 服务
-  - `knowledge_service.py` - 知识存储服务
-  - `stock_service.py` - 股票数据服务
-  - `backtest_service.py` - 回测服务
-  - `logger_service.py` - 日志服务
-  - `monitoring_service.py` - 监控服务
-
-#### 工具模块
-- `src/long_earn/tools/`
-  - `subgraph_tool.py` - 子图封装工具
-  - `kimi_web_search.py` - Web 搜索工具
-  - `get_stock_info.py` - 股票数据工具（akshare）
-  - `store.py` - 知识库存储工具（Qdrant）
-  - `md_splitter.py` - Markdown 分割工具
-  - `backtest.py` - 回测工具
-  - `code_safety_check.py` - 代码安全检查
-
-
-#### 工具类
-- `src/long_earn/utils/`
-  - `llm_factory.py` - LLM 工厂
-  - `logger.py` - 日志工具（简化版）
-
-#### 配置文件
-- `langgraph.json` - 主图配置
-- `.env` - 环境变量配置
-
-## 最简控制流
-用户请求 → 主图：意图判断 → 调用子图/工具 → 结果汇总 → 返回结果
-```
-
----
-
-## 开发注意事项
-
-### 状态管理
-
-- 节点返回值：每个节点只需返回要更新的 key，不需要返回整个状态
-- LangGraph 会自动合并节点返回的更新到全局状态
-
-### 回测框架
-
-- 包名：`pyqlib`
-- [文档](https://qlib.readthedocs.io/en/latest/)
-
-### 依赖注入规范
-
-所有 Agent 和子图现在必须通过 context 初始化：
-
-```python
-# ❌ 旧方式（不再有效）
-agent = StrategyResearchAgent()
-subgraph = create_strategy_rd_subgraph()
-
-# ✅ 新方式
-context = create_runtime_context()
-agent = StrategyResearchAgent(context=context)
-subgraph = create_strategy_rd_subgraph(context)
-```
-
-### 日志和监控
-
-```python
-# ❌ 旧方式（不再有效）
-from long_earn.utils.logger import LOGGER
-LOGGER.info("消息")
-
-# ✅ 新方式
-def my_node(state, context):
-    logger = context.get("logger")
-    logger.info("消息")
-```
-
----
-
-## 提示词规范
-
-### 文件组织
-
-- 每个提示词独立文件管理，位于对应 agents 目录下
-- 文件包含：文档字符串、版本号（`__version__`）、PromptTemplate 定义
-- 所有提示词统一使用 `PromptTemplate` 类型
-
-### 版本管理
-
-- 每个提示词文件包含 `__version__` 属性，初始版本为 `0.1.0`
-- 版本号格式：`主版本。次版本。修订版本`
-- 修改提示词时更新版本号
-
-### 文档规范
-
-每个提示词文件顶部必须包含文档字符串，说明：
-- 适用场景
-- 输入参数
-- 输出格式
-- 使用示例
-- 注意事项
-- 版本信息
-
-### 监控系统
-
-- 记录指标：token 使用、执行时间、成功率
-
----
-
-## Python 代码规范
-
-- 所有 Python 代码必须符合 pylance 规范
-- 所有 Python 代码必须添加类型注解
-- str 类型的参数需要添加默认值空字符串 `""`
-
----
-
-## 架构设计要求
-
-### 可测试性
-
-- ✅ 可以在测试中注入 Mock 服务
-- ✅ 无需真实 API 调用即可测试
-- ✅ 测试速度提升 10-100 倍
-
-### 可维护性
-
-- ✅ 依赖关系清晰（通过构造函数）
-- ✅ 模块解耦（通过服务接口）
-- ✅ 配置集中管理
-
-### 可扩展性
-
-- ✅ 易于替换实现（如切换 LLM 提供商）
-- ✅ 易于添加新服务
-- ✅ 支持插件化架构
-
-
-## 未来计划
-
-### v0.9 计划
-
-- [ ] 添加更多服务（如 Web Search 服务）
-- [ ] 优化 context 初始化性能
-- [ ] 完善文档和示例
-- [ ] 完成核心 Agent 单元测试（策略研究 + 股票分析）
-- [ ] 完成关键集成测试
-
-### v0.10 计划
-
-- [ ] 引入完整的 Clean Architecture 分层
-- [ ] 添加插件化架构支持
-- [ ] 完善 API 文档
-- [ ] 完成所有单元测试（覆盖率≥80%）
-- [ ] 完成 E2E 测试套件
-- [ ] 建立 CI/CD 流程
-
----
-
-**版本**: v0.8.1  
-**更新日期**: 2026-03-23  
-**测试覆盖率**: 15.8% (9/57)  
-**测试计划**: [tests/README.md](tests/README.md)
+MIT

@@ -75,7 +75,9 @@ class StockServiceImpl(StockService):
                     "name": "未找到股票",
                 }
 
-            stock_dict = dict(zip(stock_info["item"], stock_info["value"]))
+            stock_dict = dict(
+                zip(stock_info["item"], stock_info["value"], strict=False)
+            )
 
             return {
                 "code": stock_code,

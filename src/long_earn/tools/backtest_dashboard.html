@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>回测可视化仪表盘</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 24px; color: #f8fafc; }
+  .runs-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+  .runs-bar button { background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .runs-bar button:hover { border-color: #3b82f6; color: #e2e8f0; }
+  .runs-bar button.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+  .refresh-btn { background: #3b82f6; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-left: auto; }
+  .refresh-btn:hover { background: #2563eb; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+  .card h3 { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; }
+  .card .value.positive { color: #22c55e; }
+  .card .value.negative { color: #ef4444; }
+  .card .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .chart-container { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 24px; }
+  .chart-container h3 { font-size: 14px; color: #94a3b8; margin-bottom: 16px; }
+  canvas { width: 100%; height: 320px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #64748b; font-weight: 500; border-bottom: 1px solid #334155; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  tr:hover td { background: #0f172a; }
+  .loading { text-align: center; padding: 60px; color: #64748b; }
+  .loading::after { content: '...'; animation: dots 1.5s infinite; }
+  @keyframes dots { 0%,20% { content: '.'; } 40% { content: '..'; } 60%,100% { content: '...'; } }
+  .error { color: #ef4444; text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📊 回测可视化仪表盘</h1>
+  <div class="runs-bar" id="runsBar">
+    <button class="refresh-btn" onclick="loadRuns()">🔄 刷新</button>
+  </div>
+  <div id="content"><div class="loading">加载中</div></div>
+</div>
+<script>
+const API = '';  // 空 = 同源
+
+async function loadRuns() {
+  const bar = document.getElementById('runsBar');
+  bar.innerHTML = '<button class="refresh-btn" onclick="loadRuns()">🔄 刷新</button>';
+  try {
+    const res = await fetch(API + '/api/runs');
+    const data = await res.json();
+    if (!data.runs || data.runs.length === 0) {
+      document.getElementById('content').innerHTML = '<div class="loading">暂无回测运行记录</div>';
+      return;
+    }
+    data.runs.forEach(r => {
+      const btn = document.createElement('button');
+      btn.textContent = r.run_id.slice(0, 8) + '…' + (r.started ? ' ' + r.started.slice(0, 10) : '');
+      btn.onclick = () => { document.querySelectorAll('.runs-bar button').forEach(b => b.classList.remove('active')); btn.classList.add('active'); loadDashboard(r.run_id); };
+      bar.appendChild(btn);
+    });
+    loadDashboard(data.runs[0].run_id);
+  } catch (e) {
+    document.getElementById('content').innerHTML = '<div class="error">无法连接 API 服务</div>';
+  }
+}
+
+async function loadDashboard(runId) {
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="loading">加载回测数据</div>';
+  try {
+    const res = await fetch(API + '/api/runs/' + runId + '/dashboard');
+    const data = await res.json();
+    renderDashboard(data, runId);
+  } catch (e) {
+    content.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function renderDashboard(data, runId) {
+  const equity = data.equity_curve || [];
+  const trades = data.trade_journal || [];
+  const signals = data.signal_history || [];
+  const events = data.event_breakdown || {};
+
+  const startVal = equity.length > 0 ? equity[0].value : 1_000_000;
+  const endVal = equity.length > 0 ? equity[equity.length - 1].value : startVal;
+  const totalReturn = ((endVal - startVal) / startVal * 100).toFixed(2);
+  const tradeCount = trades.length;
+  const eventTypes = Object.entries(events).map(([k, v]) => `${k}: ${v}`).join(', ');
+
+  let html = '<div class="grid">';
+  html += card('总收益率', totalReturn + '%', parseFloat(totalReturn) >= 0, '期间: ' + (equity.length > 0 ? equity[0].time + ' ~ ' + equity[equity.length - 1].time : '-'));
+  html += card('最终权益', '¥' + endVal.toLocaleString('zh-CN', { maximumFractionDigits: 0 }), true, '初始: ¥' + startVal.toLocaleString('zh-CN', { maximumFractionDigits: 0 }));
+  html += card('交易次数', tradeCount.toString(), true, '');
+  html += card('事件总数', (data.total_events || 0).toString(), true, eventTypes);
+  html += '</div>';
+
+  // 基准对比指标 (如果有)
+  if (data.benchmark) {
+    html += '<div class="grid">';
+    html += card('Alpha', (data.benchmark.alpha || 0).toFixed(4), (data.benchmark.alpha || 0) > 0, '超额收益');
+    html += card('Beta', (data.benchmark.beta || 0).toFixed(4), true, '市场敏感度');
+    html += card('信息比率', (data.benchmark.information_ratio || 0).toFixed(4), (data.benchmark.information_ratio || 0) > 0, '风险调整后超额');
+    html += card('跟踪误差', (data.benchmark.tracking_error || 0).toFixed(4), false, '');
+    html += '</div>';
+  }
+
+  html += '<div class="chart-container"><h3>权益曲线</h3><canvas id="equityChart"></canvas></div>';
+
+  // 交易明细
+  if (trades.length > 0) {
+    html += '<div class="chart-container"><h3>交易明细 (' + trades.length + ' 笔)</h3><table><tr><th>时间</th><th>标的</th><th>方向</th><th>价格</th><th>数量</th><th>持仓市值</th></tr>';
+    trades.slice(-50).reverse().forEach(t => {
+      html += '<tr><td>' + (t.time || '').slice(0, 16) + '</td><td>' + (t.symbol || '') + '</td><td>' + (t.type || '') + '</td><td>' + (t.price || 0).toFixed(2) + '</td><td>' + (t.quantity || 0).toFixed(0) + '</td><td>¥' + (t.portfolio_value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + '</td></tr>';
+    });
+    html += '</table></div>';
+  }
+
+  content.innerHTML = html;
+  drawEquityChart(equity);
+}
+
+function card(title, value, positive, sub) {
+  const cls = positive ? 'positive' : (value.startsWith('-') ? 'negative' : '');
+  return '<div class="card"><h3>' + title + '</h3><div class="value ' + cls + '">' + value + '</div>' + (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
+}
+
+function drawEquityChart(data) {
+  const canvas = document.getElementById('equityChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width - 40;
+  canvas.height = 320;
+
+  const w = canvas.width, h = canvas.height;
+  const pad = { top: 20, right: 20, bottom: 30, left: 70 };
+  const cw = w - pad.left - pad.right, ch = h - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (data.length < 2) {
+    ctx.fillStyle = '#64748b'; ctx.textAlign = 'center';
+    ctx.fillText('数据不足', w/2, h/2);
+    return;
+  }
+
+  const values = data.map(d => d.value);
+  const min = Math.min(...values) * 0.98;
+  const max = Math.max(...values) * 1.02;
+  const range = max - min || 1;
+
+  // 网格
+  ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (ch * i / 4);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+    ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText((max - range * i / 4).toFixed(0), pad.left - 8, y + 4);
+  }
+
+  // 权益曲线
+  ctx.beginPath();
+  ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2;
+  data.forEach((d, i) => {
+    const x = pad.left + (i / (data.length - 1)) * cw;
+    const y = pad.top + ch - ((d.value - min) / range) * ch;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // 填充渐变
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  grad.addColorStop(0, 'rgba(59, 130, 246, 0.15)');
+  grad.addColorStop(1, 'rgba(59, 130, 246, 0)');
+  ctx.lineTo(pad.left + cw, pad.top + ch);
+  ctx.lineTo(pad.left, pad.top + ch);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
+
+loadRuns();
+</script>
+</body>
+</html>

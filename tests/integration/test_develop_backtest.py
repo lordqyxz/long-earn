@@ -20,14 +20,11 @@
 import pytest
 from dotenv import load_dotenv
 
-load_dotenv()
-
 from long_earn.config import RuntimeContext
 from long_earn.context_init import create_runtime_context
-from long_earn.core.llm_utils import sanitize_code
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
-from long_earn.tools.backtest import check_service_health
 
+load_dotenv()
 
 # ── 默认股票池（沪深 300 部分成分股，qlib 格式 SH/PREFIX） ──────────────
 
@@ -118,7 +115,7 @@ def context() -> RuntimeContext:
     """创建真实运行时上下文"""
     ctx = create_runtime_context()
     try:
-        ctx.knowledge_service.initialize()
+        ctx.memory.initialize()
     except Exception as e:
         pytest.skip(f"知识库初始化失败: {e}")
     return ctx
@@ -149,9 +146,8 @@ def assert_valid_strategy_code(code: str) -> None:
         assert char not in code, f"代码不应包含全角字符: {char}"
 
 
-def assert_backtest_success(result: dict | None) -> None:
+def assert_backtest_success(result: dict) -> None:
     """断言回测成功并返回完整结果"""
-    assert result is not None, "回测不应返回 None"
     if "error" in result:
         pytest.fail(f"回测失败: {result['error']}")
     for key in ["total_return", "sharpe_ratio", "max_drawdown", "trading_days"]:
@@ -163,29 +159,27 @@ def run_backtest_via_context(
     code: str,
     start_date: str = "",
     end_date: str = "",
-    stock_list: list[str] | None = None,
-) -> dict | None:
+    **_unused,
+) -> dict:
     """通过 RuntimeContext 的 backtest_service 执行回测"""
-    return context.backtest_service.run_backtest(
-        strategy_code=code,
+    return context.backtest_service.run(
+        strategy_yaml=code,
         start_date=start_date or context.config.backtest_start_date,
         end_date=end_date or context.config.backtest_end_date,
-        stock_list=stock_list,
     )
 
 
-def print_backtest_result(result: dict | None) -> None:
+def print_backtest_result(result: dict) -> None:
     """打印回测结果"""
-    if result and not result.get("error"):
+    if not result.get("error"):
         print(f"  总收益率: {result.get('total_return', 0)}")
         print(f"  年化收益: {result.get('annual_return', 0)}")
         print(f"  夏普比率: {result.get('sharpe_ratio', 0)}")
         print(f"  最大回撤: {result.get('max_drawdown', 0)}")
         print(f"  交易天数: {result.get('trading_days', 0)}")
-    elif result:
-        print(f"  错误: {result.get('error', '未知')}")
     else:
-        print("  回测服务返回 None")
+        print(f"  错误: {result.get('error', '未知')}")
+        print(f"  错误分类: {result.get('error_category', '未知')}")
 
 
 def refine_and_backtest(
@@ -196,7 +190,7 @@ def refine_and_backtest(
     context: RuntimeContext,
     stock_list: list[str] | None = None,
     max_refines: int = 3,
-) -> tuple[str, dict | None]:
+) -> tuple[str, dict]:
     """修复循环：最多 max_refines 轮"""
     for i in range(1, max_refines + 1):
         print(f"\n  --- 修复第 {i} 次 ---")
@@ -211,12 +205,12 @@ def refine_and_backtest(
         result = run_backtest_via_context(context, code, stock_list=stock_list)
         print_backtest_result(result)
 
-        if result and not result.get("error"):
+        if not result.get("error"):
             return code, result
 
-        error_msg = result.get("error", "Unknown error") if result else "回测返回None"
+        error_msg = result.get("error", "Unknown error")
 
-    return code, None
+    return code, result
 
 
 # ── 测试：代码生成 ───────────────────────────────────────────────────────
@@ -243,29 +237,19 @@ class TestDevelop:
         print(f"代码预览:\n{code[:300]}...")
         assert_valid_strategy_code(code)
 
-    def test_sanitize_code_removes_fullwidth(self):
-        """sanitize_code 应清除全角字符（含句号）"""
-        dirty = 'x = [1，2（3）]  # 注释：测试。'
-        clean = sanitize_code(dirty)
-        assert "，" not in clean
-        assert "（" not in clean
-        assert "）" not in clean
-        assert "。" not in clean
-        assert clean == 'x = [1,2(3)]  # 注释:测试.'
-
 
 # ── 测试：回测服务 ───────────────────────────────────────────────────────
 
 
 class TestBacktest:
-    """回测服务测试：直接调用 backtest_service"""
+    """回测服务测试：通过 RuntimeContext 调用内嵌回测引擎"""
 
     def test_backtest_known_good_code(
         self, context: RuntimeContext, backtest_dates: tuple[str, str]
     ):
-        """用已知可用代码测试回测服务正常执行"""
+        """用已知可用 YAML 策略测试回测服务正常执行"""
         start, end = backtest_dates
-        print("\n使用已知可用代码测试回测...")
+        print("\n使用已知可用 YAML 策略测试回测...")
         result = run_backtest_via_context(
             context, KNOWN_GOOD_CODE, start, end, stock_list=DEFAULT_STOCK_LIST
         )
@@ -282,11 +266,6 @@ class TestBacktest:
         )
         assert result is not None, "语法错误应返回错误结果，而非 None"
         assert "error" in result, "语法错误应在 result.error 中反映"
-
-    def test_health_check(self):
-        """check_service_health 应返回布尔值"""
-        result = check_service_health()
-        assert isinstance(result, bool)
 
 
 # ── 测试：端到端 develop → backtest ──────────────────────────────────────
@@ -332,14 +311,14 @@ class TestDevelopAndBacktest:
         print_backtest_result(result)
 
         # 首次回测成功
-        if result and not result.get("error"):
+        if not result.get("error"):
             assert_backtest_success(result)
             print("首次回测即成功!")
             return
 
         # 区分错误类型
-        error_msg = result.get("error", "Unknown error") if result else "回测返回None"
-        is_code_error = result and result.get("error_category") == "code_logic"
+        error_msg = result.get("error", "Unknown error")
+        is_code_error = result.get("error_category") == "code_logic"
 
         if is_code_error:
             # 代码错误需要修复
@@ -354,10 +333,10 @@ class TestDevelopAndBacktest:
                 max_refines=3,
             )
 
-            if final_result and not final_result.get("error"):
+            if not final_result.get("error"):
                 assert_backtest_success(final_result)
                 print("修复后回测成功!")
-            elif final_result and final_result.get("error_category") == "code_logic":
+            elif final_result.get("error_category") == "code_logic":
                 print(f"\n修复后仍有代码错误:\n{final_code}")
                 pytest.fail(f"代码错误3次修复后仍未解决: {final_result.get('error')}")
             else:

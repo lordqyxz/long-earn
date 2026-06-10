@@ -1,10 +1,24 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+
 from long_earn.core.llm_utils import parse_llm_json
+from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
+
+from .strategy_research_prompt import (
+    create_strategy_research_prompt,
+    strategy_optimize_prompt,
+)
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
+
+_DRAWDOWN_RISK_THRESHOLD = 30
+_DRAWDOWN_MODERATE_THRESHOLD = 20
+_MIN_SHARPE_THRESHOLD = 0.5
+_POOR_SHARPE_THRESHOLD = 0.3
+_MIN_RETURN_THRESHOLD = 10
 
 OPTIMIZATION_DIRECTIONS = {
     "收益增强": {
@@ -52,25 +66,25 @@ NODE_CATEGORIES = {
 }
 
 
-class StrategyResearchAgent:
-    """策略研究智能体
+class StrategyResearchAgent(KnowledgeContextMixin):
+    """策略研究智能体 — 研究策略并生成迭代改进
 
-    参考 LangGraph Runtime 实践：
-    1. 依赖通过 context 传递，而非硬编码
-    2. 支持在测试时注入 Mock 依赖
+    通过 KnowledgeContextMixin 复用统一的知识检索和缓存逻辑。
     """
 
     def __init__(self, context: "RuntimeContext"):
-        """初始化策略研究 Agent
-
-        Args:
-            context: 运行时上下文
-        """
         self.context = context
         self.llm_service = context.llm_service
-        self.knowledge_service = context.knowledge_service
+        self.memory = context.memory
         self.logger = context.logger
         self._knowledge_cache: dict[str, list[str]] = {}
+
+    def _get_research_context(self, query: str, node_type: str | None = None) -> str:
+        """获取研究相关知识（按类别过滤）"""
+        categories = NODE_CATEGORIES.get(node_type) if node_type else None
+        return KnowledgeContextMixin._get_knowledge_context(
+            self, query, node_type=node_type, categories=categories
+        )
 
     def _create_retrieval_decision_prompt(self, query: str, context: str) -> str:
         return f"""<task>
@@ -117,54 +131,10 @@ class StrategyResearchAgent:
             return True, [k.strip() for k in keywords]
         return False, []
 
-    def _search_knowledge(
-        self,
-        query: str,
-        categories: list[str] | None = None,
-        terms: list[str] | None = None,
-    ) -> list[str]:
-        """搜索知识库获取相关参考信息"""
-        try:
-            results = self.knowledge_service.search(
-                query, k=3, categories=categories, terms=terms
-            )
-            return results
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"搜索知识库失败：{e}")
-            return []
-
-    def _get_knowledge_context(
-        self,
-        query: str,
-        node_type: str | None = None,
-    ) -> str:
-        """获取知识库上下文，如果缓存中没有则搜索
-
-        Args:
-            query: 搜索查询
-            node_type: 节点类型，可选 "research", "reflection", "optimize"
-        """
-        cache_key = f"{node_type}:{query}" if node_type else query
-
-        if cache_key in self._knowledge_cache:
-            return "\n".join(self._knowledge_cache[cache_key])
-
-        categories = NODE_CATEGORIES.get(node_type) if node_type else None
-
-        results = self._search_knowledge(query, categories=categories)
-        if results:
-            self._knowledge_cache[cache_key] = results
-            return "\n".join(results)
-        return ""
-
     def research_strategy(self, query: str) -> dict[str, Any]:
         """研究策略 - 根据用户查询生成初始策略"""
-        from langchain_core.prompts import ChatPromptTemplate
 
-        from .strategy_research_prompt import create_strategy_research_prompt
-
-        knowledge_context = self._get_knowledge_context(query, node_type="research")
+        knowledge_context = self._get_research_context(query, node_type="research")
 
         prompt = create_strategy_research_prompt(
             target_market="stock",
@@ -190,9 +160,6 @@ class StrategyResearchAgent:
         self, query: str, knowledge_context: str = ""
     ) -> dict[str, Any]:
         """使用已有上下文的研究策略"""
-        from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-
-        from .strategy_research_prompt import create_strategy_research_prompt
 
         if self.logger:
             self.logger.info(f"[策略研究Agent] 开始研究: {query}")
@@ -236,11 +203,11 @@ class StrategyResearchAgent:
         max_drawdown = abs(metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0))
         sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
 
-        if max_drawdown > 30:
+        if max_drawdown > _DRAWDOWN_RISK_THRESHOLD:
             return "风险控制"
         elif return_rate < 0:
             return "收益增强"
-        elif sharpe < 0.5:
+        elif sharpe < _MIN_SHARPE_THRESHOLD:
             return "收益稳定性"
         else:
             return "收益增强"
@@ -315,7 +282,7 @@ class StrategyResearchAgent:
         if self.logger:
             self.logger.info(f"[ToT反思] 开始分支: {direction}")
 
-        knowledge_context = self._get_knowledge_context(
+        knowledge_context = self._get_research_context(
             f"策略{direction}方法", node_type="reflection"
         )
         prompt = self._build_reflection_prompt(direction, strategy, backtest_result)
@@ -332,7 +299,7 @@ class StrategyResearchAgent:
         result = parse_llm_json(content)
         return result
 
-    def _evaluate_branches(
+    def _evaluate_branches(  # noqa: PLR0912
         self, branches: list[dict[str, Any]], backtest_result: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """评估各分支的改进建议"""
@@ -348,7 +315,7 @@ class StrategyResearchAgent:
                 )
                 if return_rate < 0:
                     score += 30
-                elif return_rate < 10:
+                elif return_rate < _MIN_RETURN_THRESHOLD:
                     score += 15
                 else:
                     score += 5
@@ -357,18 +324,18 @@ class StrategyResearchAgent:
                 max_drawdown = abs(
                     metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0)
                 )
-                if max_drawdown > 30:
+                if max_drawdown > _DRAWDOWN_RISK_THRESHOLD:
                     score += 30
-                elif max_drawdown > 20:
+                elif max_drawdown > _DRAWDOWN_MODERATE_THRESHOLD:
                     score += 15
                 else:
                     score += 5
 
             elif direction == "收益稳定性":
                 sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
-                if sharpe < 0.3:
+                if sharpe < _POOR_SHARPE_THRESHOLD:
                     score += 30
-                elif sharpe < 0.5:
+                elif sharpe < _MIN_SHARPE_THRESHOLD:
                     score += 15
                 else:
                     score += 5
@@ -420,7 +387,9 @@ class StrategyResearchAgent:
         }
 
     def _simple_fallback(
-        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+        self,
+        strategy: dict[str, Any],  # noqa: ARG002
+        backtest_result: dict[str, Any],
     ) -> dict[str, Any]:
         """极简兜底 - 基于规则的通用建议"""
         metrics = backtest_result.get("metrics", {})
@@ -436,11 +405,11 @@ class StrategyResearchAgent:
         max_drawdown = abs(metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0))
         sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
 
-        if max_drawdown > 20:
+        if max_drawdown > _DRAWDOWN_MODERATE_THRESHOLD:
             suggestions.append("建议添加止损机制或降低仓位以控制回撤")
-        if sharpe < 0.5:
+        if sharpe < _MIN_SHARPE_THRESHOLD:
             suggestions.append("建议优化因子权重以提升风险调整收益")
-        if return_rate < 10:
+        if return_rate < _MIN_RETURN_THRESHOLD:
             suggestions.append("建议扩展选股池或增加有效因子")
 
         if not suggestions:
@@ -472,10 +441,9 @@ class StrategyResearchAgent:
         self, strategy: dict[str, Any], improvement_suggestions: list
     ) -> dict[str, Any]:
         """优化策略 - 根据改进建议优化策略"""
-        from .strategy_research_prompt import strategy_optimize_prompt
 
         suggestions_str = "\n".join([f"- {s}" for s in improvement_suggestions])
-        knowledge_context = self._get_knowledge_context(
+        knowledge_context = self._get_research_context(
             "策略优化方法", node_type="optimize"
         )
 

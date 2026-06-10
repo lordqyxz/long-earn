@@ -1,0 +1,43 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync
+      - name: Run benchmark
+        run: |
+          uv run python -c "
+          import time
+          import polars as pl
+          from datetime import datetime, timedelta
+          from long_earn.backtest.engine.visibility import VisibilityGuard
+
+          symbols = [f's{i:04d}' for i in range(100)]
+          rows = []
+          for d in range(252):
+              dt = datetime(2024, 1, 1) + timedelta(days=d)
+              for s in symbols:
+                  rows.append({
+                      'timestamp': dt,
+                      'symbol': s,
+                      'close': 10.0 + d * 0.01 + (hash(s) % 5),
+                  })
+
+          data = pl.DataFrame(rows)
+          guard = VisibilityGuard(data)
+          start = time.perf_counter()
+          for d in range(252):
+              dt = datetime(2024, 1, 1) + timedelta(days=d)
+              guard.set_time(dt)
+              _ = guard.read_current_slab()
+          elapsed = time.perf_counter() - start
+          print(f'252 bars, 100 symbols: {elapsed:.3f}s ({252 / elapsed:.1f} bars/sec)')
+          "

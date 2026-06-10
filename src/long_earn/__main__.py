@@ -1,19 +1,14 @@
 from dotenv import load_dotenv
 
 from long_earn.agent import create_main_agent
+from long_earn.context_init import initialize_context
 
 load_dotenv()
 
 
 def main():
     """主函数"""
-    from long_earn.context_init import create_runtime_context
-
-    # 创建运行时上下文
-    context = create_runtime_context()
-
-    # 初始化知识库（通过服务）
-    context.knowledge_service.initialize()
+    context = initialize_context()
 
     # 创建主 Agent
     agent = create_main_agent(context)
