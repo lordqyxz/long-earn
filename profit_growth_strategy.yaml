@@ -1,0 +1,40 @@
+name: ProfitGrowthStrategy
+description: |
+  利润增长策略 - 选择净利润连续增长、ROE 优良的股票
+  选股逻辑：
+  1. 净利润同比增长率 > 20%
+  2. ROE > 8%
+  3. 营业收入同比增长 > 0%
+  4. 按净利润增长率排序，取前 20 只
+
+universe:
+  type: csi300
+  rebalance_freq: 20D
+
+factors:
+  profit_growth_score: "net_profit_yoy * 0.3 + roe * 0.25 + revenue_yoy * 0.15"
+
+signals:
+  - type: filter
+    condition: "net_profit_yoy > 0.20"
+  - type: filter
+    condition: "roe > 0.08"
+  - type: filter
+    condition: "revenue_yoy > 0"
+  - type: rank
+    by: profit_growth_score
+    ascending: false
+    top: 20
+
+weights:
+  method: equal
+
+risk_control:
+  max_position_per_stock: 0.1
+  stop_loss: 0.15
+  max_drawdown_limit: 0.25
+
+trading_cost:
+  commission_rate: 0.0003
+  stamp_duty: 0.0005
+  slippage_bps: 2.0

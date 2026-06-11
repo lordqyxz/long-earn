@@ -1,0 +1,35 @@
+[
+  {
+    "error": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "error_category": "engine_error",
+    "error_detail": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "params": {
+      "name": "保守型",
+      "net_profit_yoy": "0.15",
+      "roe": "0.06",
+      "top": "15"
+    }
+  },
+  {
+    "error": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "error_category": "engine_error",
+    "error_detail": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "params": {
+      "name": "平衡型",
+      "net_profit_yoy": "0.20",
+      "roe": "0.08",
+      "top": "20"
+    }
+  },
+  {
+    "error": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "error_category": "engine_error",
+    "error_detail": "Conversion Error: invalid date field format: \"20200101\", expected format is (YYYY-MM-DD)",
+    "params": {
+      "name": "进取型",
+      "net_profit_yoy": "0.30",
+      "roe": "0.10",
+      "top": "10"
+    }
+  }
+]
