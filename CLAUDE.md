@@ -12,16 +12,19 @@ uv run pytest tests/unit/ -v               # 仅运行单元测试
 uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
 uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
-uv run mypy src/                           # 类型检查（全局类型推断）
 uv run lint-imports                        # 架构依赖校验
 ```
 
+类型检查用 Serena LSP，见下方「质量门槛」。
+
 ### 质量门槛（按强弱排序）
 
-1. **Serena LSP / Pyright 单文件零错**：编辑代码后必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是**最严格**的本地反馈回路，比 `uv run mypy` 更快、聚焦当前文件。
+1. **Serena LSP 单文件零错**（**首要、唯一类型检查工具**）：编辑任何代码符号后，必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是最快、最聚焦的反馈回路，也是本项目**唯一**的类型检查手段。
 2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
-3. **`uv run mypy src/` 不引入新错**：作为全局回归参考；现存历史错误（如 `Service | None` DI 模式）允许暂存，但任何 PR 不得使错误总数上升。
-4. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
+3. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
+4. **`uv run pytest tests/unit/`**：单元测试全绿。
+
+> 不使用 mypy / pyright CLI：以 Serena LSP 单文件诊断为准，避免双工具冲突与配置分裂。
 
 ### 架构与设计原则
 

@@ -73,21 +73,6 @@ max-complexity = 15
 known-first-party = ["long_earn"]
 combine-as-imports = true
 
-[tool.mypy]
-strict = false
-warn_return_any = true
-warn_unused_configs = true
-check_untyped_defs = true
-exclude = ["tests/"]
-
-[tool.pyright]
-include = ["src"]
-exclude = ["tests"]
-pythonVersion = "3.11"
-typeCheckingMode = "basic"
-reportMissingTypeStubs = false
-reportUnknownMemberType = false
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=long_earn --cov-report=term --cov-report=html --cov-fail-under=0"
@@ -123,9 +108,7 @@ message = "services 层不应依赖 tools 模块"
 dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.11",
-    "mypy>=1.0.0",
     "import-linter>=2.0",
-    "pyright>=1.1.409",
     "pytest-cov>=7.1.0",
     "types-pyyaml>=6.0.12.20260510",
     "types-pytz>=2026.2.0.20260506",
