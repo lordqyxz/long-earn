@@ -7,6 +7,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from long_earn.services import (
     BacktestService,
@@ -16,6 +17,9 @@ from long_earn.services import (
     MonitoringService,
     StockService,
 )
+
+if TYPE_CHECKING:
+    from long_earn.backtest.data.provider import DataProvider
 
 # 项目数据目录
 _project_root = Path(__file__).parent.parent.parent.parent
@@ -60,7 +64,7 @@ class RuntimeContext:
     config: "AppConfig | None" = None
 
     # 数据层（可选）
-    data_provider: "DataProvider | None" = None  # noqa: F821
+    data_provider: "DataProvider | None" = None
 
 
 @dataclass
