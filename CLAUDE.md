@@ -12,9 +12,22 @@ uv run pytest tests/unit/ -v               # 仅运行单元测试
 uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
 uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
-uv run mypy src/                           # 类型检查
+uv run mypy src/                           # 类型检查（全局类型推断）
 uv run lint-imports                        # 架构依赖校验
 ```
+
+### 质量门槛（按强弱排序）
+
+1. **Serena LSP / Pyright 单文件零错**：编辑代码后必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是**最严格**的本地反馈回路，比 `uv run mypy` 更快、聚焦当前文件。
+2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
+3. **`uv run mypy src/` 不引入新错**：作为全局回归参考；现存历史错误（如 `Service | None` DI 模式）允许暂存，但任何 PR 不得使错误总数上升。
+4. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
+
+### 架构与设计原则
+
+- **整洁架构 (Clean Architecture)**：依赖方向单向收敛——`tools` → `services` → `domain`，外层可知内层，内层不知外层。
+- **DDD 辅助**：`backtest/domain/` 承载领域模型（实体、值对象、领域异常）；`services/` 是应用服务（编排领域行为 + 跨上下文事务）；`backtest/engine/` 是领域服务（纯计算）；`data/` 是基础设施（数据提供者实现）。
+- **依赖注入容器**：`RuntimeContext` 是 DI Container，下游组件接收**已构造完毕**的服务实例（非 `Service | None`）。允许 `Service | None` 仅限**容器初始化中间态**；业务节点接受非空依赖。
 
 ## 架构
 
