@@ -21,7 +21,7 @@ class StrategyRdSupervisor:
             context: 运行时上下文
         """
         self.context = context
-        self.llm_service = context.llm_service
+        self.llm_service = context.require_llm()
         self.logger = context.logger
 
     def evaluate_strategy(

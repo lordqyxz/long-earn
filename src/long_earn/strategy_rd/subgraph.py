@@ -461,8 +461,8 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     develop_agent = StrategyDevelopAgent(context=context)
 
     logger = context.logger
-    backtest_service = context.backtest_service
-    memory = context.memory
+    backtest_service = context.require_backtest()
+    memory = context.require_memory()
 
     workflow = StateGraph(State)
 

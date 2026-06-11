@@ -30,8 +30,8 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
 
     def __init__(self, context: "RuntimeContext"):
         self.context = context
-        self.llm_service = context.llm_service
-        self.memory = context.memory
+        self.llm_service = context.require_llm()
+        self.memory = context.require_memory()
         self.logger = context.logger
         self._knowledge_cache: dict[str, list[str]] = {}
         self._error_history: list[dict] = []
