@@ -28,43 +28,68 @@ PROJECT_DATA_DIR = _project_root / ".data"
 
 @dataclass
 class RuntimeContext:
-    """运行时上下文实现
+    """运行时上下文实现（DI Container）
 
-    参考 LangGraph 的 context 设计模式：
-    1. 集中管理配置和依赖
-    2. 直接属性访问
-    3. 类型安全
+    设计原则（Clean Architecture）：
+    - **基础设施层**（config/logger/monitoring）：必填，构造时即可用
+    - **业务服务层**（llm/memory/stock/backtest）：Optional，因为它们依赖基础设施
+      先构造，存在「先有 ctx，后注入服务」的中间态
+    - **数据层**（data_provider）：Optional，跨子图共享，并非所有路径都需要
+
+    业务节点访问业务服务应使用 ``require_*()`` 访问器，避免散布 ``assert is not None``。
 
     用法:
-        context = RuntimeContext(
-            config=AppConfig(),
-            llm_service=LLMServiceImpl(context),
-            memory=MemoryServiceImpl(context),
-        )
+        ctx = RuntimeContext(config=AppConfig(), logger=LoggerServiceImpl(), monitoring=...)
+        ctx.llm_service = LLMServiceImpl(ctx.config, ctx.logger)
 
-        # 在节点或工具中使用（直接属性访问）
-        response = context.llm_service.invoke(prompt)
-        facts = context.memory.recall(query)
-
-        # 使用提示词模板
-        from long_earn.core.prompt_loader import MarkdownPromptTemplate
-        prompt_template = MarkdownPromptTemplate("my_prompt.md", caller_file=__file__)
-        prompt = prompt_template.format(query=query)
+        # 在业务节点中使用（强制非空）
+        response = ctx.require_llm().invoke(prompt)
+        facts = ctx.require_memory().recall(query)
     """
 
-    # 核心服务（初始化阶段可能为 None）
+    # 基础设施（必填）—— 容器构造时必须就绪
+    config: "AppConfig"
+    logger: LoggerService
+    monitoring: MonitoringService
+
+    # 业务服务（构造后注入）
     llm_service: LLMService | None = None
     memory: MemoryService | None = None
     stock_service: StockService | None = None
     backtest_service: BacktestService | None = None
 
-    # 基础设施
-    logger: LoggerService | None = None
-    monitoring: MonitoringService | None = None
-    config: "AppConfig | None" = None
-
     # 数据层（可选）
     data_provider: "DataProvider | None" = None
+
+    def require_llm(self) -> LLMService:
+        """获取已就绪的 LLM 服务，未注入时抛出明确错误"""
+        if self.llm_service is None:
+            raise RuntimeError("LLMService 未初始化；请通过 initialize_context() 构造 ctx")
+        return self.llm_service
+
+    def require_memory(self) -> MemoryService:
+        """获取已就绪的记忆服务"""
+        if self.memory is None:
+            raise RuntimeError("MemoryService 未初始化")
+        return self.memory
+
+    def require_stock(self) -> StockService:
+        """获取已就绪的股票服务"""
+        if self.stock_service is None:
+            raise RuntimeError("StockService 未初始化")
+        return self.stock_service
+
+    def require_backtest(self) -> BacktestService:
+        """获取已就绪的回测服务"""
+        if self.backtest_service is None:
+            raise RuntimeError("BacktestService 未初始化")
+        return self.backtest_service
+
+    def require_data_provider(self) -> "DataProvider":
+        """获取已就绪的数据提供者"""
+        if self.data_provider is None:
+            raise RuntimeError("DataProvider 未初始化")
+        return self.data_provider
 
 
 @dataclass

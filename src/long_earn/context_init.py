@@ -17,6 +17,11 @@ from long_earn.services.stock_service import StockServiceImpl
 def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     """创建运行时上下文
 
+    构造顺序（Clean Architecture）：
+    1. 基础设施层（config / logger / monitoring）—— 必须最先就绪
+    2. 数据层（data_provider）
+    3. 业务服务层（llm / stock / backtest / memory）—— 依赖上面两层
+
     Args:
         config: 应用配置，None 则从环境变量加载
 
@@ -30,36 +35,27 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     if errors:
         raise ValueError(f"配置验证失败：{', '.join(errors)}")
 
+    # 1. 基础设施层
     logger = LoggerServiceImpl()
     monitoring = MonitoringServiceImpl(enabled=True)
 
-    # 初始化数据提供者（带 DuckDB 缓存）
+    # 2. 数据层（带 DuckDB 缓存）
     data_cache = DataCache()
     data_provider = DataProviderImpl(cache=data_cache)
 
-    # 创建临时上下文用于服务初始化
-    temp_ctx = RuntimeContext(
+    # 3. 业务服务层 —— 复用同一个 ctx 实例，避免「temp_ctx → final_ctx」的双实例问题
+    ctx = RuntimeContext(
         config=config,
         logger=logger,
         monitoring=monitoring,
         data_provider=data_provider,
     )
+    ctx.llm_service = LLMServiceImpl(ctx)
+    ctx.stock_service = StockServiceImpl(ctx)
+    ctx.backtest_service = BacktestServiceImpl(ctx)
+    ctx.memory = MemoryServiceImpl(ctx)
 
-    llm_service = LLMServiceImpl(temp_ctx)
-    stock_service = StockServiceImpl(temp_ctx)
-    backtest_service = BacktestServiceImpl(temp_ctx)
-    memory_service = MemoryServiceImpl(temp_ctx)
-
-    return RuntimeContext(
-        config=config,
-        llm_service=llm_service,
-        memory=memory_service,
-        stock_service=stock_service,
-        backtest_service=backtest_service,
-        logger=logger,
-        monitoring=monitoring,
-        data_provider=data_provider,
-    )
+    return ctx
 
 
 def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
@@ -74,12 +70,6 @@ def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
         初始化好的 RuntimeContext
     """
     context = create_runtime_context(config)
-
-    # 初始化记忆系统（加载持久化数据 + init 目录）
-    if context.memory is not None:
-        context.memory.initialize()
-
-    if context.logger is not None:
-        context.logger.info("回测引擎已就绪（内嵌模式）")
-
+    context.require_memory().initialize()
+    context.logger.info("回测引擎已就绪（内嵌模式）")
     return context

@@ -255,7 +255,7 @@ def create_main_agent(context: "RuntimeContext"):
     Args:
         context: 运行时上下文
     """
-    llm_service = context.llm_service
+    llm_service = context.require_llm()
     logger = context.logger
     monitoring = context.monitoring
 
