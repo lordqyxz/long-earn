@@ -67,7 +67,7 @@ class EmbeddingRetriever:
         """懒加载嵌入模型"""
         if self._model is not None:
             return self._model
-        if not _HAS_SENTENCE_TRANSFORMERS:
+        if not _HAS_SENTENCE_TRANSFORMERS or SentenceTransformer is None:
             logger.warning(
                 "sentence-transformers 未安装，嵌入检索不可用。"
                 "安装: uv run pip install sentence-transformers"

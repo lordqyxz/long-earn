@@ -36,7 +36,7 @@ class RuntimeContext:
       一次性构造完毕注入。业务节点接收**非空**实例，无需 None 守卫。
     - **数据层**（data_provider）：可选，跨子图共享，并非所有路径都需要
 
-    历史上业务服务字段类型曾是 ``Service | None`` + ``require_*()`` 访问器，
+    历史上业务服务字段类型曾是可空联合 + ``require_*()`` 访问器，
     用于支持「先建 ctx 再注入 services」的渐进构造。现 services 已解耦为接
     ``(config, logger)``，可在 ctx 构造前先建好，因此字段类型已收紧为非空。
 
