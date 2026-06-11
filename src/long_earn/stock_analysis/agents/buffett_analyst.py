@@ -26,7 +26,7 @@ class BuffettAnalyst:
 
         # 使用新的提示词加载服务
         self.prompt = MarkdownPromptTemplate(
-            name="buffett_prompt",
+            template_file="buffett_prompt.md",
             caller_file=__file__,
             input_variables=["stock_data"],
         )

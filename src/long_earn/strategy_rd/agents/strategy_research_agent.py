@@ -1,8 +1,6 @@
 import json
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-
 from long_earn.core.llm_utils import parse_llm_json
 from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
@@ -142,11 +140,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
-        if isinstance(prompt, ChatPromptTemplate):
-            messages = prompt.format_messages()
-        else:
-            messages = prompt
-        response = self.llm_service.invoke(messages)
+        response = self.llm_service.invoke(prompt)
         if self.logger:
             self.logger.info(f"策略研究代理生成策略完成：{query}")
 
@@ -164,26 +158,14 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         if self.logger:
             self.logger.info(f"[策略研究Agent] 开始研究: {query}")
 
-        prompt_template = create_strategy_research_prompt(
+        prompt = create_strategy_research_prompt(
             target_market="stock",
             query=query,
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
 
-        if isinstance(prompt_template, ChatPromptTemplate):
-            messages = prompt_template.format_messages()
-        elif isinstance(prompt_template, PromptTemplate):
-            messages = prompt_template.format(
-                target_market="stock",
-                query=query,
-                strategy_examples="无",
-                strategy_context=knowledge_context if knowledge_context else "无",
-            )
-        else:
-            messages = prompt_template
-
-        response = self.llm_service.invoke(messages)
+        response = self.llm_service.invoke(prompt)
         if self.logger:
             self.logger.info("策略研究代理生成策略完成（使用自适应检索上下文）")
 
