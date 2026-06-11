@@ -23,8 +23,8 @@ long_earn/
 ├── src/long_earn/           # 主项目源码
 │   ├── backtest/            # 内嵌回测引擎
 │   │   ├── domain/          #   领域模型（实体、值对象、异常）
-│   │   ├── engine/          #   向量化回测引擎 + AST 安全求值器
-│   │   └── data/            #   数据提供（akshare + DuckDB 缓存）
+│   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器
+│   │   └── data/            #   数据提供（miniqmt/xtdat + DuckDB 缓存）
 │   ├── core/                # 核心工具（prompt_loader, llm_utils）
 │   ├── memory/              # 记忆系统（TF-IDF + 关系图，numpy/pandas）
 │   ├── services/            # 服务接口与实现
@@ -32,7 +32,7 @@ long_earn/
 │   ├── strategy_rd/         # 策略研发子图
 │   │   └── agents/          # 策略研发 Agent（含同目录 .md prompt）
 │   ├── stock_analysis/      # 股票分析子图
-│   │   └── agents/          # 多视角分析师 Agent（含同目录 .py prompt）
+│   │   └── agents/          # 多视角分析师 Agent（含同目录 .md prompt）
 │   ├── dashboard/           # 可视化仪表盘（分析器 + API + 前端）
 │   │   └── templates/       #   HTML 仪表盘模板
 │   ├── tools/               # 工具函数（回测、知识库、股票信息）
@@ -48,6 +48,7 @@ long_earn/
 ├── docs/                    # 文档
 │   ├── adr/                 # 架构决策记录
 │   └── research/            # 调研文档
+├── scripts/                 # 一次性脚本（独立回测、数学验证），不属于主包
 └── langgraph.json           # LangGraph 部署配置
 ```
 
@@ -65,7 +66,8 @@ RuntimeContext(dataclass)
     ├── backtest_service: BacktestService (Protocol)
     ├── logger: LoggerService
     ├── monitoring: MonitoringService
-    └── config: AppConfig
+    ├── config: AppConfig
+    └── data_provider: DataProvider | None       # 可选；跨子图共享数据提供者
 ```
 
 主图（`agent.py`）路由到子图：
@@ -120,8 +122,9 @@ prompt = prompt_template.format(query=query)
 ## Gotchas
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
+- **子项目为 git submodule**：`remoteMiniQmt/` 通过 `.gitmodules` 引入，clone 后需 `git submodule update --init --recursive` 才会有内容
 - **记忆系统**：基于 numpy/pandas 的 3-Tier 记忆系统（Working/Core/Archival），替代 Qdrant 向量数据库。无需外部嵌入模型，使用内置 TF-IDF + 余弦相似度检索。持久化至 `~/.long_earn/memory.npz`。
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），首次运行时会通过 akshare 获取数据。
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），首次运行时会通过 miniqmt (xtquant) 获取数据。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
 - **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)
 - **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
@@ -160,7 +163,7 @@ prompt = prompt_template.format(query=query)
 - 实现细节（日志调用、属性赋值、`repr()` 格式）
 - 需要大量 mock 链的端到端子图流程（属于集成测试范畴）
 
-### 核心引擎测试 (test_engine.py)
+### 核心引擎测试 (tests/unit/test_backtest/test_engine.py)
 
 引擎测试覆盖关键链路而非内部实现细节，使用 `unittest.TestCase`：
 
@@ -173,12 +176,6 @@ prompt = prompt_template.format(query=query)
 | `TestAuditTrail` | 审计跟踪记录事件类型完整性 | 1 |
 
 通过 `MockDataProvider` + 内联策略桩（`_SimpleStrategy` / `_EmptyStrategy` / `_RaisingStrategy`）注入测试数据，避免对外部数据源的依赖。
-
-```sh
-LLM_TYPE=ollama
-LLM_MODEL=qwen3.5:cloud
-LLM_BASE_URL=http://localhost:11434
-```
 
 ## 回测引擎（事件驱动）
 
@@ -205,8 +202,9 @@ src/long_earn/backtest/
 └── data/
     ├── __init__.py
     ├── cache.py             # DuckDB 本地缓存
-    ├── provider.py          # Akshare 数据获取
-    └── universe.py          # 股票池管理
+    ├── provider.py          # 数据提供者接口（miniqmt 版）
+    ├── miniqmt_provider.py  # xtquant.xtdata 数据获取封装
+    └── universe.py          # 股票池管理（miniqmt 版）
 ```
 
 - **状态化策略**：LLM 生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行。
@@ -291,11 +289,9 @@ src/long_earn/memory/
 | 审计提供者 | `src/long_earn/backtest/engine/audit.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
 | 数据提供者 | `src/long_earn/backtest/data/provider.py` |
+| miniqmt 数据封装 | `src/long_earn/backtest/data/miniqmt_provider.py` |
 | DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
 | 股票池管理 | `src/long_earn/backtest/data/universe.py` |
-| Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
-| Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
-| Dashboard HTML | `src/long_earn/dashboard/templates/dashboard.html` |
 | Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
 | Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
 | Dashboard HTML 模板 | `src/long_earn/dashboard/templates/dashboard.html` |
@@ -315,11 +311,38 @@ src/long_earn/memory/
 | 股票分析子图 | `src/long_earn/stock_analysis/subgraph.py` |
 | 股票分析状态 | `src/long_earn/stock_analysis/state.py` |
 | 知识库工具 | `src/long_earn/tools/store.py` |
-| 回测工具 | `src/long_earn/tools/backtest.py` |
-| 股票信息工具 | `src/long_earn/tools/get_stock_info.py` |
+| 回测分析器 | `src/long_earn/tools/backtest_analyzer.py` |
+| 可视化 API | `src/long_earn/tools/visualization_api.py` |
+| Kimi 网页搜索 | `src/long_earn/tools/kimi_web_search.py` |
 | 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
 | LangGraph 部署配置 | `langgraph.json` |
 | 环境变量模板 | `.env.example` |
+
+## 子项目：Remote MiniQMT
+
+`remoteMiniQmt/` 是基于 WebSocket 的 miniQMT (xtquant) 远程 SDK，用于将本地 xtquant 行情与交易能力暴露为远程 JSON-RPC 2.0 服务。
+
+```
+remoteMiniQmt/
+├── src/rmt/
+│   ├── protocol.py          # JSON-RPC 协议定义
+│   ├── transport.py         # WebSocket 传输层
+│   ├── types.py             # xtquant 数据类型镜像
+│   ├── constants.py         # xtquant 交易常量镜像
+│   ├── client/
+│   │   ├── data.py          # 远程行情客户端 (RemoteXtData)
+│   │   └── trader.py        # 远程交易客户端 (RemoteXtTrader)
+│   └── server/
+│       ├── engine.py        # xtquant 引擎封装
+│       ├── app.py           # WebSocket JSON-RPC 服务端
+│       └── __main__.py      # 服务启动入口
+└── skills/
+    └── remote-miniqmt-data/  # TRAE Skill 封装
+```
+
+- **服务端**：运行在有 miniQMT 客户端的机器上，`python -m rmt.server` 启动（默认行情 ws://0.0.0.0:8001，交易 ws://0.0.0.0:8002）
+- **客户端**：远程机器通过 `RemoteXtData("ws://server-ip:8001")` 异步连接获取数据
+- **主项目数据层**：`miniqmt_provider.py` 直接调用本地 `xtquant.xtdata`，无需启动 remote 服务；remote 服务用于跨机部署场景
 
 ## 开发待办 (TODO)
 
@@ -331,6 +354,7 @@ src/long_earn/memory/
 - [x] **高级状态化风控**：实现基于事件触发的动态止损、追踪止盈及最大回撤限制。
 - [x] **扩展数据字段**：增加更多技术指标（如 MACD, RSI）和财务指标。
 - [x] **Dashboard 模块独立**：将可视化分析抽取为 `dashboard/` 模块，与 Agent 共享审计接口。
+- [x] **数据源迁移**：从 akshare 迁移至 miniqmt (xtquant)，完成 `miniqmt_provider.py` / `provider.py` / `universe.py` / `stock_service.py` / `backtest_service.py` / `cache.py` / `context_init.py` 的适配。
 
 ### 2. 记忆系统 (Memory System)
 - [ ] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。
@@ -339,9 +363,10 @@ src/long_earn/memory/
 - [ ] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
+- [x] **利润增长策略回测验证**：完成保守型/平衡型/进取型三组参数回测（模拟数据年化收益 47.50% / 47.91% / 101.32%）。
 - [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
 - [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
-- [ ] **实时数据对接**：将 `akshare` 静态回测扩展到支持近实时的行情监控与预警。
+- [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
 - [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
 
 ### 4. 工程化与质量 (Engineering & Quality)
