@@ -144,17 +144,18 @@ class MemoryServiceImpl(MemoryService):
         self,
         query: str,
         k: int = 3,
-        categories: list[str] | None = None,
-        terms: list[str] | None = None,
-        source_files: list[str] | None = None,
+        **filters,
     ) -> list[str]:
         """便捷方法: 检索并返回格式化字符串（兼容旧 KnowledgeService 调用）"""
+        categories = filters.get("categories") or filters.get("category", [])
+        terms = filters.get("terms") or filters.get("term", [])
+        source_files = filters.get("source_files") or filters.get("source_file", [])
         results = self.recall(
             query,
             k=k,
-            categories=categories or [],
-            terms=terms or [],
-            source_files=source_files or [],
+            categories=categories if isinstance(categories, list) else [categories],
+            terms=terms if isinstance(terms, list) else [terms],
+            source_files=source_files if isinstance(source_files, list) else [source_files],
         )
         output = []
         for r in results:
