@@ -103,13 +103,12 @@ class Broker:
         raise OrderExecutionError(f"未知订单执行类型: {order_type}")
 
     def check_pending_orders(
-        self, bar_idx: int, price_lookup: dict[str, float]
+        self, price_lookup: dict[str, float]
     ) -> list[FillEvent]:
         """
         检查所有待成交订单（每个 bar 调用一次）
 
         Args:
-            bar_idx: 当前 bar 索引
             price_lookup: symbol → current_price 映射
 
         Returns:
@@ -195,8 +194,7 @@ class Broker:
         self._cancel_oco_siblings(order)
         return fill
 
-    @staticmethod
-    def _try_fill_limit(order: OrderEvent, current_price: float) -> FillEvent | None:
+    def _try_fill_limit(self, order: OrderEvent, current_price: float) -> FillEvent | None:
         """尝试限价单成交（价格满足条件则成交，否则返回 None）"""
         if order.price is None:
             return None
@@ -213,6 +211,11 @@ class Broker:
             return None
 
         fill_price = current_price  # 限价单以当前价成交
+        commission = (order.quantity * fill_price) * self.cost_config.commission_rate
+        stamp_duty = 0.0
+        if order.order_type == "SELL":
+            stamp_duty = (order.quantity * fill_price) * self.cost_config.stamp_duty
+
         return FillEvent(
             timestamp=order.timestamp,
             trace_id=str(uuid.uuid4()),
@@ -222,9 +225,9 @@ class Broker:
             order_type=order.order_type,
             fill_price=fill_price,
             fill_quantity=order.quantity,
-            commission=0.0,
+            commission=commission,
             slippage=0.0,
-            stamp_duty=0.0,
+            stamp_duty=stamp_duty,
         )
 
     @staticmethod

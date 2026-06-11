@@ -118,7 +118,7 @@ class EventDrivenBacktestEngine:
 
             for bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
-                    ts, guard, portfolio, broker, strategy, db_audit, bar_idx
+                    ts, guard, portfolio, broker, strategy, db_audit
                 )
 
             self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
@@ -162,7 +162,6 @@ class EventDrivenBacktestEngine:
         broker: Broker,
         strategy: BaseStrategy,
         db_audit: Any,
-        bar_idx: int = 0,
     ) -> None:
         guard.set_time(ts)
         slab = guard.read_current_slab()
@@ -181,10 +180,11 @@ class EventDrivenBacktestEngine:
             for sym, price in zip(
                 slab.select("symbol").to_series().to_list(),
                 slab.select("close").to_series().to_list(),
+                strict=True,
             )
         }
         pending_fills = broker.check_pending_orders(
-            bar_idx=bar_idx, price_lookup=price_lookup
+            price_lookup=price_lookup
         )
         for pf in pending_fills:
             portfolio.update_from_fill(pf)
@@ -520,7 +520,7 @@ class EventDrivenBacktestEngine:
         bm_ts = bm_df.select("timestamp").to_series().to_list()
         bm_close = bm_df.select("close").to_series().to_list()
         bm_price_map: dict[Any, float] = {}
-        for ts, price in zip(bm_ts, bm_close):
+        for ts, price in zip(bm_ts, bm_close, strict=True):
             if ts is not None and price is not None:
                 bm_price_map[ts] = float(price)
 
@@ -624,13 +624,17 @@ class EventDrivenBacktestEngine:
         all_train_metrics: list[dict[str, float]] = []
         all_test_metrics: list[dict[str, float]] = []
 
+        # 保存当前审计日志，Walk-Forward 完成后恢复
+        saved_audit_trail = self.audit_logger.trail.copy()
+
         for fold_idx, (train_ts, test_ts) in enumerate(splits):
             train_start = str(train_ts[0])
             train_end = str(train_ts[-1])
             test_start = str(test_ts[0]) if test_ts else train_end
             test_end = str(test_ts[-1]) if test_ts else train_end
 
-            # 训练期回测
+            # 训练期回测（每个 fold 使用独立的审计日志）
+            self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
                 strategy,
@@ -647,7 +651,8 @@ class EventDrivenBacktestEngine:
             }
             all_train_metrics.append(train_metrics)
 
-            # 测试期回测（重置策略状态，防止训练期信息泄漏）
+            # 测试期回测（重置策略状态和审计日志，防止训练期信息泄漏）
+            self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
                 strategy,
@@ -671,6 +676,9 @@ class EventDrivenBacktestEngine:
                     "test": {"start": test_start, "end": test_end, **test_metrics},
                 }
             )
+
+        # 恢复原始审计日志
+        self.audit_logger.trail = saved_audit_trail
 
         def _avg(metrics_list: list[dict[str, float]]) -> dict[str, float]:
             if not metrics_list:

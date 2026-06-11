@@ -11,6 +11,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from long_earn.backtest.engine.broker import (
+    TradingCostConfig as BrokerTradingCostConfig,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,7 +46,11 @@ SignalStep = SignalFilter | SignalRank | SignalExpression
 
 
 class TradingCostConfig(BaseModel):
-    """交易成本配置 (默认 A 股参数)"""
+    """交易成本配置 (默认 A 股参数)
+
+    Pydantic 版本，用于 YAML DSL 解析。运行时通过 to_broker_config() 转换为
+    broker 层的 dataclass 版本，确保类型一致。
+    """
 
     commission_rate: float = Field(
         default=0.0003, description="单边佣金率，如 0.0003 表示万三"
@@ -54,9 +62,13 @@ class TradingCostConfig(BaseModel):
         default=2.0, description="滑点基点，2.0 表示 2bps = 0.0002"
     )
 
-    @property
-    def slippage_rate(self) -> float:
-        return self.slippage_bps * 0.0001
+    def to_broker_config(self) -> BrokerTradingCostConfig:
+        """转换为 broker 层的 dataclass 版本"""
+        return BrokerTradingCostConfig(
+            commission_rate=self.commission_rate,
+            stamp_duty=self.stamp_duty,
+            slippage_bps=self.slippage_bps,
+        )
 
 
 class WeightConfig(BaseModel):

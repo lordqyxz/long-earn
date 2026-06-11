@@ -57,13 +57,13 @@ class Portfolio:
         max_positions: int = 0,
         max_position_pct: float = 1.0,
     ) -> list[OrderEvent]:
-        """
-        将信号转换为订单
+        """将信号转换为订单
 
         Args:
             event: 信号事件 (包含目标权重)
             current_prices: 当前时刻所有股票的价格 Slab
             max_positions: 最大持仓数（0 表示不限制）
+            max_position_pct: 单只股票最大仓位比例
         """
         target_weights = event.signals
 
@@ -71,21 +71,45 @@ class Portfolio:
             logger.error("Portfolio 目前仅支持 dict 格式的信号权重")
             return []
 
-        # 若超出最大持仓限制，按权重降序保留前 N 个
-        if max_positions > 0:
-            current_count = len(self.positions)
-            new_symbols = [s for s in target_weights if s not in self.positions]
-            available = max_positions - current_count
-            if available <= 0:
-                return []  # 已满仓，不开新仓
-            if len(new_symbols) > available:
-                new_sorted = sorted(
-                    new_symbols, key=lambda s: target_weights.get(s, 0), reverse=True
-                )
-                for s in new_sorted[available:]:
-                    target_weights.pop(s, None)
+        target_weights = self._apply_position_limits(
+            target_weights, max_positions
+        )
 
-        # 预处理：收集所有订单信息（sell 优先，使资金可用于同 bar 内的买入）
+        order_infos = self._compute_order_infos(
+            target_weights, current_prices, max_position_pct
+        )
+
+        return self._generate_orders(order_infos, event)
+
+    def _apply_position_limits(
+        self,
+        target_weights: dict[str, float],
+        max_positions: int,
+    ) -> dict[str, float]:
+        """应用持仓数量限制，返回裁剪后的目标权重"""
+        if max_positions <= 0:
+            return target_weights
+
+        current_count = len(self.positions)
+        new_symbols = [s for s in target_weights if s not in self.positions]
+        available = max_positions - current_count
+        if available <= 0:
+            return {}  # 已满仓，不开新仓
+        if len(new_symbols) > available:
+            new_sorted = sorted(
+                new_symbols, key=lambda s: target_weights.get(s, 0), reverse=True
+            )
+            for s in new_sorted[available:]:
+                target_weights.pop(s, None)
+        return target_weights
+
+    def _compute_order_infos(
+        self,
+        target_weights: dict[str, float],
+        current_prices: pl.DataFrame,
+        max_position_pct: float,
+    ) -> list[dict]:
+        """计算每个标的的目标订单信息（方向、金额、价格）"""
         order_infos: list[dict] = []
         for symbol, target_weight in target_weights.items():
             if target_weight <= 0:
@@ -127,8 +151,15 @@ class Portfolio:
 
         # 按先卖后买排序，使卖出回笼资金可用于同 bar 买入
         order_infos.sort(key=lambda x: 0 if x["order_type"] == "SELL" else 1)
+        return order_infos
 
-        orders = []
+    def _generate_orders(
+        self,
+        order_infos: list[dict],
+        event: SignalEvent,
+    ) -> list[OrderEvent]:
+        """根据订单信息生成 OrderEvent，处理现金约束"""
+        orders: list[OrderEvent] = []
         remaining_cash = self.cash
         for info in order_infos:
             symbol = info["symbol"]
@@ -215,8 +246,7 @@ class Portfolio:
         )
 
         # 更新 peak_value（O(1) 追踪，替代 max(equity_curve) 的 O(N) 查找）
-        if self.total_value > self.peak_value:
-            self.peak_value = self.total_value
+        self.peak_value = max(self.peak_value, self.total_value)
 
     def _sync_equity_curve(self) -> None:
         """将当前 total_value 同步到 equity_curve（由引擎在 bar 末尾调用）"""

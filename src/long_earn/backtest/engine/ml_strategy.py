@@ -117,7 +117,6 @@ def compute_kdj(
         (K, D, J) 三个 Series，取值范围 [0, 100]
     """
     # 计算 n 日内最低价和最高价
-    n_np = n  # 避免与变量名冲突，先保留为int
     lowest_low = low.rolling_min(n)
     highest_high = high.rolling_max(n)
 
@@ -480,9 +479,11 @@ class MLSignalStrategy(BaseStrategy):
     def on_bar(
         self, bars: pl.DataFrame, context: VisibilityContext
     ) -> SignalEvent | None:
+        # 使用 VisibilityContext 的安全接口获取历史数据，防止数据泄漏
+        # get_history_df 内部保证 timestamp <= current_timestamp
         features = FeatureEngine.compute_features(
             bars,
-            context._guard._full_data,
+            context.get_history_df(),
             context.current_timestamp,
         )
         weights = self.predict_weights(features)
