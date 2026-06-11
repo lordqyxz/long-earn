@@ -10,7 +10,7 @@ DEFAULT_TIMEOUT = 300
 
 def create_llm(
     llm_type: str = "ollama",
-    model_name: str = "qwen3.5:cloud",
+    model_name: str = "deepseek-v4-flash:cloud",
     base_url: str = "http://localhost:11434",
     timeout: int = DEFAULT_TIMEOUT,
     **kwargs,
@@ -28,9 +28,6 @@ def create_llm(
         初始化好的LLM实例
     """
     if llm_type == "ollama":
-        # 默认使用ollama的qwen3.5:cloud模型
-        if model_name is None:
-            model_name = "qwen3.5:cloud"
         return ChatOllama(
             model=model_name,
             client_kwargs={
@@ -41,8 +38,6 @@ def create_llm(
 
     elif llm_type == "dashscope":
         # 阿里云DashScope模型
-        if model_name is None:
-            model_name = "qwen-turbo"
         # 注意：使用DashScope需要设置环境变量
         # DASHSCOPE_API_KEY
         return ChatOpenAI(
