@@ -1,14 +1,14 @@
-"""股票数据服务实现
+"""股票数据服务实现（miniqmt 版）
 
-封装 akshare 股票数据获取功能。
+封装 xtquant.xtdata 股票数据获取功能。
 """
 
-import re
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-import akshare as ak
-
+from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
 from long_earn.services import StockService
 
 if TYPE_CHECKING:
@@ -16,93 +16,70 @@ if TYPE_CHECKING:
 
 
 class StockServiceImpl(StockService):
-    """股票数据服务实现
+    """股票数据服务实现（miniqmt 版）
 
-    参考 LangGraph Runtime 实践：
-    1. 依赖通过 context 传递
-    2. 便于测试时 Mock
-    3. 统一错误处理
+    使用 xtquant.xtdata 获取股票信息、财务数据、K线数据。
     """
 
-    def __init__(self, context: "RuntimeContext"):
-        """初始化股票服务
-
-        Args:
-            context: 运行时上下文
-        """
+    def __init__(self, context: RuntimeContext):
         self.context = context
         self.logger = context.logger
+        self._client = MiniQmtClient.get()
 
     def get_stock_code_by_name(self, stock_name: str) -> str:
-        """从 NLP 回答中提取股票代码
+        """通过板块搜索匹配股票名称。
 
-        Args:
-            stock_name: 股票名称
-
-        Returns:
-            股票代码
+        xtquant 没有 NLP 接口，改为通过板块遍历匹配。
         """
         try:
-            nlp_answer_df = ak.nlp_answer(question=stock_name + "")
-            stock_code_match = re.search(r"[0-9]+", nlp_answer_df)
-            if stock_code_match:
-                return stock_code_match.group(0)
-            return ""
+            # 尝试从常用板块搜索
+            for sector in ["沪深300", "中证500", "上证50"]:
+                stocks = self._client.get_sector_stocks(sector)
+                for code in stocks:
+                    detail = self._client.get_instrument_detail(code)
+                    if stock_name in str(detail.get("stockName", "")):
+                        return code
         except Exception as e:
             if self.logger:
-                self.logger.exception(f"获取股票代码失败：{e}")
-            return ""
+                self.logger.warning(f"股票名称搜索失败: {e}")
+        return ""
 
     def get_stock_data(self, stock_code: str) -> dict[str, Any]:
-        """获取股票数据
-
-        Args:
-            stock_code: 股票代码
-
-        Returns:
-            股票数据字典
-        """
+        """获取股票基本信息。"""
         try:
-            stock_info = ak.stock_individual_info_em(symbol=stock_code)
-
-            if stock_info.empty:
-                error_msg = f"错误：未找到股票代码 {stock_code} 的数据。"
-                if self.logger:
-                    self.logger.error(error_msg)
+            detail = self._client.get_instrument_detail(stock_code)
+            if not detail:
                 return {
-                    "error": error_msg,
+                    "error": f"未找到股票代码 {stock_code}",
                     "code": stock_code,
-                    "name": "未找到股票",
+                    "name": "未找到",
                 }
 
-            stock_dict = dict(
-                zip(stock_info["item"], stock_info["value"], strict=False)
-            )
+            tick = self._client.get_full_tick([stock_code])
 
             return {
                 "code": stock_code,
-                "name": stock_dict.get("股票简称", "未知股票"),
-                "current_price": float(stock_dict.get("最新", 0.0)),
-                "change_percent": 0.0,
-                "volume": 0,
-                "turnover": 0.0,
-                "total_shares": float(stock_dict.get("总股本", 0.0)),
-                "circulating_shares": float(stock_dict.get("流通股", 0.0)),
-                "total_market_value": float(stock_dict.get("总市值", 0.0)),
-                "circulating_market_value": float(stock_dict.get("流通市值", 0.0)),
-                "listing_date": stock_dict.get("上市时间", ""),
+                "name": detail.get("stockName", detail.get("name", "未知")),
+                "current_price": float(tick.get(stock_code, {}).get("latestPrice", 0.0)),
+                "change_percent": float(tick.get(stock_code, {}).get("changeRatio", 0.0)),
+                "volume": int(tick.get(stock_code, {}).get("volume", 0)),
+                "turnover": float(tick.get(stock_code, {}).get("amount", 0.0)),
+                "total_shares": float(detail.get("totalShare", 0.0)),
+                "circulating_shares": float(detail.get("floatShare", 0.0)),
+                "total_market_value": float(detail.get("marketValue", 0.0)),
+                "circulating_market_value": float(detail.get("flowMarketValue", 0.0)),
+                "listing_date": detail.get("listDate", ""),
                 "company_info": {
                     "business": "暂无详细业务信息",
-                    "industry": stock_dict.get("行业", "未知行业"),
-                    "location": "暂无位置信息",
+                    "industry": detail.get("industry", "未知行业"),
+                    "location": detail.get("region", "未知地区"),
                 },
             }
         except Exception as e:
-            error_msg = f"获取股票数据时出错：{e!s}"
             if self.logger:
-                self.logger.exception(error_msg)
+                self.logger.exception(f"获取股票数据失败: {e}")
             return {
-                "error": error_msg,
+                "error": str(e),
                 "code": stock_code,
                 "name": "数据获取失败",
             }
@@ -110,91 +87,69 @@ class StockServiceImpl(StockService):
     def get_financial_metrics(
         self, stock_code: str = "600519", start_year: str = "2021"
     ) -> dict[str, Any]:
-        """获取股票财务指标
-
-        Args:
-            stock_code: 股票代码
-            start_year: 起始年份
-
-        Returns:
-            财务指标字典
-        """
+        """获取股票财务指标。"""
         try:
-            financial_df = ak.stock_financial_analysis_indicator(
-                symbol=stock_code, start_year=start_year
+            end_date = datetime.now().strftime("%Y%m%d")
+            df = self._client.get_financial(
+                stock_list=[stock_code],
+                start_time=start_year + "0101",
+                end_time=end_date,
+                table="Balance",
             )
 
-            if financial_df.empty:
-                error_msg = f"错误：未找到股票代码 {stock_code} 的财务指标数据。"
-                if self.logger:
-                    self.logger.error(error_msg)
+            if df.empty:
                 return {
-                    "error": error_msg,
+                    "error": f"未找到 {stock_code} 财务数据",
                     "code": stock_code,
-                    "name": "未找到股票",
+                    "name": "未找到",
                     "financial_metrics": {},
                 }
 
-            latest_data = financial_df.iloc[0].to_dict()
-
+            latest = df.iloc[0] if len(df) > 0 else {}
             return {
                 "code": stock_code,
-                "report_date": latest_data.get("日期", ""),
+                "report_date": str(latest.get("report_date", "")),
                 "financial_metrics": {
-                    "eps": latest_data.get("摊薄每股收益 (元)", 0.0),
-                    "eps_weighted": latest_data.get("加权每股收益 (元)", 0.0),
-                    "bvps": latest_data.get("每股净资产_调整前 (元)", 0.0),
-                    "operating_cash_flow_per_share": latest_data.get(
-                        "每股经营性现金流 (元)", 0.0
-                    ),
-                    "capital_reserve_per_share": latest_data.get(
-                        "每股资本公积金 (元)", 0.0
-                    ),
-                    "retained_earnings_per_share": latest_data.get(
-                        "每股未分配利润 (元)", 0.0
-                    ),
-                    "total_assets": latest_data.get("资产总计", 0.0),
-                    "total_liabilities": latest_data.get("负债合计", 0.0),
-                    "equity": latest_data.get("股东权益合计", 0.0),
+                    "eps": float(latest.get("eps", 0.0)),
+                    "roe": float(latest.get("roe", 0.0)),
+                    "revenue": float(latest.get("operating_revenue", 0.0)),
+                    "net_profit": float(latest.get("net_profit", 0.0)),
                 },
-                "raw_data": financial_df.to_dict(orient="records"),
+                "raw_data": df.to_dict(orient="records"),
             }
         except Exception as e:
-            error_msg = f"获取股票财务指标时出错：{e!s}"
             if self.logger:
-                self.logger.exception(error_msg)
+                self.logger.exception(f"获取财务指标失败: {e}")
             return {
-                "error": error_msg,
+                "error": str(e),
                 "code": stock_code,
                 "name": "数据获取失败",
                 "financial_metrics": {},
             }
 
     def get_price_history(self, stock_code: str) -> list:
-        """获取股票交易信息（近五年的月线数据）
-
-        Args:
-            stock_code: 股票代码
-
-        Returns:
-            交易信息列表
-        """
+        """获取股票历史 K 线（近五年月线）。"""
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=5 * 365)
-
-            start_date_str = start_date.strftime("%Y%m%d")
-            end_date_str = end_date.strftime("%Y%m%d")
-
-            stock_kc_a_spot_em_df = ak.stock_zh_a_hist(
-                symbol=stock_code,
-                period="monthly",
-                start_date=start_date_str,
-                end_date=end_date_str,
-                adjust="qfq",
+            end = datetime.now()
+            start = end - timedelta(days=5 * 365)
+            df = self._client.get_kline(
+                stock_list=[stock_code],
+                start_time=start.strftime("%Y%m%d"),
+                end_time=end.strftime("%Y%m%d"),
+                period="1M",
             )
-            return stock_kc_a_spot_em_df.to_dict(orient="records")
+            if df.empty:
+                return []
+            records = df.to_dict(orient="records")
+            for r in records:
+                r["date"] = r.get("date", "")
+                r["open"] = r.get("open", 0)
+                r["high"] = r.get("high", 0)
+                r["low"] = r.get("low", 0)
+                r["close"] = r.get("close", 0)
+                r["volume"] = r.get("volume", 0)
+            return records
         except Exception as e:
             if self.logger:
-                self.logger.exception(f"获取价格历史失败：{e}")
+                self.logger.exception(f"获取价格历史失败: {e}")
             return []

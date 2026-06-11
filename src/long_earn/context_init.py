@@ -3,6 +3,8 @@
 提供统一的运行时上下文创建和初始化。
 """
 
+from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.provider import MiniQmtDataProvider as DataProviderImpl
 from long_earn.config import AppConfig, RuntimeContext
 from long_earn.services.backtest_service import BacktestServiceImpl
 from long_earn.services.llm_service import LLMServiceImpl
@@ -31,15 +33,16 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     logger = LoggerServiceImpl()
     monitoring = MonitoringServiceImpl(enabled=True)
 
+    # 初始化数据提供者（带 DuckDB 缓存）
+    data_cache = DataCache()
+    data_provider = DataProviderImpl(cache=data_cache)
+
     # 创建临时上下文用于服务初始化
     temp_ctx = RuntimeContext(
         config=config,
-        llm_service=None,  # type: ignore[arg-type]
-        memory=None,  # type: ignore[arg-type]
-        stock_service=None,  # type: ignore[arg-type]
-        backtest_service=None,  # type: ignore[arg-type]
         logger=logger,
         monitoring=monitoring,
+        data_provider=data_provider,
     )
 
     llm_service = LLMServiceImpl(temp_ctx)
@@ -55,6 +58,7 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         backtest_service=backtest_service,
         logger=logger,
         monitoring=monitoring,
+        data_provider=data_provider,
     )
 
 
@@ -72,8 +76,10 @@ def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
     context = create_runtime_context(config)
 
     # 初始化记忆系统（加载持久化数据 + init 目录）
-    context.memory.initialize()
+    if context.memory is not None:
+        context.memory.initialize()
 
-    context.logger.info("回测引擎已就绪（内嵌模式）")
+    if context.logger is not None:
+        context.logger.info("回测引擎已就绪（内嵌模式）")
 
     return context

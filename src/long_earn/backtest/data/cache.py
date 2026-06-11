@@ -11,7 +11,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_PATH = Path.home() / ".long_earn" / "backtest_cache.duckdb"
+DEFAULT_CACHE_PATH = Path(__file__).parent.parent.parent.parent.parent / ".cache" / "backtest_cache.duckdb"
 
 
 class DataCache:
@@ -33,6 +33,19 @@ class DataCache:
         if self._conn is None:
             self._conn = duckdb.connect(str(self.db_path))
         return self._conn
+
+    @staticmethod
+    def _normalize_date(date_str: str) -> str:
+        """将日期字符串标准化为 YYYY-MM-DD 格式。"""
+        date_str = str(date_str).strip()
+        # 已经是 YYYY-MM-DD 格式
+        if len(date_str) == 10 and "-" in date_str:
+            return date_str
+        # YYYYMMDD 格式
+        if len(date_str) == 8:
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        # 其他格式，尝试 pandas 解析
+        return str(pd.to_datetime(date_str).strftime("%Y-%m-%d"))
 
     def _init_tables(self) -> None:
         """初始化数据表"""
@@ -218,6 +231,8 @@ class DataCache:
     def get_universe(self, index_code: str, date: str) -> list[str]:
         """获取某指数在某日期的成分股列表"""
         conn = self._get_conn()
+        # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
+        date_fmt = self._normalize_date(date)
         result = conn.execute(
             """
             SELECT symbol
@@ -227,7 +242,7 @@ class DataCache:
                 WHERE index_code = ? AND date <= ?
             )
             """,
-            [index_code, index_code, date],
+            [index_code, index_code, date_fmt],
         ).fetchdf()
 
         if result.empty:
@@ -240,11 +255,13 @@ class DataCache:
             return
 
         conn = self._get_conn()
+        # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
+        date_fmt = self._normalize_date(date)
         df = pd.DataFrame(  # noqa: F841
             {
                 "index_code": [index_code] * len(symbols),
                 "symbol": symbols,
-                "date": [pd.to_datetime(date)] * len(symbols),
+                "date": [pd.to_datetime(date_fmt)] * len(symbols),
             }
         )
 
