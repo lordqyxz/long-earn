@@ -7,20 +7,21 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from long_earn.config import RuntimeContext
 from long_earn.memory.store import MemoryStore
-from long_earn.services import MemoryService
+from long_earn.services import LoggerService, MemoryService
+
+if TYPE_CHECKING:
+    from long_earn.config import AppConfig
 
 
 class MemoryServiceImpl(MemoryService):
     """3-Tier 记忆服务"""
 
-    def __init__(self, context: "RuntimeContext"):
-        self.context = context
-        self.config = context.config
-        self.logger = context.logger
+    def __init__(self, config: "AppConfig", logger: LoggerService):
+        self.config = config
+        self.logger = logger
         self._store = MemoryStore()
         self._initialized = False
 

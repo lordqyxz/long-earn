@@ -14,10 +14,11 @@ from long_earn.backtest.engine.dsl import (
 )
 from long_earn.backtest.engine.evaluator import SafeExpressionEvaluator
 from long_earn.backtest.engine.strategy import BaseStrategy
-from long_earn.services import BacktestService
+from long_earn.services import BacktestService, LoggerService
 
 if TYPE_CHECKING:
-    from long_earn.config import RuntimeContext
+    from long_earn.backtest.data.provider import DataProvider
+    from long_earn.config import AppConfig
 
 
 class DSLStrategy(BaseStrategy):
@@ -188,10 +189,15 @@ class BacktestServiceImpl(BacktestService):
     - 自动数据缓存（DuckDB）
     """
 
-    def __init__(self, context: "RuntimeContext"):
-        self.context = context
-        self.logger = context.logger
-        self.config = context.config
+    def __init__(
+        self,
+        config: "AppConfig",
+        logger: LoggerService,
+        data_provider: "DataProvider | None" = None,
+    ):
+        self.config = config
+        self.logger = logger
+        self.data_provider = data_provider
 
     def run(
         self,
@@ -232,7 +238,7 @@ class BacktestServiceImpl(BacktestService):
                 max_position_pct=dsl.risk_control.max_position_per_stock,
             )
 
-            data_provider = getattr(self.context, "data_provider", None)
+            data_provider = self.data_provider
             if data_provider is not None and hasattr(data_provider, "get_merged_panel"):
                 engine.data_provider = PandasToPolarsProvider(data_provider)
 

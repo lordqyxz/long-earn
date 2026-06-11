@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseLanguageModel
 
-from long_earn.services import LLMService
+from long_earn.services import LLMService, LoggerService
 from long_earn.utils.llm_factory import create_llm
 
 if TYPE_CHECKING:
-    from long_earn.config import RuntimeContext
+    from long_earn.config import AppConfig
 
 
 class LLMServiceImpl(LLMService):
@@ -29,13 +29,15 @@ class LLMServiceImpl(LLMService):
             response = llm_service.invoke(prompt)
     """
 
-    def __init__(self, context: "RuntimeContext"):
+    def __init__(self, config: "AppConfig", logger: LoggerService):
         """初始化 LLM 服务
 
         Args:
-            context: 运行时上下文，从中获取配置
+            config: 应用配置（含 llm_type / llm_model / llm_base_url）
+            logger: 日志服务
         """
-        self.context = context
+        self.config = config
+        self.logger = logger
         self._llm: BaseLanguageModel | None = None
         self._invoke_count: int = 0
 
@@ -47,11 +49,10 @@ class LLMServiceImpl(LLMService):
             LLM 实例
         """
         if self._llm is None:
-            config = self.context.config
             self._llm = create_llm(
-                llm_type=config.llm_type,
-                model_name=config.llm_model,
-                base_url=config.llm_base_url,
+                llm_type=self.config.llm_type,
+                model_name=self.config.llm_model,
+                base_url=self.config.llm_base_url,
             )
         return self._llm
 
@@ -67,35 +68,32 @@ class LLMServiceImpl(LLMService):
         """
         self._invoke_count += 1
         call_id = self._invoke_count
-        logger = self.context.logger
 
-        if logger:
-            logger.debug(f"LLM 调用 #{call_id} 开始...")
+        self.logger.debug(f"LLM 调用 #{call_id} 开始...")
 
         try:
             # 根据 format 参数绑定模型配置
             llm = self.llm
             if format == "json":
-                config = self.context.config
-                if config.llm_type == "ollama":
+                if self.config.llm_type == "ollama":
                     # Ollama 原生支持 format="json"
                     llm = self.llm.bind(format="json")
-                elif config.llm_type in ("dashscope", "openai"):
+                elif self.config.llm_type in ("dashscope", "openai"):
                     # OpenAI 兼容 API 使用 response_format
                     llm = self.llm.bind(response_format={"type": "json_object"})
 
             response = llm.invoke(prompt)
-            if logger:
-                content_preview = (
-                    response.content[:100]
-                    if hasattr(response, "content")
-                    else str(response)[:100]
-                )
-                logger.debug(f"LLM 调用 #{call_id} 完成，响应预览: {content_preview!r}")
+            content_preview = (
+                response.content[:100]
+                if hasattr(response, "content")
+                else str(response)[:100]
+            )
+            self.logger.debug(
+                f"LLM 调用 #{call_id} 完成，响应预览: {content_preview!r}"
+            )
             return response
         except Exception as e:
-            if logger:
-                logger.error(f"LLM 调用 #{call_id} 异常: {e}")
+            self.logger.error(f"LLM 调用 #{call_id} 异常: {e}")
             raise
 
     def get_llm(self) -> BaseLanguageModel:

@@ -9,10 +9,10 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
-from long_earn.services import StockService
+from long_earn.services import LoggerService, StockService
 
 if TYPE_CHECKING:
-    from long_earn.config import RuntimeContext
+    from long_earn.config import AppConfig
 
 
 class StockServiceImpl(StockService):
@@ -21,9 +21,9 @@ class StockServiceImpl(StockService):
     使用 xtquant.xtdata 获取股票信息、财务数据、K线数据。
     """
 
-    def __init__(self, context: RuntimeContext):
-        self.context = context
-        self.logger = context.logger
+    def __init__(self, config: "AppConfig", logger: LoggerService):
+        self.config = config
+        self.logger = logger
         self._client = MiniQmtClient.get()
 
     def get_stock_code_by_name(self, stock_name: str) -> str:

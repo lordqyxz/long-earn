@@ -15,18 +15,19 @@ from long_earn.services.stock_service import StockServiceImpl
 
 
 def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
-    """创建运行时上下文
+    """创建运行时上下文（一次性构造完整 DI Container）
 
     构造顺序（Clean Architecture）：
-    1. 基础设施层（config / logger / monitoring）—— 必须最先就绪
-    2. 数据层（data_provider）
-    3. 业务服务层（llm / stock / backtest / memory）—— 依赖上面两层
+    1. 基础设施层（config / logger / monitoring）
+    2. 数据层（data_provider，带 DuckDB 缓存）
+    3. 业务服务层（llm / stock / backtest / memory）——
+       接 `(config, logger)`（必要时 `data_provider`），与 ctx 解耦
 
     Args:
         config: 应用配置，None 则从环境变量加载
 
     Returns:
-        初始化好的 RuntimeContext
+        所有字段（除 data_provider 外）均为非空的 RuntimeContext
     """
     if config is None:
         config = AppConfig.from_env()
@@ -43,19 +44,22 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     data_cache = DataCache()
     data_provider = DataProviderImpl(cache=data_cache)
 
-    # 3. 业务服务层 —— 复用同一个 ctx 实例，避免「temp_ctx → final_ctx」的双实例问题
-    ctx = RuntimeContext(
+    # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
+    llm_service = LLMServiceImpl(config, logger)
+    memory = MemoryServiceImpl(config, logger)
+    stock_service = StockServiceImpl(config, logger)
+    backtest_service = BacktestServiceImpl(config, logger, data_provider=data_provider)
+
+    return RuntimeContext(
         config=config,
         logger=logger,
         monitoring=monitoring,
+        llm_service=llm_service,
+        memory=memory,
+        stock_service=stock_service,
+        backtest_service=backtest_service,
         data_provider=data_provider,
     )
-    ctx.llm_service = LLMServiceImpl(ctx)
-    ctx.stock_service = StockServiceImpl(ctx)
-    ctx.backtest_service = BacktestServiceImpl(ctx)
-    ctx.memory = MemoryServiceImpl(ctx)
-
-    return ctx
 
 
 def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
