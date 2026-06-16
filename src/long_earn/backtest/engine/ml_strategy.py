@@ -92,7 +92,7 @@ def compute_rsi(series: pl.Series, window: int = 14) -> pl.Series:
     return 100 - (100 / (1 + rs))
 
 
-def compute_kdj(
+def compute_kdj(  # noqa: PLR0913
     high: pl.Series,
     low: pl.Series,
     close: pl.Series,
@@ -324,7 +324,7 @@ class FeatureEngine:
     _MIN_WR = 14
 
     @staticmethod
-    def compute_features(
+    def compute_features(  # noqa: PLR0915
         slab: pl.DataFrame,
         history: pl.DataFrame,
         current_timestamp: Any,

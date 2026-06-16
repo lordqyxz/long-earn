@@ -127,43 +127,50 @@ class Broker:
                 continue
 
             otype = order.exec_type or ExecType.MARKET
-
-            if otype == ExecType.LIMIT:
-                fill = self._try_fill_limit(order, sym_price)
-                if fill is not None:
-                    fills.append(fill)
-                    self._cancel_oco_siblings(order)
-                    self._finalize_order(oid)
-                continue
-
-            if otype == ExecType.STOP:
-                triggered = open_order.trigger_activated or self._check_stop_trigger(
-                    order, sym_price
-                )
-                if triggered:
-                    open_order.trigger_activated = True
-                    fills.append(self._fill_market(order, sym_price))
-                    self._finalize_order(oid)
-                continue
-
-            if otype == ExecType.STOP_LIMIT:
-                if not open_order.trigger_activated:
-                    triggered = self._check_stop_trigger(order, sym_price)
-                    if triggered:
-                        open_order.trigger_activated = True
-                    # 触发后立即尝试限价成交
-                if open_order.trigger_activated:
-                    fill = self._try_fill_limit(order, sym_price)
-                    if fill is not None:
-                        fills.append(fill)
-                        self._cancel_oco_siblings(order)
-                        self._finalize_order(oid)
-                continue
+            new_fills = self._process_pending_order(otype, open_order, order, sym_price)
+            if new_fills:
+                fills.extend(new_fills)
+                self._cancel_oco_siblings(order)
+                self._finalize_order(oid)
 
         for oid in expired_ids:
             self._cancel_order(oid)
 
         return fills
+
+    def _process_pending_order(
+        self,
+        otype: str,
+        open_order: OpenOrder,
+        order: OrderEvent,
+        sym_price: float,
+    ) -> list[FillEvent]:
+        """根据订单类型处理单个待成交订单"""
+        if otype == ExecType.LIMIT:
+            fill = self._try_fill_limit(order, sym_price)
+            return [fill] if fill is not None else []
+
+        if otype == ExecType.STOP:
+            triggered = open_order.trigger_activated or self._check_stop_trigger(
+                order, sym_price
+            )
+            if triggered:
+                open_order.trigger_activated = True
+                return [self._fill_market(order, sym_price)]
+            return []
+
+        if otype == ExecType.STOP_LIMIT:
+            if not open_order.trigger_activated:
+                triggered = self._check_stop_trigger(order, sym_price)
+                if triggered:
+                    open_order.trigger_activated = True
+            if open_order.trigger_activated:
+                fill = self._try_fill_limit(order, sym_price)
+                if fill is not None:
+                    return [fill]
+            return []
+
+        return []
 
     # ── 订单撮合方法 ────────────────────────────────────────────
 
@@ -195,7 +202,15 @@ class Broker:
         return fill
 
     def _try_fill_limit(self, order: OrderEvent, current_price: float) -> FillEvent | None:
-        """尝试限价单成交（价格满足条件则成交，否则返回 None）"""
+        """尝试限价单成交（价格满足条件则成交，否则返回 None）
+
+        保守成交规则（避免回测过于乐观）：
+        - BUY LIMIT @ L：实际成交价取 max(L, current + slip)
+          ——回测不能假设拿到 bar 内任意优于限价的价格，且必须承担滑点
+        - SELL LIMIT @ L：实际成交价取 min(L, current - slip)
+        旧实现 fill_price = current_price 等于"白拿 bar 内最低/最高价"，且
+        漏掉滑点，会让限价策略回测业绩系统性高估。
+        """
         if order.price is None:
             return None
 
@@ -210,7 +225,15 @@ class Broker:
         if not can_fill:
             return None
 
-        fill_price = current_price  # 限价单以当前价成交
+        # 加滑点：买方向上付溢价，卖方向下让价
+        slip_adj = current_price * self.cost_config.slippage_rate
+        if order.order_type == "BUY":
+            # 至少不优于限价：max(limit, current + slip)
+            fill_price = max(order.price, current_price + slip_adj)
+        else:
+            # 至少不优于限价：min(limit, current - slip)
+            fill_price = min(order.price, current_price - slip_adj)
+
         commission = (order.quantity * fill_price) * self.cost_config.commission_rate
         stamp_duty = 0.0
         if order.order_type == "SELL":
@@ -226,7 +249,7 @@ class Broker:
             fill_price=fill_price,
             fill_quantity=order.quantity,
             commission=commission,
-            slippage=0.0,
+            slippage=abs(fill_price - current_price) * order.quantity,
             stamp_duty=stamp_duty,
         )
 

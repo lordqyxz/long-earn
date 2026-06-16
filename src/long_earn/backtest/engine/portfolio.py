@@ -59,6 +59,12 @@ class Portfolio:
     ) -> list[OrderEvent]:
         """将信号转换为订单
 
+        语义：target_weights 是策略想要的**完整目标组合**——任何当前持仓
+        但不在 target_weights 中的标的会被解读为"目标权重 0 → 全部卖出"。
+        这样 DSL 策略发 {B:1.0} 时可以正确把 A 卖出再买 B（rebalancing）。
+        反之若实现成"只处理 target 中的 symbol，其它不动"，DSL 策略
+        将无法表达切换持仓的意图，仓位会不断累积——本轮修复的核心 bug。
+
         Args:
             event: 信号事件 (包含目标权重)
             current_prices: 当前时刻所有股票的价格 Slab
@@ -70,6 +76,12 @@ class Portfolio:
         if not isinstance(target_weights, dict):
             logger.error("Portfolio 目前仅支持 dict 格式的信号权重")
             return []
+
+        # 关键修复：把"当前持仓但不在 target_weights 中"的标的填 weight=0，
+        # 让 _compute_order_infos 能生成 SELL 订单完成 rebalancing。
+        target_weights = dict(target_weights)
+        for held in self.positions:
+            target_weights.setdefault(held, 0.0)
 
         target_weights = self._apply_position_limits(
             target_weights, max_positions
@@ -109,13 +121,20 @@ class Portfolio:
         current_prices: pl.DataFrame,
         max_position_pct: float,
     ) -> list[dict]:
-        """计算每个标的的目标订单信息（方向、金额、价格）"""
+        """计算每个标的的目标订单信息（方向、金额、价格）
+
+        target_weight=0 + 当前持仓 → 全部卖出（rebalancing 语义）。
+        target_weight=0 + 无持仓 → 跳过（什么都不做）。
+        """
         order_infos: list[dict] = []
-        for symbol, target_weight in target_weights.items():
-            if target_weight <= 0:
-                continue
+        for symbol, raw_weight in target_weights.items():
+            # 不允许做空：负权重视为 0
+            target_weight = max(0.0, raw_weight)
 
             current_pos = self.positions.get(symbol)
+            # weight=0 + 无持仓 → 跳过
+            if target_weight == 0 and current_pos is None:
+                continue
 
             price_rows = current_prices.filter(pl.col("symbol") == symbol)
             if price_rows.is_empty():

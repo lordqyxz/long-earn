@@ -63,7 +63,7 @@ class DoubleMAStrategy(MLSignalStrategy):
         # 获取当前有效股票的 sma_ratio
         symbols = valid["symbol"].to_list()
         sma_ratios = valid["sma_ratio"].to_list()
-        current_ratios = dict(zip(symbols, sma_ratios))
+        current_ratios = dict(zip(symbols, sma_ratios, strict=True))
 
         prev_ratios = self._state.get("prev_sma_ratio", {})
 
@@ -146,7 +146,7 @@ class RSIMeanReversionStrategy(MLSignalStrategy):
         if valid.is_empty():
             return {}
 
-        rsi_values = dict(zip(valid["symbol"].to_list(), valid["rsi_14"].to_list()))
+        rsi_values = dict(zip(valid["symbol"].to_list(), valid["rsi_14"].to_list(), strict=True))
 
         prev_oversold = self._state.get("oversold_days", {})
         prev_overbought = self._state.get("overbought_days", {})
@@ -241,7 +241,7 @@ class MACDHistogramStrategy(MLSignalStrategy):
 
         symbols = valid["symbol"].to_list()
         diffs = valid["macd_diff"].to_list()
-        current_diffs = dict(zip(symbols, diffs))
+        current_diffs = dict(zip(symbols, diffs, strict=True))
 
         prev_diffs = self._state.get("prev_diff", {})
 
