@@ -1,91 +1,88 @@
-# Qlib 信号生成模式
+# 信号生成 - YAML DSL 信号步骤
 
-## 模式一：直接返回仓位权重
+## 信号步骤类型
 
-```python
-def generate_signals(self, date: str) -> pd.Series:
-    """
-    返回目标仓位
-    
-    Returns:
-        pd.Series: 索引为股票代码，值为仓位权重（-1 到 1）
-    """
-    positions = {}
-    for stock in self.stock_list:
-        # 计算目标仓位
-        positions[stock] = 0.5  # 50% 仓位
-    return pd.Series(positions)
+策略通过 `signals` 列表定义信号生成流程，支持三种步骤类型，按顺序执行。
+
+### 1. filter - 过滤步骤
+
+筛选符合条件的股票，不满足条件的股票被排除。
+
+```yaml
+signals:
+  - type: filter
+    condition: net_profit_yoy > 0.2
 ```
 
-## 模式二：使用预测分数生成信号
-
-```python
-def generate_signals(self, pred_score: pd.DataFrame) -> pd.Series:
-    """
-    基于预测分数生成信号
-    
-    Args:
-        pred_score: 预测分数 DataFrame
-        
-    Returns:
-        pd.Series: 目标仓位
-    """
-    # 取 Top-K
-    top_k = 10
-    top_stocks = pred_score.nlargest(top_k).index
-    
-    # 等权分配
-    positions = {stock: 1.0 / top_k for stock in top_stocks}
-    return pd.Series(positions)
+```yaml
+signals:
+  - type: filter
+    condition: roe > 0.1 and revenue_yoy > 0.15
 ```
 
-## 动量策略信号生成
+### 2. rank - 排序选取步骤
 
-```python
-def generate_signals(self, date: str) -> pd.Series:
-    # 获取历史数据
-    close_data = D.features(
-        self.stock_list,
-        ["$close"],
-        start_time=start_date,
-        end_time=date
-    )
-    
-    signals = {}
-    for stock in close_data.columns.get_level_values(0).unique():
-        stock_close = close_data[stock]["$close"].dropna()
-        
-        if len(stock_close) >= self.lookback_period:
-            # 计算动量信号
-            returns = stock_close.pct_change(periods=self.period).iloc[-1]
-            
-            if returns > 0:
-                signals[stock] = 1.0 / self.top_k
-            else:
-                signals[stock] = 0.0
-    
-    return pd.Series(signals)
+按指定字段排序，选取前 N 只股票。
+
+```yaml
+signals:
+  - type: rank
+    by: net_profit_yoy
+    ascending: false
+    top: 10
 ```
 
-## 均线交叉信号生成
-
-```python
-def generate_signals(self, date: str) -> pd.Series:
-    # 计算短期和长期均线
-    short_ma = price_data.rolling(self.short_window).mean()
-    long_ma = price_data.rolling(self.long_window).mean()
-    
-    # 金叉买入，死叉卖出
-    if short_ma.iloc[-1] > long_ma.iloc[-1]:
-        return pd.Series({stock: 1.0 for stock in self.stock_list})
-    else:
-        return pd.Series({stock: 0.0 for stock in self.stock_list})
+```yaml
+signals:
+  - type: rank
+    by: close
+    ascending: true
+    top: 20
 ```
 
-## 信号生成规则
+### 3. expression - 表达式计算步骤
 
-1. 返回值必须是 pd.Series 类型
-2. 索引为股票代码，值为目标仓位
-3. 仓位范围：-1（满仓做空）到 1（满仓做多）
-4. 0 表示空仓
-5. 所有仓位通常需要归一化处理
+计算新字段并加入 DataFrame，供后续步骤使用。
+
+```yaml
+signals:
+  - type: expression
+    formula: close / shift(close, 20) - 1
+    alias: momentum
+```
+
+## 表达式语法
+
+支持 Python 风格的算术和比较运算：
+
+- 算术运算：`+`, `-`, `*`, `/`
+- 比较运算：`>`, `<`, `>=`, `<=`, `==`, `!=`
+- 逻辑运算：`and`, `or`, `not`
+- 函数：`shift(field, n)` 向前偏移 n 个周期
+- 函数：`abs()`, `max()`, `min()`, `sum()`, `mean()`, `std()`, `log()`, `exp()`, `sqrt()`
+
+### 表达式示例
+
+```
+net_profit_yoy > 0.3                    # 净利润增长率超过30%
+close / shift(close, 20) - 1            # 20日收益率（动量）
+roe > 0.1 and net_profit_yoy > 0.2      # ROE>10%且利润增长>20%
+abs(close - open) / close > 0.02        # 日内振幅超过2%
+```
+
+## 信号生成流程
+
+1. 从股票池获取所有股票数据
+2. 如果有 `factors` 定义，先计算因子
+3. 按 `signals` 列表顺序执行步骤
+4. filter 步骤逐步缩小候选范围
+5. rank 步骤从候选中选取 top N
+6. expression 步骤计算新字段
+7. 最终候选股票按 weights 配置分配仓位
+
+## 注意事项
+
+- filter 条件中 NaN 值自动视为 False（该股票被排除）
+- rank 步骤中 NaN 值会被 dropna 排除
+- 没有股票满足条件时，策略返回空仓
+- 多个 filter 步骤是 AND 关系（逐步缩小范围）

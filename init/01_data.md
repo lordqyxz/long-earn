@@ -1,74 +1,52 @@
-# Qlib 数据获取 - 初始化
+# 数据获取 - miniqmt (xtquant) 数据源
 
-## 初始化 Qlib
+## 数据源架构
 
-```python
-from qlib import init
-from pathlib import Path
+系统使用 miniqmt (xtquant) 作为主数据源，DuckDB 作为本地缓存，akshare 作为降级备选。
 
-qlib_data_path = Path.home() / ".qlib_data"
-if qlib_data_path.exists():
-    init(provider_uri=str(qlib_data_path), region="cn")
-```
+数据获取优先级：DuckDB 缓存 → miniqmt → akshare
 
-## 获取股票列表
+## 股票池类型
 
-```python
-from qlib.data import D
+| 类型代码 | 说明 |
+|----------|------|
+| csi300 | 沪深300成分股 |
+| csi500 | 中证500成分股 |
+| csi1000 | 中证1000成分股 |
+| sse50 | 上证50成分股 |
+| all_a | 全A股 |
+| main_board | 沪深主板 |
+| gem | 创业板 |
+| star_board | 科创板 |
+| main_board+star_board | 主板+科创板（组合） |
 
-# 获取 A 股市场股票列表
-instruments = D.instruments(market="csi300")  # CSI300 成分股
-instruments = D.instruments(market="csi1000")  # CSI1000 成分股
-instruments = D.instruments(market="all")      # 所有 A 股
+## 可用数据字段
 
-# 使用正则匹配股票代码
-instruments = D.list_instruments(symbols="SH60.*", as_list=True)
-```
+### 行情数据（日频）
 
-## 获取历史价格数据
+| 字段名 | 说明 | 类型 |
+|--------|------|------|
+| open | 开盘价 | float |
+| high | 最高价 | float |
+| low | 最低价 | float |
+| close | 收盘价 | float |
+| volume | 成交量 | float |
 
-```python
-from qlib.data import D
-import pandas as pd
+### 财务数据（季度，已前向填充到日级别）
 
-# 获取单只股票数据
-fields = ["$close", "$open", "$high", "$low", "$volume", "$money"]
-data = D.features(
-    symbol="SH600519",  # 贵州茅台
-    fields=fields,
-    start_time="2020-01-01",
-    end_time="2023-12-31"
-)
-
-# 获取多只股票数据
-symbols = ["SH600519", "SH000001", "SZ000002"]
-data = D.features(
-    symbol=symbols,
-    fields=["$close", "$volume"],
-    start_time="2020-01-01",
-    end_time="2023-12-31"
-)
-
-# 获取交易日历
-trade_dates = D.calendar(start_time="2020-01-01", end_time="2023-12-31", freq="day")
-```
-
-## 常用数据字段
-
-| 字段 | 说明 |
-|------|------|
-| $close | 收盘价 |
-| $open | 开盘价 |
-| $high | 最高价 |
-| $low | 最低价 |
-| $volume | 成交量 |
-| $money | 成交额 |
-| $change | 涨跌幅 |
-| $vwap | 成交量加权平均价 |
+| 字段名 | 说明 | 类型 |
+|--------|------|------|
+| net_profit_yoy | 净利润同比增长率 | float |
+| revenue_yoy | 营业总收入同比增长率 | float |
+| roe | 净资产收益率 | float |
+| gross_margin | 销售毛利率 | float |
+| eps | 每股收益 | float |
+| net_profit | 净利润 | float |
+| revenue | 营业总收入 | float |
 
 ## 数据获取最佳实践
 
-1. 预先定义股票池，避免每次查询都获取全市场数据
-2. 使用合适的时间范围，减少不必要的数据获取
-3. 处理缺失数据，使用 dropna() 或前向填充
-4. 注意数据时区，Qlib 使用北京时间
+1. 使用 csi300 或 csi500 等指数成分股作为股票池，避免全市场扫描
+2. 财务数据为季度频率，已前向填充到日级别，可直接在日频策略中使用
+3. 数据缺失或 NaN 时，过滤条件自动返回 False（该股票被排除）
+4. 数据通过 DuckDB 缓存，首次获取后自动缓存到本地

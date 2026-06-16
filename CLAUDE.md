@@ -97,7 +97,7 @@ RuntimeContext(dataclass)
 - 所有函数和参数必须添加类型注解
 - `str` 类型参数默认值 `""`
 - 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
-- 类型检查：mypy（渐进式，warn\_return\_any + check\_untyped\_defs）
+- 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见上文「质量门槛」）
 - 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
 - 中文注释和文档字符串
 
@@ -362,15 +362,11 @@ remoteMiniQmt/
 
 ## 开发待办 (TODO)
 
-### 1. 回测引擎 (Backtest Engine)
-- [x] **Event-Driven 核心链路实现**：开发 `EventEngine` $\to$ `DataHandler` $\to$ `Strategy` $\to$ `Portfolio` $\to$ `Broker` 闭环。
-- [x] **Agent 友好 API 设计**：构建一套低认知成本的策略接口，支持 LLM 高正确率生成状态化策略。
-- [x] **金融级可信验证**：通过严格的事件流隔离，验证回测结果不存在未来函数（Look-ahead bias）。
-- [x] **机器学习样本外验证 (OOS)**：实现时间窗切分，支持模型在样本外数据的性能验证。
-- [x] **高级状态化风控**：实现基于事件触发的动态止损、追踪止盈及最大回撤限制。
-- [x] **扩展数据字段**：增加更多技术指标（如 MACD, RSI）和财务指标。
-- [x] **Dashboard 模块独立**：将可视化分析抽取为 `dashboard/` 模块，与 Agent 共享审计接口。
-- [x] **数据源迁移**：从 akshare 迁移至 miniqmt (xtquant)，完成 `miniqmt_provider.py` / `provider.py` / `universe.py` / `stock_service.py` / `backtest_service.py` / `cache.py` / `context_init.py` 的适配。
+### 1. 回测引擎 (Backtest Engine) — 已交付
+
+事件驱动核心链路、Agent 友好 API、金融级可信验证（无未来函数）、Walk-Forward OOS、状态化风控（动态止损 / 追踪止盈 / 最大回撤）、扩展技术指标（MACD/RSI 等）、Dashboard 模块独立、akshare → miniqmt (xtquant) 数据源迁移均已完成（详见 ADR-005 与 git log）。
+
+后续优化项暂无规划，按需添加。
 
 ### 2. 记忆系统 (Memory System)
 - [ ] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。
@@ -379,7 +375,6 @@ remoteMiniQmt/
 - [ ] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
-- [x] **利润增长策略回测验证**：完成保守型/平衡型/进取型三组参数回测（模拟数据年化收益 47.50% / 47.91% / 101.32%）。
 - [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
 - [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
 - [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。

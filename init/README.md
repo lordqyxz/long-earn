@@ -67,7 +67,7 @@ results = search_knowledge("数据获取", k=3, source_files=["01_data.md", "02_
 | **research** | 按类别过滤 | 策略概念、指标知识 |
 | **reflection** | 按类别过滤 | 风险评估、策略优化知识 |
 | **optimize** | 按类别过滤 | 优化方法知识 |
-| **develop** | 按源文件过滤 | Qlib 代码实现知识 |
+| **develop** | 按源文件过滤 | 回测引擎代码实现知识 |
 
 ### develop 节点检索的文件
 
@@ -99,7 +99,7 @@ results = search_knowledge("数据获取", k=3, source_files=["01_data.md", "02_
 
 | 文件 | 说明 |
 |------|------|
-| `01_data.md` | Qlib 数据获取指南 |
+| `01_data.md` | miniqmt/xtquant 数据获取指南 |
 | `02_strategy.md` | 策略开发指南 |
 | `03_signals.md` | 信号生成 |
 | `04_backtest.md` | 回测框架 |

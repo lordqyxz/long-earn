@@ -1,70 +1,43 @@
-# Qlib 回测配置
+# 事件驱动回测引擎
 
-## 使用 workflow 进行回测
+## 引擎架构
 
-```python
-from qlib.workflow import R
-from qlib.workflow.record_temp import SignalRecord, PortAnaRecord
+回测引擎采用事件驱动架构，核心流程：
 
-# 开始实验
-with R.start(experiment_name="my_strategy"):
-    # 生成信号
-    sr = SignalRecord(task_id=task_id)
-    sr.generate()
-    
-    # 回测分析
-    par = PortAnaRecord(sr.get_pred_graph(), "2020-01-01", "2023-12-31")
-    par.generate()
+```
+EventEngine → DataHandler → Strategy → Portfolio → Broker
 ```
 
-## 使用 backtest 模块
+### 核心特性
 
-```python
-from qlib.backtest import backtest, Exchange
+1. **Agent 友好**：接口设计优先考虑 LLM 的认知成本，使用 YAML DSL 描述策略
+2. **金融级可信**：严格的事件流控制时间线，杜绝未来函数（look-ahead bias）
+3. **数据隔离**：策略仅能通过 `engine.current_data` 访问当前时刻数据
+4. **T+1 执行**：信号在 T 日生成，T+1 日执行
 
-# 创建交易所配置
-exchange = Exchange(
-    start_time="2020-01-01",
-    end_time="2023-12-31",
-    freq="day",
-    benchmark="SH000300"  # 沪深300作为基准
-)
+## 回测执行流程
 
-# 执行回测
-portfolio = backtest(
-    strategy=my_strategy,
-    exchange=exchange,
-    account=100000000  # 1亿资金
-)
-```
+1. 解析 YAML DSL 策略描述
+2. 获取股票池成分股
+3. 获取行情和财务数据（DuckDB 缓存 → miniqmt → akshare 降级链路）
+4. 事件驱动回测循环：
+   - 每个交易日触发 on_bar 事件
+   - 执行信号生成步骤（filter → rank → expression）
+   - 计算目标权重
+   - 模拟撮合（考虑滑点、佣金、印花税）
+   - 更新投资组合
+5. 计算绩效指标
 
-## 回测参数配置
+## 回测参数
 
-```python
-backtest_config = {
-    "start_time": "2020-01-01",
-    "end_time": "2023-12-31",
-    "account": 100000000,  # 1亿
-    "benchmark": "SH000300",
-    "exchange_kwargs": {
-        "freq": "day",
-        "limit_threshold": 0.095,  # 涨跌停限制 9.5%
-        "deal_price": "close",      # 成交价格用收盘价
-        "cancel_threshold": 0,     # 撤单阈值
-        "fee": {
-            "commission": 0.001,   # 手续费千分之一
-            "slippage": 0.0005,    # 滑点万分之五
-        }
-    }
-}
-```
-
-## 回测时间范围选择
-
-1. 长周期回测：2020-01-01 至 2023-12-31（4年）
-2. 短周期回测：2022-01-01 至 2023-12-31（2年）
-3. 牛市测试：2019-01-01 至 2020-12-31
-4. 熊市测试：2022-01-01 至 2022-12-31
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| 初始资金 | 1,000,000 | 默认100万 |
+| 佣金率 | 0.0003 | 单边万三 |
+| 印花税 | 0.0005 | 卖出万五 |
+| 滑点 | 2bps | 2个基点 |
+| 止损 | None | 可选，如 0.1 表示 -10% |
+| 最大回撤限制 | None | 可选，超过则清仓 |
 
 ## 回测注意事项
 
@@ -72,3 +45,4 @@ backtest_config = {
 2. 设置合理的交易费用和滑点
 3. 考虑涨跌停限制对交易的影响
 4. 使用合适的基准进行对比
+5. 财务数据有发布延迟（季报通常在季后1-2个月发布）
