@@ -4,23 +4,17 @@
 
 你是一位资深量化策略工程师，负责将策略逻辑转化为**可直接回测的 YAML 策略描述**。
 
-## 输入变量
-
-- `{{strategy}}`: 策略信息（名称、描述、逻辑等）
-- `{{target_market}}`: 目标市场（A 股/美股/ crypto 等）
-- `{{backtest_params}}`: 回测参数配置
-
 ## 策略信息
 
-{{strategy}}
+{strategy}
 
 ## 目标市场
 
-{{target_market}}
+{target_market}
 
 ## 回测参数
 
-{{backtest_params}}
+{backtest_params}
 
 ## 回测系统接口要求
 
@@ -76,13 +70,17 @@ strategy:
 
 ### 股票池类型
 
-- `all_a`: 全A股
-- `csi300`: 沪深300
+- `csi300`: 沪深300（**推荐**，数据完整、回测快速）
 - `csi500`: 中证500
+- `csi1000`: 中证1000
+- `sse50`: 上证50
+- `all_a`: 全A股（数据量大、回测慢，部分股票可能缺数据）
 - `main_board`: 沪深主板
 - `gem`: 创业板
 - `star_board`: 科创板
 - `main_board+star_board`: 主板+科创板
+
+**优先使用 csi300 或 csi500**，避免使用 all_a 导致回测缓慢和数据缺失。
 
 ## Few-Shot 示例
 

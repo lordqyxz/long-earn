@@ -87,8 +87,27 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         for start, end in [("```yaml", "```"), ("```", "```")]:
             if start in response:
                 yaml_str = response.split(start)[1].split(end, maxsplit=1)[0].strip()
-                return yaml_str
-        return response.strip()
+                return self._clean_yaml_trailing_content(yaml_str)
+
+        # 无代码块标记时，尝试从 strategy: 开始截取
+        cleaned = self._clean_yaml_trailing_content(response.strip())
+        return cleaned
+
+    @staticmethod
+    def _clean_yaml_trailing_content(yaml_str: str) -> str:
+        """清理 YAML 末尾附带的非 YAML 内容（如 JSON 解释文本）
+
+        LLM 有时在 YAML 代码块后附加 JSON 格式的说明，
+        导致 YAML 解析器在遇到 '{' 时报错。
+        """
+        lines = yaml_str.split("\n")
+        clean_lines: list[str] = []
+        for line in lines:
+            # 遇到非缩进的 { 开头行，视为 YAML 之后的附加内容，截断
+            if line.startswith("{") and not line.startswith("  "):
+                break
+            clean_lines.append(line)
+        return "\n".join(clean_lines).strip()
 
     def refine_code(
         self,
@@ -155,7 +174,7 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
 
         try:
             raw = self.memory.recall(
-                query, k=4, experience_type="strategy", min_similarity=0.05
+                query, k=4, categories=["策略经验"]
             )
         except Exception:
             if self.logger:

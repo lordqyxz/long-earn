@@ -59,11 +59,19 @@ strategy_optimize_prompt = PromptTemplate(
 ## 市场特征
 {market_characteristics}
 
+## 可用数据字段（必须且只能使用以下字段）
+行情：open, high, low, close, volume
+财务：net_profit_yoy, revenue_yoy, roe, gross_margin, eps, net_profit, revenue
+可用函数：shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
+可用股票池：csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board
+
 ## 优化要求
 1. 针对改进建议中的每个问题，给出具体的优化方案
 2. 优化后的策略必须保持逻辑清晰可解释
 3. 必须包含具体的风险控制措施
 4. 避免过拟合，考虑样本外表现
+5. factors_used 中的 field 必须来自可用字段列表
+6. backtest_params.universe 必须使用可用股票池类型
 
 ## 输出格式
 请严格按照以下 JSON 格式返回优化后的策略：
