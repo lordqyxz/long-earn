@@ -265,3 +265,60 @@ class TestMaxPositions:
         orders = portfolio.process_signal(signal, slab, max_positions=0)
 
         assert len(orders) == 10
+
+
+class TestRebalancing:
+    """完整目标组合 rebalancing 语义
+
+    防止"target_weights 中消失的持仓永远不被卖出 → DSL 策略无法切换持仓"。
+    """
+
+    def test_missing_position_is_sold(self):
+        """portfolio 持有 A，新信号 {B:1.0} → A 必须被 SELL，B 必须被 BUY"""
+        portfolio = Portfolio(initial_capital=1_000_000.0)
+        portfolio.positions["A"] = Position(
+            symbol="A", shares=10000.0, avg_cost=10.0,
+            current_price=10.0, market_value=100_000.0,
+        )
+        portfolio.total_value = 1_000_000.0
+
+        slab = _make_slab({"A": 10.0, "B": 20.0})
+        signal = _make_signal({"B": 1.0})
+
+        orders = portfolio.process_signal(signal, slab)
+
+        order_types = {o.symbol: o.order_type for o in orders}
+        assert order_types.get("A") == "SELL", (
+            f"A 必须被 SELL（消失即清仓），实际 orders: {[(o.symbol, o.order_type) for o in orders]}"
+        )
+        assert order_types.get("B") == "BUY"
+
+    def test_explicit_zero_weight_sells(self):
+        """portfolio 持有 A，信号 {A:0.0} 显式 0 也被解读为 SELL 全部"""
+        portfolio = Portfolio(initial_capital=1_000_000.0)
+        portfolio.positions["A"] = Position(
+            symbol="A", shares=10000.0, avg_cost=10.0,
+            current_price=10.0, market_value=100_000.0,
+        )
+        portfolio.total_value = 1_000_000.0
+
+        slab = _make_slab({"A": 10.0})
+        signal = _make_signal({"A": 0.0})
+
+        orders = portfolio.process_signal(signal, slab)
+
+        a_orders = [o for o in orders if o.symbol == "A"]
+        assert a_orders and a_orders[0].order_type == "SELL"
+
+    def test_zero_weight_no_position_skipped(self):
+        """target=0 + 无持仓 → 不生成订单（不会有 'BUY 0 股' 的怪事）"""
+        portfolio = Portfolio(initial_capital=1_000_000.0)
+        portfolio.total_value = 1_000_000.0
+
+        slab = _make_slab({"A": 10.0, "B": 20.0})
+        signal = _make_signal({"A": 0.0, "B": 1.0})
+
+        orders = portfolio.process_signal(signal, slab)
+
+        a_orders = [o for o in orders if o.symbol == "A"]
+        assert a_orders == [], "weight=0 + 无持仓不应生成订单"

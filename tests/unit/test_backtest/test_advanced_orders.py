@@ -44,12 +44,13 @@ class TestLimitOrder:
     """限价单测试"""
 
     def test_buy_limit_fills_when_price_below_limit(self):
-        """买入限价：当前价低于限价时应成交"""
+        """买入限价：当前价低于限价时应成交（保守取 max(limit, current+slip)）"""
         broker = Broker()
         order = _make_order("BUY", exec_type=ExecType.LIMIT, price=11.0)
         fills = broker.submit_order(order, current_price=10.0)
         assert len(fills) == 1
-        assert fills[0].fill_price == 10.0  # 以当前价成交
+        # 保守成交价：BUY 不能优于 limit；limit=11 > current+slip ≈ 10.002，取 11
+        assert fills[0].fill_price == 11.0
         assert fills[0].order_id == order.order_id
 
     def test_buy_limit_fills_when_price_equals_limit(self):

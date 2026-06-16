@@ -114,6 +114,74 @@ class TestBrokerStampDuty:
         assert fill.stamp_duty == 0.0
 
 
+def _make_limit_order(
+    order_type: str, limit_price: float, quantity: float = 100.0
+) -> OrderEvent:
+    """构造测试用限价单"""
+    from long_earn.backtest.domain.entities import ExecType
+
+    return OrderEvent(
+        timestamp=datetime(2024, 1, 1),
+        trace_id="trace-lmt",
+        event_id="evt-lmt",
+        symbol="000001",
+        order_type=order_type,
+        quantity=quantity,
+        price=limit_price,
+        order_id="ord-lmt",
+        exec_type=ExecType.LIMIT,
+    )
+
+
+class TestLimitOrderConservativeFill:
+    """限价单保守成交价测试
+
+    防止"用 close 直接成交、且不加滑点"导致回测系统性高估限价策略业绩。
+    """
+
+    def test_buy_limit_fill_price_not_below_current_plus_slip(self):
+        """BUY LIMIT @ 10，current=8.0：成交价应 ≥ current + slippage（不能白拿 8.0）"""
+        broker = Broker(TradingCostConfig(slippage_bps=10))  # 0.001
+        order = _make_limit_order("BUY", limit_price=10.0)
+
+        fill = broker.submit_order(order, current_price=8.0)
+        assert fill, "应成交"
+        # 不应直接拿 current_price 8.0，至少 8.0 + 滑点
+        expected_min = 8.0 * (1 + 0.001)
+        assert fill[0].fill_price >= expected_min - 1e-9, (
+            f"BUY LIMIT 成交价过于乐观: {fill[0].fill_price} < {expected_min}"
+        )
+        # 仍应 ≤ limit_price（限价单的硬上限）
+        assert fill[0].fill_price <= 10.0
+        # 滑点字段非零
+        assert fill[0].slippage > 0
+
+    def test_sell_limit_fill_price_not_above_current_minus_slip(self):
+        """SELL LIMIT @ 10，current=12.0：成交价应 ≤ current - slippage"""
+        broker = Broker(TradingCostConfig(slippage_bps=10))  # 0.001
+        order = _make_limit_order("SELL", limit_price=10.0)
+
+        fill = broker.submit_order(order, current_price=12.0)
+        assert fill, "应成交"
+        expected_max = 12.0 * (1 - 0.001)
+        assert fill[0].fill_price <= expected_max + 1e-9, (
+            f"SELL LIMIT 成交价过于乐观: {fill[0].fill_price} > {expected_max}"
+        )
+        # 仍应 ≥ limit_price（限价单的硬下限）
+        assert fill[0].fill_price >= 10.0
+        assert fill[0].slippage > 0
+
+    def test_limit_order_with_zero_slippage_falls_back_to_limit(self):
+        """slippage=0 时 BUY LIMIT 成交价就是 limit（保守边界）"""
+        broker = Broker(TradingCostConfig(slippage_bps=0))
+        order = _make_limit_order("BUY", limit_price=10.0)
+
+        fill = broker.submit_order(order, current_price=8.0)
+        assert fill
+        # 无滑点时 max(limit, current+0) = max(10, 8) = 10
+        assert fill[0].fill_price == 10.0
+
+
 class TestFillEventIntegrity:
     """FillEvent 字段完整性接口测试"""
 
