@@ -39,10 +39,12 @@ class DataCache:
         """将日期字符串标准化为 YYYY-MM-DD 格式。"""
         date_str = str(date_str).strip()
         # 已经是 YYYY-MM-DD 格式
-        if len(date_str) == 10 and "-" in date_str:
+        _yyyy_mm_dd_len = 10
+        _yyyymmdd_len = 8
+        if len(date_str) == _yyyy_mm_dd_len and "-" in date_str:
             return date_str
         # YYYYMMDD 格式
-        if len(date_str) == 8:
+        if len(date_str) == _yyyymmdd_len:
             return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
         # 其他格式，尝试 pandas 解析
         return str(pd.to_datetime(date_str).strftime("%Y-%m-%d"))
@@ -216,15 +218,26 @@ class DataCache:
         if df["report_date"].dtype == "object":
             df["report_date"] = pd.to_datetime(df["report_date"])
 
-        conn.execute("""
-            CREATE OR REPLACE TEMP TABLE temp_fin AS SELECT * FROM df
-        """)
-        conn.execute("""
+        # 只选择缓存表中存在的列，缺失列用 NULL 填充
+        cache_columns = [
+            "symbol", "report_date",
+            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+            "eps", "net_profit", "revenue",
+        ]
+        for col in cache_columns:
+            if col not in df.columns:
+                df[col] = None
+
+        # 过滤掉 symbol 或 report_date 为空的行（NOT NULL 约束）
+        df = df.dropna(subset=["symbol", "report_date"])
+
+        if df.empty:
+            return
+
+        conn.execute(f"""
             INSERT OR REPLACE INTO financial_quarterly
-            SELECT symbol, report_date,
-                   net_profit_yoy, revenue_yoy, roe, gross_margin,
-                   eps, net_profit, revenue
-            FROM temp_fin
+            ({', '.join(cache_columns)})
+            SELECT {', '.join(cache_columns)} FROM df
         """)
         logger.info(f"缓存财务数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
 
@@ -233,21 +246,33 @@ class DataCache:
         conn = self._get_conn()
         # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
         date_fmt = self._normalize_date(date)
-        result = conn.execute(
-            """
-            SELECT symbol
-            FROM universe_constituents
-            WHERE index_code = ? AND date = (
-                SELECT MAX(date) FROM universe_constituents
-                WHERE index_code = ? AND date <= ?
-            )
-            """,
-            [index_code, index_code, date_fmt],
-        ).fetchdf()
+        try:
+            # 先检查表中是否有该 index_code 的数据
+            count = conn.execute(
+                "SELECT COUNT(*) FROM universe_constituents WHERE index_code = ?",
+                [index_code],
+            ).fetchone()
+            if not count or count[0] == 0:
+                return []
 
-        if result.empty:
+            result = conn.execute(
+                """
+                SELECT symbol
+                FROM universe_constituents
+                WHERE index_code = ? AND date = (
+                    SELECT MAX(date) FROM universe_constituents
+                    WHERE index_code = ? AND date <= ?
+                )
+                """,
+                [index_code, index_code, date_fmt],
+            ).fetchdf()
+
+            if result.empty:
+                return []
+            return result["symbol"].tolist()
+        except Exception as e:
+            logger.warning(f"缓存查询成分股失败: {e}")
             return []
-        return result["symbol"].tolist()
 
     def save_universe(self, index_code: str, date: str, symbols: list[str]) -> None:
         """保存指数成分股到缓存"""
