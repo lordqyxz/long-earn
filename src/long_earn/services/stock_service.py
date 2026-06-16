@@ -21,7 +21,7 @@ class StockServiceImpl(StockService):
     使用 xtquant.xtdata 获取股票信息、财务数据、K线数据。
     """
 
-    def __init__(self, config: "AppConfig", logger: LoggerService):
+    def __init__(self, config: AppConfig, logger: LoggerService):
         self.config = config
         self.logger = logger
         self._client = MiniQmtClient.get()

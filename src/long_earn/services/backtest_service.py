@@ -27,6 +27,10 @@ class DSLStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, dsl_strategy: Any, config: dict | None = None):
         super().__init__(strategy_id, config)
         self.dsl = dsl_strategy
+        # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
+        # 还是只是退化成"什么都不做"而被错误标记 success=True。
+        self.factor_failures: list[dict[str, str]] = []
+        self.step_failures: list[dict[str, str]] = []
 
     def _eval(self, expr: str, df) -> Any:
         """使用 SafeExpressionEvaluator 安全求值"""
@@ -34,13 +38,43 @@ class DSLStrategy(BaseStrategy):
         return evaluator.evaluate(expr)
 
     def on_bar(self, bars: pl.DataFrame, context) -> Any:
-        from long_earn.backtest.domain.entities import SignalEvent
+        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
 
-        df = bars.to_pandas()
-        if "symbol" not in df.index.names:
-            df = df.set_index("symbol")
+        # 因子计算必须基于历史窗口而非当前截面：否则 shift(close, N) 这类
+        # 时序因子在每 symbol 单行的 slab 上永远是 NaN，所有动量/反转/波动率
+        # 因子全部失效——这是 LLM 生成的量化策略最常见的因子类型。
+        # context.get_history_df() 由 VisibilityGuard 保证只含 timestamp <= 当前时刻。
+        try:
+            history_pl = context.get_history_df()
+            history_df = history_pl.to_pandas()
+            # 因子层：MultiIndex (timestamp, symbol)，shift(level="symbol") 才能正确按
+            # 每只股票的时间序列做位移
+            if "timestamp" in history_df.columns and "symbol" in history_df.columns:
+                history_df = history_df.sort_values(
+                    ["symbol", "timestamp"]
+                ).set_index(["timestamp", "symbol"])
+            factors_df = self._compute_factors(history_df)
+            # 取当前时刻的截面快照（信号和权重在 symbol 单层 index 上工作）
+            ct = context.current_timestamp
+            if ct in factors_df.index.get_level_values(0):
+                df = factors_df.xs(ct, level="timestamp")
+            else:
+                # 兜底：若历史 df 没有当前 ts（数据缺失等），退回到 bars 截面
+                df = bars.to_pandas()
+                if "symbol" not in df.index.names:
+                    df = df.set_index("symbol")
+        except Exception as exc:
+            # 历史数据获取失败时回退旧路径，但记录到 step_failures 便于上层观测
+            self.step_failures.append({
+                "type": "history_fetch",
+                "step": "on_bar history",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            df = bars.to_pandas()
+            if "symbol" not in df.index.names:
+                df = df.set_index("symbol")
+            df = self._compute_factors(df)
 
-        df = self._compute_factors(df)
         selected = self._execute_signal_steps(df)
         final_weights = self._compute_weights(df, selected)
 
@@ -56,20 +90,30 @@ class DSLStrategy(BaseStrategy):
         )
 
     def _compute_factors(self, df: Any) -> Any:
-        """计算 DSL 定义的因子并加入 DataFrame"""
+        """计算 DSL 定义的因子并加入 DataFrame
+
+        失败的因子写入 self.factor_failures，便于上层判断策略是否真的在工作。
+        """
         for alias, expr in self.dsl.factors.items():
             try:
                 result = self._eval(expr, df)
                 if result is not None:
                     df[alias] = result
-            except Exception:
+            except Exception as exc:
+                # 不要让一个坏因子直接挂掉整张图，但要让失败可观测
+                self.factor_failures.append(
+                    {"alias": alias, "expr": str(expr), "error": str(exc)}
+                )
                 continue
         return df
 
     def _execute_signal_steps(self, df: Any) -> list:
-        """执行 DSL 信号步骤（filter/rank/expression），返回选中的标的列表"""
+        """执行 DSL 信号步骤（filter/rank/expression），返回选中的标的列表
+
+        失败的 step 写入 self.step_failures，便于上层判断策略是否真的在工作。
+        """
         selected = df.index.unique().tolist()
-        for step in self.dsl.signals:
+        for idx, step in enumerate(self.dsl.signals):
             step_type = step.get("type", "")
             try:
                 if step_type == "filter":
@@ -78,7 +122,15 @@ class DSLStrategy(BaseStrategy):
                     selected = self._apply_rank_step(step, df)
                 elif step_type == "expression":
                     self._apply_expression_step(step, df)
-            except Exception:
+            except Exception as exc:
+                self.step_failures.append(
+                    {
+                        "index": str(idx),
+                        "type": step_type,
+                        "step": str(step),
+                        "error": str(exc),
+                    }
+                )
                 continue
         return selected
 
@@ -108,20 +160,68 @@ class DSLStrategy(BaseStrategy):
             df[alias_new] = result
 
     def _compute_weights(self, df: Any, selected: list) -> dict[str, float]:
-        """根据权重配置计算最终权重"""
-        if self.dsl.weights.method == "equal":
-            weight = 1.0 / len(selected) if selected else 1.0
-            return dict.fromkeys(selected, weight)
+        """根据权重配置计算最终权重
 
-        if self.dsl.weights.method == "signal" and self.dsl.weights.signal_field:
-            field = self.dsl.weights.signal_field
-            if field in df.columns:
-                total = df.loc[selected, field].clip(lower=0).sum()
-                if total > 0:
-                    return {
-                        s: max(0.0, df.loc[s, field]) / total for s in selected
-                    }
+        所有"返回空 {}"的退化路径都必须写入 step_failures，
+        让上层（reflection / supervisor）知道是策略层退化而非真业绩 0。
+        """
+        method = self.dsl.weights.method
+        if method == "equal":
+            return self._equal_weights(selected)
+        if method == "signal":
+            return self._signal_weights(df, selected)
+        # 未知 method：LLM 写错了配置
+        self.step_failures.append({
+            "type": "weights",
+            "step": f"method={method}",
+            "error": f"未知 weights.method '{method}'，仅支持 equal/signal",
+        })
         return {}
+
+    def _equal_weights(self, selected: list) -> dict[str, float]:
+        if not selected:
+            self.step_failures.append({
+                "type": "weights",
+                "step": "method=equal",
+                "error": "selected 为空：信号步骤未选出任何标的",
+            })
+            return {}
+        weight = 1.0 / len(selected)
+        return dict.fromkeys(selected, weight)
+
+    def _signal_weights(self, df: Any, selected: list) -> dict[str, float]:
+        if not self.dsl.weights.signal_field:
+            self.step_failures.append({
+                "type": "weights",
+                "step": "method=signal",
+                "error": "signal_field 未配置",
+            })
+            return {}
+        field = self.dsl.weights.signal_field
+        step_label = f"method=signal,field={field}"
+        if field not in df.columns:
+            self.step_failures.append({
+                "type": "weights",
+                "step": step_label,
+                "error": f"signal_field '{field}' 不在 DataFrame 列中",
+            })
+            return {}
+        if not selected:
+            self.step_failures.append({
+                "type": "weights",
+                "step": step_label,
+                "error": "selected 为空：信号步骤未选出任何标的",
+            })
+            return {}
+        total = df.loc[selected, field].clip(lower=0).sum()
+        if total <= 0:
+            self.step_failures.append({
+                "type": "weights",
+                "step": step_label,
+                "error": "signal_field 在 selected 上的正部和为 0，无法分配权重",
+            })
+            return {}
+        return {s: max(0.0, df.loc[s, field]) / total for s in selected}
 
 
 class PandasToPolarsProvider:
@@ -133,12 +233,10 @@ class PandasToPolarsProvider:
     def get_merged_panel_as_polars(
         self, symbols: list[str], start_date: str, end_date: str
     ) -> pl.DataFrame:
-        # 确保符号格式正确（添加 .SH/.SZ 后缀）
-        formatted_symbols = self._format_symbols(symbols)
-
         # 获取合并的价格和财务数据面板
+        # 注意：symbols 已由调用方格式化（含 .SH/.SZ 后缀），无需重复格式化
         df = self._provider.get_merged_panel(
-            formatted_symbols,
+            symbols,
             start_date,
             end_date,
             price_fields=["open", "high", "low", "close", "volume"],
@@ -199,6 +297,64 @@ class BacktestServiceImpl(BacktestService):
         self.logger = logger
         self.data_provider = data_provider
 
+
+    def _build_strategy_diagnostics(
+        self,
+        strategy_obj: "DSLStrategy",
+        dsl: Any,
+        result: Any,
+    ) -> dict[str, Any]:
+        """收集策略层静默失败信息
+
+        让上层（reflection / supervisor）能识别"策略实际上几乎啥都没干，
+        业绩 0 是退化结果而非真实表现"。
+
+        关键：factor_failures / step_failures 跨 bar 累积——每个 bar 都会重新跑
+        一遍因子和信号步骤。直接用 len(step_failures) == total_steps 判断"全失败"
+        在多 bar 下永远 False（1000 bar × 6 step = 6000 ≠ 6）。
+        正确做法：按 step index / factor alias 去重，看"是否每个 step 至少失败过一次"。
+        """
+        factor_failures = list(strategy_obj.factor_failures)
+        step_failures = list(strategy_obj.step_failures)
+        trade_count = result.trade_count or 0
+
+        total_factors = len(getattr(dsl, "factors", {}) or {})
+        total_steps = len(getattr(dsl, "signals", []) or [])
+
+        # 去重：哪些 alias / index 至少失败过一次
+        failed_factor_aliases: set[str] = {
+            alias for f in factor_failures if (alias := f.get("alias"))
+        }
+        failed_step_indices: set[str] = {
+            idx for f in step_failures if (idx := f.get("index")) is not None
+        }
+
+        all_factors_failed = (
+            total_factors > 0 and len(failed_factor_aliases) >= total_factors
+        )
+        all_steps_failed = (
+            total_steps > 0 and len(failed_step_indices) >= total_steps
+        )
+        degenerate = all_factors_failed or all_steps_failed or trade_count == 0
+
+        if self.logger and degenerate:
+            self.logger.warning(
+                f"策略疑似退化：trade_count={trade_count}, "
+                f"factor_failures={len(failed_factor_aliases)}/{total_factors} "
+                f"unique（共 {len(factor_failures)} 次）, "
+                f"step_failures={len(failed_step_indices)}/{total_steps} "
+                f"unique（共 {len(step_failures)} 次）"
+            )
+
+        return {
+            "factor_failures": factor_failures,
+            "step_failures": step_failures,
+            "failed_factor_aliases": sorted(failed_factor_aliases),
+            "failed_step_indices": sorted(failed_step_indices),
+            "trade_count": trade_count,
+            "degenerate": degenerate,
+        }
+
     def run(
         self,
         strategy_yaml: str,
@@ -250,11 +406,20 @@ class BacktestServiceImpl(BacktestService):
             universe_provider = MiniQmtUniverseProvider()
             universe_symbols = universe_provider.get_symbols(universe_type, start_date_str)
 
+            # 降级：如果指定股票池为空，尝试 csi300
+            if not universe_symbols and universe_type != "csi300":
+                if self.logger:
+                    self.logger.warning(
+                        f"股票池 '{universe_type}' 为空，降级到 csi300"
+                    )
+                universe_type = "csi300"
+                universe_symbols = universe_provider.get_symbols("csi300", start_date_str)
+
             if not universe_symbols:
                 return {
-                    "error": f"股票池 '{universe_type}' 为空",
+                    "error": f"股票池 '{universe_type}' 为空，数据源不可用",
                     "error_category": "engine_error",
-                    "error_detail": f"无法获取 {universe_type} 成分股",
+                    "error_detail": f"无法获取 {universe_type} 成分股，请检查数据源",
                 }
 
             # 格式化股票代码（添加 .SH/.SZ 后缀）
@@ -277,6 +442,10 @@ class BacktestServiceImpl(BacktestService):
                     f"max_drawdown={result.max_drawdown}"
                 )
 
+            strategy_diagnostics = self._build_strategy_diagnostics(
+                strategy_obj, dsl, result
+            )
+
             if result.success:
                 return {
                     "total_return": result.total_return,
@@ -289,12 +458,14 @@ class BacktestServiceImpl(BacktestService):
                     "calmar_ratio": result.calmar_ratio,
                     "sortino_ratio": result.sortino_ratio,
                     "daily_returns": result.daily_returns,
+                    "strategy_diagnostics": strategy_diagnostics,
                 }
 
             return {
                 "error": result.message,
                 "error_category": result.error_category or "unknown",
                 "error_detail": result.error_detail or "",
+                "strategy_diagnostics": strategy_diagnostics,
             }
 
         except Exception as e:
