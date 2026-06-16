@@ -4,7 +4,7 @@
 """
 
 from long_earn.backtest.data.cache import DataCache
-from long_earn.backtest.data.provider import MiniQmtDataProvider as DataProviderImpl
+from long_earn.backtest.data.provider import CompositeDataProvider as DataProviderImpl
 from long_earn.config import AppConfig, RuntimeContext
 from long_earn.services.backtest_service import BacktestServiceImpl
 from long_earn.services.llm_service import LLMServiceImpl
