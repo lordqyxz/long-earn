@@ -62,9 +62,11 @@
 **下一回合应做：**
 
 优先级 1（体检失败）已清零。进入 CLAUDE.md TODO 清单（按文档顺序）：
-1. **#0 ciccwm 财经数据 Provider**（待实现）——最大块，见 ADR-006，需新增 `ciccwm_client.py` + `ciccwm_provider.py`，接入 `CompositeDataProvider` 降级链。建议本回合或下回合启动。
-2. **#2 记忆系统**：语义增强检索 / 记忆压缩 / 记忆衰减 / 冲突检测——可按子项小步推进。
+1. **#0 ciccwm 财经数据 Provider**（待实现）——⚠️ **本回合发现并发会话正在同目录实现**：工作树已出现未跟踪的 `src/long_earn/backtest/data/ciccwm_client.py`、`ciccwm_provider.py` 及对应单测，README 也被改为 v2.0.0。下回合**先检查这些文件是否已被并发会话提交**（`git log --oneline -- src/long_earn/backtest/data/ciccwm_*.py`）；若已落地则跳过 #0，若仍是未跟踪草稿则不要与之冲突，转做其他项。
+2. **#2 记忆系统**：语义增强检索 / 记忆压缩 / 记忆衰减 / 冲突检测——可按子项小步推进（与并发会话无重叠，推荐下回合优先取此项）。
 3. 顺带收尾：统一其余 9 个 prompt .md 文件的双花括号约定（非阻塞，生产已正常）。
+
+**⚠️ 并发会话警示（本回合新发现）：** 仓库存在另一会话同目录并发开发（ciccwm + README v2.0.0），且本回合中段 `feat/ralph-completion` 分支 ref 一度被外部清空（HEAD 变 unborn），已用 `git update-ref refs/heads/feat/ralph-completion fdf5622` 恢复。下回合开始时**务必先 `git log --oneline -3` 确认 HEAD 仍在自己的提交链上**；若再次变 unborn，用 `git update-ref refs/heads/feat/ralph-completion <最近提交>` 恢复。提交时只 `git add` 自己改动的文件，勿 `git add -A`（会卷入并发会话的未跟踪草稿）。
 
 > 终止条件尚未满足：CLAUDE.md TODO 清单多数项未勾选。不输出完成承诺。
 
