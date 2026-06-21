@@ -386,6 +386,6 @@ remoteMiniQmt/
 - [x] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。`FundFlowAnalyst`（`stock_analysis/agents/fund_flow_analyst.py` + `fund_flow_prompt.md`）作为第 5 个并行分析师接入子图，使用 ciccwm 独占的 `get_fund_flow`（其他 Provider 均无此能力），ciccwm 不可用时由 prompt 走"数据缺失"占位、不阻塞其他分析师。
 
 ### 4. 工程化与质量 (Engineering & Quality)
-- [ ] **集成测试增强**：针对 `strategy_rd` 的全链路流程编写更多端到端集成测试。
+- [x] **集成测试增强**：针对 `strategy_rd` / `stock_analysis` 全链路 + MemoryService / CompositeDataProvider 的接口契约。`test_strategy_rd_subgraph.py`（关键节点齐全 + 关键边连通 + 终止性）、`test_stock_analysis_subgraph.py`（5 视角并行 fan-out + summarize 汇聚 + 终止）、`test_memory_service_recall.py`（remember→recall 链路 + hybrid fallback + 异常容错）、`test_data_provider_degradation.py`（全 provider 不可用降级 + 日期标准化）。
 - [x] **性能监控**：在 `MonitoringService` 中增加对 LLM Token 消耗和回测耗时的统计。`MonitoringServiceImpl`（`services/monitoring_service.py`）实现 `track_tokens`/`track(node_name)`/`monitor_node`/`log_report`；`context_init.py` 注入 `monitoring` 到 `LLMServiceImpl`（自动追踪 `response.usage_metadata`）与 `BacktestServiceImpl`（`run()` 用 `monitoring.track("backtest")` 包裹耗时）。
 - [ ] **配置中心化**：将 `.env` 变量扩展为支持多环境配置的 `config.yaml`。

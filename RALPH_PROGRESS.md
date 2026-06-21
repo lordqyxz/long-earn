@@ -368,3 +368,75 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：仍有 3 项未勾选。不输出完成承诺。
 
+---
+
+### 回合 6（2026-06-22）：集成测试增强 #4.1 — 4 个新文件 / 17 个新用例
+
+**开局核查：** HEAD 稳定在 `685181e`，`89371d6` 是祖先（谱系健康）。工作树干净。开局门槛全绿（ruff/lint-imports/unit 328）。
+
+**做了什么：**
+
+延续"先核查再补"模式，本回合系统性补齐集成测试覆盖缺口，完成 TODO #4.1：
+
+**覆盖缺口审计（开局发现）：**
+- `test_strategy_rd_subgraph.py` 仅 2 用例：编译 + "develop or backtest 存在"——形同摆设。
+- `stock_analysis` 子图**零集成测试**（5 个分析师无任何接口校验）。
+- `MemoryServiceImpl` 仅有单测，无走完整 RuntimeContext 的端到端集成测试。
+- `CompositeDataProvider` 多源降级链**无任何集成测试**——核心数据契约盲区。
+
+**新增 4 个集成测试文件（17 个新用例）：**
+
+1. **`test_strategy_rd_subgraph.py`**（原 2 → 4 用例，全面重写）：
+   - 编译为 `CompiledStateGraph` ✓
+   - 15 个关键节点全部齐全（Reflexion + 自适应检索 + 优化循环 + supervisor + save_experience）✓
+   - 6 条关键边连通（`START→init`、`develop→backtest`、`backtest→refine`、`optimize→develop_optimized` 等）✓
+   - 终止性：至少一条边连向 `__end__`（防无限循环）✓
+2. **`test_stock_analysis_subgraph.py`**（**新文件**，4 用例）：
+   - 编译 + 5 视角分析师 + 数据/汇总/错误节点齐全 ✓
+   - **每个分析师必须连向 summarize**（防视角丢失）✓
+   - summarize 与 error_handler 都连向 `__end__` ✓
+3. **`test_memory_service_recall.py`**（**新文件**，4 用例）：
+   - remember → recall 完整链路 ✓
+   - category filter 透传 ✓
+   - **embed extra 缺失时 fallback 到 TF-IDF**（核心 hybrid 契约）✓
+   - 底层 store.search 抛异常时 recall 容错返回空 ✓
+4. **`test_data_provider_degradation.py`**（**新文件**，5 用例）：
+   - 空 symbols 直接返回空 DF（不触发任何 provider）✓
+   - **全 provider 不可用时返回空 DF，不抛/不崩**（核心降级契约）✓
+   - 财务面板同样降级 ✓
+   - 日期标准化 YYYYMMDD → YYYY-MM-DD（DuckDB 缓存契约）✓
+
+**门槛结果：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken |
+| `uv run pytest tests/unit/ -q` | ✅ 328 passed（无回归） |
+| `uv run pytest tests/integration/ -q` | ✅ **35 passed**, 4 skipped, 0 failed（70s，原 20 → 35，+15 用例） |
+| Serena 新测试文件诊断 | ✅ 仅 pyright 对 pandas/pytest import 解析噪声（环境问题） |
+
+**集成测试跳过项：** 同回合 1，4 个 LLM 依赖用例（`LONG_EARN_RUN_LLM_INTEGRATION` 门控）。
+
+**改动文件：**
+- `tests/integration/test_strategy_rd_subgraph.py`（重写：4 用例）
+- `tests/integration/test_stock_analysis_subgraph.py`（**新**：4 用例）
+- `tests/integration/test_memory_service_recall.py`（**新**：4 用例）
+- `tests/integration/test_data_provider_degradation.py`（**新**：5 用例）
+- `CLAUDE.md`（勾选 #4.1，补注 4 文件实现位置）
+- `RALPH_PROGRESS.md`（本条目）
+
+**TODO 进度：**
+- ✅ #0 ciccwm｜✅ #2 记忆（4/4）｜✅ #3.1 参数寻优｜✅ #3.2 多策略集成｜✅ #3.4 增强分析视角｜✅ **#4.1 集成测试增强**｜✅ #4.2 性能监控
+- ⏳ #3.3 实时数据对接｜#4.3 配置中心化（**仅剩 2 项**）
+
+**⚠️ 持续警示：** 外部 `git reset origin/main` 风险仍在。下回合开局必做 `git merge-base --is-ancestor 89371d6 HEAD`；若 NO，`update-ref` 恢复到本回合 tip（提交后更新警示锚点）。优先 `commit-tree`+`update-ref`。
+
+**下一回合应做：**
+
+剩余 2 项 TODO，按工作量从小到大：
+1. **#4.3 配置中心化**（中等）：当前 `AppConfig` 是 `@dataclass` + `from_env()` 类方法。MVP 设计：增加 `AppConfig.from_yaml(path)` 与 `from_env_or_yaml(yaml_path=None)`，环境变量覆盖 yaml 字段；写一个 `config.example.yaml` 模板 + 1 个专项 ADR；保持 `from_env()` 行为不变（向后兼容）。
+2. **#3.3 实时数据**（最大，需评估范围）：调研 miniqmt `xtdata.subscribe_quote`/`subscribe_whole_quote` 是否可用；若有，新增 `RealtimeDataProvider` Protocol + miniqmt impl + 简单的"行情订阅 + 阈值预警" demo 节点。若调研后认为太大，可拆分为"轮询 spot quote"先做。
+
+> 终止条件尚未满足：仍有 2 项未勾选。不输出完成承诺。
+
