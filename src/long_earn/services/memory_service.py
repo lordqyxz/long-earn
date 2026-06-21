@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from long_earn.memory.embedding import EmbeddingRetriever
 from long_earn.memory.store import MemoryStore
 from long_earn.services import LoggerService, MemoryService
 
@@ -19,11 +20,17 @@ if TYPE_CHECKING:
 class MemoryServiceImpl(MemoryService):
     """3-Tier 记忆服务"""
 
+    # 语义检索默认融合权重（TF-IDF 0.5 + 嵌入 0.5）。
+    # sentence-transformers（embed extra）未安装时自动回退到纯 TF-IDF，零行为变化。
+    _DEFAULT_HYBRID_ALPHA: float = 0.5
+
     def __init__(self, config: "AppConfig", logger: LoggerService):
         self.config = config
         self.logger = logger
         self._store = MemoryStore()
         self._initialized = False
+        # 嵌入检索器懒加载：仅当 embed extra 可用时才启用语义混合检索
+        self._embedding: EmbeddingRetriever | None = None
 
     def initialize(self) -> None:
         if self._initialized:
@@ -54,12 +61,36 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         **filters,
     ) -> list[dict[str, Any]]:
-        """语义检索记忆"""
+        """语义检索记忆
+
+        检索策略：
+        - 当 ``embed`` extra（sentence-transformers）可用时，使用 TF-IDF + 嵌入向量的
+          混合检索（``EmbeddingRetriever.hybrid_search``），提升长文本与近义表达的匹配质量；
+        - 否则回退到纯 TF-IDF 检索（``MemoryStore.search``），行为与未接入语义检索前一致。
+
+        ``filters`` 中的 ``alpha``（0~1，越高越偏重语义）可覆盖默认融合权重。
+        """
         try:
+            retriever = self._get_embedding_retriever()
+            if retriever is not None:
+                alpha = float(filters.pop("alpha", self._DEFAULT_HYBRID_ALPHA))
+                return retriever.hybrid_search(
+                    self._store, query, k=k, alpha=alpha, **filters
+                )
             return self._store.search(query, k=k, **filters)
         except Exception as e:
             self.logger.error(f"记忆检索失败: {e}")
             return []
+
+    def _get_embedding_retriever(self) -> EmbeddingRetriever | None:
+        """懒加载嵌入检索器；embed extra 不可用时返回 None（回退纯 TF-IDF）。"""
+        if self._embedding is not None:
+            return self._embedding
+        retriever = EmbeddingRetriever()
+        if retriever.is_available:
+            self._embedding = retriever
+            self.logger.info("语义嵌入检索已启用（TF-IDF + 嵌入混合检索）")
+        return self._embedding
 
     # ── Remember ───────────────────────────────────────────────
 

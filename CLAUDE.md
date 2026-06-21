@@ -374,10 +374,10 @@ remoteMiniQmt/
 详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。在 `backtest/data/` 新增 `ciccwm_client.py` + `ciccwm_provider.py`：实现 `DataProvider` Protocol（行情历史→`get_price_panel`，财务报表→`get_financial_panel`），接入 `CompositeDataProvider` 降级链，优先级紧跟 miniqmt 之后、akshare 之前（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力（miniqmt、akshare 均无），以 Protocol 外扩展方法暴露，失败不静默降级。参考实现为 cidd 项目下已实测可用的三个 skill 脚本，凭证复用 `~/.config/ciccwm/config.json`。
 
 ### 2. 记忆系统 (Memory System)
-- [ ] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。
-- [ ] **记忆压缩与总结**：实现自动将冗余事实合并为概括性知识的能力。
-- [ ] **记忆衰减机制**：引入时间衰减因子，降低陈旧事实的检索权重。
-- [ ] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。
+- [x] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。`EmbeddingRetriever`（`memory/embedding.py`）提供 `embedding_search`/`hybrid_search`，已接入 `MemoryServiceImpl.recall`（embed extra 可用时走混合检索，不可用时回退纯 TF-IDF，零回归）。
+- [x] **记忆压缩与总结**：实现自动将冗余事实合并为概括性知识的能力。`MemoryStore.compress`/`summarize_topic`（`memory/store.py`）。
+- [x] **记忆衰减机制**：引入时间衰减因子，降低陈旧事实的检索权重。`MemoryStore._calc_decay`/`decay`，`search(apply_decay=...)`（`memory/store.py`）。
+- [x] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。`MemoryStore.find_conflicts`/`resolve_conflict`（`memory/store.py`）。
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
 - [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
