@@ -6,6 +6,7 @@
 import logging
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -15,6 +16,9 @@ from long_earn.backtest.domain.entities import (
     Position,
     SignalEvent,
 )
+
+if TYPE_CHECKING:
+    from long_earn.backtest.engine.broker import TradingCostConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,11 @@ class Portfolio:
     3. 每日更新持仓市值。
     """
 
-    def __init__(self, initial_capital: float = 1_000_000.0):
+    def __init__(
+        self,
+        initial_capital: float = 1_000_000.0,
+        cost_config: "TradingCostConfig | None" = None,
+    ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.positions: dict[str, Position] = {}
@@ -49,6 +57,68 @@ class Portfolio:
         self.realized_pnl: dict[str, float] = {}
         self.pnl_by_symbol: dict[str, float] = {}
         self.trade_count: int = 0
+        # 交易成本配置：用于在生成订单时预估佣金（含最低佣金保护），使现金约束
+        # 与 Broker 实际成交成本一致，避免"预估够、实际不足"的现金断裂。
+        self.cost_config = cost_config
+
+    def _estimate_commission(self, amount: float) -> float:
+        """预估佣金，与 Broker.compute_commission 保持一致。
+
+        未配置 cost_config 时退化为按 0.1% 缓冲（旧行为），保证历史调用兼容。
+        """
+        if self.cost_config is None:
+            return amount * 0.001
+        return self.cost_config.compute_commission(amount)
+
+    def _slippage_rate(self) -> float:
+        """滑点率（未配置时按 2bps）。"""
+        if self.cost_config is None:
+            return 0.0002
+        return self.cost_config.slippage_rate
+
+    def _stamp_duty_rate(self) -> float:
+        """卖出印花税率（未配置时按默认万五）。"""
+        if self.cost_config is None:
+            return 0.0005
+        return self.cost_config.stamp_duty
+
+    def _estimate_buy_cost(self, target_value: float) -> float:
+        """预估买入实际成本 = 成交金额(含滑点) + 佣金(含最低保护)。
+
+        与 Broker._fill_market/_fill_limit 的 BUY 成本口径一致：
+        fill_price = current*(1+slippage)，amount = target_value*(1+slippage)，
+        commission = max(amount*rate, min_commission)。
+        """
+        slip = self._slippage_rate()
+        amount = target_value * (1.0 + slip)
+        return amount + self._estimate_commission(amount)
+
+    def _estimate_sell_net(self, target_value: float) -> float:
+        """预估卖出净回笼 = 成交金额(扣滑点) - 佣金 - 印花税。"""
+        slip = self._slippage_rate()
+        proceeds = target_value * (1.0 - slip)
+        return proceeds - self._estimate_commission(proceeds) - proceeds * self._stamp_duty_rate()
+
+    def _max_affordable_buy(self, cash: float) -> float:
+        """在现金 ``cash`` 下，反解能承受的最大买入目标金额（含滑点+佣金）。
+
+        求解 _estimate_buy_cost(v) <= cash，即
+        v*(1+slip) + max(v*(1+slip)*rate, min_c) <= cash。
+        分两段（最低佣金档 / 费率档）取较保守者。
+        """
+        if self.cost_config is None:
+            return cash / 1.001
+        slip = self._slippage_rate()
+        rate = self.cost_config.commission_rate
+        min_c = self.cost_config.min_commission
+        gross_factor = 1.0 + slip  # target_value -> amount 的系数
+        # 费率档：v*(1+slip)*(1+rate) <= cash
+        rate_branch = cash / (gross_factor * (1.0 + rate)) if rate >= 0 else cash
+        # 最低佣金档：v*(1+slip) + min_c <= cash  （仅当该档确实落在最低区间才有效）
+        min_branch = (cash - min_c) / gross_factor if cash >= min_c else 0.0
+        # 两段交界处取较小者最保守；但要确保选中的段与其假设一致
+        candidate = min(rate_branch, min_branch)
+        return max(0.0, candidate)
 
     def process_signal(
         self,
@@ -187,17 +257,17 @@ class Portfolio:
             price = info["price"]
 
             if order_type == "SELL":
-                # 卖出回笼资金计入可用现金（预留 0.1% 费用缓冲）
-                remaining_cash += abs(diff_val) * 0.999
+                # 卖出回笼资金计入可用现金（扣减滑点 + 佣金 + 印花税）
+                remaining_cash += self._estimate_sell_net(abs(diff_val))
             else:
-                # 买入时检查可用现金（含预估交易成本缓冲）
-                estimated_cost = diff_val * 1.001
+                # 买入：预估成本 = 成交金额(含滑点) + 佣金(含最低保护)，与 Broker 一致
+                estimated_cost = self._estimate_buy_cost(diff_val)
                 if estimated_cost > remaining_cash:
-                    # 可用现金不足以覆盖预估成本，缩减交易金额至可承受范围
-                    diff_val = remaining_cash / 1.001
+                    # 可用现金不足：反解能承受的最大买入金额
+                    diff_val = self._max_affordable_buy(remaining_cash)
                     if diff_val < 1.0:
                         continue
-                    estimated_cost = diff_val * 1.001
+                    estimated_cost = self._estimate_buy_cost(diff_val)
                 remaining_cash -= estimated_cost
 
             qty = abs(diff_val) / price

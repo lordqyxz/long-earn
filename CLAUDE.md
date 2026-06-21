@@ -152,6 +152,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
+- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Proposed）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；参考实现见 `D:\dev\cidd\.claude\skills\ciccwm-*/scripts/`。
 
 ## 调研文档
 
@@ -367,6 +368,10 @@ remoteMiniQmt/
 事件驱动核心链路、Agent 友好 API、金融级可信验证（无未来函数）、Walk-Forward OOS、状态化风控（动态止损 / 追踪止盈 / 最大回撤）、扩展技术指标（MACD/RSI 等）、Dashboard 模块独立、akshare → miniqmt (xtquant) 数据源迁移均已完成（详见 ADR-005 与 git log）。
 
 后续优化项暂无规划，按需添加。
+
+### 0. ciccwm 财经数据 Provider — 待实现
+
+详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。在 `backtest/data/` 新增 `ciccwm_client.py` + `ciccwm_provider.py`：实现 `DataProvider` Protocol（行情历史→`get_price_panel`，财务报表→`get_financial_panel`），接入 `CompositeDataProvider` 降级链，优先级紧跟 miniqmt 之后、akshare 之前（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力（miniqmt、akshare 均无），以 Protocol 外扩展方法暴露，失败不静默降级。参考实现为 cidd 项目下已实测可用的三个 skill 脚本，凭证复用 `~/.config/ciccwm/config.json`。
 
 ### 2. 记忆系统 (Memory System)
 - [ ] **语义增强检索**：在 TF-IDF 基础上引入轻量级本地嵌入模型（如 `all-MiniLM-L6-v2`）实现混合检索。

@@ -3,6 +3,7 @@
 实现 T 维度迭代 × S 维度向量化 (Slab) 的执行链路。
 """
 
+import contextlib
 import logging
 import uuid
 from typing import Any
@@ -105,7 +106,7 @@ class EventDrivenBacktestEngine:
                 return BacktestResult(success=False, message="加载数据为空")
 
             guard = VisibilityGuard(full_data)
-            portfolio = Portfolio()
+            portfolio = Portfolio(cost_config=self.cost_config)
             broker = Broker(self.cost_config)
             broker.reset()
             strategy.init()
@@ -184,10 +185,8 @@ class EventDrivenBacktestEngine:
             strict=True,
         ):
             if price is not None:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     price_lookup[sym] = float(price)
-                except (TypeError, ValueError):
-                    pass
         pending_fills = broker.check_pending_orders(
             price_lookup=price_lookup
         )

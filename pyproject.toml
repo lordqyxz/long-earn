@@ -5,7 +5,7 @@ description = "自我进化的量化交易系统"
 authors = [
     { name = "shiyz", email = "shiyz@eoutlook.com" },
 ]
-requires-python = "==3.11.*"
+requires-python = "==3.13.*"
 dependencies = [
     "pandas>=2.0.0",
     "polars>=1.0.0",
@@ -55,7 +55,7 @@ index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py313"
 src = ["src", "tests"]
 exclude = [".venv", "build", "dist"]
 

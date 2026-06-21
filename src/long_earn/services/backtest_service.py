@@ -37,8 +37,82 @@ class DSLStrategy(BaseStrategy):
         evaluator = SafeExpressionEvaluator(df)
         return evaluator.evaluate(expr)
 
+    def _build_operator_executor(self):
+        """惰性构造算子目录执行器（仅当 DSL 含算子步骤时）。
+
+        把算子目录接入策略执行路径：算子因子/信号步骤经此执行器跑在算子目录上，
+        绕过旧表达式求值器。解析期已校验过 op/params，这里直接 resolve。
+        """
+        from long_earn.backtest.engine.operator_executor import (  # noqa: PLC0415
+            OperatorStrategyExecutor,
+            resolve_factor_step,
+            resolve_signal_step,
+        )
+
+        factor_specs = [resolve_factor_step(s) for s in self.dsl.operator_factors]
+        signal_specs = [
+            resolve_signal_step(s)
+            for s in self.dsl.signals
+            if s.get("type") == "operator"
+        ]
+        return OperatorStrategyExecutor(factor_specs, signal_specs)
+
+    def _on_bar_operators(self, bars: pl.DataFrame, context) -> Any:  # noqa: ARG002
+        """算子目录执行路径：在 polars 历史面板上跑算子链 → 选中标的 → 等权信号。
+
+        与旧路径的区别：因子/信号计算全部走算子目录（polars），无表达式求值、
+        无 pandas 转换。因果性由算子目录（每个算子过 prove_causality）+
+        VisibilityGuard（history 仅含 timestamp <= 当前时刻）共同保证。
+        ``bars`` 参数为 BaseStrategy.on_bar 契约要求，算子路径改用 history 面板。
+        """
+        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
+
+        if not hasattr(self, "_op_executor"):
+            self._op_executor = self._build_operator_executor()
+
+        try:
+            history_pl = context.get_history_df()
+        except Exception as exc:
+            self.step_failures.append({
+                "type": "history_fetch",
+                "step": "on_bar_operators history",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            return None
+
+        try:
+            selected = self._op_executor.execute(
+                history_pl, context.current_timestamp
+            )
+        except Exception as exc:
+            self.step_failures.append({
+                "type": "operator_execute",
+                "step": "operator_executor",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            return None
+
+        final_weights = self._equal_weights(selected)
+        if not final_weights:
+            return None
+
+        return SignalEvent(
+            timestamp=context.current_timestamp,
+            trace_id=f"op_{context.current_timestamp.isoformat()}",
+            event_id=f"op_{context.current_timestamp.isoformat()}",
+            signals=final_weights,
+            strategy_id=self.strategy_id,
+        )
+
     def on_bar(self, bars: pl.DataFrame, context) -> Any:
         from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
+
+        # 算子目录路径：DSL 含 operator_factors / operator 信号时，走算子执行器，
+        # 在 polars 历史面板上直接跑算子目录（因果性由算子目录 + VisibilityGuard 保证）。
+        # 这条路径绕过旧 SafeExpressionEvaluator，是"调整系统架构"后的主执行路径。
+        # getattr 兜底：兼容不含 has_operator_steps 的旧 stub DSL（测试用）。
+        if getattr(self.dsl, "has_operator_steps", lambda: False)():
+            return self._on_bar_operators(bars, context)
 
         # 因子计算必须基于历史窗口而非当前截面：否则 shift(close, N) 这类
         # 时序因子在每 symbol 单行的 slab 上永远是 NaN，所有动量/反转/波动率

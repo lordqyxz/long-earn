@@ -65,9 +65,10 @@ class TestBrokerCommission:
     """佣金计算接口测试"""
 
     def test_commission_calculated_on_fill(self):
-        """成交时计算双边佣金"""
+        """成交时计算双边佣金（金额足够大，不触发最低佣金保护）"""
         broker = Broker()
-        order = _make_order("BUY", quantity=100.0)
+        # 成交金额 > min_commission/commission_rate = 5/0.0003 ≈ 16667，确保按费率计
+        order = _make_order("BUY", quantity=1000.0)
 
         fill = broker.execute_order(order, 20.0)
 
@@ -77,16 +78,26 @@ class TestBrokerCommission:
         assert fill.commission > 0
 
     def test_commission_with_custom_rate(self):
-        """自定义佣金费率"""
+        """自定义佣金费率（金额足够大，不触发最低佣金保护）"""
         config = TradingCostConfig(commission_rate=0.0001)
         broker = Broker(cost_config=config)
-        order = _make_order("BUY", quantity=100.0)
+        # 金额需 > 5/0.0001 = 50000 才按费率计
+        order = _make_order("BUY", quantity=10000.0)
 
         fill = broker.execute_order(order, 10.0)
 
         expected_turnover = fill.fill_quantity * fill.fill_price
         expected = expected_turnover * 0.0001
         assert fill.commission == pytest.approx(expected)
+
+    def test_min_commission_floor_applied(self):
+        """小订单触发最低佣金保护（A 股 5 元/单行规）"""
+        broker = Broker()
+        order = _make_order("BUY", quantity=100.0)  # 金额 ~2000，费率佣金 0.6 < 5
+
+        fill = broker.execute_order(order, 20.0)
+
+        assert fill.commission == pytest.approx(broker.cost_config.min_commission)
 
 
 class TestBrokerStampDuty:

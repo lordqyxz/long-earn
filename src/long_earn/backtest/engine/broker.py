@@ -22,15 +22,31 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradingCostConfig:
-    """交易成本配置 (默认 A 股参数)"""
+    """交易成本配置 (默认 A 股参数)
+
+    A 股关键约束：
+    - 佣金万三起步，**最低 5 元/单**（券商行规）——小订单 <16667 元会触发最低佣金
+    - 印花税仅卖出收，2023-08 起从万十减半到万五
+    - 滑点按 bps 计：2bps = 0.02% 接近实际中等流动性股票成交磨损
+    """
 
     commission_rate: float = 0.0003  # 万三
-    stamp_duty: float = 0.0005  # 万五 (仅卖出)
+    stamp_duty: float = 0.0005  # 万五 (仅卖出，2023-08 后减半)
     slippage_bps: float = 2.0  # 2bps
+    min_commission: float = 5.0  # 最低 5 元/单（A 股券商行规）
 
     @property
     def slippage_rate(self) -> float:
         return self.slippage_bps * 0.0001
+
+    def compute_commission(self, amount: float) -> float:
+        """计算佣金：max(rate * amount, min_commission)
+
+        amount 是成交金额（fill_price * fill_quantity）。
+        旧版直接 amount * rate 让小订单佣金严重低估，导致 LLM 生成的高频/小资金
+        策略回测业绩失真——本轮修复（轮 18）保证最低 5 元约束生效。
+        """
+        return max(amount * self.commission_rate, self.min_commission)
 
 
 class Broker:
@@ -175,14 +191,15 @@ class Broker:
     # ── 订单撮合方法 ────────────────────────────────────────────
 
     def _fill_market(self, order: OrderEvent, current_price: float) -> FillEvent:
-        """市价单立即成交（含滑点）"""
+        """市价单立即成交（含滑点 + 最低佣金保护）"""
         slip_dir = 1 if order.order_type == "BUY" else -1
         fill_price = current_price * (1 + slip_dir * self.cost_config.slippage_rate)
 
-        commission = (order.quantity * fill_price) * self.cost_config.commission_rate
+        amount = order.quantity * fill_price
+        commission = self.cost_config.compute_commission(amount)
         stamp_duty = 0.0
         if order.order_type == "SELL":
-            stamp_duty = (order.quantity * fill_price) * self.cost_config.stamp_duty
+            stamp_duty = amount * self.cost_config.stamp_duty
 
         fill = FillEvent(
             timestamp=order.timestamp,
@@ -234,10 +251,11 @@ class Broker:
             # 至少不优于限价：min(limit, current - slip)
             fill_price = min(order.price, current_price - slip_adj)
 
-        commission = (order.quantity * fill_price) * self.cost_config.commission_rate
+        amount = order.quantity * fill_price
+        commission = self.cost_config.compute_commission(amount)
         stamp_duty = 0.0
         if order.order_type == "SELL":
-            stamp_duty = (order.quantity * fill_price) * self.cost_config.stamp_duty
+            stamp_duty = amount * self.cost_config.stamp_duty
 
         return FillEvent(
             timestamp=order.timestamp,
