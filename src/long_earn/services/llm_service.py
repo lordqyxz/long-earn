@@ -12,6 +12,7 @@ from long_earn.utils.llm_factory import create_llm
 
 if TYPE_CHECKING:
     from long_earn.config import AppConfig
+    from long_earn.services import MonitoringService
 
 
 class LLMServiceImpl(LLMService):
@@ -38,15 +39,22 @@ class LLMServiceImpl(LLMService):
     # Fatal Python error 进程级信号 Python 层无法捕获救援。
     _MAX_RETRIES = 1
 
-    def __init__(self, config: "AppConfig", logger: LoggerService):
+    def __init__(
+        self,
+        config: "AppConfig",
+        logger: LoggerService,
+        monitoring: "MonitoringService | None" = None,
+    ):
         """初始化 LLM 服务
 
         Args:
             config: 应用配置（含 llm_type / llm_model / llm_base_url）
             logger: 日志服务
+            monitoring: 监控服务（可选）；提供时自动追踪 token 消耗到全局指标
         """
         self.config = config
         self.logger = logger
+        self.monitoring = monitoring
         self._llm: BaseLanguageModel | None = None
         self._invoke_count: int = 0
 
@@ -104,6 +112,13 @@ class LLMServiceImpl(LLMService):
                 llm = self._build_llm()
                 llm = self._bind_format(llm, format)
                 response = llm.invoke(prompt)
+                # 追踪 token 消耗到 MonitoringService（若已注入）。
+                # langchain 标准 AIMessage 暴露 usage_metadata（input_tokens / output_tokens /
+                # total_tokens 等）；缺失则跳过追踪，不影响主路径。
+                if self.monitoring is not None:
+                    usage = getattr(response, "usage_metadata", None)
+                    if isinstance(usage, dict):
+                        self.monitoring.track_tokens(usage)
                 content_preview = (
                     response.content[:100]
                     if hasattr(response, "content")

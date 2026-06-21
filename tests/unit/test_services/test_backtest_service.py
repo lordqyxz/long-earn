@@ -438,3 +438,33 @@ class TestBuildStrategyDiagnosticsAccumulation:
         assert set(diag["failed_factor_aliases"]) == {"f0", "f1", "f2"}
         # 3/3 factor 都失败过 → degenerate=True（即使 trade_count > 0）
         assert diag["degenerate"] is True
+
+
+class TestBacktestMonitoring:
+    """monitoring 注入后 run() 应在 track('backtest') 上下文内执行"""
+
+    def test_monitoring_track_called_on_run(self):
+        """run() 用 monitoring.track('backtest') 包裹，无论成功或客户端错误均经过 track"""
+        config = AppConfig()
+        config.backtest_start_date = "2023-01-01"
+        config.backtest_end_date = "2023-03-31"
+        monitoring = MagicMock()
+        # track 必须返回 context manager
+        monitoring.track.return_value.__enter__ = MagicMock(return_value=None)
+        monitoring.track.return_value.__exit__ = MagicMock(return_value=False)
+
+        svc = BacktestServiceImpl(config, MagicMock(), monitoring=monitoring)
+
+        # 触发客户端错误分支（无需引擎/数据）：strategy_yaml 为空 → 立即返回 error
+        result = svc.run("")
+        assert result["error_category"] == "client_error"
+        monitoring.track.assert_called_once_with("backtest")
+        # 上下文必须正确进入和退出
+        monitoring.track.return_value.__enter__.assert_called_once()
+        monitoring.track.return_value.__exit__.assert_called_once()
+
+    def test_monitoring_none_uses_nullcontext(self):
+        """不注入 monitoring 时主路径正常返回，无 AttributeError"""
+        svc = _make_service()  # monitoring=None
+        result = svc.run("")
+        assert result["error_category"] == "client_error"

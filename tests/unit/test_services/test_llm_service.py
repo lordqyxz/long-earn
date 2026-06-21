@@ -145,3 +145,69 @@ class TestLLMInvokeCounter:
         svc.invoke("p1")  # 1 次失败 + 1 次重试 = 总尝试 2 次
         svc.invoke("p2")  # 1 次成功
         assert svc._invoke_count == 2  # 按调用计数（2），非尝试（3）
+
+
+class TestLLMMonitoringTracking:
+    """monitoring 注入后 invoke 应自动追踪 token 消耗"""
+
+    def test_track_tokens_called_on_response_with_usage_metadata(self):
+        """response.usage_metadata 存在时 track_tokens 被调用"""
+        config = MagicMock()
+        config.llm_type = "ollama"
+        config.llm_model = "m"
+        config.llm_base_url = "http://localhost"
+        monitoring = MagicMock()
+        svc = LLMServiceImpl(config, MagicMock(), monitoring=monitoring)
+
+        class _Resp:
+            content = "ok"
+            usage_metadata = {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30,
+            }
+
+        fake_llm = MagicMock()
+        fake_llm.invoke.return_value = _Resp()
+        fake_llm.bind.return_value = fake_llm
+        svc._build_llm = lambda: fake_llm  # type: ignore[method-assign]
+
+        svc.invoke("p")
+        monitoring.track_tokens.assert_called_once_with(_Resp.usage_metadata)
+
+    def test_track_tokens_skipped_when_metadata_missing(self):
+        """response 无 usage_metadata 时不调 track_tokens（无静默错误）"""
+        config = MagicMock()
+        config.llm_type = "ollama"
+        config.llm_model = "m"
+        config.llm_base_url = "http://localhost"
+        monitoring = MagicMock()
+        svc = LLMServiceImpl(config, MagicMock(), monitoring=monitoring)
+
+        class _Resp:
+            content = "ok"
+
+        fake_llm = MagicMock()
+        fake_llm.invoke.return_value = _Resp()
+        fake_llm.bind.return_value = fake_llm
+        svc._build_llm = lambda: fake_llm  # type: ignore[method-assign]
+
+        svc.invoke("p")
+        monitoring.track_tokens.assert_not_called()
+
+    def test_monitoring_none_no_attribute_error(self):
+        """不注入 monitoring（默认 None）时主路径无任何额外开销与错误"""
+        svc = _make_service()  # 默认 monitoring=None
+
+        class _Resp:
+            content = "ok"
+            usage_metadata = {"input_tokens": 1}
+
+        fake_llm = MagicMock()
+        fake_llm.invoke.return_value = _Resp()
+        fake_llm.bind.return_value = fake_llm
+        svc._build_llm = lambda: fake_llm  # type: ignore[method-assign]
+
+        # 不应抛 AttributeError
+        result = svc.invoke("p")
+        assert result.content == "ok"

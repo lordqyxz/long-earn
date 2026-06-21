@@ -45,10 +45,13 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     data_provider = DataProviderImpl(cache=data_cache)
 
     # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
-    llm_service = LLMServiceImpl(config, logger)
+    #    monitoring 注入到 LLM/回测服务，自动追踪 token 消耗与回测耗时（TODO #4）。
+    llm_service = LLMServiceImpl(config, logger, monitoring=monitoring)
     memory = MemoryServiceImpl(config, logger)
     stock_service = StockServiceImpl(config, logger)
-    backtest_service = BacktestServiceImpl(config, logger, data_provider=data_provider)
+    backtest_service = BacktestServiceImpl(
+        config, logger, data_provider=data_provider, monitoring=monitoring
+    )
 
     return RuntimeContext(
         config=config,

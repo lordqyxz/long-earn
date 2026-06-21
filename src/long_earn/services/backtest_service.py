@@ -19,6 +19,7 @@ from long_earn.services import BacktestService, LoggerService
 if TYPE_CHECKING:
     from long_earn.backtest.data.provider import DataProvider
     from long_earn.config import AppConfig
+    from long_earn.services import MonitoringService
 
 
 class DSLStrategy(BaseStrategy):
@@ -366,10 +367,12 @@ class BacktestServiceImpl(BacktestService):
         config: "AppConfig",
         logger: LoggerService,
         data_provider: "DataProvider | None" = None,
+        monitoring: "MonitoringService | None" = None,
     ):
         self.config = config
         self.logger = logger
         self.data_provider = data_provider
+        self.monitoring = monitoring
 
 
     def _build_strategy_diagnostics(
@@ -430,6 +433,23 @@ class BacktestServiceImpl(BacktestService):
         }
 
     def run(
+        self,
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        # 性能监控：若已注入 MonitoringService，则记录回测耗时与执行次数。
+        # 使用 contextlib.nullcontext 保持单一执行路径，避免 if/else 分叉重复函数体。
+        if self.monitoring is not None:
+            tracker = self.monitoring.track("backtest")
+        else:
+            from contextlib import nullcontext  # noqa: PLC0415
+
+            tracker = nullcontext()
+        with tracker:
+            return self._run_impl(strategy_yaml, start_date, end_date)
+
+    def _run_impl(
         self,
         strategy_yaml: str,
         start_date: str = "",

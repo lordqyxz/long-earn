@@ -369,7 +369,7 @@ remoteMiniQmt/
 
 后续优化项暂无规划，按需添加。
 
-### 0. ciccwm 财经数据 Provider — 待实现
+### 0. ciccwm 财经数据 Provider — 已实现
 
 详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。在 `backtest/data/` 新增 `ciccwm_client.py` + `ciccwm_provider.py`：实现 `DataProvider` Protocol（行情历史→`get_price_panel`，财务报表→`get_financial_panel`），接入 `CompositeDataProvider` 降级链，优先级紧跟 miniqmt 之后、akshare 之前（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力（miniqmt、akshare 均无），以 Protocol 外扩展方法暴露，失败不静默降级。参考实现为 cidd 项目下已实测可用的三个 skill 脚本，凭证复用 `~/.config/ciccwm/config.json`。
 
@@ -380,12 +380,12 @@ remoteMiniQmt/
 - [x] **冲突检测**：当新记忆与旧记忆冲突时，提供版本管理或冲突标记机制。`MemoryStore.find_conflicts`/`resolve_conflict`（`memory/store.py`）。
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
-- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
-- [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
+- [x] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。`strategy_rd/subgraph.py::_optimize_node`（L310）调用 `research_agent.optimize_strategy`，主图含 optimize 循环；独立模块 `strategy_optimization/`（`OptimizationPipeline` + `AcceptanceGate` 业绩验收 + `optimize_strategy` 便捷函数 + `LLMStrategyOptimizer`/`FakeStrategyOptimizer` 可注入）。
+- [x] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。`dashboard/analyzer.py`（L308 起）提供多策略对比分析，`dashboard/api.py` `POST /api/compare` 暴露 HTTP 接口，前端 `dashboard.html` 含对比视图。
 - [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
 - [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
 
 ### 4. 工程化与质量 (Engineering & Quality)
 - [ ] **集成测试增强**：针对 `strategy_rd` 的全链路流程编写更多端到端集成测试。
-- [ ] **性能监控**：在 `MonitoringService` 中增加对 LLM Token 消耗和回测耗时的统计。
+- [x] **性能监控**：在 `MonitoringService` 中增加对 LLM Token 消耗和回测耗时的统计。`MonitoringServiceImpl`（`services/monitoring_service.py`）实现 `track_tokens`/`track(node_name)`/`monitor_node`/`log_report`；`context_init.py` 注入 `monitoring` 到 `LLMServiceImpl`（自动追踪 `response.usage_metadata`）与 `BacktestServiceImpl`（`run()` 用 `monitoring.track("backtest")` 包裹耗时）。
 - [ ] **配置中心化**：将 `.env` 变量扩展为支持多环境配置的 `config.yaml`。

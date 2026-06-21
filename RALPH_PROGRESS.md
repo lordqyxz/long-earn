@@ -241,3 +241,63 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：#3/#4 多项未勾选。不输出完成承诺。
 
+---
+
+### 回合 4（2026-06-22）：性能监控接入 + 勾选 #0 / #3.1 / #3.2 / #4.2 共 4 项 TODO
+
+**开局核查：** HEAD 稳定在 `3a9ec41`，`89371d6` 是祖先（谱系健康，未再受外部 `git reset origin/main` 干扰）。工作树干净，回合 3 修复成果完整保留。
+
+**做了什么：**
+
+延续"先核查已实现再补接入"模式（回合 2-B/3 既验有效），本回合一次性推进 4 个 TODO：
+
+1. **#0 ciccwm 财经数据 Provider — 勾选**：回合 2-B/3 已在健康链落地（`c9576a5`，含 client + provider + 36 单测 + README v2.0.0）；CLAUDE.md 该段标题改为"已实现"。
+2. **#3.1 自动化参数寻优 — 勾选**（已实现）：`strategy_rd/subgraph.py::_optimize_node`（L310）+ `strategy_optimization/` 独立模块（`OptimizationPipeline` + `AcceptanceGate` 业绩验收 + `optimize_strategy` 便捷函数 + LLM/Fake 双实现），勾选并补注实现位置。
+3. **#3.2 多策略集成 — 勾选**（已实现）：`dashboard/analyzer.py`（L308）提供多策略对比，`dashboard/api.py::POST /api/compare` 暴露 HTTP，前端 `dashboard.html` 含对比视图，勾选并补注。
+4. **#4.2 性能监控 — 实现接入 + 勾选**：`MonitoringServiceImpl` 早已实现（`track_tokens`/`track(node)`/`monitor_node`/`log_report`），但**未注入**到 LLM/回测服务。本回合完成接入：
+   - `LLMServiceImpl.__init__` 新增 `monitoring: MonitoringService | None = None` 参数；`invoke()` 成功后自动调 `monitoring.track_tokens(response.usage_metadata)`（langchain 标准字段，缺失则跳过）。
+   - `BacktestServiceImpl.__init__` 新增 `monitoring: MonitoringService | None = None`；`run()` 用 `monitoring.track("backtest")` 包裹（monitoring 为 None 时用 `contextlib.nullcontext` 走单一路径，避免 if/else 分叉）。
+   - `context_init.py::create_runtime_context` 注入 `monitoring=monitoring` 到两个服务。
+5. **新增 5 个接口契约测试**（向 `test_llm_service.py` 与 `test_backtest_service.py` 追加）：
+   - LLM：`track_tokens` 在 `usage_metadata` 存在时被调用 / 缺失时跳过 / `monitoring=None` 时无 AttributeError。
+   - 回测：`run()` 调用 `track("backtest")` 且上下文正确进入退出 / `monitoring=None` 时走 nullcontext 正常返回。
+
+**门槛结果：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken |
+| `uv run pytest tests/unit/ -q` | ✅ 320 passed（+5 新测试） |
+| `uv run pytest tests/integration/ -q` | ✅ 20p / 4s / 0f（见提交时背景任务结果） |
+| Serena `llm_service.py` / `backtest_service.py` 诊断 | ✅ 仅 pyright 对 langchain_core/polars 的 import-resolution 噪声（环境问题，与回合1一致） |
+
+**集成测试跳过项：** 同回合 1，4 个 LLM 依赖用例（`LONG_EARN_RUN_LLM_INTEGRATION` 门控）。
+
+**改动文件：**
+- `src/long_earn/services/llm_service.py`（+monitoring 参数 + track_tokens 调用）
+- `src/long_earn/services/backtest_service.py`（+monitoring 参数 + run() 用 track 包裹）
+- `src/long_earn/context_init.py`（注入 monitoring 到 LLM/回测服务）
+- `tests/unit/test_services/test_llm_service.py`（+3 监控测试）
+- `tests/unit/test_services/test_backtest_service.py`（+2 监控测试）
+- `CLAUDE.md`（勾选 4 项 TODO）
+- `RALPH_PROGRESS.md`（本条目）
+
+**TODO 进度：**
+- ✅ #0 ciccwm（4/4）｜✅ #2 记忆（4/4）｜✅ #3.1 参数寻优｜✅ #3.2 多策略集成｜✅ #4.2 性能监控
+- ⏳ #3.3 实时数据对接｜#3.4 增强分析视角｜#4.1 集成测试增强｜#4.3 配置中心化（4 项未勾选）
+
+**⚠️ 持续警示：** 外部 `git reset origin/main` 风险仍存在。下回合开局必做 `git merge-base --is-ancestor 89371d6 HEAD`；若 NO，`update-ref` 恢复到本回合 tip（提交后更新本警示锚点）。优先 `commit-tree`+`update-ref` 而非 `git commit`。
+
+**下一回合应做：**
+
+1. 开局核验谱系（见上警示），必要时 `update-ref` 恢复。
+2. 推进剩余 4 项 TODO，优先核查已实现的：
+   - **#4.1 集成测试增强**：核查 `tests/integration/test_strategy_rd_subgraph.py` 是否覆盖全链路，缺什么补什么。
+   - **#3.4 增强分析视角**：`stock_analysis/agents/` 现有 4 视角（buffett/munger/fiske/petter），考虑加"行业对比"或"资金流向"分析师（资金流向 ciccwm 独占能力已就绪，可直接接入）。
+   - **#4.3 配置中心化**：评估 `.env` + `config.yaml` 多环境支持的最小可行设计。
+   - **#3.3 实时数据**：评估范围；若太大可拆为"近实时行情查询"先做。
+3. 任一项实现完成即勾选 + 补注实现位置 + 加接口契约测试。
+
+> 终止条件尚未满足：仍有 4 项未勾选。不输出完成承诺。
+
