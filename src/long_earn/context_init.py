@@ -5,7 +5,7 @@
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.provider import CompositeDataProvider as DataProviderImpl
-from long_earn.config import AppConfig, RuntimeContext
+from long_earn.config import AppConfig, RuntimeContext, load_config
 from long_earn.services.backtest_service import BacktestServiceImpl
 from long_earn.services.llm_service import LLMServiceImpl
 from long_earn.services.logger_service import LoggerServiceImpl
@@ -30,7 +30,8 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         所有字段（除 data_provider 外）均为非空的 RuntimeContext
     """
     if config is None:
-        config = AppConfig.from_env()
+        # 走配置中心化入口（dotenv + AppConfig.from_env）；详见 ADR-007
+        config = load_config()
 
     errors = config.validate()
     if errors:

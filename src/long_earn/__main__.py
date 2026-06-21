@@ -1,9 +1,8 @@
-from dotenv import load_dotenv
-
 from long_earn.agent import create_main_agent
 from long_earn.context_init import initialize_context
 
-load_dotenv()
+# 配置加载由 initialize_context → load_config 统一处理（dotenv + AppConfig）。
+# 详见 ADR-007 配置中心化。无需在此调用 load_dotenv()。
 
 
 def main():

@@ -440,3 +440,67 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：仍有 2 项未勾选。不输出完成承诺。
 
+---
+
+### 回合 7（2026-06-22）：配置中心化 #4.3 — `load_config` + 多环境 dotenv + ADR-007
+
+**用户指示采纳**：用户明确"配置中心化 统一用 dotenv 包处理"——不走 yaml 路线，用 `python-dotenv` 多环境约定。
+
+**开局核查：** HEAD 稳定在 `5cd6f42`，`89371d6` 是祖先（谱系健康）。工作树干净，gates 全绿（ruff/lint-imports/unit 328）。并发会话已加 `tests/unit/test_memory/test_memory_scenarios.py`（含 30 个新测试），其中 1 个失败：`test_recall_without_init_dir_does_not_load_cwd` 暴露 `MemoryServiceImpl.initialize` 空路径未守卫的真实 bug。
+
+**做了什么：**
+
+1. **TODO #4.3 配置中心化（核心）**：
+   - 新增 `long_earn.config.load_config(env_file=None, search_from=None, override=False)` 作为**配置加载唯一入口**：
+     - `python-dotenv` 加载 `.env`（已加入直接依赖 `pyproject.toml`）。
+     - **多环境支持**：`LONG_EARN_ENV=dev|staging|prod` 选择 `.env.<name>`，缺失则回退 `.env`。
+     - **优先级**：显式 `os.environ` > 选定 `.env` 文件 > `AppConfig` 默认值（`override=False`）。
+     - 文件选择优先级：显式 `env_file` > `.env.<LONG_EARN_ENV>` > `.env` > 无文件。
+   - `_resolve_env_file()` 辅助函数处理多源选择逻辑。
+   - `context_init.create_runtime_context`：`config is None` 时默认走 `load_config()`。
+   - 移除 ad-hoc `load_dotenv()` 调用：`__main__.py` / `tests/integration/conftest.py` / `tests/integration/test_develop_backtest.py` 全部改用 `load_config()`，注释引导后续读者看 ADR-007。
+2. **6 个 load_config 接口契约测试**（`tests/unit/test_config.py::TestLoadConfig`）：默认无文件 / 自动加载 `.env` / `LONG_EARN_ENV` 选择 / 文件缺失回退 / `os.environ` 优先 / 显式 `env_file` 最高优先级。
+3. **ADR-007 配置中心化**（`docs/adr/007-config-centralization.md`）：记录决策、优先级、替代方案（yaml / pydantic-settings 为何不采纳）、影响范围。CLAUDE.md ADR 索引列表同步加入。
+4. **顺手修并发遗留 bug**：`MemoryServiceImpl.initialize` 对 `memory_path=""` / `init_dir=""` 加空守卫，避免 `Path("")` 等价于 `Path(".")` 导致误加载/写入当前目录的隐蔽 bug。1 个失败的单元测试转绿。
+
+**门槛结果：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken |
+| `uv run pytest tests/unit/ -q` | ✅ 358 passed（含并发 +30 + 我 +6 + bug 修复，无失败） |
+| `uv run pytest tests/integration/ -q` | ✅ 35 passed, 4 skipped, 0 failed |
+| Serena `config.py` 诊断 | ✅ 仅 pyright 对 `dotenv` import 解析噪声（环境问题；运行期 OK） |
+
+**集成测试跳过项：** 同回合 1，4 个 LLM 依赖用例（`LONG_EARN_RUN_LLM_INTEGRATION` 门控）。
+
+**改动文件：**
+- `pyproject.toml`（`python-dotenv>=1.0.0` 加入直接依赖）
+- `src/long_earn/config.py`（+`load_config` + `_resolve_env_file`）
+- `src/long_earn/context_init.py`（`load_config` 替代 `AppConfig.from_env`）
+- `src/long_earn/__main__.py`（移除 ad-hoc `load_dotenv`）
+- `src/long_earn/services/memory_service.py`（空路径守卫 bug 修复）
+- `tests/integration/conftest.py`（改用 `load_config`）
+- `tests/integration/test_develop_backtest.py`（移除 ad-hoc `load_dotenv`）
+- `tests/unit/test_config.py`（+6 load_config 用例）
+- `docs/adr/007-config-centralization.md`（**新**）
+- `CLAUDE.md`（勾选 #4.3 + ADR-007 索引）
+- `RALPH_PROGRESS.md`（本条目）
+
+**TODO 进度：**
+- ✅ #0 ciccwm｜✅ #2 记忆（4/4）｜✅ #3.1 参数寻优｜✅ #3.2 多策略集成｜✅ #3.4 增强分析视角｜✅ #4.1 集成测试增强｜✅ #4.2 性能监控｜✅ **#4.3 配置中心化**
+- ⏳ #3.3 实时数据对接（**仅剩 1 项**）
+
+**⚠️ 持续警示：** 外部 `git reset origin/main` 风险仍在。下回合开局必做 `git merge-base --is-ancestor 89371d6 HEAD`；若 NO，`update-ref` 恢复到本回合 tip。优先 `commit-tree`+`update-ref`。
+
+**下一回合应做：**
+
+仅剩 #3.3 实时数据对接，最大改造项：
+1. 调研：`xtquant.xtdata` 是否暴露 `subscribe_quote` / `subscribe_whole_quote` / `download_history_tick`？真实数据订阅需 miniQMT 客户端在线，CI 必须门控（参考 `LONG_EARN_DISABLE_XTQUANT` 模式）。
+2. MVP 设计：新增 `RealtimeDataProvider` Protocol（`subscribe_quote(symbols, on_quote)` / `get_latest_quote(symbol)`），miniqmt impl 实现，ciccwm fallback 用 `get_ranking` + `get_info` 模拟"近实时" spot 查询（HTTP 拉取，CI 友好）。
+3. 简单的"行情订阅 + 阈值预警" demo 节点（独立模块 `monitoring/realtime_alert.py`），不强制接入主图。
+4. 接口契约测试 + ADR-008（如必要）。
+
+> 终止条件尚未满足：仅剩 #3.3 一项。不输出完成承诺。
+

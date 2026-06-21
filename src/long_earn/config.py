@@ -2,12 +2,23 @@
 
 参考 LangGraph Context 实践，提供统一的上下文管理，用于传递配置和依赖。
 使用直接属性访问提供最佳类型安全支持。
+
+配置中心化（TODO #4.3）：
+- ``load_config()`` 是配置加载唯一入口，封装"dotenv 加载 + AppConfig.from_env()"。
+- 多环境支持：``LONG_EARN_ENV`` 选择 ``.env.<name>``（如 dev/staging/prod），
+  缺失时回退到默认 ``.env``。
+- 优先级：**显式 os.environ > 选定 .env 文件 > AppConfig 默认值**（dotenv 的
+  ``override=False`` 行为）——生产环境通过环境变量覆盖 yaml/dotenv 是标准做法。
+- 详见 [ADR-007](docs/adr/007-config-centralization.md)。
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from dotenv import load_dotenv
 
 from long_earn.services import (
     BacktestService,
@@ -21,9 +32,15 @@ from long_earn.services import (
 if TYPE_CHECKING:
     from long_earn.backtest.data.provider import DataProvider
 
+_logger = logging.getLogger(__name__)
+
 # 项目数据目录
 _project_root = Path(__file__).parent.parent.parent.parent
 PROJECT_DATA_DIR = _project_root / ".data"
+
+# 多环境配置文件选择：LONG_EARN_ENV=dev|staging|prod 等 → .env.<name>
+# 未设置则回退到默认 .env
+_ENV_NAME_VAR = "LONG_EARN_ENV"
 
 
 @dataclass
@@ -157,3 +174,65 @@ class AppConfig:
             errors.append(f"最大迭代次数必须大于 0: {self.max_iterations}")
 
         return errors
+
+
+def _resolve_env_file(env_file: str | Path | None, search_from: Path) -> Path | None:
+    """解析最终要加载的 .env 文件路径。
+
+    选择顺序：
+    1. 显式传入的 ``env_file`` 优先（无论是否存在，原样返回；不存在由 ``load_dotenv``
+       静默跳过）。
+    2. ``LONG_EARN_ENV`` 已设置 → 寻找 ``.env.<name>``，存在则使用，不存在则回退默认。
+    3. 默认 ``.env``。
+    """
+    if env_file is not None:
+        return Path(env_file)
+
+    env_name = os.environ.get(_ENV_NAME_VAR, "").strip()
+    if env_name:
+        candidate = search_from / f".env.{env_name}"
+        if candidate.exists():
+            return candidate
+        _logger.info(
+            f"{_ENV_NAME_VAR}={env_name} 但 {candidate} 不存在，回退默认 .env"
+        )
+
+    default_env = search_from / ".env"
+    return default_env if default_env.exists() else None
+
+
+def load_config(
+    env_file: str | Path | None = None,
+    search_from: Path | None = None,
+    override: bool = False,
+) -> AppConfig:
+    """加载配置（dotenv + AppConfig.from_env 的统一入口）。
+
+    这是项目中**唯一推荐**的配置入口，替代散落各处的 ``load_dotenv()`` + 手动
+    ``AppConfig.from_env()`` 组合。详见 [ADR-007](docs/adr/007-config-centralization.md)。
+
+    Args:
+        env_file: 显式指定 .env 文件路径（优先级最高）。
+        search_from: dotenv 查找的起点目录（默认为项目根 ``_project_root``）。
+        override: 是否让 .env 文件覆盖已设的 os.environ（默认 False，符合
+            "显式环境变量 > .env 文件 > 默认值" 的生产惯例）。
+
+    Returns:
+        AppConfig 实例
+
+    多环境支持：
+        export LONG_EARN_ENV=dev   → 加载 .env.dev
+        export LONG_EARN_ENV=prod  → 加载 .env.prod
+        不设置                       → 加载 .env
+    """
+    if search_from is None:
+        search_from = _project_root
+
+    resolved = _resolve_env_file(env_file, search_from)
+    if resolved is not None and resolved.exists():
+        load_dotenv(resolved, override=override)
+        _logger.info(f"配置加载自 {resolved}（override={override}）")
+    else:
+        _logger.debug("无 .env 文件可加载，使用 os.environ + AppConfig 默认值")
+
+    return AppConfig.from_env()

@@ -36,19 +36,27 @@ class MemoryServiceImpl(MemoryService):
         if self._initialized:
             return
 
-        persistent_path = Path(self.config.memory_path).expanduser()
-        if persistent_path.exists() and self._store.load(persistent_path):
-            self._initialized = True
-            self.logger.info(f"记忆已加载 ({self._store.fact_count} 条)")
-            return
+        # 空 memory_path / init_dir 守卫：Path("") 等价于 Path(".")，会让 exists()
+        # 误判为真并触发对当前目录的加载/写入，是隐蔽 bug。空字符串视为"未配置"。
+        memory_path_str = (self.config.memory_path or "").strip()
+        if memory_path_str:
+            persistent_path = Path(memory_path_str).expanduser()
+            if persistent_path.exists() and self._store.load(persistent_path):
+                self._initialized = True
+                self.logger.info(f"记忆已加载 ({self._store.fact_count} 条)")
+                return
+        else:
+            persistent_path = None
 
-        init_dir = Path(self.config.init_dir)
-        if init_dir.exists():
-            count = self._store.load_directory(init_dir)
-            if count > 0:
-                persistent_path.parent.mkdir(parents=True, exist_ok=True)
-                self._store.save(persistent_path)
-                self.logger.info(f"记忆初始化完成 ({count} 条事实)")
+        init_dir_str = (self.config.init_dir or "").strip()
+        if init_dir_str:
+            init_dir = Path(init_dir_str)
+            if init_dir.exists():
+                count = self._store.load_directory(init_dir)
+                if count > 0 and persistent_path is not None:
+                    persistent_path.parent.mkdir(parents=True, exist_ok=True)
+                    self._store.save(persistent_path)
+                    self.logger.info(f"记忆初始化完成 ({count} 条事实)")
 
         self._initialized = True
 

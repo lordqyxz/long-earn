@@ -20,13 +20,13 @@
 import os
 
 import pytest
-from dotenv import load_dotenv
 
 from long_earn.config import RuntimeContext
 from long_earn.context_init import create_runtime_context
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 
-load_dotenv()
+# .env 加载由 conftest.py 中的 load_config() 统一处理（ADR-007 配置中心化），
+# 本文件不再调用 load_dotenv()。
 
 # LLM 依赖门控：develop / develop_then_backtest 类用例需要真实 LLM（ollama/远端 API）
 # 在线生成策略代码。默认 .env 为 ollama 且无远端 API key，本地未启动 ollama 时这些

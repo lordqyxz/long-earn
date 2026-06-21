@@ -153,6 +153,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
 - [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Proposed）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；参考实现见 `D:\dev\cidd\.claude\skills\ciccwm-*/scripts/`。
+- [ADR-007](docs/adr/007-config-centralization.md): 配置中心化（dotenv 统一加载）。`load_config()` 是唯一入口，`LONG_EARN_ENV` 选择多环境 `.env.<name>`，`os.environ > .env > 默认值` 的优先级。
 
 ## 调研文档
 
@@ -388,4 +389,4 @@ remoteMiniQmt/
 ### 4. 工程化与质量 (Engineering & Quality)
 - [x] **集成测试增强**：针对 `strategy_rd` / `stock_analysis` 全链路 + MemoryService / CompositeDataProvider 的接口契约。`test_strategy_rd_subgraph.py`（关键节点齐全 + 关键边连通 + 终止性）、`test_stock_analysis_subgraph.py`（5 视角并行 fan-out + summarize 汇聚 + 终止）、`test_memory_service_recall.py`（remember→recall 链路 + hybrid fallback + 异常容错）、`test_data_provider_degradation.py`（全 provider 不可用降级 + 日期标准化）。
 - [x] **性能监控**：在 `MonitoringService` 中增加对 LLM Token 消耗和回测耗时的统计。`MonitoringServiceImpl`（`services/monitoring_service.py`）实现 `track_tokens`/`track(node_name)`/`monitor_node`/`log_report`；`context_init.py` 注入 `monitoring` 到 `LLMServiceImpl`（自动追踪 `response.usage_metadata`）与 `BacktestServiceImpl`（`run()` 用 `monitoring.track("backtest")` 包裹耗时）。
-- [ ] **配置中心化**：将 `.env` 变量扩展为支持多环境配置的 `config.yaml`。
+- [x] **配置中心化**：将 `.env` 变量扩展为支持多环境配置。`config.load_config()` 统一入口（`python-dotenv`），`LONG_EARN_ENV=<name>` 选择 `.env.<name>`（dev/staging/prod），回退默认 `.env`；优先级 `os.environ > .env 文件 > AppConfig 默认`。`context_init.create_runtime_context` 默认走 `load_config()`；`__main__.py`、`tests/integration/conftest.py`、`test_develop_backtest.py` 移除 ad-hoc `load_dotenv()` 调用。详见 [ADR-007](docs/adr/007-config-centralization.md)。
