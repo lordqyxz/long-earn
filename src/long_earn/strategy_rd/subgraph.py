@@ -196,6 +196,20 @@ def _backtest_node(
     if backtest_result.get("error"):
         if logger:
             logger.error(f"[回测] 回测错误: {backtest_result.get('error')}")
+        # 引擎/数据源/数据不足错误不是策略代码逻辑问题，跳过修复循环
+        error_category = backtest_result.get("error_category", "")
+        non_refine_categories = {"engine_error", "insufficient_data"}
+        if error_category in non_refine_categories:
+            # 显式标记数值不可信：扁平 0 + 嵌套占位 metrics 同步置零，
+            # 避免 reflection / save_experience 把"占位 0"当真实业绩。
+            backtest_result.setdefault("metrics", {
+                "return": 0,
+                "annual_return": 0,
+                "sharpe_ratio": 0,
+                "max_drawdown": 0,
+            })
+            backtest_result.setdefault("metrics_unreliable", True)
+            return {"backtest_result": backtest_result, "code_valid": True}
         return {"backtest_result": backtest_result, "code_valid": False}
 
     if logger:
@@ -211,12 +225,30 @@ def _refine_node(
     state: State,
     develop_agent: StrategyDevelopAgent,
     logger: LoggerService,
+    target: str = "initial",
 ) -> dict:
-    """代码修复节点 - 根据错误修复代码"""
+    """代码修复节点 - 根据错误修复代码
+
+    target:
+      - "initial"   修 strategy_yaml（首轮 develop 失败链路）
+      - "optimized" 修 optimized_strategy_yaml（第 N 轮 develop_optimized 失败链路）
+    第 2 轮 backtest_optimized 失败时，必须修复优化版本而非误改回初版；
+    且修复后写回的字段决定下游 backtest_* 能否读到修好的代码。
+    """
     strategy = state.get("strategy", {}) or {}
-    strategy_code = (
-        state.get("strategy_yaml", "") or state.get("strategy_code", "") or ""
-    )
+    if target == "optimized":
+        strategy_code = (
+            state.get("optimized_strategy_yaml", "")
+            or state.get("optimized_strategy_code", "")
+            or ""
+        )
+        opt_strat = state.get("optimized_strategy", {}) or {}
+        if opt_strat:
+            strategy = opt_strat
+    else:
+        strategy_code = (
+            state.get("strategy_yaml", "") or state.get("strategy_code", "") or ""
+        )
     backtest_result = state.get("backtest_result", {}) or {}
     error_message = backtest_result.get("error", "Unknown error")
 
@@ -227,7 +259,9 @@ def _refine_node(
         return {"code_valid": False}
 
     if logger:
-        logger.info(f"[代码修复] 第{refine_count + 1}次修复...")
+        logger.info(
+            f"[代码修复-{target}] 第{refine_count + 1}次修复..."
+        )
 
     refined_code = develop_agent.refine_code(
         strategy=strategy,
@@ -236,8 +270,10 @@ def _refine_node(
     )
 
     if logger:
-        logger.info("[代码修复] 修复完成")
+        logger.info(f"[代码修复-{target}] 修复完成")
 
+    if target == "optimized":
+        return {"optimized_strategy_yaml": refined_code, "code_valid": False}
     return {"strategy_yaml": refined_code, "code_valid": False}
 
 
@@ -276,18 +312,36 @@ def _optimize_node(
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
 ) -> dict:
-    """优化节点 - 根据改进建议优化策略"""
-    strategy = state.get("strategy", {}) or {}
+    """优化节点 - 根据改进建议优化策略
+
+    多轮演进的关键：优先以 **上一轮 optimized_strategy** 作为优化起点，
+    而非永远从初始 strategy 开始 —— 否则 N 轮迭代实际只是 N 次独立 v0 优化。
+    """
+    base_strategy = (
+        state.get("optimized_strategy") or state.get("strategy", {}) or {}
+    )
+    backtest_result = state.get("backtest_result", {}) or {}
     improvement_suggestions: list[str] = state.get("improvement_suggestions", []) or []
 
     if isinstance(improvement_suggestions, str):
         improvement_suggestions = [improvement_suggestions]
+    # 确保 improvement_suggestions 是 str 列表（LLM 可能返回 dict）
+    improvement_suggestions = [str(s) for s in improvement_suggestions]
 
     if logger:
-        logger.info(f"[优化] 开始优化策略, 改进建议数: {len(improvement_suggestions)}")
+        base_label = (
+            "上一轮优化版"
+            if state.get("optimized_strategy")
+            else "初始版"
+        )
+        logger.info(
+            f"[优化] 起点={base_label}, 改进建议数: {len(improvement_suggestions)}"
+        )
 
     optimized_strategy = research_agent.optimize_strategy(
-        strategy, improvement_suggestions
+        base_strategy,
+        improvement_suggestions,
+        previous_backtest=backtest_result,
     )
 
     if logger:
@@ -301,11 +355,17 @@ def _develop_optimized_node(
     develop_agent: StrategyDevelopAgent,
     logger: LoggerService,
 ) -> dict:
-    """开发优化后的策略代码"""
+    """开发优化后的策略代码
+
+    第 N 轮（N≥2）的入口：在调用 LLM 前必须清空 develop_agent 的错误历史，
+    否则第 1 轮累积的失败次数会让 _refine_cond 立即认定"已用尽修复预算"，
+    第 2 轮的优化版策略一旦回测失败就**永远进不了 refine** —— 多轮演进静默崩盘。
+    """
     optimized_strategy = state.get("optimized_strategy", {}) or {}
+    develop_agent.clear_error_history()
 
     if logger:
-        logger.info("[策略开发-优化版] 开始开发优化后的策略代码...")
+        logger.info("[策略开发-优化版] 开始开发优化后的策略代码（已重置错误历史）...")
 
     code = develop_agent.develop_strategy(optimized_strategy)
 
@@ -343,6 +403,18 @@ def _backtest_optimized_node(
     if backtest_result.get("error"):
         if logger:
             logger.error(f"[回测-优化版] 错误: {backtest_result.get('error')}")
+        # 与 _backtest_node 对齐：engine_error / insufficient_data 不是策略代码逻辑问题，跳过修复循环
+        error_category = backtest_result.get("error_category", "")
+        non_refine_categories = {"engine_error", "insufficient_data"}
+        if error_category in non_refine_categories:
+            backtest_result.setdefault("metrics", {
+                "return": 0,
+                "annual_return": 0,
+                "sharpe_ratio": 0,
+                "max_drawdown": 0,
+            })
+            backtest_result.setdefault("metrics_unreliable", True)
+            return {"backtest_result": backtest_result, "code_valid": True}
         return {"backtest_result": backtest_result, "code_valid": False}
 
     if logger:
@@ -400,6 +472,8 @@ def _supervisor_node(
     backtest_result = state.get("backtest_result", {}) or {}
     reflection = state.get("reflection", "") or ""
     improvement_suggestions = state.get("improvement_suggestions", []) or []
+    # 确保 improvement_suggestions 是 str 列表（LLM 可能返回 dict）
+    str_suggestions = [str(s) for s in improvement_suggestions]
 
     if logger:
         logger.info(
@@ -412,7 +486,7 @@ def _supervisor_node(
         strategy=strategy,
         backtest_result=backtest_result,
         reflection=reflection,
-        improvement_suggestions="\n".join(improvement_suggestions),
+        improvement_suggestions="\n".join(str_suggestions),
     )
 
     next_iteration = current_iteration + 1
@@ -442,12 +516,23 @@ def _refine_cond(_state: State, develop_agent: StrategyDevelopAgent) -> str:
     )
 
 
+def _refine_optimized_cond(
+    _state: State, develop_agent: StrategyDevelopAgent
+) -> str:
+    """优化版修复后的条件路由：还在预算内 → 重新跑 backtest_optimized；用尽 → reflection。"""
+    return (
+        "backtest_optimized"
+        if len(develop_agent.get_error_history()) < MAX_CODE_REFINES
+        else "reflection"
+    )
+
+
 def _supervisor_cond(state: State) -> str:
     return "optimize" if state.get("should_continue", False) else "end"
 
 
 def _backtest_optimized_cond(state: State) -> str:
-    return "reflection" if state.get("code_valid", False) else "refine"
+    return "reflection" if state.get("code_valid", False) else "refine_optimized"
 
 
 def create_strategy_rd_subgraph(context: "RuntimeContext"):
@@ -461,8 +546,8 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     develop_agent = StrategyDevelopAgent(context=context)
 
     logger = context.logger
-    backtest_service = context.backtest_service
-    memory = context.memory
+    backtest_service = context.require_backtest()
+    memory = context.require_memory()
 
     workflow = StateGraph(State)
 
@@ -493,7 +578,22 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         partial(_backtest_node, backtest_service=backtest_service, logger=logger),
     )
     workflow.add_node(
-        "refine", partial(_refine_node, develop_agent=develop_agent, logger=logger)
+        "refine",
+        partial(
+            _refine_node,
+            develop_agent=develop_agent,
+            logger=logger,
+            target="initial",
+        ),
+    )
+    workflow.add_node(
+        "refine_optimized",
+        partial(
+            _refine_node,
+            develop_agent=develop_agent,
+            logger=logger,
+            target="optimized",
+        ),
     )
     workflow.add_node(
         "reflection",
@@ -569,7 +669,13 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     workflow.add_conditional_edges(
         "backtest_optimized",
         _backtest_optimized_cond,
-        {"refine": "refine", "reflection": "reflection"},
+        {"refine_optimized": "refine_optimized", "reflection": "reflection"},
+    )
+
+    workflow.add_conditional_edges(
+        "refine_optimized",
+        partial(_refine_optimized_cond, develop_agent=develop_agent),
+        {"backtest_optimized": "backtest_optimized", "reflection": "reflection"},
     )
 
     return workflow.compile()

@@ -167,19 +167,6 @@ class FillEvent(Event):
 
 
 @dataclass
-class Portfolio:
-    """投资组合实体 — 管理持仓和资金状态"""
-
-    initial_capital: float = 1_000_000.0
-    cash: float = 1_000_000.0
-    positions: dict[str, Position] = field(default_factory=dict)
-
-    @property
-    def total_value(self) -> float:
-        return self.cash + sum(p.market_value for p in self.positions.values())
-
-
-@dataclass
 class Position:
     """单个股票的持仓实体"""
 

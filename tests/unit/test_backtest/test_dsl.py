@@ -77,3 +77,69 @@ class TestParseStrategyYaml:
 """
         with pytest.raises(ValueError, match="缺少 type 字段"):
             parse_strategy_yaml(yaml)
+
+
+class TestExtractFieldNames:
+    """字段提取函数排除 Python 关键字 / evaluator 内置函数"""
+
+    def test_python_constants_excluded(self):
+        """True/False/None 是 Python 常量，evaluator 走 ast.Constant，不应被当字段"""
+        from long_earn.backtest.engine.dsl import _extract_field_names
+
+        result = _extract_field_names("close > 0 if revenue_yoy > 0 else None")
+        # 真实字段：close / revenue_yoy；不应含 if / else / None
+        assert result == {"close", "revenue_yoy"}, f"got {result}"
+
+    def test_logical_keywords_excluded(self):
+        """and / or / not / in / is 是 Python 逻辑关键字"""
+        from long_earn.backtest.engine.dsl import _extract_field_names
+
+        result = _extract_field_names("close > 0 and revenue_yoy > 0 or not low")
+        assert result == {"close", "revenue_yoy", "low"}, f"got {result}"
+
+    def test_safe_functions_excluded(self):
+        """SafeExpressionEvaluator 内置函数（clip/log/exp/sqrt/where）不被当字段"""
+        from long_earn.backtest.engine.dsl import _extract_field_names
+
+        result = _extract_field_names("clip(log(close), 0, 1) + sqrt(volume)")
+        assert result == {"close", "volume"}, f"got {result}"
+
+    def test_validate_fields_accepts_ternary_expression(self):
+        """validate_fields 不应把 if/else 当成 missing 字段"""
+        from long_earn.backtest.engine.dsl import (
+            StrategyDSL,
+            validate_fields,
+        )
+
+        strategy = StrategyDSL.model_validate({
+            "name": "Test",
+            "factors": {
+                # IfExp 三元表达式：evaluator 原生支持
+                "alpha": "close if volume > 1000 else low",
+            },
+            "signals": [
+                {"type": "rank", "by": "alpha", "top": 10},
+            ],
+            "weights": {"method": "equal"},
+        })
+
+        missing = validate_fields(strategy, ["close", "low", "volume"])
+        # alpha 是 factor 别名 + close/low/volume 是 available → missing 应空
+        assert missing == [], f"got {missing}"
+
+    def test_validate_fields_still_catches_real_missing(self):
+        """真正缺失的字段仍要被报告"""
+        from long_earn.backtest.engine.dsl import (
+            StrategyDSL,
+            validate_fields,
+        )
+
+        strategy = StrategyDSL.model_validate({
+            "name": "Test",
+            "factors": {"alpha": "close * unknown_field"},
+            "signals": [{"type": "rank", "by": "alpha", "top": 10}],
+            "weights": {"method": "equal"},
+        })
+
+        missing = validate_fields(strategy, ["close"])
+        assert missing == ["unknown_field"]

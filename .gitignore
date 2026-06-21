@@ -22,3 +22,14 @@ temp/
 .coverage
 htmlcov/
 pi-session-*.html
+
+# 本地缓存与索引
+.cache/
+.serena/
+
+# 工具/IDE 配置（按需提交时再单独豁免）
+pyrightconfig.json
+
+# Ralph Loop 运行时状态
+.claude/ralph-state.md
+.claude/.ralph-loop.local.md

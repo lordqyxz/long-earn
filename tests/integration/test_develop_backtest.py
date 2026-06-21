@@ -26,7 +26,7 @@ from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopA
 
 load_dotenv()
 
-# ── 默认股票池（沪深 300 部分成分股，qlib 格式 SH/PREFIX） ──────────────
+# ── 默认股票池（沪深 300 部分成分股，SH/SZ 前缀格式） ──────────────
 
 DEFAULT_STOCK_LIST = [
     "SH600000",
@@ -86,24 +86,22 @@ MOCK_STRATEGIES = {
     },
 }
 
-# 已验证可用的示例代码（等权重策略，不依赖数据筛选，确保产生交易信号）
+# 已验证可用的 YAML DSL 策略（等权重策略，不依赖数据筛选，确保产生交易信号）
 KNOWN_GOOD_CODE = """\
-from typing import List
-import pandas as pd
-from qlib.data import D
-
-
-class EqualWeightStrategy:
-    def __init__(self, stock_list: List[str] = None, topk: int = 10):
-        self.stock_list = stock_list or []
-        self.topk = topk
-
-    def generate_signals(self, date: str) -> pd.Series:
-        if not self.stock_list:
-            return pd.Series({})
-        stocks = self.stock_list[:self.topk]
-        weight = 1.0 / len(stocks)
-        return pd.Series({s: weight for s in stocks})
+strategy:
+  name: EqualWeightStrategy
+  description: 等权重策略，选择股票池中所有股票等权配置
+  universe:
+    type: csi300
+  signals:
+    - type: rank
+      by: close
+      top: 10
+      ascending: false
+  weights:
+    method: equal
+  risk_control:
+    max_position_per_stock: 1.0
 """
 
 
@@ -136,14 +134,22 @@ def backtest_dates(context: RuntimeContext) -> tuple[str, str]:
 # ── 辅助函数 ─────────────────────────────────────────────────────────────
 
 
-def assert_valid_strategy_code(code: str) -> None:
-    """断言代码符合回测接口要求"""
-    assert isinstance(code, str), "代码应为字符串"
-    assert len(code) > 0, "代码不应为空"
-    assert "generate_signals" in code, "代码应包含 generate_signals 方法"
-    assert "pd.Series" in code, "代码应返回 pd.Series"
-    for char in ["，", "（", "）", "：", "；", "。"]:
-        assert char not in code, f"代码不应包含全角字符: {char}"
+def assert_valid_strategy_yaml(yaml_str: str) -> None:
+    """断言 YAML 策略符合 DSL 格式要求"""
+    assert isinstance(yaml_str, str), "策略应为字符串"
+    assert len(yaml_str) > 0, "策略不应为空"
+    assert "signals" in yaml_str, "策略应包含 signals 字段"
+    assert "weights" in yaml_str, "策略应包含 weights 字段"
+    # 全角字符只检查 signals/weights/factors 区域（description 允许中文标点）
+    import re
+
+    code_section = re.split(r"\n  signals:", yaml_str, maxsplit=1)
+    if len(code_section) > 1:
+        check_zone = "signals:" + code_section[1]
+    else:
+        check_zone = yaml_str
+    for char in ["，", "（", "）", "；"]:
+        assert char not in check_zone, f"策略代码区域不应包含全角字符: {char}"
 
 
 def assert_backtest_success(result: dict) -> None:
@@ -235,7 +241,7 @@ class TestDevelop:
 
         print(f"代码长度: {len(code)} 字符")
         print(f"代码预览:\n{code[:300]}...")
-        assert_valid_strategy_code(code)
+        assert_valid_strategy_yaml(code)
 
 
 # ── 测试：回测服务 ───────────────────────────────────────────────────────
@@ -262,7 +268,7 @@ class TestBacktest:
         """回测服务应检测到语法错误并返回错误信息"""
         start, end = backtest_dates
         result = run_backtest_via_context(
-            context, "x = [1，2]", start, end, stock_list=DEFAULT_STOCK_LIST
+            context, "strategy:\n  name: bad\n  signals:\n    - type: filter\n      condition: 'x > >'", start, end, stock_list=DEFAULT_STOCK_LIST
         )
         assert result is not None, "语法错误应返回错误结果，而非 None"
         assert "error" in result, "语法错误应在 result.error 中反映"
@@ -301,7 +307,7 @@ class TestDevelopAndBacktest:
         # 生成代码
         code = develop_agent.develop_strategy(strategy)
         print(f"生成代码 ({len(code)} 字符)")
-        assert_valid_strategy_code(code)
+        assert_valid_strategy_yaml(code)
 
         # 首次回测
         print("\n--- 首次回测 ---")

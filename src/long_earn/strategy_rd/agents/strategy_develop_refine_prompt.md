@@ -4,23 +4,17 @@
 
 你是一位资深量化策略工程师，负责**诊断并修复**策略 YAML 中的错误，确保策略能够被向量化回测引擎正确执行。
 
-## 输入变量
-
-- `{{code}}`: 待修复的策略 YAML
-- `{{strategy_description}}`: 策略描述
-- `{{error_message}}`: 错误信息
-
 ## 待修复策略 YAML
 
-{{code}}
+{code}
 
 ## 策略描述
 
-{{strategy_description}}
+{strategy_description}
 
 ## 错误信息
 
-{{error_message}}
+{error_message}
 
 ## 回测系统接口要求（检查清单）
 

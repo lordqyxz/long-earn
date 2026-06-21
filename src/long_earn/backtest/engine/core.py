@@ -3,6 +3,7 @@
 实现 T 维度迭代 × S 维度向量化 (Slab) 的执行链路。
 """
 
+import contextlib
 import logging
 import uuid
 from typing import Any
@@ -105,7 +106,7 @@ class EventDrivenBacktestEngine:
                 return BacktestResult(success=False, message="加载数据为空")
 
             guard = VisibilityGuard(full_data)
-            portfolio = Portfolio()
+            portfolio = Portfolio(cost_config=self.cost_config)
             broker = Broker(self.cost_config)
             broker.reset()
             strategy.init()
@@ -116,9 +117,9 @@ class EventDrivenBacktestEngine:
 
             timestamps = self._get_timestamps(full_data)
 
-            for bar_idx, ts in enumerate(timestamps):
+            for _bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
-                    ts, guard, portfolio, broker, strategy, db_audit, bar_idx
+                    ts, guard, portfolio, broker, strategy, db_audit
                 )
 
             self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
@@ -131,7 +132,9 @@ class EventDrivenBacktestEngine:
 
         except Exception as e:
             logger.exception("回测引擎执行失败")
-            return BacktestResult(success=False, message=str(e))
+            return BacktestResult(
+                success=False, message=str(e), error_category="engine_error"
+            )
 
     # ── 初始化辅助 ────────────────────────────────────────────
 
@@ -162,7 +165,6 @@ class EventDrivenBacktestEngine:
         broker: Broker,
         strategy: BaseStrategy,
         db_audit: Any,
-        bar_idx: int = 0,
     ) -> None:
         guard.set_time(ts)
         slab = guard.read_current_slab()
@@ -176,15 +178,17 @@ class EventDrivenBacktestEngine:
         portfolio.update_market_values(slab)
 
         # 检查待成交订单（限价/止损单）
-        price_lookup = {
-            sym: float(price)
-            for sym, price in zip(
-                slab.select("symbol").to_series().to_list(),
-                slab.select("close").to_series().to_list(),
-            )
-        }
+        price_lookup = {}
+        for sym, price in zip(
+            slab.select("symbol").to_series().to_list(),
+            slab.select("close").to_series().to_list(),
+            strict=True,
+        ):
+            if price is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    price_lookup[sym] = float(price)
         pending_fills = broker.check_pending_orders(
-            bar_idx=bar_idx, price_lookup=price_lookup
+            price_lookup=price_lookup
         )
         for pf in pending_fills:
             portfolio.update_from_fill(pf)
@@ -272,20 +276,26 @@ class EventDrivenBacktestEngine:
         assert self.stop_loss is not None
         triggered = False
         for symbol, pos in list(portfolio.positions.items()):
-            # 使用最低价判断止损触发（真实止损单在日内最低价触及止损线时即成交）
+            # 触发判断：用日内最低价确认是否触及止损线（真实止损单监控盘中价格）
             low_price = self._lookup_price(slab, symbol, field="low")
             close_price = self._lookup_price(slab, symbol, field="close")
             check_price = low_price if (low_price and low_price > 0) else close_price
             if check_price is None or check_price <= 0:
                 continue
 
-            pnl_pct = (check_price - pos.avg_cost) / pos.avg_cost if pos.avg_cost > 0 else 0.0
+            pnl_pct = (
+                (check_price - pos.avg_cost) / pos.avg_cost
+                if pos.avg_cost > 0 else 0.0
+            )
             if pnl_pct > -self.stop_loss:
                 continue
 
-            # 止损成交使用最低价（更保守地模拟真实成交）
-            price = low_price if (low_price and low_price > 0) else close_price
-            if price is not None and price > 0:
+            # 成交价：用"止损线"作为基准而非日内最低价（避免给回测白送日内极值）
+            # 现实中止损单触发后通常以触发价附近 + 滑点成交，绝不会恰好 = 日内 low
+            stop_threshold = pos.avg_cost * (1 - self.stop_loss)
+            # 取 max(止损线, 日内最低价): 真实成交不会优于止损线
+            ref_price = max(stop_threshold, check_price) if check_price else stop_threshold
+            if ref_price > 0:
                 order = OrderEvent(
                     timestamp=ts,
                     trace_id=str(uuid.uuid4()),
@@ -293,9 +303,10 @@ class EventDrivenBacktestEngine:
                     symbol=symbol,
                     order_type="SELL",
                     quantity=pos.shares,
-                    price=price,
+                    price=ref_price,
                 )
-                fill = broker.execute_order(order, price)
+                # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
+                fill = broker.execute_order(order, ref_price)
                 portfolio.update_from_fill(fill)
             triggered = True
         return triggered
@@ -451,6 +462,24 @@ class EventDrivenBacktestEngine:
         full_data: pl.DataFrame | None = None,
         benchmark_symbol: str = "",
     ) -> BacktestResult:
+        # 数据可信度门槛：交易日数 / equity_curve 长度不足时拒绝输出指标，
+        # 防止把"全程持仓未变 → 零收益"误标为成功的回测结果。
+        equity_len = len(portfolio.equity_curve)
+        if trading_days < self.MIN_TRADING_DAYS or equity_len < self.MIN_TRADING_DAYS:
+            return BacktestResult(
+                success=False,
+                message=(
+                    f"回测样本不足：trading_days={trading_days}, "
+                    f"equity_points={equity_len}，最少需要 {self.MIN_TRADING_DAYS}"
+                ),
+                error_category="insufficient_data",
+                error_detail=(
+                    "样本量低于最低交易日阈值，无法可信地计算 Sharpe/MaxDD 等指标。"
+                    "请检查数据源或扩大回测区间。"
+                ),
+                trading_days=trading_days,
+            )
+
         metrics = self._calculate_metrics(portfolio)
         bm = self._benchmark_or_none(
             full_data, benchmark_symbol, portfolio.equity_curve
@@ -520,7 +549,7 @@ class EventDrivenBacktestEngine:
         bm_ts = bm_df.select("timestamp").to_series().to_list()
         bm_close = bm_df.select("close").to_series().to_list()
         bm_price_map: dict[Any, float] = {}
-        for ts, price in zip(bm_ts, bm_close):
+        for ts, price in zip(bm_ts, bm_close, strict=True):
             if ts is not None and price is not None:
                 bm_price_map[ts] = float(price)
 
@@ -609,7 +638,11 @@ class EventDrivenBacktestEngine:
                 "fold_results": [{fold_id, train, test}],
                 "average_metrics": {train: {}, test: {}},
                 "n_splits": n,
+                "failed_folds": [{fold_id, phase, error_category, message}],
             }
+
+        可信度承诺：失败的 fold（success=False / insufficient_data / engine_error）
+        不进入 average_metrics 计算，避免把失败的 0 当作平均业绩的一部分。
         """
 
         full_data = self._prepare_data(symbols, start_date, end_date)
@@ -623,6 +656,10 @@ class EventDrivenBacktestEngine:
         fold_results: list[dict[str, Any]] = []
         all_train_metrics: list[dict[str, float]] = []
         all_test_metrics: list[dict[str, float]] = []
+        failed_folds: list[dict[str, Any]] = []
+
+        # 保存当前审计日志，Walk-Forward 完成后恢复
+        saved_audit_trail = self.audit_logger.trail.copy()
 
         for fold_idx, (train_ts, test_ts) in enumerate(splits):
             train_start = str(train_ts[0])
@@ -630,39 +667,51 @@ class EventDrivenBacktestEngine:
             test_start = str(test_ts[0]) if test_ts else train_end
             test_end = str(test_ts[-1]) if test_ts else train_end
 
-            # 训练期回测
+            # 训练期回测（每个 fold 使用独立的审计日志）
+            self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
-                strategy,
-                train_start,
-                train_end,
-                symbols,
-                benchmark_symbol,
+                strategy, train_start, train_end, symbols, benchmark_symbol
             )
-            train_metrics = {
-                "total_return": train_result.total_return or 0.0,
-                "sharpe_ratio": train_result.sharpe_ratio or 0.0,
-                "max_drawdown": train_result.max_drawdown or 0.0,
-                "alpha": train_result.alpha or 0.0,
-            }
-            all_train_metrics.append(train_metrics)
+            if train_result.success:
+                train_metrics = {
+                    "total_return": train_result.total_return or 0.0,
+                    "sharpe_ratio": train_result.sharpe_ratio or 0.0,
+                    "max_drawdown": train_result.max_drawdown or 0.0,
+                    "alpha": train_result.alpha or 0.0,
+                }
+                all_train_metrics.append(train_metrics)
+            else:
+                train_metrics = {"error": train_result.message}
+                failed_folds.append({
+                    "fold_id": fold_idx,
+                    "phase": "train",
+                    "error_category": train_result.error_category or "unknown",
+                    "message": train_result.message,
+                })
 
-            # 测试期回测（重置策略状态，防止训练期信息泄漏）
+            # 测试期回测（重置策略状态和审计日志，防止训练期信息泄漏）
+            self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
-                strategy,
-                test_start,
-                test_end,
-                symbols,
-                benchmark_symbol,
+                strategy, test_start, test_end, symbols, benchmark_symbol
             )
-            test_metrics = {
-                "total_return": test_result.total_return or 0.0,
-                "sharpe_ratio": test_result.sharpe_ratio or 0.0,
-                "max_drawdown": test_result.max_drawdown or 0.0,
-                "alpha": test_result.alpha or 0.0,
-            }
-            all_test_metrics.append(test_metrics)
+            if test_result.success:
+                test_metrics = {
+                    "total_return": test_result.total_return or 0.0,
+                    "sharpe_ratio": test_result.sharpe_ratio or 0.0,
+                    "max_drawdown": test_result.max_drawdown or 0.0,
+                    "alpha": test_result.alpha or 0.0,
+                }
+                all_test_metrics.append(test_metrics)
+            else:
+                test_metrics = {"error": test_result.message}
+                failed_folds.append({
+                    "fold_id": fold_idx,
+                    "phase": "test",
+                    "error_category": test_result.error_category or "unknown",
+                    "message": test_result.message,
+                })
 
             fold_results.append(
                 {
@@ -671,6 +720,9 @@ class EventDrivenBacktestEngine:
                     "test": {"start": test_start, "end": test_end, **test_metrics},
                 }
             )
+
+        # 恢复原始审计日志
+        self.audit_logger.trail = saved_audit_trail
 
         def _avg(metrics_list: list[dict[str, float]]) -> dict[str, float]:
             if not metrics_list:
@@ -686,6 +738,7 @@ class EventDrivenBacktestEngine:
                 "test": _avg(all_test_metrics),
             },
             "n_splits": n_splits,
+            "failed_folds": failed_folds,
         }
 
     # ── 数据与指标 ────────────────────────────────────────────

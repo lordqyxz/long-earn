@@ -1,36 +1,36 @@
 """数据提供者模块
 
-封装 akshare 数据获取，支持本地 DuckDB 缓存。
+统一的数据获取接口，支持多数据源自动降级：
+  DuckDB 缓存 → miniqmt (xtquant) → akshare
+
+架构设计：
+  - DataProvider Protocol：统一接口，上层服务只依赖此接口
+  - CompositeDataProvider：组合提供者，按优先级自动选择数据源
+  - 工厂函数 create_data_provider()：根据环境自动创建最佳提供者
 """
 
+from __future__ import annotations
+
 import logging
-import time
 from typing import Protocol
 
-import akshare as ak
 import pandas as pd
 
 from long_earn.backtest.data.cache import DataCache
 
 logger = logging.getLogger(__name__)
 
-# akshare 业绩快报列名映射（中文 -> 英文标准名）
-FINANCIAL_FIELD_MAP = {
-    "净利润-同比增长": "net_profit_yoy",
-    "营业总收入-同比增长": "revenue_yoy",
-    "净资产收益率": "roe",
-    "销售毛利率": "gross_margin",
-    "每股收益": "eps",
-    "净利润-净利润": "net_profit",
-    "营业总收入-营业总收入": "revenue",
-}
-
-# 季度报告日期列表（支持常见的报告期）
-QUARTER_END_DATES = ["0331", "0630", "0930", "1231"]
-
 
 class DataProvider(Protocol):
-    """数据提供者接口"""
+    """数据提供者统一接口。
+
+    所有数据源实现必须遵循此接口。
+    """
+
+    @property
+    def is_available(self) -> bool:
+        """数据源是否可用。"""
+        ...
 
     def get_price_panel(
         self,
@@ -38,7 +38,19 @@ class DataProvider(Protocol):
         start_date: str,
         end_date: str,
         fields: list[str] | None = None,
-    ) -> pd.DataFrame: ...
+    ) -> pd.DataFrame:
+        """获取行情数据面板。
+
+        Args:
+            symbols: 股票代码列表（xtquant 格式，如 600519.SH）
+            start_date: 起始日期（YYYY-MM-DD）
+            end_date: 结束日期（YYYY-MM-DD）
+            fields: 需要的字段列表，默认 open/high/low/close/volume
+
+        Returns:
+            DataFrame，index 为 (date, symbol)，列为 fields
+        """
+        ...
 
     def get_financial_panel(
         self,
@@ -46,7 +58,19 @@ class DataProvider(Protocol):
         start_date: str,
         end_date: str,
         fields: list[str] | None = None,
-    ) -> pd.DataFrame: ...
+    ) -> pd.DataFrame:
+        """获取财务数据面板（前向填充到日级）。
+
+        Args:
+            symbols: 股票代码列表
+            start_date: 起始日期
+            end_date: 结束日期
+            fields: 需要的财务字段列表
+
+        Returns:
+            DataFrame，index 为 (date, symbol)
+        """
+        ...
 
     def get_merged_panel(
         self,
@@ -55,14 +79,107 @@ class DataProvider(Protocol):
         end_date: str,
         price_fields: list[str] | None = None,
         financial_fields: list[str] | None = None,
-    ) -> pd.DataFrame: ...
+    ) -> pd.DataFrame:
+        """获取合并面板（行情 + 财务）。
+
+        Args:
+            symbols: 股票代码列表
+            start_date: 起始日期
+            end_date: 结束日期
+            price_fields: 行情字段
+            financial_fields: 财务字段
+
+        Returns:
+            DataFrame，index 为 (date, symbol)，行情+财务列
+        """
+        ...
 
 
-class AkshareDataProvider:
-    """基于 akshare 的数据提供者（带 DuckDB 缓存）"""
+class CompositeDataProvider:
+    """组合数据提供者：DuckDB 缓存 → miniqmt → akshare 自动降级。
 
-    def __init__(self, cache: DataCache | None = None):
+    数据获取策略：
+    1. 优先从 DuckDB 缓存读取
+    2. 缓存缺失/过期时，尝试 miniqmt 增量更新
+    3. miniqmt 不可用且缓存无数据时，降级到 akshare
+    4. 每次从远程获取的数据自动写入 DuckDB 缓存
+    """
+
+    def __init__(self, cache: DataCache | None = None) -> None:
         self.cache = cache or DataCache()
+        self._miniqmt: DataProvider | None = None
+        self._akshare: DataProvider | None = None
+        self._miniqmt_available: bool | None = None
+        self._akshare_available: bool | None = None
+
+    @staticmethod
+    def _normalize_date(date_str: str) -> str:
+        """标准化日期格式为 YYYY-MM-DD（DuckDB 缓存要求）。"""
+        if not date_str:
+            return date_str
+        # YYYYMMDD -> YYYY-MM-DD
+        if len(date_str) == 8 and date_str.isdigit():
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        return date_str
+
+    @property
+    def miniqmt(self) -> DataProvider | None:
+        """延迟加载 miniqmt 提供者。"""
+        if self._miniqmt is not None:
+            return self._miniqmt
+        try:
+            from long_earn.backtest.data.miniqmt_provider import (
+                MiniQmtDataProvider,
+            )
+
+            self._miniqmt = MiniQmtDataProvider(self.cache)
+            return self._miniqmt
+        except Exception as e:
+            logger.warning(f"miniqmt 提供者加载失败: {e}")
+            return None
+
+    @property
+    def miniqmt_available(self) -> bool:
+        """检测 miniqmt 是否可用。"""
+        if self._miniqmt_available is not None:
+            return self._miniqmt_available
+        try:
+            from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
+
+            self._miniqmt_available = MiniQmtClient.get().is_available
+        except Exception:
+            self._miniqmt_available = False
+        return self._miniqmt_available
+
+    @property
+    def akshare_available(self) -> bool:
+        """检测 akshare 是否可用。"""
+        if self._akshare_available is not None:
+            return self._akshare_available
+        provider = self._get_akshare()
+        self._akshare_available = provider.is_available if provider else False
+        return self._akshare_available
+
+    def _get_akshare(self) -> DataProvider | None:
+        """延迟加载 akshare 提供者。"""
+        if self._akshare is not None:
+            return self._akshare
+        try:
+            from long_earn.backtest.data.akshare_provider import (
+                AkshareFallbackProvider,
+            )
+
+            self._akshare = AkshareFallbackProvider(self.cache)
+            return self._akshare
+        except Exception as e:
+            logger.warning(f"akshare 提供者加载失败: {e}")
+            return None
+
+    def _log_source(self, source: str) -> None:
+        """记录数据来源。"""
+        logger.info(f"[数据来源: {source}]")
+
+    # ── 行情面板 ─────────────────────────────────────────────────────────
 
     def get_price_panel(
         self,
@@ -71,83 +188,37 @@ class AkshareDataProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取行情数据面板"""
+        """获取行情数据面板（自动降级）。"""
         if not symbols:
             return pd.DataFrame()
 
-        fields = fields or ["open", "high", "low", "close", "volume"]
-        cached_df = self.cache.get_prices(symbols, start_date, end_date)
-        missing_symbols = symbols
-        if cached_df is not None:
-            cached_symbols = set(cached_df["symbol"].unique())
-            missing_symbols = [s for s in symbols if s not in cached_symbols]
-            if missing_symbols:
-                logger.info(
-                    f"行情缓存缺失 {len(missing_symbols)} 只股票，从 akshare 补充"
-                )
-        if missing_symbols:
-            fetched = self._fetch_prices_from_akshare(
-                missing_symbols, start_date, end_date
-            )
-            if fetched is not None and not fetched.empty:
-                self.cache.save_prices(fetched)
-        df = self.cache.get_prices(symbols, start_date, end_date, fields)
-        if df is None or df.empty:
-            logger.warning("无法获取行情数据")
-            return pd.DataFrame()
-        df = df.set_index(["date", "symbol"]).sort_index()
-        return df[fields]
+        start_date = self._normalize_date(start_date)
+        end_date = self._normalize_date(end_date)
 
-    def _fetch_prices_from_akshare(
-        self,
-        symbols: list[str],
-        start_date: str,
-        end_date: str,
-    ) -> pd.DataFrame | None:
-        """从 akshare 获取行情数据（使用 stock_zh_a_daily 接口）"""
+        # 1. 始终尝试 miniqmt 提供者（内部已含 DuckDB 缓存优先逻辑）
+        #    即使 miniqmt 不可用，它也会从 DuckDB 缓存读取
+        mq = self.miniqmt
+        if mq is not None:
+            df = mq.get_price_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
 
-        all_data = []
-        ak_start = start_date.replace("-", "")
-        ak_end = end_date.replace("-", "")
+        # 2. miniqmt 提供者返回空（缓存无数据 + miniqmt 不可用），降级到 akshare
+        ak = self._get_akshare()
+        if ak is not None:
+            self._log_source("akshare（miniqmt 不可用且缓存无数据，降级获取）")
+            df = ak.get_price_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
 
-        def _to_akshare_symbol(code: str) -> str:
-            """将股票代码转换为 akshare 格式（sh/sz 前缀）"""
-            code = str(code).strip()
-            if code.startswith("6") or code.startswith("68"):
-                return f"sh{code}"
-            return f"sz{code}"
-
-        for i, symbol in enumerate(symbols):
-            if (i + 1) % 50 == 0:
-                logger.info(f"行情获取进度: {i + 1}/{len(symbols)}")
-            try:
-                ak_symbol = _to_akshare_symbol(symbol)
-                df = ak.stock_zh_a_daily(
-                    symbol=ak_symbol,
-                    start_date=ak_start,
-                    end_date=ak_end,
-                    adjust="qfq",
-                )
-                if df is None or df.empty:
-                    continue
-                df["symbol"] = symbol
-                df["date"] = pd.to_datetime(df["date"])
-                all_data.append(
-                    df[["symbol", "date", "open", "high", "low", "close", "volume"]]
-                )
-                # 请求间隔，避免触发限流
-                time.sleep(0.15)
-            except Exception as e:
-                logger.warning(f"获取 {symbol} 行情失败: {e}")
-                continue
-        if not all_data:
-            return None
-        result = pd.concat(all_data, ignore_index=True)
-        logger.info(
-            f"从 akshare 获取行情 {len(result)} 条记录, "
-            f"{result['symbol'].nunique()} 只股票"
+        # 3. 所有数据源均不可用
+        logger.warning(
+            "所有数据源均不可用（miniqmt 不可用 + akshare 不可用），"
+            "行情数据获取失败"
         )
-        return result
+        return pd.DataFrame()
+
+    # ── 财务面板 ─────────────────────────────────────────────────────────
 
     def get_financial_panel(
         self,
@@ -156,91 +227,32 @@ class AkshareDataProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取财务数据面板（日级别）"""
+        """获取财务数据面板（自动降级）。"""
         if not symbols:
             return pd.DataFrame()
 
-        fields = fields or list(FINANCIAL_FIELD_MAP.values())
-        quarters = self._get_quarters_between(start_date, end_date)
-        cached_df = self.cache.get_financials(symbols, fields)
-        missing_quarters = quarters
-        if cached_df is not None and not cached_df.empty:
-            cached_quarters = set(
-                cached_df["report_date"].dt.strftime("%Y%m%d").unique()
-            )
-            missing_quarters = [q for q in quarters if q not in cached_quarters]
-        if missing_quarters:
-            fetched = self._fetch_financials_from_akshare(missing_quarters)
-            if fetched is not None and not fetched.empty:
-                self.cache.save_financials(fetched)
-        df = self.cache.get_financials(symbols, fields)
-        if df is None or df.empty:
-            logger.warning("无法获取财务数据")
-            return pd.DataFrame()
-        trading_dates = pd.date_range(start=start_date, end=end_date, freq="B")
-        panel = self._quarterly_to_daily(df, symbols, trading_dates, fields)
-        return panel
+        start_date = self._normalize_date(start_date)
+        end_date = self._normalize_date(end_date)
 
-    def _fetch_financials_from_akshare(
-        self, quarters: list[str]
-    ) -> pd.DataFrame | None:
-        """从 akshare 获取季度财务数据"""
-        all_data = []
-        for quarter in quarters:
-            logger.info(f"获取 {quarter} 季度财务数据...")
-            try:
-                df = ak.stock_yjbb_em(date=quarter)
-                if df is None or df.empty:
-                    continue
-                df = df.rename(columns=FINANCIAL_FIELD_MAP)
-                df["symbol"] = df["股票代码"].astype(str).str.strip()
-                df["report_date"] = pd.to_datetime(quarter, format="%Y%m%d")
-                available_cols = ["symbol", "report_date"] + [
-                    c for c in FINANCIAL_FIELD_MAP.values() if c in df.columns
-                ]
-                all_data.append(df[available_cols])
-                logger.info(f"  {quarter}: {len(df)} 条记录")
-            except Exception as e:
-                logger.warning(f"获取 {quarter} 财务数据失败: {e}")
-                continue
-        if not all_data:
-            return None
-        result = pd.concat(all_data, ignore_index=True)
-        logger.info(
-            f"从 akshare 获取财务数据 {len(result)} 条记录, "
-            f"{result['symbol'].nunique()} 只股票"
-        )
-        return result
+        # 1. 始终尝试 miniqmt 提供者（内部已含 DuckDB 缓存优先逻辑）
+        mq = self.miniqmt
+        if mq is not None:
+            df = mq.get_financial_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
 
-    def _quarterly_to_daily(
-        self,
-        quarterly_df: pd.DataFrame,
-        symbols: list[str],
-        trading_dates: pd.DatetimeIndex,
-        fields: list[str],
-    ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级别"""
-        panels = []
-        for symbol in symbols:
-            symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
-            if symbol_data.empty:
-                continue
-            symbol_data = symbol_data.sort_values("report_date")
-            daily = pd.DataFrame(index=trading_dates)
-            daily.index.name = "date"
-            for _, row in symbol_data.iterrows():
-                report_date = row["report_date"]
-                mask = daily.index >= report_date
-                for field in fields:
-                    if field in row:
-                        daily.loc[mask, field] = row[field]
-            daily["symbol"] = symbol
-            daily = daily.reset_index().set_index(["date", "symbol"])
-            panels.append(daily)
-        if not panels:
-            return pd.DataFrame()
-        result = pd.concat(panels)
-        return result[fields]
+        # 2. 降级到 akshare
+        ak = self._get_akshare()
+        if ak is not None:
+            self._log_source("akshare（miniqmt 不可用且缓存无数据，降级获取）")
+            df = ak.get_financial_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
+
+        logger.warning("所有数据源均不可用，财务数据获取失败")
+        return pd.DataFrame()
+
+    # ── 合并面板 ─────────────────────────────────────────────────────────
 
     def get_merged_panel(
         self,
@@ -250,8 +262,10 @@ class AkshareDataProvider:
         price_fields: list[str] | None = None,
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取合并的数据面板"""
-        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
+        """获取合并面板（行情 + 财务，自动降级）。"""
+        price_df = self.get_price_panel(
+            symbols, start_date, end_date, price_fields
+        )
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )
@@ -261,42 +275,41 @@ class AkshareDataProvider:
             return fin_df
         if fin_df.empty:
             return price_df
-        merged = price_df.join(fin_df, how="outer")
-        merged = merged.groupby(level="symbol").ffill()
+        # 检查 fin_df 是否有正确的 MultiIndex
+        if not isinstance(fin_df.index, pd.MultiIndex) or fin_df.index.nlevels < 2:  # noqa: PLR2004
+            # 财务数据 index 不规范，只返回行情数据
+            return price_df
+        # 统一 index names，确保一致
+        if price_df.index.names != fin_df.index.names:
+            fin_df.index.names = price_df.index.names
+        # 使用 reset_index + merge + set_index 避免 MultiIndex join 问题
+        p = price_df.reset_index()
+        f = fin_df.reset_index()
+        idx_cols = [c for c in p.columns if c in f.columns][:2]
+        if len(idx_cols) < 2:  # noqa: PLR2004
+            return price_df
+        p[idx_cols[0]] = pd.to_datetime(p[idx_cols[0]])
+        f[idx_cols[0]] = pd.to_datetime(f[idx_cols[0]])
+        merged = pd.merge(p, f, on=idx_cols, how="outer")
+        merged = merged.set_index(idx_cols)
+        merged = merged.groupby(level=idx_cols[1]).ffill()
         return merged.sort_index()
 
-    @staticmethod
-    def _get_quarters_between(start_date: str, end_date: str) -> list[str]:
-        """获取日期范围内的所有季度报告期
 
-        包含 start_date 之前的最近一期报告（用于前向填充）。
-        """
-        start = pd.to_datetime(start_date)
-        end = pd.to_datetime(end_date)
+def create_data_provider(cache: DataCache | None = None) -> CompositeDataProvider:
+    """工厂函数：创建组合数据提供者。
 
-        # 生成所有可能的季度
-        all_quarters = []
-        for year in range(start.year - 1, end.year + 1):
-            for qe in QUARTER_END_DATES:
-                all_quarters.append(f"{year}{qe}")
+    自动检测可用数据源，按优先级组合：
+    DuckDB 缓存 → miniqmt → akshare
 
-        # 筛选出在 [start, end] 范围内的报告
-        quarters = [
-            q
-            for q in all_quarters
-            if start <= pd.to_datetime(q, format="%Y%m%d") <= end
-        ]
+    Args:
+        cache: DuckDB 缓存实例，默认自动创建
 
-        # 额外添加 start_date 之前的最近一期报告
-        before_start = [
-            q for q in all_quarters if pd.to_datetime(q, format="%Y%m%d") < start
-        ]
-        if before_start:
-            quarters.append(max(before_start))
-
-        return sorted(set(quarters))
+    Returns:
+        CompositeDataProvider 实例
+    """
+    return CompositeDataProvider(cache)
 
 
-def get_data_provider(cache: DataCache | None = None) -> DataProvider:
-    """获取默认的数据提供者"""
-    return AkshareDataProvider(cache)
+# 向后兼容别名
+get_data_provider = create_data_provider

@@ -7,20 +7,21 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from long_earn.config import RuntimeContext
 from long_earn.memory.store import MemoryStore
-from long_earn.services import MemoryService
+from long_earn.services import LoggerService, MemoryService
+
+if TYPE_CHECKING:
+    from long_earn.config import AppConfig
 
 
 class MemoryServiceImpl(MemoryService):
     """3-Tier 记忆服务"""
 
-    def __init__(self, context: "RuntimeContext"):
-        self.context = context
-        self.config = context.config
-        self.logger = context.logger
+    def __init__(self, config: "AppConfig", logger: LoggerService):
+        self.config = config
+        self.logger = logger
         self._store = MemoryStore()
         self._initialized = False
 
@@ -74,7 +75,17 @@ class MemoryServiceImpl(MemoryService):
         idx = self._store.add_fact(content, metadata)
         fact_id = f"mem_{idx:06d}"
         self.logger.debug(f"记忆已存储 [{tier}]: {fact_id}")
+        # 自动持久化到磁盘
+        self._auto_save()
         return fact_id
+
+    def _auto_save(self) -> None:
+        """自动持久化记忆到磁盘"""
+        try:
+            persistent_path = Path(self.config.memory_path).expanduser()
+            self._store.save(persistent_path)
+        except Exception as e:
+            self.logger.warning(f"记忆自动保存失败: {e}")
 
     # ── Reflect ────────────────────────────────────────────────
 
@@ -144,17 +155,18 @@ class MemoryServiceImpl(MemoryService):
         self,
         query: str,
         k: int = 3,
-        categories: list[str] | None = None,
-        terms: list[str] | None = None,
-        source_files: list[str] | None = None,
+        **filters,
     ) -> list[str]:
         """便捷方法: 检索并返回格式化字符串（兼容旧 KnowledgeService 调用）"""
+        categories = filters.get("categories") or filters.get("category", [])
+        terms = filters.get("terms") or filters.get("term", [])
+        source_files = filters.get("source_files") or filters.get("source_file", [])
         results = self.recall(
             query,
             k=k,
-            categories=categories or [],
-            terms=terms or [],
-            source_files=source_files or [],
+            categories=categories if isinstance(categories, list) else [categories],
+            terms=terms if isinstance(terms, list) else [terms],
+            source_files=source_files if isinstance(source_files, list) else [source_files],
         )
         output = []
         for r in results:
@@ -218,13 +230,34 @@ class MemoryServiceImpl(MemoryService):
 {json.dumps(error_history, ensure_ascii=False, indent=2)}
 """
 
+            # 兼容扁平结构（BacktestServiceImpl.run 实际返回）：
+            # 优先取扁平字段，回退到嵌套 metrics 子字典；
+            # 这样存入 experience 的 metadata 始终带真实数值，便于后续记忆检索匹配。
+            metrics_payload = backtest_result.get("metrics", {}) or {}
+            flat_keys = (
+                "total_return",
+                "annual_return",
+                "sharpe_ratio",
+                "max_drawdown",
+                "volatility",
+                "win_rate",
+                "calmar_ratio",
+                "sortino_ratio",
+                "trading_days",
+            )
+            for key in flat_keys:
+                if backtest_result.get(key) is not None:
+                    metrics_payload.setdefault(key, backtest_result[key])
+
             self.remember(
                 content,
                 tier="core",
                 term=strategy_name,
                 category="策略经验",
                 experience_type="strategy",
-                backtest_metrics=backtest_result.get("metrics", {}),
+                backtest_metrics=metrics_payload,
+                backtest_success=bool(backtest_result.get("success", True))
+                and not backtest_result.get("error"),
             )
             return True
         except Exception as e:
@@ -237,7 +270,11 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         min_sharpe: float | None = None,
     ) -> list[dict]:
-        """便捷方法: 搜索历史经验"""
+        """便捷方法: 搜索历史经验
+
+        min_sharpe 过滤：用显式 None 检查避免 `0 or fallback` 链
+        把合法低值 sharpe=0 当成"缺失"误回退。
+        """
         try:
             results = self.recall(query, k=k * 2, min_similarity=0.05)
             experiences: list[dict] = []
@@ -245,11 +282,13 @@ class MemoryServiceImpl(MemoryService):
                 meta = r["metadata"]
                 if meta.get("experience_type") != "strategy":
                     continue
-                if min_sharpe:
-                    s = meta.get("sharpe_ratio", 0) or meta.get(
-                        "backtest_metrics", {}
-                    ).get("sharpe_ratio", 0)
-                    if s < min_sharpe:
+                if min_sharpe is not None:
+                    s = meta.get("sharpe_ratio")
+                    if s is None:
+                        s = (meta.get("backtest_metrics", {}) or {}).get(
+                            "sharpe_ratio"
+                        )
+                    if s is None or s < min_sharpe:
                         continue
 
                 content = r["content"]

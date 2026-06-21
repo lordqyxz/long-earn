@@ -28,11 +28,11 @@ class DuckDBAuditProvider(AuditProvider):
 
     def _init_db(self) -> None:
         conn = self._get_conn()
-        # 创建审计专用 Schema
-        conn.execute("CREATE SCHEMA IF NOT EXISTS audit")
+        # 创建审计专用 Schema（使用唯一名称避免与数据库文件名冲突）
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
         # 创建审计日志表
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit.logs (
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS "backtest_audit".logs (
                 run_id VARCHAR,
                 timestamp TIMESTAMP,
                 event_type VARCHAR,
@@ -44,7 +44,7 @@ class DuckDBAuditProvider(AuditProvider):
                 latency_ms DOUBLE,
                 PRIMARY KEY (run_id, trace_id, timestamp)
             )
-        """)
+        ''')
         logger.info(f"Audit provider initialized at {self.db_path}")
 
     def log_event(self, record: AuditRecord) -> None:
@@ -61,10 +61,10 @@ class DuckDBAuditProvider(AuditProvider):
         payload_json = json.dumps(record.payload, default=json_serializable)
 
         conn.execute(
-            """
-            INSERT INTO audit.logs (run_id, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
+            '''
+            INSERT INTO "backtest_audit".logs (run_id, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            ''',
             [
                 record.run_id,
                 record.timestamp,
@@ -82,7 +82,7 @@ class DuckDBAuditProvider(AuditProvider):
         self, run_id: str, filters: dict[str, Any]
     ) -> Sequence[AuditRecord]:
         conn = self._get_conn()
-        query = "SELECT * FROM audit.logs WHERE run_id = ?"
+        query = 'SELECT * FROM "backtest_audit".logs WHERE run_id = ?'
         params = [run_id]
 
         for key, value in filters.items():
@@ -111,7 +111,7 @@ class DuckDBAuditProvider(AuditProvider):
     def get_causal_chain(self, trace_id: str) -> Sequence[AuditRecord]:
         conn = self._get_conn()
         res = conn.execute(
-            "SELECT * FROM audit.logs WHERE trace_id = ? ORDER BY timestamp ASC",
+            'SELECT * FROM "backtest_audit".logs WHERE trace_id = ? ORDER BY timestamp ASC',
             [trace_id],
         ).fetchall()
 

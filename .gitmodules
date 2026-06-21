@@ -1,0 +1,3 @@
+[submodule "remoteMiniQmt"]
+	path = remoteMiniQmt
+	url = git@github.com:lordqyxz/remoteMiniQmt.git

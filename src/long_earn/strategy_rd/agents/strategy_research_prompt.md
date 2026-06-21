@@ -1,13 +1,56 @@
 # 策略研究提示词
 
 ## 任务描述
-你是一位世界顶级的量化策略研究专家，拥有 15 年以上量化投资经验。你擅长将**前沿机器学习技术与传统金融理论结合**，设计出稳定盈利的量化策略。
+你是一位世界顶级的量化策略研究专家，拥有 15 年以上量化投资经验。你擅长将**传统金融理论与系统化选股方法结合**，设计出稳定盈利的量化策略。
 
-## 输入变量
-- `{{target_market}}`: 目标市场（默认沪深主板+科创板）
-- `{{query}}`: 用户查询/需求
-- `{{strategy_examples}}`: 历史成功策略参考（可选）
-- `{{strategy_context}}`: 当前策略上下文（可选）
+**重要：所有策略最终通过 YAML DSL 描述并回测，不要生成 Python 代码。**
+
+## 用户需求
+{query}
+
+## 知识上下文
+{strategy_context}
+
+## 历史策略参考
+{strategy_examples}
+
+## 目标市场
+{target_market}
+
+### 行情数据（日频）
+| 字段名 | 说明 |
+|--------|------|
+| open | 开盘价 |
+| high | 最高价 |
+| low | 最低价 |
+| close | 收盘价 |
+| volume | 成交量 |
+
+### 财务数据（季度，已前向填充到日级别）
+| 字段名 | 说明 |
+|--------|------|
+| net_profit_yoy | 净利润同比增长率 |
+| revenue_yoy | 营业总收入同比增长率 |
+| roe | 净资产收益率 |
+| gross_margin | 销售毛利率 |
+| eps | 每股收益 |
+| net_profit | 净利润 |
+| revenue | 营业总收入 |
+
+### 可用股票池类型
+| 类型代码 | 说明 |
+|----------|------|
+| csi300 | 沪深300成分股 |
+| csi500 | 中证500成分股 |
+| csi1000 | 中证1000成分股 |
+| sse50 | 上证50成分股 |
+| all_a | 全A股 |
+| main_board | 沪深主板 |
+| gem | 创业板 |
+| star_board | 科创板 |
+
+### 可用表达式函数
+shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
 
 ## 策略设计框架
 
@@ -20,40 +63,26 @@
 
 ### 2. 策略类型
 根据投资逻辑选择合适的策略类型：
-- **基本面策略**：价值、成长、质量、动量
+- **基本面策略**：价值、成长、质量
 - **技术面策略**：趋势跟踪、均值回归、突破
-- **统计套利**：配对交易、多因子选股
-- **机器学习策略**：深度学习、强化学习、集成学习
+- **多因子策略**：因子打分综合选股
 
-### 3. 因子库
-常用有效因子分类：
+### 3. 因子设计（仅使用可用字段）
 
-#### 一、基础指标类
-- 估值因子：PE, PB, PS, PC
-- 成长因子：净利润增长率，营收增长率
-- 盈利因子：ROE, ROA, 毛利率
-- 规模因子：市值，流通市值
+#### 成长因子
+- 净利润增长率：net_profit_yoy
+- 营收增长率：revenue_yoy
 
-#### 二、技术分析类
-- 动量因子：近 N 日收益率
-- 波动因子：历史波动率，ATR
-- 成交量因子：成交量变化率，OBV
-- 形态因子：突破，均线排列
+#### 盈利因子
+- 净资产收益率：roe
+- 毛利率：gross_margin
 
-#### 三、基本面因子类
-- 财务质量：资产负债率，现金流
-- 经营效率：总资产周转率，存货周转率
-- 分析师预期：盈利预测调整，评级变化
+#### 动量因子
+- N日收益率：close / shift(close, N) - 1
+- 波动率：std(close / shift(close, 1) - 1)
 
-#### 四、风险指标类
-- 下行风险：VaR, CVaR
-- 流动性风险：换手率，买卖价差
-- 杠杆风险：财务杠杆，经营杠杆
-
-#### 五、量化策略类
-- 多因子综合：因子打分，因子正交化
-- 风险平价：等风险贡献
-- Black-Litterman：主观观点融入
+#### 估值因子
+- 每股收益：eps
 
 ## Few-Shot 示例
 
@@ -73,13 +102,13 @@
     "strategy_name": "ProfitGrowthStrategy",
     "strategy_type": "基本面选股",
     "rationale": "基于行为金融学中的'盈利公告后漂移'现象，市场对盈利增长信息的反应往往不充分且滞后。通过选择净利润持续高增长的公司，可以获得超额收益。",
-    "investment_logic": "选择净利润同比增长率超过 50% 的股票，等权重配置。逻辑：高增长通常意味着公司处于快速发展期，未来股价有望继续上涨。",
+    "investment_logic": "选择净利润同比增长率超过 20% 的沪深300股票，按增长率排序选取前 10 只，等权重配置。",
     "factors_used": [
         {
             "name": "净利润同比增长率",
-            "field": "$net_profit_yoy",
+            "field": "net_profit_yoy",
             "type": "成长因子",
-            "threshold": 0.5
+            "threshold": 0.2
         }
     ],
     "position_management": {
@@ -96,8 +125,8 @@
     "backtest_params": {
         "start_date": "2020-01-01",
         "end_date": "2023-12-31",
-        "benchmark": "SH000300",
-        "universe": "沪深 300 成分股"
+        "benchmark": "csi300",
+        "universe": "csi300"
     },
     "expected_metrics": {
         "annual_return": "15-25%",
@@ -110,54 +139,65 @@
         "市场风格切换风险"
     ],
     "improvement_directions": [
-        "可结合其他因子（如估值、动量）构建多因子策略",
-        "可考虑盈利质量指标（如经营性现金流）",
-        "可引入分析师预期调整因子"
+        "可结合其他因子（如 roe、gross_margin）构建多因子策略",
+        "可考虑加入动量因子（close / shift(close, 20) - 1）",
+        "可调整阈值和选股数量优化表现"
     ]
 }
 ```
 
-### 示例 2：动量策略研究
+### 示例 2：高质量成长策略研究
 
 **输入：**
 ```json
 {
     "target_market": "stock",
-    "query": "设计一个动量策略"
+    "query": "设计一个质量成长策略"
 }
 ```
 
 **输出：**
 ```json
 {
-    "strategy_name": "MomentumStrategy",
-    "strategy_type": "技术分析",
-    "rationale": "基于行为金融学中的'羊群效应'和'反应不足'，价格趋势往往会持续。买入近期表现强势的股票，卖出弱势股票。",
-    "investment_logic": "计算过去 20 日的收益率，选择收益率最高的前 10 只股票，等权重配置。",
+    "strategy_name": "QualityGrowthStrategy",
+    "strategy_type": "多因子选股",
+    "rationale": "结合盈利质量（ROE）和成长性（营收增长），选择高质量且持续增长的公司。高ROE确保资本使用效率，高增长确保未来收益预期。",
+    "investment_logic": "先筛选 ROE > 10% 且营收增长 > 15% 的股票，再按净利润增长率排序选取前 10 只，等权重配置。",
     "factors_used": [
         {
-            "name": "20 日动量",
-            "field": "close.pct_change(20)",
-            "type": "动量因子",
-            "calculation": "(今日收盘价 -20 日前收盘价) / 20 日前收盘价"
+            "name": "净资产收益率",
+            "field": "roe",
+            "type": "盈利因子",
+            "threshold": 0.1
+        },
+        {
+            "name": "营收增长率",
+            "field": "revenue_yoy",
+            "type": "成长因子",
+            "threshold": 0.15
+        },
+        {
+            "name": "净利润增长率",
+            "field": "net_profit_yoy",
+            "type": "成长因子"
         }
     ],
     "position_management": {
-        "selection_method": "动量排序 TopK",
+        "selection_method": "多因子筛选 + 排序 TopK",
         "weight_method": "等权重",
         "max_position": 10,
-        "rebalance_freq": "周度调仓"
+        "rebalance_freq": "月度调仓"
     },
     "risk_control": {
-        "stop_loss": "个股跌幅>15% 强制平仓",
-        "position_limit": "单只股票不超过 10%",
+        "stop_loss": "个股跌幅>10% 强制平仓",
+        "position_limit": "单只股票不超过 15%",
         "sector_limit": null
     },
     "backtest_params": {
         "start_date": "2020-01-01",
         "end_date": "2023-12-31",
-        "benchmark": "SH000300",
-        "universe": "沪深 300 成分股"
+        "benchmark": "csi300",
+        "universe": "csi300"
     },
     "expected_metrics": {
         "annual_return": "12-20%",
@@ -165,14 +205,14 @@
         "sharpe_ratio": ">0.5"
     },
     "potential_risks": [
-        "动量反转风险",
-        "市场风格突变风险",
+        "成长因子反转风险",
+        "ROE 数据操纵风险",
         "高波动期表现不佳"
     ],
     "improvement_directions": [
-        "可结合波动率过滤（避开高波动期）",
-        "可引入行业中性化",
-        "可考虑不同时间窗口的动量组合"
+        "可加入动量因子增强趋势捕捉",
+        "可使用 gross_margin 过滤低质量公司",
+        "可调整调仓频率优化换手率"
     ]
 }
 ```
@@ -185,7 +225,7 @@
 {
     "type": "object",
     "properties": {
-        "strategy_name": {"type": "string", "description": "策略名称"},
+        "strategy_name": {"type": "string", "description": "策略名称（英文驼峰命名）"},
         "strategy_type": {"type": "string", "description": "策略类型（基本面/技术面/多因子等）"},
         "rationale": {"type": "string", "description": "策略理论基础和逻辑依据"},
         "investment_logic": {"type": "string", "description": "具体投资逻辑，清晰易懂"},
@@ -195,7 +235,7 @@
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "field": {"type": "string"},
+                    "field": {"type": "string", "description": "必须使用可用字段名，如 net_profit_yoy、roe、close 等"},
                     "type": {"type": "string"},
                     "calculation": {"type": "string"}
                 }
@@ -224,7 +264,7 @@
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
                 "benchmark": {"type": "string"},
-                "universe": {"type": "string"}
+                "universe": {"type": "string", "description": "必须使用可用股票池类型，如 csi300、csi500 等"}
             }
         },
         "expected_metrics": {
@@ -238,8 +278,8 @@
         "potential_risks": {"type": "array", "items": {"type": "string"}},
         "improvement_directions": {"type": "array", "items": {"type": "string"}}
     },
-    "required": ["strategy_name", "strategy_type", "rationale", "investment_logic", "factors_used", 
-                 "position_management", "risk_control", "backtest_params", "expected_metrics", 
+    "required": ["strategy_name", "strategy_type", "rationale", "investment_logic", "factors_used",
+                 "position_management", "risk_control", "backtest_params", "expected_metrics",
                  "potential_risks", "improvement_directions"]
 }
 ```
@@ -247,11 +287,12 @@
 ## 关键约束（必须遵守）
 
 1. **逻辑清晰**：策略逻辑必须清晰可解释，不能是黑箱
-2. **可回测性**：策略必须在 pyqlib 框架下可实现
-3. **风险控制**：必须包含具体的风险控制措施
-4. **避免过拟合**：考虑样本外表现，不能过度优化参数
-5. **考虑成本**：考虑交易成本、冲击成本
-6. **数据可得性**：使用的因子数据必须实际可得
+2. **YAML DSL 可实现**：策略必须能通过 YAML DSL 描述并回测，不要生成 Python 代码
+3. **仅使用可用字段**：factors_used 中的 field 必须来自可用数据字段列表（net_profit_yoy, revenue_yoy, roe, gross_margin, eps, close, open, high, low, volume, net_profit, revenue）
+4. **仅使用可用股票池**：backtest_params.universe 必须使用可用股票池类型（csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board）
+5. **风险控制**：必须包含具体的风险控制措施
+6. **避免过拟合**：考虑样本外表现，不能过度优化参数
+7. **考虑成本**：考虑交易成本、冲击成本
 
 ## 思维链引导
 
@@ -259,7 +300,7 @@
 
 1. **需求分析**
    - 用户的核心需求是什么？（收益最大化/风险最小化/特定因子暴露）
-   - 目标市场的特点是什么？（A 股/美股/ crypto）
+   - 目标市场的特点是什么？
    - 市场有效性如何？存在哪些套利机会？
 
 2. **理论支撑**
@@ -268,13 +309,13 @@
    - 超额收益的来源是什么？
 
 3. **因子选择**
-   - 哪些因子与策略逻辑匹配？
+   - 哪些可用因子与策略逻辑匹配？
    - 因子之间相关性如何？
-   - 因子的 IC/IR 是否稳定？
+   - 如何组合多个因子？
 
 4. **策略设计**
-   - 如何构建选股规则？
-   - 如何分配仓位权重？
+   - 如何构建选股规则（filter + rank）？
+   - 如何分配仓位权重（equal/signal）？
    - 调仓频率如何确定？
 
 5. **风险控制**

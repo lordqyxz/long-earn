@@ -11,6 +11,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from long_earn.backtest.engine.broker import (
+    TradingCostConfig as BrokerTradingCostConfig,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,7 +46,11 @@ SignalStep = SignalFilter | SignalRank | SignalExpression
 
 
 class TradingCostConfig(BaseModel):
-    """交易成本配置 (默认 A 股参数)"""
+    """交易成本配置 (默认 A 股参数)
+
+    Pydantic 版本，用于 YAML DSL 解析。运行时通过 to_broker_config() 转换为
+    broker 层的 dataclass 版本，确保类型一致。
+    """
 
     commission_rate: float = Field(
         default=0.0003, description="单边佣金率，如 0.0003 表示万三"
@@ -54,9 +62,13 @@ class TradingCostConfig(BaseModel):
         default=2.0, description="滑点基点，2.0 表示 2bps = 0.0002"
     )
 
-    @property
-    def slippage_rate(self) -> float:
-        return self.slippage_bps * 0.0001
+    def to_broker_config(self) -> BrokerTradingCostConfig:
+        """转换为 broker 层的 dataclass 版本"""
+        return BrokerTradingCostConfig(
+            commission_rate=self.commission_rate,
+            stamp_duty=self.stamp_duty,
+            slippage_bps=self.slippage_bps,
+        )
 
 
 class WeightConfig(BaseModel):
@@ -114,6 +126,10 @@ class StrategyDSL(BaseModel):
     factors: dict[str, str] = Field(
         default_factory=dict, description="因子定义，{alias: expression}"
     )
+    operator_factors: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="算子目录因子步骤，[{op, alias, params}]（绕过表达式求值器）",
+    )
     signals: list[dict[str, Any]] = Field(
         default_factory=list, description="信号生成步骤列表"
     )
@@ -132,7 +148,15 @@ class StrategyDSL(BaseModel):
                 raise ValueError(f"第 {i} 个 filter 步骤缺少 condition 字段")
             if step["type"] == "rank" and "by" not in step:
                 raise ValueError(f"第 {i} 个 rank 步骤缺少 by 字段")
+            if step["type"] == "operator" and "op" not in step:
+                raise ValueError(f"第 {i} 个 operator 信号步骤缺少 op 字段")
         return v
+
+    def has_operator_steps(self) -> bool:
+        """是否含算子目录步骤（factor 或 signal）。"""
+        return bool(self.operator_factors) or any(
+            s.get("type") == "operator" for s in self.signals
+        )
 
 
 def _convert_dates(obj: Any) -> Any:
@@ -179,8 +203,34 @@ def parse_strategy_yaml(yaml_str: str) -> StrategyDSL:
     except Exception as e:
         raise ValueError(f"策略参数校验失败: {e}") from e
 
+    # 算子目录步骤解析期校验：op 存在 + params 符合 params_cls。
+    # 失败在此抛 ValueError（被 backtest_service 归为 client_error，跳过 refine 循环），
+    # 而非拖到回测期才暴露——这是新 DSL 消灭 refine 循环的关键。
+    _validate_operator_steps(strategy)
+
     logger.info(f"策略解析成功: {strategy.name}")
     return strategy
+
+
+def _validate_operator_steps(strategy: StrategyDSL) -> None:
+    """解析期校验算子因子 / 信号步骤：op 在目录、params 合法。"""
+    from long_earn.backtest.engine.operator_executor import (  # noqa: PLC0415
+        resolve_factor_step,
+        resolve_signal_step,
+    )
+
+    for i, step in enumerate(strategy.operator_factors):
+        try:
+            resolve_factor_step(step)
+        except ValueError as exc:
+            raise ValueError(f"第 {i} 个 operator_factors 步骤非法: {exc}") from exc
+    for i, step in enumerate(strategy.signals):
+        if step.get("type") != "operator":
+            continue
+        try:
+            resolve_signal_step(step)
+        except ValueError as exc:
+            raise ValueError(f"第 {i} 个 operator 信号步骤非法: {exc}") from exc
 
 
 def validate_fields(strategy: StrategyDSL, available_fields: list[str]) -> list[str]:
@@ -218,36 +268,40 @@ def validate_fields(strategy: StrategyDSL, available_fields: list[str]) -> list[
     valid_fields = (
         set(available_fields) | set(strategy.factors.keys()) | defined_aliases
     )
-    missing = (
-        used_fields
-        - valid_fields
-        - {
-            "",
-            "shift",
-            "rank",
-            "sum",
-            "mean",
-            "std",
-            "abs",
-            "max",
-            "min",
-        }
-    )
+    # 兜底排除空串（rank.by 缺失会塞 ""）；其它关键字 / 函数已由 _extract_field_names 过滤
+    missing = used_fields - valid_fields - {""}
 
     return sorted(missing)
 
 
 def _extract_field_names(expression: str) -> set[str]:
-    """从表达式中提取字段名"""
+    """从表达式中提取字段名
+
+    需排除以下三类标识符（与 SafeExpressionEvaluator 支持的语法保持一致）：
+    1. Python 关键字（True/False/None/if/else/and/or/not/in/is）—— evaluator 走 ast 节点
+       原生支持，不会进 _namespace
+    2. evaluator 内置函数白名单（_SAFE_FUNCTIONS / 领域函数 shift/rank）
+    3. 数值与字符串常量
+    """
     # 移除字符串常量
     expr = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
     # 移除数字
     expr = re.sub(r"\b\d+\.?\d*\b", "", expr)
-    # 移除常见函数名、运算符及 Python 逻辑关键字
-    funcs = (
-        r"\b(shift|rank|sum|mean|std|abs|max|min|where|clip|log|exp|sqrt|and|or|not)\b"
+    # 移除常见函数名 + Python 关键字 + evaluator 支持的所有内置 / 领域函数
+    # 必须与 _KEYWORDS_AND_FUNCTIONS 集合保持同步（validate_fields 也用同一集合）
+    keywords_and_funcs = (
+        # 领域函数
+        "shift|rank|"
+        # numpy 数学函数（_SAFE_FUNCTIONS）
+        "sum|mean|std|abs|max|min|where|clip|log|exp|sqrt|"
+        # Python 逻辑 / 比较关键字
+        "and|or|not|in|is|"
+        # Python 常量
+        "True|False|None|"
+        # if/else 三元表达式（evaluator 走 ast.IfExp 原生支持）
+        "if|else"
     )
-    expr = re.sub(funcs, "", expr)
+    expr = re.sub(rf"\b({keywords_and_funcs})\b", "", expr)
     # 移除比较运算符和逻辑运算符
     expr = re.sub(r"[><=!&|+\-*/()\[\],\.\:\%\^]", " ", expr)
     # 提取剩余标识符

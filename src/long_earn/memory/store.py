@@ -597,13 +597,18 @@ class MemoryStore:
         facts_df = self.get_all_facts()
         relations_df = self.graph.to_dataframe()
 
-        np.savez_compressed(
-            path,
-            doc_matrix=(
+        save_data = {
+            "doc_matrix": (
                 self._doc_matrix if self._doc_matrix is not None else np.array([])
             ),
-            allow_pickle=True,
-        )
+        }
+        # 保存 vectorizer 词汇表和 IDF，避免 load 后需要重建
+        if self._vectorizer.idf_ is not None:
+            save_data["vocab_keys"] = np.array(list(self._vectorizer.vocabulary_.keys()))
+            save_data["vocab_vals"] = np.array(list(self._vectorizer.vocabulary_.values()))
+            save_data["idf"] = self._vectorizer.idf_
+
+        np.savez_compressed(path, **save_data, allow_pickle=True)
         facts_df.to_pickle(path.with_suffix(".facts.pkl"))
         if not relations_df.empty:
             relations_df.to_pickle(path.with_suffix(".relations.pkl"))
@@ -634,7 +639,17 @@ class MemoryStore:
                 data = np.load(vecs_path, allow_pickle=True)
                 if "doc_matrix" in data:
                     self._doc_matrix = data["doc_matrix"]
-                    self._dirty = False
+                    # 恢复 vectorizer 词汇表和 IDF
+                    if "vocab_keys" in data and "idf" in data:
+                        keys = data["vocab_keys"]
+                        vals = data["vocab_vals"]
+                        self._vectorizer.vocabulary_ = dict(zip(keys, vals, strict=True))
+                        self._vectorizer.idf_ = data["idf"]
+                        self._dirty = False
+                    elif self._vectorizer.idf_ is not None:
+                        self._dirty = False
+                    else:
+                        self._dirty = True
 
             relations_path = path.with_suffix(".relations.pkl")
             if relations_path.exists():

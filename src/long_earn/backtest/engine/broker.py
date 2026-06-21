@@ -22,15 +22,31 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradingCostConfig:
-    """交易成本配置 (默认 A 股参数)"""
+    """交易成本配置 (默认 A 股参数)
+
+    A 股关键约束：
+    - 佣金万三起步，**最低 5 元/单**（券商行规）——小订单 <16667 元会触发最低佣金
+    - 印花税仅卖出收，2023-08 起从万十减半到万五
+    - 滑点按 bps 计：2bps = 0.02% 接近实际中等流动性股票成交磨损
+    """
 
     commission_rate: float = 0.0003  # 万三
-    stamp_duty: float = 0.0005  # 万五 (仅卖出)
+    stamp_duty: float = 0.0005  # 万五 (仅卖出，2023-08 后减半)
     slippage_bps: float = 2.0  # 2bps
+    min_commission: float = 5.0  # 最低 5 元/单（A 股券商行规）
 
     @property
     def slippage_rate(self) -> float:
         return self.slippage_bps * 0.0001
+
+    def compute_commission(self, amount: float) -> float:
+        """计算佣金：max(rate * amount, min_commission)
+
+        amount 是成交金额（fill_price * fill_quantity）。
+        旧版直接 amount * rate 让小订单佣金严重低估，导致 LLM 生成的高频/小资金
+        策略回测业绩失真——本轮修复（轮 18）保证最低 5 元约束生效。
+        """
+        return max(amount * self.commission_rate, self.min_commission)
 
 
 class Broker:
@@ -103,13 +119,12 @@ class Broker:
         raise OrderExecutionError(f"未知订单执行类型: {order_type}")
 
     def check_pending_orders(
-        self, bar_idx: int, price_lookup: dict[str, float]
+        self, price_lookup: dict[str, float]
     ) -> list[FillEvent]:
         """
         检查所有待成交订单（每个 bar 调用一次）
 
         Args:
-            bar_idx: 当前 bar 索引
             price_lookup: symbol → current_price 映射
 
         Returns:
@@ -128,55 +143,63 @@ class Broker:
                 continue
 
             otype = order.exec_type or ExecType.MARKET
-
-            if otype == ExecType.LIMIT:
-                fill = self._try_fill_limit(order, sym_price)
-                if fill is not None:
-                    fills.append(fill)
-                    self._cancel_oco_siblings(order)
-                    self._finalize_order(oid)
-                continue
-
-            if otype == ExecType.STOP:
-                triggered = open_order.trigger_activated or self._check_stop_trigger(
-                    order, sym_price
-                )
-                if triggered:
-                    open_order.trigger_activated = True
-                    fills.append(self._fill_market(order, sym_price))
-                    self._finalize_order(oid)
-                continue
-
-            if otype == ExecType.STOP_LIMIT:
-                if not open_order.trigger_activated:
-                    triggered = self._check_stop_trigger(order, sym_price)
-                    if triggered:
-                        open_order.trigger_activated = True
-                    # 触发后立即尝试限价成交
-                if open_order.trigger_activated:
-                    fill = self._try_fill_limit(order, sym_price)
-                    if fill is not None:
-                        fills.append(fill)
-                        self._cancel_oco_siblings(order)
-                        self._finalize_order(oid)
-                continue
+            new_fills = self._process_pending_order(otype, open_order, order, sym_price)
+            if new_fills:
+                fills.extend(new_fills)
+                self._cancel_oco_siblings(order)
+                self._finalize_order(oid)
 
         for oid in expired_ids:
             self._cancel_order(oid)
 
         return fills
 
+    def _process_pending_order(
+        self,
+        otype: str,
+        open_order: OpenOrder,
+        order: OrderEvent,
+        sym_price: float,
+    ) -> list[FillEvent]:
+        """根据订单类型处理单个待成交订单"""
+        if otype == ExecType.LIMIT:
+            fill = self._try_fill_limit(order, sym_price)
+            return [fill] if fill is not None else []
+
+        if otype == ExecType.STOP:
+            triggered = open_order.trigger_activated or self._check_stop_trigger(
+                order, sym_price
+            )
+            if triggered:
+                open_order.trigger_activated = True
+                return [self._fill_market(order, sym_price)]
+            return []
+
+        if otype == ExecType.STOP_LIMIT:
+            if not open_order.trigger_activated:
+                triggered = self._check_stop_trigger(order, sym_price)
+                if triggered:
+                    open_order.trigger_activated = True
+            if open_order.trigger_activated:
+                fill = self._try_fill_limit(order, sym_price)
+                if fill is not None:
+                    return [fill]
+            return []
+
+        return []
+
     # ── 订单撮合方法 ────────────────────────────────────────────
 
     def _fill_market(self, order: OrderEvent, current_price: float) -> FillEvent:
-        """市价单立即成交（含滑点）"""
+        """市价单立即成交（含滑点 + 最低佣金保护）"""
         slip_dir = 1 if order.order_type == "BUY" else -1
         fill_price = current_price * (1 + slip_dir * self.cost_config.slippage_rate)
 
-        commission = (order.quantity * fill_price) * self.cost_config.commission_rate
+        amount = order.quantity * fill_price
+        commission = self.cost_config.compute_commission(amount)
         stamp_duty = 0.0
         if order.order_type == "SELL":
-            stamp_duty = (order.quantity * fill_price) * self.cost_config.stamp_duty
+            stamp_duty = amount * self.cost_config.stamp_duty
 
         fill = FillEvent(
             timestamp=order.timestamp,
@@ -195,9 +218,16 @@ class Broker:
         self._cancel_oco_siblings(order)
         return fill
 
-    @staticmethod
-    def _try_fill_limit(order: OrderEvent, current_price: float) -> FillEvent | None:
-        """尝试限价单成交（价格满足条件则成交，否则返回 None）"""
+    def _try_fill_limit(self, order: OrderEvent, current_price: float) -> FillEvent | None:
+        """尝试限价单成交（价格满足条件则成交，否则返回 None）
+
+        保守成交规则（避免回测过于乐观）：
+        - BUY LIMIT @ L：实际成交价取 max(L, current + slip)
+          ——回测不能假设拿到 bar 内任意优于限价的价格，且必须承担滑点
+        - SELL LIMIT @ L：实际成交价取 min(L, current - slip)
+        旧实现 fill_price = current_price 等于"白拿 bar 内最低/最高价"，且
+        漏掉滑点，会让限价策略回测业绩系统性高估。
+        """
         if order.price is None:
             return None
 
@@ -212,7 +242,21 @@ class Broker:
         if not can_fill:
             return None
 
-        fill_price = current_price  # 限价单以当前价成交
+        # 加滑点：买方向上付溢价，卖方向下让价
+        slip_adj = current_price * self.cost_config.slippage_rate
+        if order.order_type == "BUY":
+            # 至少不优于限价：max(limit, current + slip)
+            fill_price = max(order.price, current_price + slip_adj)
+        else:
+            # 至少不优于限价：min(limit, current - slip)
+            fill_price = min(order.price, current_price - slip_adj)
+
+        amount = order.quantity * fill_price
+        commission = self.cost_config.compute_commission(amount)
+        stamp_duty = 0.0
+        if order.order_type == "SELL":
+            stamp_duty = amount * self.cost_config.stamp_duty
+
         return FillEvent(
             timestamp=order.timestamp,
             trace_id=str(uuid.uuid4()),
@@ -222,9 +266,9 @@ class Broker:
             order_type=order.order_type,
             fill_price=fill_price,
             fill_quantity=order.quantity,
-            commission=0.0,
-            slippage=0.0,
-            stamp_duty=0.0,
+            commission=commission,
+            slippage=abs(fill_price - current_price) * order.quantity,
+            stamp_duty=stamp_duty,
         )
 
     @staticmethod

@@ -1,62 +1,50 @@
-# Qlib 策略基类
+# YAML DSL 策略定义
 
-## BaseStrategy 基础策略类
+## 策略格式
 
-```python
-from qlib.strategy import BaseStrategy
-import pandas as pd
+策略使用 **YAML DSL** 描述，不需要编写 Python 代码。
 
-class MyStrategy(BaseStrategy):
-    def __init__(self, trade_exchange=None):
-        self.trade_exchange = trade_exchange
+### YAML 结构
 
-    def generate_signals(self, date: str) -> pd.Series:
-        """
-        生成交易信号
-        
-        Args:
-            date: 交易日期，格式为 "YYYY-MM-DD"
-            
-        Returns:
-            pd.Series: 索引为股票代码，值为目标仓位（-1 到 1）
-        """
-        positions = {}
-        # 遍历股票列表生成信号
-        for stock in self.stock_list:
-            positions[stock] = 0.5  # 50% 仓位
-        return pd.Series(positions)
+```yaml
+strategy:
+  name: 策略名称（英文，驼峰命名）
+  description: 策略简述
+  universe:
+    type: 股票池类型
+    rebalance_freq: 调仓频率（如 20D）
+  start_date: YYYY-MM-DD
+  end_date: YYYY-MM-DD
+  factors:
+    因子别名: 表达式
+  signals:
+    - type: filter
+      condition: 过滤条件表达式
+    - type: rank
+      by: 排序字段
+      ascending: true/false
+      top: 选取数量
+    - type: expression
+      formula: 计算公式
+      alias: 结果字段名
+  weights:
+    method: equal/signal/custom_formula
+    signal_field: 信号字段名（method=signal时必填）
+    formula: 权重公式（method=custom_formula时必填）
+  risk_control:
+    max_position_per_stock: 单只股票最大仓位比例
+    stop_loss: 止损比例（如 0.1 表示 -10% 止损）
+    max_drawdown_limit: 最大回撤限制
+  trading_cost:
+    commission_rate: 单边佣金率（默认 0.0003）
+    stamp_duty: 卖出印花税率（默认 0.0005）
+    slippage_bps: 滑点基点（默认 2.0）
 ```
 
-## TargetPositionStrategy 目标仓位策略
+### 关键约束
 
-```python
-from qlib.strategy import TargetPositionStrategy
-
-class MyStrategy(TargetPositionStrategy):
-    def __init__(self, portfolio_strategy, **kwargs):
-        super().__init__(portfolio_strategy, **kwargs)
-```
-
-## LongShortStrategy 多空策略
-
-```python
-from qlib.strategy import LongShortStrategy
-
-class MyStrategy(LongShortStrategy):
-    def __init__(self, portfolio_strategy, **kwargs):
-        super().__init__(portfolio_strategy, **kwargs)
-```
-
-## 策略类必须实现的方法
-
-1. `__init__`: 初始化策略参数
-2. `generate_signals(date)`: 生成交易信号，返回 pd.Series
-3. 可选: `get_trade_dates()` 获取交易日期
-4. 可选: `get_position_size()` 仓位管理
-
-## 策略开发要点
-
-1. 策略类必须继承 BaseStrategy 或其子类
-2. generate_signals 返回值必须是 pd.Series
-3. 索引为股票代码，值为仓位权重（-1 到 1）
-4. 负值表示做空，正值表示做多
+1. **必须使用 YAML 格式**：不要输出 Python 代码
+2. **字段名必须来自可用字段列表**：open/high/low/close/volume/net_profit_yoy/revenue_yoy/roe/gross_margin/eps/net_profit/revenue
+3. **股票池类型必须有效**：csi300/csi500/csi1000/sse50/all_a/main_board/gem/star_board
+4. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
+5. **T+1 执行**：信号在 T 日生成，T+1 日执行

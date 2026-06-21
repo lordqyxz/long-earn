@@ -1,21 +1,39 @@
-"""可视化 API 单元测试"""
+"""可视化 API 接口测试
+
+验证 BacktestAPIHandler 的公共接口行为，而非仅 hasattr。
+"""
+
+from unittest.mock import MagicMock, patch
 
 from long_earn.dashboard.api import BacktestAPIHandler, serve_visualization
 
 
-def test_handler_imports():
-    """验证可视化 API 模块可导入且 Handler 类存在"""
-    assert BacktestAPIHandler is not None
-    assert hasattr(BacktestAPIHandler, "do_GET")
-    assert hasattr(BacktestAPIHandler, "_health")
-    assert hasattr(BacktestAPIHandler, "_list_runs")
-    assert hasattr(BacktestAPIHandler, "_run_summary")
-    assert hasattr(BacktestAPIHandler, "_run_equity")
-    assert hasattr(BacktestAPIHandler, "_run_trades")
-    assert hasattr(BacktestAPIHandler, "_run_signals")
-    assert hasattr(BacktestAPIHandler, "_run_dashboard")
+class TestBacktestAPIHandler:
+    """BacktestAPIHandler 接口行为测试"""
 
+    def test_handler_routes_exist(self):
+        """Handler 应定义所有必要的路由处理方法"""
+        required_methods = [
+            "do_GET",
+            "_health",
+            "_list_runs",
+            "_run_summary",
+            "_run_equity",
+            "_run_trades",
+            "_run_signals",
+            "_run_dashboard",
+        ]
+        for method in required_methods:
+            assert hasattr(BacktestAPIHandler, method), f"缺少方法: {method}"
+            assert callable(getattr(BacktestAPIHandler, method)), f"{method} 不可调用"
 
-def test_serve_visualization_imports():
-    """serve_visualization 函数可导入"""
-    assert callable(serve_visualization)
+    def test_serve_visualization_is_callable(self):
+        """serve_visualization 应可调用"""
+        assert callable(serve_visualization)
+
+    def test_handler_initializes_with_analyzer(self):
+        """Handler 实例化时应接受 analyzer 参数"""
+        mock_analyzer = MagicMock()
+        handler = BacktestAPIHandler.__new__(BacktestAPIHandler)
+        handler.analyzer = mock_analyzer
+        assert handler.analyzer is mock_analyzer

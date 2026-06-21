@@ -1,6 +1,6 @@
 """回测领域层"""
 
-from long_earn.backtest.domain.entities import DateRange, PerformanceMetrics, Portfolio
+from long_earn.backtest.domain.entities import DateRange, PerformanceMetrics
 from long_earn.backtest.domain.exceptions import (
     BacktestDomainError,
     BacktestExecutionError,
@@ -17,7 +17,6 @@ __all__ = [
     "DateRange",
     "ExpressionEvalError",
     "PerformanceMetrics",
-    "Portfolio",
     "StrategyValidationError",
     "UniverseError",
 ]

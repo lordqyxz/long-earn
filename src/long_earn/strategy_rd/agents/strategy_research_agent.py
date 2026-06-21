@@ -1,8 +1,6 @@
 import json
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-
 from long_earn.core.llm_utils import parse_llm_json
 from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
@@ -14,11 +12,14 @@ from .strategy_research_prompt import (
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
-_DRAWDOWN_RISK_THRESHOLD = 30
-_DRAWDOWN_MODERATE_THRESHOLD = 20
+# 单位语义统一：所有阈值与 BacktestResult 字段一致使用"小数"（return/drawdown 不带 %）
+# 历史上这里曾把 drawdown / return 阈值写成百分比（30、20、10），与扁平 backtest_result
+# 的小数指标不匹配，导致 fallback 与 ToT 评判几乎永远不触发——属于隐蔽的"单位错位"。
+_DRAWDOWN_RISK_THRESHOLD = 0.30
+_DRAWDOWN_MODERATE_THRESHOLD = 0.20
 _MIN_SHARPE_THRESHOLD = 0.5
 _POOR_SHARPE_THRESHOLD = 0.3
-_MIN_RETURN_THRESHOLD = 10
+_MIN_RETURN_THRESHOLD = 0.10
 
 OPTIMIZATION_DIRECTIONS = {
     "收益增强": {
@@ -74,8 +75,8 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 
     def __init__(self, context: "RuntimeContext"):
         self.context = context
-        self.llm_service = context.llm_service
-        self.memory = context.memory
+        self.llm_service = context.require_llm()
+        self.memory = context.require_memory()
         self.logger = context.logger
         self._knowledge_cache: dict[str, list[str]] = {}
 
@@ -142,11 +143,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
-        if isinstance(prompt, ChatPromptTemplate):
-            messages = prompt.format_messages()
-        else:
-            messages = prompt
-        response = self.llm_service.invoke(messages)
+        response = self.llm_service.invoke(prompt)
         if self.logger:
             self.logger.info(f"策略研究代理生成策略完成：{query}")
 
@@ -164,26 +161,14 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         if self.logger:
             self.logger.info(f"[策略研究Agent] 开始研究: {query}")
 
-        prompt_template = create_strategy_research_prompt(
+        prompt = create_strategy_research_prompt(
             target_market="stock",
             query=query,
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
         )
 
-        if isinstance(prompt_template, ChatPromptTemplate):
-            messages = prompt_template.format_messages()
-        elif isinstance(prompt_template, PromptTemplate):
-            messages = prompt_template.format(
-                target_market="stock",
-                query=query,
-                strategy_examples="无",
-                strategy_context=knowledge_context if knowledge_context else "无",
-            )
-        else:
-            messages = prompt_template
-
-        response = self.llm_service.invoke(messages)
+        response = self.llm_service.invoke(prompt)
         if self.logger:
             self.logger.info("策略研究代理生成策略完成（使用自适应检索上下文）")
 
@@ -194,23 +179,45 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         }
 
     def _identify_primary_issue(self, backtest_result: dict[str, Any]) -> str:
-        """根据回测指标自动判断主要问题方向"""
-        metrics = backtest_result.get("metrics", {})
-        if not metrics:
-            return "收益增强"
+        """根据回测指标自动判断主要问题方向
 
-        return_rate = metrics.get("return", 0) or metrics.get("annual_return", 0)
-        max_drawdown = abs(metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0))
-        sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
+        兼容两种结构：
+        - 扁平结构（BacktestServiceImpl.run 实际返回）：
+          {"total_return": ..., "sharpe_ratio": ..., "max_drawdown": ...}
+        - 嵌套结构（_backtest_node 在 engine_error 时填的占位）：
+          {"metrics": {"return": ..., "sharpe_ratio": ..., "max_drawdown": ...}}
+
+        如果回测失败（带 error 字段），仍然给出方向以便上层流程继续。
+        """
+        # 优先从扁平字段读取
+        return_rate = backtest_result.get("total_return")
+        sharpe = backtest_result.get("sharpe_ratio")
+        max_drawdown = backtest_result.get("max_drawdown")
+
+        # 回退到嵌套 metrics 字段（兼容历史调用方）
+        if return_rate is None or sharpe is None or max_drawdown is None:
+            metrics = backtest_result.get("metrics", {}) or {}
+            return_rate = return_rate if return_rate is not None else (
+                metrics.get("return") or metrics.get("annual_return") or 0
+            )
+            sharpe = sharpe if sharpe is not None else (
+                metrics.get("sharpe_ratio") or metrics.get("sharpe") or 0
+            )
+            max_drawdown = max_drawdown if max_drawdown is not None else (
+                metrics.get("max_drawdown") or metrics.get("drawdown") or 0
+            )
+
+        return_rate = return_rate or 0
+        sharpe = sharpe or 0
+        max_drawdown = abs(max_drawdown or 0)
 
         if max_drawdown > _DRAWDOWN_RISK_THRESHOLD:
             return "风险控制"
-        elif return_rate < 0:
+        if return_rate < 0:
             return "收益增强"
-        elif sharpe < _MIN_SHARPE_THRESHOLD:
+        if sharpe < _MIN_SHARPE_THRESHOLD:
             return "收益稳定性"
-        else:
-            return "收益增强"
+        return "收益增强"
 
     def _build_reflection_prompt(
         self, direction: str, strategy: dict[str, Any], backtest_result: dict[str, Any]
@@ -299,19 +306,48 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         result = parse_llm_json(content)
         return result
 
+    @staticmethod
+    def _read_metric(
+        backtest_result: dict[str, Any],
+        flat_key: str,
+        nested_keys: tuple[str, ...] = (),
+        default: float = 0.0,
+    ) -> float:
+        """从 backtest_result 同时兼容扁平与嵌套结构读取单个数值指标
+
+        - 扁平结构（BacktestServiceImpl.run 实际返回）：顶层 flat_key
+        - 嵌套结构（_backtest_node 在 engine_error 时填的占位 metrics）：metrics[flat_key]
+          以及若干历史别名（nested_keys，如 "return" 别名 "annual_return"）
+        """
+        v = backtest_result.get(flat_key)
+        if v is not None:
+            return float(v)
+        metrics = backtest_result.get("metrics", {}) or {}
+        v = metrics.get(flat_key)
+        if v is not None:
+            return float(v)
+        for nk in nested_keys:
+            v = metrics.get(nk)
+            if v is not None:
+                return float(v)
+        return default
+
     def _evaluate_branches(  # noqa: PLR0912
         self, branches: list[dict[str, Any]], backtest_result: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """评估各分支的改进建议"""
-        metrics = backtest_result.get("metrics", {})
+        """评估各分支的改进建议
 
+        必须兼容扁平与嵌套两种结构（见 `_read_metric`），否则扁平结构下
+        所有分支都得到默认 +5 分（最低档），sorted 稳定排序导致 ToT 永远
+        选 OPTIMIZATION_DIRECTIONS 第一个键作为 best_branch——多分支退化为单一分支。
+        """
         for branch in branches:
             score = 0
             direction = branch.get("direction", "")
 
             if direction == "收益增强":
-                return_rate = metrics.get("return", 0) or metrics.get(
-                    "annual_return", 0
+                return_rate = self._read_metric(
+                    backtest_result, "total_return", ("return", "annual_return")
                 )
                 if return_rate < 0:
                     score += 30
@@ -322,7 +358,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 
             elif direction == "风险控制":
                 max_drawdown = abs(
-                    metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0)
+                    self._read_metric(
+                        backtest_result, "max_drawdown", ("drawdown",)
+                    )
                 )
                 if max_drawdown > _DRAWDOWN_RISK_THRESHOLD:
                     score += 30
@@ -332,7 +370,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                     score += 5
 
             elif direction == "收益稳定性":
-                sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
+                sharpe = self._read_metric(
+                    backtest_result, "sharpe_ratio", ("sharpe",)
+                )
                 if sharpe < _POOR_SHARPE_THRESHOLD:
                     score += 30
                 elif sharpe < _MIN_SHARPE_THRESHOLD:
@@ -391,21 +431,43 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         strategy: dict[str, Any],  # noqa: ARG002
         backtest_result: dict[str, Any],
     ) -> dict[str, Any]:
-        """极简兜底 - 基于规则的通用建议"""
-        metrics = backtest_result.get("metrics", {})
-        if not metrics:
+        """极简兜底 - 基于规则的通用建议
+
+        必须兼容扁平结构（BacktestServiceImpl.run 实际返回）和嵌套 metrics 结构，
+        否则 ToT 异常进 fallback 时会陷入"无法获取回测指标"死分支，
+        导致 reflection 完全失去回测信息引导，拖垮整轮演进。
+        """
+        return_rate = backtest_result.get("total_return")
+        sharpe = backtest_result.get("sharpe_ratio")
+        max_drawdown = backtest_result.get("max_drawdown")
+
+        # 回退到嵌套 metrics 字段
+        if return_rate is None or sharpe is None or max_drawdown is None:
+            metrics = backtest_result.get("metrics", {}) or {}
+            return_rate = return_rate if return_rate is not None else (
+                metrics.get("return") or metrics.get("annual_return")
+            )
+            sharpe = sharpe if sharpe is not None else (
+                metrics.get("sharpe_ratio") or metrics.get("sharpe")
+            )
+            max_drawdown = max_drawdown if max_drawdown is not None else (
+                metrics.get("max_drawdown") or metrics.get("drawdown")
+            )
+
+        # 三项核心指标全部缺失才认定"无法获取"——只要任一项有真实值就要用上
+        if return_rate is None and sharpe is None and max_drawdown is None:
             return {
                 "reflection": "无法获取回测指标",
                 "improvement_suggestions": ["建议检查回测配置是否正确"],
                 "tot_enabled": False,
             }
 
-        suggestions = []
-        return_rate = metrics.get("return", 0) or metrics.get("annual_return", 0)
-        max_drawdown = abs(metrics.get("max_drawdown", 0) or metrics.get("drawdown", 0))
-        sharpe = metrics.get("sharpe_ratio", 0) or metrics.get("sharpe", 0)
+        return_rate = return_rate or 0
+        sharpe = sharpe or 0
+        max_drawdown_abs = abs(max_drawdown or 0)
 
-        if max_drawdown > _DRAWDOWN_MODERATE_THRESHOLD:
+        suggestions: list[str] = []
+        if max_drawdown_abs > _DRAWDOWN_MODERATE_THRESHOLD:
             suggestions.append("建议添加止损机制或降低仓位以控制回撤")
         if sharpe < _MIN_SHARPE_THRESHOLD:
             suggestions.append("建议优化因子权重以提升风险调整收益")
@@ -418,7 +480,11 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         primary_issue = self._identify_primary_issue(backtest_result)
 
         return {
-            "reflection": f"简化分析：主要问题为 {primary_issue}，回测指标 return={return_rate:.2f}%, max_drawdown={max_drawdown:.2f}%, sharpe={sharpe:.2f}",
+            "reflection": (
+                f"简化分析：主要问题为 {primary_issue}，"
+                f"回测指标 return={return_rate:.2f}, "
+                f"max_drawdown={max_drawdown_abs:.2f}, sharpe={sharpe:.2f}"
+            ),
             "improvement_suggestions": suggestions,
             "primary_issue": primary_issue,
             "tot_enabled": False,
@@ -437,28 +503,114 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                 self.logger.warning(f"ToT 反思失败，使用极简 fallback: {e}")
             return self._simple_fallback(strategy, backtest_result)
 
-    def optimize_strategy(
-        self, strategy: dict[str, Any], improvement_suggestions: list
-    ) -> dict[str, Any]:
-        """优化策略 - 根据改进建议优化策略"""
+    @staticmethod
+    def _format_previous_backtest(previous_backtest: dict[str, Any] | None) -> str:
+        """把上一轮回测结果格式化为 prompt 用的可读段落。
 
+        - 优先扁平字段，回退到嵌套 metrics 子字典
+        - metrics_unreliable 或带 error 时显式提示，避免 LLM 把占位 0 当真业绩
+        """
+        if not previous_backtest:
+            return "无"
+
+        unreliable = bool(previous_backtest.get("metrics_unreliable")) or bool(
+            previous_backtest.get("error")
+        )
+        if unreliable:
+            return (
+                f"上一轮回测失败/数据不足（{previous_backtest.get('error', '占位指标')}），"
+                "请仅依据改进建议进行结构性优化，不要将占位 0 当作真实业绩。"
+            )
+
+        metric_keys = (
+            "total_return",
+            "annual_return",
+            "sharpe_ratio",
+            "max_drawdown",
+            "volatility",
+            "win_rate",
+            "trading_days",
+        )
+        nested = previous_backtest.get("metrics", {}) or {}
+        lines: list[str] = []
+        for k in metric_keys:
+            v = previous_backtest.get(k)
+            if v is None:
+                v = nested.get(k)
+            if v is not None:
+                lines.append(f"  - {k}: {v}")
+        return "上一轮回测指标：\n" + "\n".join(lines) if lines else "无"
+
+    def _retrieve_past_experience(self, strategy: dict[str, Any]) -> str:
+        """从记忆系统检索同类策略的历史经验，构造 prompt 段落。"""
+        try:
+            strategy_name = strategy.get("strategy_name", "") or ""
+            factors = strategy.get("factors_used", []) or []
+            keywords_parts = [strategy_name]
+            if isinstance(factors, list):
+                keywords_parts.append(" ".join(str(f) for f in factors))
+            keywords = " ".join(filter(None, keywords_parts)) or "策略优化"
+            past = self.memory.search_experience(query=keywords, k=2)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"检索历史经验失败: {exc}")
+            return ""
+        if not past:
+            return ""
+        lines = [
+            f"- {p.get('name', '?')}: metrics={p.get('metrics', {})}" for p in past
+        ]
+        return "历史同类经验：\n" + "\n".join(lines)
+
+    def optimize_strategy(
+        self,
+        strategy: dict[str, Any],
+        improvement_suggestions: list,
+        previous_backtest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """优化策略 - 根据改进建议优化策略
+
+        相对于初版的两点关键改造：
+        1. 把当前回测结果 `previous_backtest` 注入 prompt 的 backtest_history，
+           让 LLM 真正基于"当前业绩"提优化方案，而不是看着 "无" 凭空想象。
+        2. 通过 memory.search_experience 检索同类策略的历史经验，
+           注入 market_characteristics 字段——让记忆系统真正参与策略改进。
+        """
         suggestions_str = "\n".join([f"- {s}" for s in improvement_suggestions])
         knowledge_context = self._get_research_context(
             "策略优化方法", node_type="optimize"
         )
+        backtest_history = self._format_previous_backtest(previous_backtest)
+        memory_section = self._retrieve_past_experience(strategy)
+        market_characteristics = "\n\n".join(
+            filter(None, [knowledge_context or "", memory_section])
+        ) or "无"
 
         prompt = strategy_optimize_prompt.format(
             strategy=strategy,
             suggestions_text=suggestions_str,
-            backtest_history="无",
-            market_characteristics=knowledge_context if knowledge_context else "无",
+            backtest_history=backtest_history,
+            market_characteristics=market_characteristics,
         )
         response = self.llm_service.invoke(prompt)
 
         optimized = strategy.copy()
         optimized["description"] = response.content
         optimized["optimized"] = True
+        # 记录演进谱系：方便审计 / 后续 reflection 引用
+        lineage = list(strategy.get("evolution_lineage", []) or [])
+        lineage.append(
+            {
+                "from": strategy.get("strategy_name", "unknown"),
+                "suggestions_count": len(improvement_suggestions),
+                "had_backtest": previous_backtest is not None,
+            }
+        )
+        optimized["evolution_lineage"] = lineage
         if self.logger:
-            self.logger.info("策略优化完成")
+            self.logger.info(
+                f"策略优化完成（演进深度={len(lineage)}, "
+                f"历史经验注入={'是' if memory_section else '否'}）"
+            )
 
         return optimized

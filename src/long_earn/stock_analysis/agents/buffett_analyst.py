@@ -21,12 +21,12 @@ class BuffettAnalyst:
             context: 运行时上下文
         """
         self.context = context
-        self.llm = context.llm_service.get_llm()
+        self.llm = context.require_llm().get_llm()
         self.logger = context.logger
 
         # 使用新的提示词加载服务
         self.prompt = MarkdownPromptTemplate(
-            name="buffett_prompt",
+            template_file="buffett_prompt.md",
             caller_file=__file__,
             input_variables=["stock_data"],
         )

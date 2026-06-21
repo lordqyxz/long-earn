@@ -41,9 +41,10 @@ class TfidfVectorizer:
         n_terms = len(self.vocabulary_)
 
         # 计算 IDF: log((N+1) / (df+1)) + 1 (平滑)
-        self.idf_ = np.ones(n_terms)
+        idf = np.ones(n_terms)
         for term, idx in self.vocabulary_.items():
-            self.idf_[idx] = np.log((doc_count + 1) / (df[term] + 1)) + 1.0
+            idf[idx] = np.log((doc_count + 1) / (df[term] + 1)) + 1.0
+        self.idf_ = idf
 
         return self
 

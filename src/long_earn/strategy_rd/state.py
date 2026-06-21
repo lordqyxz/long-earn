@@ -1,4 +1,9 @@
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
+
+
+def _last_wins(_left: Any, right: Any) -> Any:
+    """Reducer: 取最后一个值（右值优先）"""
+    return right
 
 
 class State(TypedDict, total=False):
@@ -28,7 +33,8 @@ class State(TypedDict, total=False):
     tot_enabled: bool
     primary_issue: str | None
     error_history: list[dict[str, Any]] | None
-    code_valid: bool
+    # code_valid 可能被并发节点同时更新，使用 last-wins reducer
+    code_valid: Annotated[bool, _last_wins]
     experience_saved: bool
 
     retrieval_count: int

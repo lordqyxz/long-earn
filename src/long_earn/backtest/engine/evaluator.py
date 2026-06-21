@@ -56,6 +56,21 @@ _SAFE_FUNCTIONS: dict[str, Any] = {
     "floor": np.floor,
 }
 
+# 安全属性白名单（仅允许访问这些属性，防止链式调用如 np.os.system）
+_SAFE_ATTRIBUTES: frozenset[str] = frozenset({
+    "iloc",
+    "loc",
+    "shape",
+    "index",
+    "columns",
+    "values",
+    "name",
+    "dtype",
+    "size",
+    "T",
+    "empty",
+})
+
 
 class SafeExpressionError(ValueError):
     """表达式求值安全异常"""
@@ -81,12 +96,6 @@ class SafeExpressionEvaluator:
 
         # 注册安全函数
         self._namespace.update(_SAFE_FUNCTIONS)
-        self._namespace.update(
-            {
-                "np": np,
-                "pd": pd,
-            }
-        )
 
         # 注册领域辅助函数
         self._namespace["shift"] = self._shift
@@ -237,8 +246,12 @@ class SafeExpressionEvaluator:
             return func(*args, **kwargs)
 
         elif isinstance(node.func, ast.Attribute):
-            obj = self._eval_node(node.func.value)
+            # 禁止通过属性链调用方法（如 np.os.system），
+            # 仅允许白名单属性上的方法调用（如 df.iloc[...]）
             attr = node.func.attr
+            if attr not in _SAFE_ATTRIBUTES:
+                raise SafeExpressionError(f"禁止通过属性调用方法: {attr}()")
+            obj = self._eval_node(node.func.value)
             if not hasattr(obj, attr):
                 raise SafeExpressionError(f"对象无此属性: {attr}")
             method = getattr(obj, attr)
@@ -255,6 +268,8 @@ class SafeExpressionEvaluator:
     def _eval_attribute(self, node: ast.Attribute) -> Any:
         obj = self._eval_node(node.value)
         attr = node.attr
+        if attr not in _SAFE_ATTRIBUTES:
+            raise SafeExpressionError(f"禁止访问属性: {attr}")
         if not hasattr(obj, attr):
             raise SafeExpressionError(f"属性不存在: {attr}")
         return getattr(obj, attr)

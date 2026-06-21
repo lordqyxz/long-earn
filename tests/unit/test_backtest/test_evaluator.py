@@ -46,7 +46,7 @@ class TestSafeExpressionEvaluator:
     def test_numpy_where(self):
         df = _make_df()
         evaluator = SafeExpressionEvaluator(df)
-        result = evaluator.evaluate("np.where(close > 10, close, 10)")
+        result = evaluator.evaluate("where(close > 10, close, 10)")
         assert isinstance(result, pd.Series)
 
     # ── 安全边界测试 ──────────────────────────────────────────

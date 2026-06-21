@@ -44,12 +44,13 @@ class TestLimitOrder:
     """限价单测试"""
 
     def test_buy_limit_fills_when_price_below_limit(self):
-        """买入限价：当前价低于限价时应成交"""
+        """买入限价：当前价低于限价时应成交（保守取 max(limit, current+slip)）"""
         broker = Broker()
         order = _make_order("BUY", exec_type=ExecType.LIMIT, price=11.0)
         fills = broker.submit_order(order, current_price=10.0)
         assert len(fills) == 1
-        assert fills[0].fill_price == 10.0  # 以当前价成交
+        # 保守成交价：BUY 不能优于 limit；limit=11 > current+slip ≈ 10.002，取 11
+        assert fills[0].fill_price == 11.0
         assert fills[0].order_id == order.order_id
 
     def test_buy_limit_fills_when_price_equals_limit(self):
@@ -89,7 +90,7 @@ class TestLimitOrder:
         broker.submit_order(order, current_price=11.0)  # 挂起
         assert broker.get_pending_count() == 1
 
-        fills = broker.check_pending_orders(bar_idx=1, price_lookup={"000001": 9.5})
+        fills = broker.check_pending_orders(price_lookup={"000001": 9.5})
         assert len(fills) == 1
         assert broker.get_pending_count() == 0
 
@@ -137,7 +138,7 @@ class TestStopOrder:
         broker.submit_order(order, current_price=10.0)  # 未触发
         assert broker.get_pending_count() == 1
 
-        fills = broker.check_pending_orders(bar_idx=2, price_lookup={"000001": 11.0})
+        fills = broker.check_pending_orders(price_lookup={"000001": 11.0})
         assert len(fills) == 1
         assert broker.get_pending_count() == 0
 
@@ -166,14 +167,14 @@ class TestStopLimitOrder:
         assert broker.get_pending_count() == 1
 
         # 触发（stop 10.5 triggered by current 10.5），但限价不满足（10.5 > 10.2 for BUY）
-        fills = broker.check_pending_orders(bar_idx=1, price_lookup={"000001": 10.5})
+        fills = broker.check_pending_orders(price_lookup={"000001": 10.5})
         assert len(fills) == 0  # 触发但限价未满足
         # 检查 order 确实触发了
         oo = broker.get_pending_orders()[0]
         assert oo.trigger_activated
 
         # 价格回归到限价内（10.0 <= 10.2）
-        fills = broker.check_pending_orders(bar_idx=2, price_lookup={"000001": 10.0})
+        fills = broker.check_pending_orders(price_lookup={"000001": 10.0})
         assert len(fills) == 1
         assert broker.get_pending_count() == 0
 
@@ -219,7 +220,7 @@ class TestOCOOrder:
         assert broker.get_pending_count() == 2
 
         # 限价单成交
-        fills = broker.check_pending_orders(bar_idx=1, price_lookup={"000001": 9.5})
+        fills = broker.check_pending_orders(price_lookup={"000001": 9.5})
         assert len(fills) == 1
         assert fills[0].order_id == "oco-buy"
 
@@ -277,7 +278,7 @@ class TestOCOOrder:
         assert broker.get_pending_count() == 2
 
         # 止损触发（8.0 <= 8.5），限价单不成交（8.0 > 7.5 for BUY）
-        fills = broker.check_pending_orders(bar_idx=1, price_lookup={"000001": 8.0})
+        fills = broker.check_pending_orders(price_lookup={"000001": 8.0})
         assert len(fills) == 1
         assert fills[0].order_id == "oco-sell"
         assert broker.get_pending_count() == 0
@@ -319,7 +320,6 @@ class TestBrokerStateManagement:
         assert broker.get_pending_count() == 3
 
         fills = broker.check_pending_orders(
-            bar_idx=1,
             price_lookup={"000001": 8.5, "000002": 9.5, "000003": 8.0},
         )
         # 000001 和 000003 成交（price <= 9.0），000002 未成交（price 9.5 > 9.0）
