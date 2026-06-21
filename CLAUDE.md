@@ -154,6 +154,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
 - [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Proposed）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；参考实现见 `D:\dev\cidd\.claude\skills\ciccwm-*/scripts/`。
 - [ADR-007](docs/adr/007-config-centralization.md): 配置中心化（dotenv 统一加载）。`load_config()` 是唯一入口，`LONG_EARN_ENV` 选择多环境 `.env.<name>`，`os.environ > .env > 默认值` 的优先级。
+- [ADR-008](docs/adr/008-realtime-data-provider.md): 实时行情数据提供者。`RealtimeDataProvider` Protocol 独立于历史 `DataProvider`，miniqmt 订阅 → ciccwm HTTP 轮询降级。
 
 ## 调研文档
 
@@ -383,7 +384,7 @@ remoteMiniQmt/
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
 - [x] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。`strategy_rd/subgraph.py::_optimize_node`（L310）调用 `research_agent.optimize_strategy`，主图含 optimize 循环；独立模块 `strategy_optimization/`（`OptimizationPipeline` + `AcceptanceGate` 业绩验收 + `optimize_strategy` 便捷函数 + `LLMStrategyOptimizer`/`FakeStrategyOptimizer` 可注入）。
 - [x] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。`dashboard/analyzer.py`（L308 起）提供多策略对比分析，`dashboard/api.py` `POST /api/compare` 暴露 HTTP 接口，前端 `dashboard.html` 含对比视图。
-- [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
+- [x] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。`RealtimeDataProvider` Protocol（`backtest/data/realtime.py`）：`get_latest_quote` / `subscribe_quote` / `unsubscribe`；`MiniQmtRealtimeProvider`（xtdata.subscribe_quote + get_full_tick）→ `CiccwmRealtimeProvider`（HTTP 轮询 fallback）→ `CompositeRealtimeProvider` 自动降级。`monitoring/realtime_alert.py` 提供 `PriceAlert` 阈值预警 demo 节点（独立模块，不接入主图）。详见 [ADR-008](docs/adr/008-realtime-data-provider.md)。
 - [x] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。`FundFlowAnalyst`（`stock_analysis/agents/fund_flow_analyst.py` + `fund_flow_prompt.md`）作为第 5 个并行分析师接入子图，使用 ciccwm 独占的 `get_fund_flow`（其他 Provider 均无此能力），ciccwm 不可用时由 prompt 走"数据缺失"占位、不阻塞其他分析师。
 
 ### 4. 工程化与质量 (Engineering & Quality)

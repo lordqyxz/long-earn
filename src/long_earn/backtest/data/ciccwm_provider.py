@@ -363,6 +363,11 @@ class CiccwmDataProvider:
 
     # ── 独占扩展方法 ──────────────────────────────────────────────────
 
+    def get_info(self, symbol: str) -> dict[str, Any]:
+        """获取个股基本信息（含最新价、涨跌幅等）。"""
+        code, market = client._parse_symbol(symbol)
+        return client.fetch_info(code, market) or {}
+
     def get_fund_flow(self, symbol: str) -> pd.DataFrame:
         """获取个股资金流向（ciccwm 独占能力）。"""
         code, market = client._parse_symbol(symbol)

@@ -504,3 +504,68 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：仅剩 #3.3 一项。不输出完成承诺。
 
+---
+
+## 压缩上下文（回合 8 进行中）
+
+**本回合目标**：完成 TODO #3.3 实时数据对接（最后一项）。
+
+**已完成**：
+- 创建 `src/long_earn/backtest/data/realtime.py`：RealtimeDataProvider Protocol + MiniQmtRealtimeProvider（xtdata.subscribe_quote/get_full_tick）+ CiccwmRealtimeProvider（HTTP 轮询 fallback）+ CompositeRealtimeProvider + `create_realtime_provider()` 工厂
+- 在 CiccwmDataProvider 新增 `get_info(symbol)` 方法
+- ruff 通过
+
+**待完成**：
+- PriceAlert 预警 demo 节点（`src/long_earn/monitoring/realtime_alert.py`）
+- 接口契约测试（RealtimeDataProvider 各分支 + PriceAlert 阈值）
+- ADR-008
+- 勾选 CLAUDE.md #3.3
+- 提交（commit-tree + update-ref）
+
+**关键技术决策**：
+- miniqmt subscribe_quote(stock_code, period, callback) → 实时推送
+- ciccwm 不支持订阅（HTTP 无长连接），subscribe 返回空 ID，仅支持 get_latest_quote 轮询
+- Composite 降级：miniqmt 可用走 miniqmt，否则 ciccwm
+- xtquant 不可用（LONG_EARN_DISABLE_XTQUANT / CI）时所有方法返回空值不抛
+
+**git 谱系**：HEAD `6125d83`，89371d6 是祖先（健康）。提交用 commit-tree+update-ref。
+
+---
+
+### 回合 8（2026-06-22）：实时数据对接 #3.3 — RealtimeDataProvider + PriceAlert + ADR-008
+
+**做了什么：**
+
+1. **TODO #3.3 实时数据对接（核心）**：
+   - `backtest/data/realtime.py`：`RealtimeDataProvider` Protocol（`get_latest_quote` / `subscribe_quote` / `unsubscribe` / `is_available`）独立于历史 `DataProvider`，与历史数据接口隔离。
+   - `MiniQmtRealtimeProvider`：基于 `xtdata.subscribe_quote`（实时推送）+ `get_full_tick`（最新快照），xtquant 不可用时返回空值不抛。
+   - `CiccwmRealtimeProvider`：HTTP 轮询 fallback（`fetch_info`），不支持订阅（返回空 ID），CI 友好。
+   - `CompositeRealtimeProvider` + `create_realtime_provider()` 工厂：miniqmt → ciccwm 自动降级。
+2. **PriceAlert 预警 demo 节点**（`monitoring/realtime_alert.py`）：`PriceAlert(symbol, threshold, direction)` dataclass + `check(provider)` + `check_alerts(alerts, provider)` 批量检查；above/below 阈值触发；无效参数校验；不接入主图（独立解耦模块）。
+3. **CiccwmDataProvider 新增 `get_info(symbol)`**：实时快照基础（复用 `ciccwm_client.fetch_info`）。
+4. **18 个接口契约测试**（`test_realtime.py`）：MiniQmt 容错 3 / Ciccwm 轮询 4 / Composite 降级 3 / PriceAlert 8。
+5. **ADR-008 实时行情数据提供者**：决策、降级链表、替代方案（不污染 DataProvider / 不引入 asyncio）。
+
+**门槛结果：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken（backtest.data 独立性保持） |
+| `uv run pytest tests/unit/ -q` | ✅ 376 passed（+18 新测试） |
+| `uv run pytest tests/integration/ -q` | ✅ 35 passed, 4 skipped, 0 failed |
+
+**改动文件：**
+- `src/long_earn/backtest/data/realtime.py`（**新**）
+- `src/long_earn/backtest/data/ciccwm_provider.py`（+`get_info`）
+- `src/long_earn/monitoring/realtime_alert.py`（**新**）
+- `tests/unit/test_backtest/test_realtime.py`（**新**：18 用例）
+- `docs/adr/008-realtime-data-provider.md`（**新**）
+- `CLAUDE.md`（勾选 #3.3 + ADR-008 索引）
+- `RALPH_PROGRESS.md`（本条目）
+
+**TODO 进度（全部完成）：**
+- ✅ #0 ciccwm｜✅ #2 记忆（4/4）｜✅ #3.1 参数寻优｜✅ #3.2 多策略集成｜✅ #3.3 实时数据｜✅ #3.4 增强分析视角｜✅ #4.1 集成测试增强｜✅ #4.2 性能监控｜✅ #4.3 配置中心化
+
+**⚠️ 持续警示：** 外部 `git reset origin/main` 风险仍在。提交用 commit-tree+update-ref。
+
