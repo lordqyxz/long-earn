@@ -89,7 +89,7 @@ RuntimeContext(dataclass)
 主图（`agent.py`）路由到子图：
 
 - **strategy\_rd**：策略研发（start → init\_iteration → initial\_retrieval → adaptive\_retrieval 循环 → develop → backtest → 代码修复循环（最多3次）→ reflection → save\_experience → supervisor → optimize 循环）
-- **stock\_analysis**：股票分析（4 视角并行分析后汇总）
+- **stock\_analysis**：股票分析（5 视角并行：巴菲特/芒格/费雪/林奇基本面 + FundFlow 资金流向，后汇总）
 
 ## 编码规范
 
@@ -383,7 +383,7 @@ remoteMiniQmt/
 - [x] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。`strategy_rd/subgraph.py::_optimize_node`（L310）调用 `research_agent.optimize_strategy`，主图含 optimize 循环；独立模块 `strategy_optimization/`（`OptimizationPipeline` + `AcceptanceGate` 业绩验收 + `optimize_strategy` 便捷函数 + `LLMStrategyOptimizer`/`FakeStrategyOptimizer` 可注入）。
 - [x] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。`dashboard/analyzer.py`（L308 起）提供多策略对比分析，`dashboard/api.py` `POST /api/compare` 暴露 HTTP 接口，前端 `dashboard.html` 含对比视图。
 - [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
-- [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
+- [x] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。`FundFlowAnalyst`（`stock_analysis/agents/fund_flow_analyst.py` + `fund_flow_prompt.md`）作为第 5 个并行分析师接入子图，使用 ciccwm 独占的 `get_fund_flow`（其他 Provider 均无此能力），ciccwm 不可用时由 prompt 走"数据缺失"占位、不阻塞其他分析师。
 
 ### 4. 工程化与质量 (Engineering & Quality)
 - [ ] **集成测试增强**：针对 `strategy_rd` 的全链路流程编写更多端到端集成测试。

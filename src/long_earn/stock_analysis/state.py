@@ -12,6 +12,7 @@ class StockAnalysisState(TypedDict, total=False):
     charles_munger_analysis: str | None
     buffett_analysis: str | None
     fiske_analysis: str | None
+    fund_flow_analysis: str | None
     summary: str | None
     result: str | None
     error: str | None

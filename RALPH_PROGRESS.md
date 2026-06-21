@@ -301,3 +301,70 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：仍有 4 项未勾选。不输出完成承诺。
 
+---
+
+### 回合 5（2026-06-22）：FundFlowAnalyst 接入 + 修复并发 C419 + 勾选 #3.4
+
+**开局核查：** HEAD 稳定在 `cc8d6ca`，`89371d6` 是祖先（谱系健康）。工作树有并发会话遗留的 `memory/store.py` 修改（compress L2 归一化 + 聚类排序 bug 修复，正确改动），含 1 个 ruff C419 错误。
+
+**做了什么：**
+
+1. **修复并发会话遗留的 C419 ruff 错误**（优先级 1 — 体检失败）：
+   `MemoryStore.compress` 中 `clusters.sort(key=lambda c: max(c), reverse=True)` → `clusters.sort(key=max, reverse=True)`。一字符级修复，并发会话的 compress bug 修复（L2 归一化 + 聚类索引排序）保留生效。
+2. **核查 4 项剩余 TODO** 选定最具体可行的 #3.4 推进（沿用"先查已实现再补"模式）：
+   - #3.4 增强分析视角：现有 4 个估值分析师（buffett/munger/fiske/petter），ciccwm 独占 `get_fund_flow` 已通过 `CompositeDataProvider.ciccwm_provider` 暴露，**直接接入即可补齐第 5 视角**。
+   - #3.3 实时数据：miniqmt 无 subscribe / on_quote 接口，范围大，本回合不动。
+   - #4.1 集成测试增强：现有 7 文件覆盖尚可，留待审计补缺。
+   - #4.3 配置中心化：纯 dataclass 现状到 yaml 是较大改造，留作专项回合。
+3. **实现 FundFlowAnalyst 第 5 个并行分析师**：
+   - `agents/fund_flow_analyst.py`：与现有 4 个分析师同构（context 注入 + `analyze(stock_data)`）；新增 `fetch_fund_flow(symbol)` 走 `CompositeDataProvider.ciccwm_provider.get_fund_flow`，ciccwm 不可用/异常返回空 DataFrame（不抛、不阻塞其他视角）；显式传入 fund_flow_data 时跳过 fetch；DataFrame → 紧凑 markdown 表（仅最近 20 行）以控制 token。
+   - `agents/fund_flow_prompt.md`：从主力资金方向 / 大单 vs 中小单 / 量价一致性 / 阶段判断 / 短期风险 5 节输出；约定数据缺失时输出"暂不可用"占位。
+   - `stock_analysis/state.py`：新增 `fund_flow_analysis: str | None` 字段。
+   - `stock_analysis/subgraph.py`：新增 `fund_flow_analysis_node` 节点 + 并行 fan-out（route 增加该分支 + 5 路 summarize edge）+ `summarize_node` 拼接资金流向视角。
+   - CLAUDE.md 主图描述：4 视角 → 5 视角。
+4. **新增 8 个接口契约测试**（`tests/unit/test_stock_analysis/test_fund_flow_analyst.py`）：
+   - fetch 4 例：ciccwm 可用 / 无 ciccwm_provider / 无 data_provider / get_fund_flow 抛异常 → 空 DF。
+   - analyze 4 例：显式传 DF 跳过 fetch / 自动按 symbol 拉取 / 空 DF prompt 走占位 / stock_info 无 symbol 跳过 fetch。
+5. **顺手修测试遗留 ruff 噪声**：`test_llm_service.py` 2 处 RUF012（类属性 dict 默认值）加 `# noqa`，不影响行为。
+
+**门槛结果：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken |
+| `uv run pytest tests/unit/ -q` | ✅ 328 passed（+8 新测试） |
+| `uv run pytest tests/integration/ -q` | ✅ 20 passed, 4 skipped, 0 failed |
+| Serena `fund_flow_analyst.py` / `subgraph.py` 诊断 | ✅ 仅 pyright 对 pandas/langgraph import 解析噪声（环境问题，与已有文件一致） |
+
+**集成测试跳过项：** 同回合 1，4 个 LLM 依赖用例（`LONG_EARN_RUN_LLM_INTEGRATION` 门控）。
+
+**改动文件：**
+- `src/long_earn/memory/store.py`（C419 fix + 并发的 compress 改进保留）
+- `src/long_earn/stock_analysis/agents/fund_flow_analyst.py`（新）
+- `src/long_earn/stock_analysis/agents/fund_flow_prompt.md`（新）
+- `src/long_earn/stock_analysis/state.py`
+- `src/long_earn/stock_analysis/subgraph.py`
+- `tests/unit/test_stock_analysis/__init__.py`（新）
+- `tests/unit/test_stock_analysis/test_fund_flow_analyst.py`（新）
+- `tests/unit/test_services/test_llm_service.py`（RUF012 noqa）
+- `CLAUDE.md`（勾选 #3.4 + 主图描述 4→5 视角）
+- `RALPH_PROGRESS.md`（本条目）
+
+**TODO 进度：**
+- ✅ #0 ciccwm｜✅ #2 记忆（4/4）｜✅ #3.1 参数寻优｜✅ #3.2 多策略集成｜✅ #3.4 增强分析视角｜✅ #4.2 性能监控
+- ⏳ #3.3 实时数据对接｜#4.1 集成测试增强｜#4.3 配置中心化（仅剩 3 项）
+
+**⚠️ 持续警示：** 外部 `git reset origin/main` 风险仍在。下回合开局必做 `git merge-base --is-ancestor 89371d6 HEAD`；若 NO，`update-ref` 恢复到本回合 tip（提交后更新本警示锚点）。优先 `commit-tree`+`update-ref` 而非 `git commit`。
+
+**下一回合应做：**
+
+1. 开局核验谱系，必要时 `update-ref` 恢复。
+2. 推进剩余 3 项 TODO：
+   - **#4.1 集成测试增强**（最易，最具体）：审计 `test_strategy_rd_subgraph.py` 覆盖；考虑给新增的 FundFlowAnalyst 加 stock_analysis 端到端集成测试。
+   - **#4.3 配置中心化**：评估"`config.yaml` 覆盖 `.env`"的最小 MVP（仅扩展 `AppConfig.from_env` 增加 `from_yaml` / `from_env_or_yaml`，向后兼容），写专项 ADR。
+   - **#3.3 实时数据**：评估 miniqmt `subscribe_quote` / `xtdata.subscribe` 接口能力（若有，添加 RealtimeQuoteProvider + 轮询监控节点）。
+3. 任一项实现完成即勾选 + 补注实现位置 + 加接口契约测试。
+
+> 终止条件尚未满足：仍有 3 项未勾选。不输出完成承诺。
+

@@ -161,7 +161,7 @@ class TestLLMMonitoringTracking:
 
         class _Resp:
             content = "ok"
-            usage_metadata = {
+            usage_metadata = {  # noqa: RUF012
                 "input_tokens": 10,
                 "output_tokens": 20,
                 "total_tokens": 30,
@@ -201,7 +201,7 @@ class TestLLMMonitoringTracking:
 
         class _Resp:
             content = "ok"
-            usage_metadata = {"input_tokens": 1}
+            usage_metadata = {"input_tokens": 1}  # noqa: RUF012
 
         fake_llm = MagicMock()
         fake_llm.invoke.return_value = _Resp()

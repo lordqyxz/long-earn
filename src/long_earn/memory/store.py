@@ -319,9 +319,13 @@ class MemoryStore:
         if self._doc_matrix is None or self._doc_matrix.size < _MIN_CLUSTER_SIZE:
             return 0
 
-        # 计算文档间相似度矩阵
+        # 计算文档间余弦相似度矩阵（先 L2 归一化再求 dot product，
+        # 避免未归一化的 raw dot product 导致长文档相似度虚高）
         n = len(self._facts)
-        sim_matrix = self._doc_matrix @ self._doc_matrix.T
+        norms = np.linalg.norm(self._doc_matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normalized = self._doc_matrix / norms
+        sim_matrix = normalized @ normalized.T
 
         # 贪心聚类：找到相似的文档对并合并
         merged_indices: set[int] = set()
@@ -344,6 +348,8 @@ class MemoryStore:
                 clusters.append(cluster)
 
         total_removed = 0
+        # 从最大索引开始处理聚类，避免 _merge_cluster 弹出元素后索引偏移
+        clusters.sort(key=max, reverse=True)
         for cluster in clusters:
             removed = self._merge_cluster(cluster)
             total_removed += removed
