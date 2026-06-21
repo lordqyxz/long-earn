@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 # 缓存数据过期阈值（天）：超过此天数视为过期，需从 miniqmt 更新
 STALE_THRESHOLD_DAYS = 5
 
+# 资产负债表合并时的基础列数（symbol + report_date），超过则代表已附加权益列
+_BALANCE_BASE_COL_COUNT = 2
+
+# 资产负债表中可用的股东权益字段（任一存在即可，统一映射为 total_equity）
+_EQUITY_FIELDS: dict[str, str] = {
+    "total_equity": "total_equity",
+    "tot_shrhldr_eqy_excl_min_int": "total_equity",
+    "total_hldr_eqy_exc_min_int": "total_equity",
+    "total_hldr_eqy_incl_min_int": "total_equity",
+    "s_fa_total_hldr_eqy_exc_min_int": "total_equity",
+}
+
 # 指数代码 -> 板块名称映射
 INDEX_SECTOR_MAP = {
     "csi300": "沪深300",
@@ -86,7 +98,9 @@ class MiniQmtClient:
                 return future.result(timeout=timeout)
             except FuturesTimeoutError:
                 logger.warning(f"xtdata 调用超时 ({timeout}s): {fn.__name__}")
-                raise TimeoutError(f"xtdata 调用超时 ({timeout}s): {fn.__name__}") from None
+                raise TimeoutError(
+                    f"xtdata 调用超时 ({timeout}s): {fn.__name__}"
+                ) from None
 
     @classmethod
     def get(cls) -> MiniQmtClient:
@@ -110,9 +124,7 @@ class MiniQmtClient:
         disable = os.environ.get("LONG_EARN_DISABLE_XTQUANT", "").strip().lower()
         if disable in ("1", "true", "yes", "on"):
             self._available = False
-            logger.info(
-                "LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用"
-            )
+            logger.info("LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用")
             return self._available
         # 2. 尝试 import；失败则不可用
         try:
@@ -498,9 +510,7 @@ class MiniQmtDataProvider:
         # 3. 若需要刷新且 miniqmt 可用，增量获取
         if need_refresh and self.client.is_available:
             if missing_symbols:
-                logger.info(
-                    f"行情缓存缺失 {len(missing_symbols)} 只，从 miniqmt 补充"
-                )
+                logger.info(f"行情缓存缺失 {len(missing_symbols)} 只，从 miniqmt 补充")
             else:
                 logger.info("行情缓存过期，从 miniqmt 增量更新")
 
@@ -625,79 +635,11 @@ class MiniQmtDataProvider:
             if income_df.empty and balance_df.empty:
                 return None
 
-            # 以 Income 表为基础构建结果
-            if not income_df.empty:
-                result_df = pd.DataFrame()
-                if "symbol" in income_df.columns:
-                    result_df["symbol"] = income_df["symbol"]
-                else:
-                    result_df["symbol"] = symbols[0] if len(symbols) == 1 else None
-                result_df["report_date"] = income_df.get("report_date", pd.NaT)
-
-                # Income 表字段映射
-                income_field_map = {
-                    "revenue_inc": "revenue",
-                    "revenue": "revenue",
-                    "net_profit_incl_min_int_inc": "net_profit",
-                    "s_fa_eps_basic": "eps",
-                    "total_operating_cost": "total_operating_cost",
-                }
-                for xt_col, std_col in income_field_map.items():
-                    if xt_col in income_df.columns and std_col not in result_df.columns:
-                        result_df[std_col] = income_df[xt_col]
-            else:
-                result_df = pd.DataFrame()
-                if "symbol" in balance_df.columns:
-                    result_df["symbol"] = balance_df["symbol"]
-                else:
-                    result_df["symbol"] = symbols[0] if len(symbols) == 1 else None
-                result_df["report_date"] = balance_df.get("report_date", pd.NaT)
+            # 以 Income 表为基础构建结果（Income 缺失时回退到 Balance）
+            result_df = self._build_financial_base(income_df, balance_df, symbols)
 
             # 合并 Balance 表的股东权益数据（用于计算 ROE）
-            if not balance_df.empty and "symbol" in balance_df.columns:
-                balance_cols = ["symbol", "report_date"]
-                equity_fields = {
-                    "total_equity": "total_equity",
-                    "tot_shrhldr_eqy_excl_min_int": "total_equity",
-                    "total_hldr_eqy_exc_min_int": "total_equity",
-                    "total_hldr_eqy_incl_min_int": "total_equity",
-                    "s_fa_total_hldr_eqy_exc_min_int": "total_equity",
-                }
-                for xt_col, std_col in equity_fields.items():
-                    if xt_col in balance_df.columns:
-                        balance_cols.append(xt_col)
-                        break
-
-                if len(balance_cols) > 2:
-                    balance_subset = balance_df[balance_cols].copy()
-                    rename_map = {
-                        xt_col: std_col
-                        for xt_col, std_col in equity_fields.items()
-                        if xt_col in balance_subset.columns
-                    }
-                    balance_subset = balance_subset.rename(columns=rename_map)
-
-                    if not result_df.empty and "report_date" in result_df.columns:
-                        result_df["_merge_date"] = pd.to_datetime(
-                            result_df["report_date"], errors="coerce"
-                        )
-                        balance_subset["_merge_date"] = pd.to_datetime(
-                            balance_subset["report_date"], errors="coerce"
-                        )
-                        merge_cols = ["symbol", "_merge_date"]
-                        new_cols = [
-                            c
-                            for c in balance_subset.columns
-                            if c not in result_df.columns and c not in merge_cols
-                        ]
-                        if new_cols:
-                            merge_df = balance_subset[merge_cols + new_cols]
-                            result_df = result_df.merge(
-                                merge_df, on=merge_cols, how="left"
-                            )
-                        result_df = result_df.drop(
-                            columns=["_merge_date"], errors="ignore"
-                        )
+            result_df = self._merge_balance_equity(balance_df, result_df)
 
             # 确保 report_date 为 datetime 并过滤无效行
             if "report_date" in result_df.columns:
@@ -718,9 +660,87 @@ class MiniQmtDataProvider:
             logger.warning(f"miniqmt 财务数据下载失败: {e}")
             return None
 
-    def _compute_derived_financials(
-        self, df: pd.DataFrame
+    def _build_financial_base(
+        self,
+        income_df: pd.DataFrame,
+        balance_df: pd.DataFrame,
+        symbols: list[str],
     ) -> pd.DataFrame:
+        """以 Income 表为基础构建结果 DataFrame（symbol + report_date + 利润表字段）。
+
+        Income 表缺失时回退使用 Balance 表的 symbol/report_date。
+        """
+        source_df = income_df if not income_df.empty else balance_df
+        result_df = pd.DataFrame()
+        if "symbol" in source_df.columns:
+            result_df["symbol"] = source_df["symbol"]
+        else:
+            result_df["symbol"] = symbols[0] if len(symbols) == 1 else None
+        result_df["report_date"] = source_df.get("report_date", pd.NaT)
+
+        # Income 表字段映射
+        income_field_map = {
+            "revenue_inc": "revenue",
+            "revenue": "revenue",
+            "net_profit_incl_min_int_inc": "net_profit",
+            "s_fa_eps_basic": "eps",
+            "total_operating_cost": "total_operating_cost",
+        }
+        if not income_df.empty:
+            for xt_col, std_col in income_field_map.items():
+                if xt_col in income_df.columns and std_col not in result_df.columns:
+                    result_df[std_col] = income_df[xt_col]
+        return result_df
+
+    def _merge_balance_equity(
+        self,
+        balance_df: pd.DataFrame,
+        result_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """将 Balance 表的股东权益列合并进结果（按 symbol + 报告日左连接）。"""
+        if balance_df.empty or "symbol" not in balance_df.columns:
+            return result_df
+
+        balance_cols = ["symbol", "report_date"]
+        for xt_col, _std_col in _EQUITY_FIELDS.items():
+            if xt_col in balance_df.columns:
+                balance_cols.append(xt_col)
+                break
+
+        # 未找到任何权益列则跳过
+        if len(balance_cols) <= _BALANCE_BASE_COL_COUNT:
+            return result_df
+
+        balance_subset = balance_df[balance_cols].copy()
+        rename_map = {
+            xt_col: std_col
+            for xt_col, std_col in _EQUITY_FIELDS.items()
+            if xt_col in balance_subset.columns
+        }
+        balance_subset = balance_subset.rename(columns=rename_map)
+
+        if result_df.empty or "report_date" not in result_df.columns:
+            return result_df
+
+        result_df["_merge_date"] = pd.to_datetime(
+            result_df["report_date"], errors="coerce"
+        )
+        balance_subset["_merge_date"] = pd.to_datetime(
+            balance_subset["report_date"], errors="coerce"
+        )
+        merge_cols = ["symbol", "_merge_date"]
+        new_cols = [
+            c
+            for c in balance_subset.columns
+            if c not in result_df.columns and c not in merge_cols
+        ]
+        if new_cols:
+            merge_df = balance_subset[merge_cols + new_cols]
+            result_df = result_df.merge(merge_df, on=merge_cols, how="left")
+        result_df = result_df.drop(columns=["_merge_date"], errors="ignore")
+        return result_df
+
+    def _compute_derived_financials(self, df: pd.DataFrame) -> pd.DataFrame:
         """从原始财务数据计算衍生指标（YoY、ROE、毛利率）。
 
         Args:
@@ -738,77 +758,82 @@ class MiniQmtDataProvider:
             if col not in df.columns:
                 df[col] = float("nan")
 
+        update_cols = ["net_profit_yoy", "revenue_yoy", "roe", "gross_margin"]
         for symbol in df["symbol"].unique():
             mask = df["symbol"] == symbol
             symbol_data = df[mask].copy().sort_values("report_date")
-
             if symbol_data.empty:
                 continue
 
-            # 计算毛利率 = (revenue - total_operating_cost) / revenue
-            if "revenue" in symbol_data.columns and "total_operating_cost" in symbol_data.columns:
-                rev = symbol_data["revenue"].astype(float)
-                cost = symbol_data["total_operating_cost"].astype(float)
-                valid = (rev != 0) & rev.notna() & cost.notna()
-                symbol_data.loc[valid, "gross_margin"] = (
-                    (rev[valid] - cost[valid]) / rev[valid]
-                )
-
-            # 计算 YoY 增长率：与去年同期比较
-            symbol_data["_quarter"] = symbol_data["report_date"].dt.quarter
-            symbol_data["_year"] = symbol_data["report_date"].dt.year
-
-            for field, yoy_field in [
-                ("net_profit", "net_profit_yoy"),
-                ("revenue", "revenue_yoy"),
-            ]:
-                if field not in symbol_data.columns:
-                    continue
-                for idx, row in symbol_data.iterrows():
-                    if pd.isna(row.get(field)) or row[field] == 0:
-                        continue
-                    # 找去年同期数据
-                    last_year_mask = (
-                        (symbol_data["_year"] == row["_year"] - 1)
-                        & (symbol_data["_quarter"] == row["_quarter"])
-                    )
-                    last_year_data = symbol_data.loc[last_year_mask, field]
-                    if not last_year_data.empty and last_year_data.iloc[0] != 0:
-                        last_year_val = float(last_year_data.iloc[0])
-                        current_val = float(row[field])
-                        symbol_data.loc[idx, yoy_field] = (
-                            current_val - last_year_val
-                        ) / abs(last_year_val)
-
-            # 计算 ROE = net_profit / total_equity
-            if (
-                "net_profit" in symbol_data.columns
-                and "total_equity" in symbol_data.columns
-            ):
-                np_val = symbol_data["net_profit"].astype(float)
-                eq_val = symbol_data["total_equity"].astype(float)
-                valid = eq_val.notna() & (eq_val != 0) & np_val.notna()
-                # 年化 ROE：Q1*4, Q2*2, H1*2, Q3*4/3, Q3*2, FY*1
-                quarter = symbol_data["_quarter"]
-                annualize_factor = quarter.map(
-                    {1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0}
-                )
-                symbol_data.loc[valid, "roe"] = (
-                    np_val[valid] / eq_val[valid]
-                ) * annualize_factor[valid]
-
-            # 清理临时列
-            symbol_data = symbol_data.drop(
-                columns=["_quarter", "_year"], errors="ignore"
-            )
-
-            # 更新回主 DataFrame
-            update_cols = ["net_profit_yoy", "revenue_yoy", "roe", "gross_margin"]
+            symbol_data = self._fill_symbol_derived(symbol_data)
             for col in update_cols:
                 if col in symbol_data.columns:
                     df.loc[mask, col] = symbol_data[col].values
 
         return df
+
+    def _fill_symbol_derived(self, symbol_data: pd.DataFrame) -> pd.DataFrame:
+        """为单只股票的财务数据填充衍生指标（毛利率、YoY、ROE），就地修改后返回。"""
+        self._fill_gross_margin(symbol_data)
+        symbol_data["_quarter"] = symbol_data["report_date"].dt.quarter
+        symbol_data["_year"] = symbol_data["report_date"].dt.year
+        self._fill_yoy_growth(symbol_data)
+        self._fill_roe(symbol_data)
+        return symbol_data.drop(columns=["_quarter", "_year"], errors="ignore")
+
+    def _fill_gross_margin(self, symbol_data: pd.DataFrame) -> None:
+        """计算毛利率 = (revenue - total_operating_cost) / revenue。"""
+        if (
+            "revenue" not in symbol_data.columns
+            or "total_operating_cost" not in symbol_data.columns
+        ):
+            return
+        rev = symbol_data["revenue"].astype(float)
+        cost = symbol_data["total_operating_cost"].astype(float)
+        valid = (rev != 0) & rev.notna() & cost.notna()
+        symbol_data.loc[valid, "gross_margin"] = (rev[valid] - cost[valid]) / rev[valid]
+
+    def _fill_yoy_growth(self, symbol_data: pd.DataFrame) -> None:
+        """计算 YoY 增长率（净利润、营收）：与去年同期比较。"""
+        for field, yoy_field in [
+            ("net_profit", "net_profit_yoy"),
+            ("revenue", "revenue_yoy"),
+        ]:
+            if field not in symbol_data.columns:
+                continue
+            for idx, row in symbol_data.iterrows():
+                if pd.isna(row.get(field)) or row[field] == 0:
+                    continue
+                # 找去年同期数据
+                last_year_mask = (symbol_data["_year"] == row["_year"] - 1) & (
+                    symbol_data["_quarter"] == row["_quarter"]
+                )
+                last_year_data = symbol_data.loc[last_year_mask, field]
+                if not last_year_data.empty and last_year_data.iloc[0] != 0:
+                    last_year_val = float(last_year_data.iloc[0])
+                    current_val = float(row[field])
+                    symbol_data.loc[idx, yoy_field] = (
+                        current_val - last_year_val
+                    ) / abs(last_year_val)
+
+    def _fill_roe(self, symbol_data: pd.DataFrame) -> None:
+        """计算 ROE = net_profit / total_equity，按季度年化。
+
+        年化因子：Q1*4, Q2*2, H1*2, Q3*4/3, Q3*2, FY*1
+        """
+        if (
+            "net_profit" not in symbol_data.columns
+            or "total_equity" not in symbol_data.columns
+        ):
+            return
+        np_val = symbol_data["net_profit"].astype(float)
+        eq_val = symbol_data["total_equity"].astype(float)
+        valid = eq_val.notna() & (eq_val != 0) & np_val.notna()
+        quarter = symbol_data["_quarter"]
+        annualize_factor = quarter.map({1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0})
+        symbol_data.loc[valid, "roe"] = (
+            np_val[valid] / eq_val[valid]
+        ) * annualize_factor[valid]
 
     def _quarterly_to_daily(
         self,
@@ -862,9 +887,7 @@ class MiniQmtDataProvider:
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并的数据面板（行情 + 财务）。"""
-        price_df = self.get_price_panel(
-            symbols, start_date, end_date, price_fields
-        )
+        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )
@@ -913,9 +936,7 @@ class MiniQmtDataProvider:
             if start <= pd.to_datetime(q, format="%Y%m%d") <= end
         ]
         before_start = [
-            q
-            for q in all_quarters
-            if pd.to_datetime(q, format="%Y%m%d") < start
+            q for q in all_quarters if pd.to_datetime(q, format="%Y%m%d") < start
         ]
         if before_start:
             quarters.append(max(before_start))
@@ -954,9 +975,7 @@ class MiniQmtUniverseProvider:
         # 1. 优先从缓存读取
         # 指数：沪深300 / 中证500 / 上证50 / 中证1000
         if universe_type in INDEX_SECTOR_MAP:
-            return self._get_index_constituents(
-                INDEX_SECTOR_MAP[universe_type], date
-            )
+            return self._get_index_constituents(INDEX_SECTOR_MAP[universe_type], date)
         # 英文板块名映射
         sector_name = BOARD_NAME_MAP.get(universe_type, universe_type)
         # 中文板块名
@@ -973,9 +992,7 @@ class MiniQmtUniverseProvider:
                 self.cache.save_universe(sector_name, date, result)
                 logger.info(f"获取 {sector_name} 板块: {len(result)} 只")
             return result
-        logger.warning(
-            f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}"
-        )
+        logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}")
         return []
 
     def _get_index_constituents(self, index_name: str, date: str) -> list[str]:
@@ -988,9 +1005,7 @@ class MiniQmtUniverseProvider:
                 self.cache.save_universe(index_name, date, result)
                 logger.info(f"获取 {index_name} 成分股: {len(result)} 只")
             return result
-        logger.warning(
-            f"缓存无数据且 miniqmt 不可用，无法获取 {index_name} 成分股"
-        )
+        logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取 {index_name} 成分股")
         return []
 
     def _get_all_a_stocks(self, date: str) -> list[str]:
@@ -1013,4 +1028,3 @@ class MiniQmtUniverseProvider:
             self.cache.save_universe("all_a", date, unique)
             logger.info(f"全A股聚合: {len(unique)} 只")
         return unique
-

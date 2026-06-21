@@ -6,16 +6,16 @@
 **重要：所有策略最终通过 YAML DSL 描述并回测，不要生成 Python 代码。**
 
 ## 用户需求
-{query}
+{{query}}
 
 ## 知识上下文
-{strategy_context}
+{{strategy_context}}
 
 ## 历史策略参考
-{strategy_examples}
+{{strategy_examples}}
 
 ## 目标市场
-{target_market}
+{{target_market}}
 
 ### 行情数据（日频）
 | 字段名 | 说明 |

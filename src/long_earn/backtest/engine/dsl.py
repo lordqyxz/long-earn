@@ -3,6 +3,7 @@
 将 LLM 生成的 YAML 策略描述解析为可执行的数据结构。
 """
 
+import ast
 import datetime
 import logging
 import re
@@ -144,8 +145,10 @@ class StrategyDSL(BaseModel):
         for i, step in enumerate(v):
             if "type" not in step:
                 raise ValueError(f"第 {i} 个信号步骤缺少 type 字段")
-            if step["type"] == "filter" and "condition" not in step:
-                raise ValueError(f"第 {i} 个 filter 步骤缺少 condition 字段")
+            if step["type"] == "filter":
+                if "condition" not in step:
+                    raise ValueError(f"第 {i} 个 filter 步骤缺少 condition 字段")
+                _validate_expression_syntax(str(step["condition"]), i, "condition")
             if step["type"] == "rank" and "by" not in step:
                 raise ValueError(f"第 {i} 个 rank 步骤缺少 by 字段")
             if step["type"] == "operator" and "op" not in step:
@@ -157,6 +160,21 @@ class StrategyDSL(BaseModel):
         return bool(self.operator_factors) or any(
             s.get("type") == "operator" for s in self.signals
         )
+
+
+def _validate_expression_syntax(expr: str, step_index: int, field_name: str) -> None:
+    """解析期检查表达式语法合法性（fail-fast）。
+
+    仅做语法层面的早失败，让 LLM 生成的畸形表达式（如 ``x > >``）在回测启动前
+    即被拒绝，避免触发长达数年的无效回测。语义层面的安全校验仍由运行期
+    AST 安全求值器（evaluator）负责。
+    """
+    try:
+        ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(
+            f"第 {step_index} 个信号步骤的 {field_name} 表达式语法错误: {e.msg}"
+        ) from None
 
 
 def _convert_dates(obj: Any) -> Any:

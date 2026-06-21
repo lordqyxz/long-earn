@@ -17,6 +17,8 @@
   - 手动：设置 BACKTEST_SERVICE_MANUAL=1 跳过自动管理，需自行启动服务
 """
 
+import os
+
 import pytest
 from dotenv import load_dotenv
 
@@ -25,6 +27,16 @@ from long_earn.context_init import create_runtime_context
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 
 load_dotenv()
+
+# LLM 依赖门控：develop / develop_then_backtest 类用例需要真实 LLM（ollama/远端 API）
+# 在线生成策略代码。默认 .env 为 ollama 且无远端 API key，本地未启动 ollama 时这些
+# 用例无法稳定通过，故默认跳过；显式设置 LONG_EARN_RUN_LLM_INTEGRATION=1 时才运行。
+# 跳过原因：依赖真实 LLM 服务（外部服务），符合"依赖外部服务的集成测试用 env 门控"约定。
+requires_llm = pytest.mark.skipif(
+    os.environ.get("LONG_EARN_RUN_LLM_INTEGRATION", "").lower()
+    not in ("1", "true", "yes", "on"),
+    reason="需真实 LLM 服务，设置 LONG_EARN_RUN_LLM_INTEGRATION=1 启用",
+)
 
 # ── 默认股票池（沪深 300 部分成分股，SH/SZ 前缀格式） ──────────────
 
@@ -144,10 +156,7 @@ def assert_valid_strategy_yaml(yaml_str: str) -> None:
     import re
 
     code_section = re.split(r"\n  signals:", yaml_str, maxsplit=1)
-    if len(code_section) > 1:
-        check_zone = "signals:" + code_section[1]
-    else:
-        check_zone = yaml_str
+    check_zone = "signals:" + code_section[1] if len(code_section) > 1 else yaml_str
     for char in ["，", "（", "）", "；"]:
         assert char not in check_zone, f"策略代码区域不应包含全角字符: {char}"
 
@@ -222,6 +231,7 @@ def refine_and_backtest(
 # ── 测试：代码生成 ───────────────────────────────────────────────────────
 
 
+@requires_llm
 class TestDevelop:
     """策略代码生成测试：真实 LLM + mock 策略描述"""
 
@@ -268,7 +278,11 @@ class TestBacktest:
         """回测服务应检测到语法错误并返回错误信息"""
         start, end = backtest_dates
         result = run_backtest_via_context(
-            context, "strategy:\n  name: bad\n  signals:\n    - type: filter\n      condition: 'x > >'", start, end, stock_list=DEFAULT_STOCK_LIST
+            context,
+            "strategy:\n  name: bad\n  signals:\n    - type: filter\n      condition: 'x > >'",
+            start,
+            end,
+            stock_list=DEFAULT_STOCK_LIST,
         )
         assert result is not None, "语法错误应返回错误结果，而非 None"
         assert "error" in result, "语法错误应在 result.error 中反映"
@@ -277,6 +291,7 @@ class TestBacktest:
 # ── 测试：端到端 develop → backtest ──────────────────────────────────────
 
 
+@requires_llm
 class TestDevelopAndBacktest:
     """端到端测试：LLM 生成代码 → 回测 → （失败则修复 → 再回测）"""
 

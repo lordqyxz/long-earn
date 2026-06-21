@@ -3,13 +3,13 @@ from typing import TYPE_CHECKING, Any
 
 from long_earn.core.llm_utils import parse_llm_json
 
-# Sharpe 阈值：达到此水平视为"业绩明确达标"，停止迭代以节省预算
-_GOOD_SHARPE_THRESHOLD = 1.5
-
 from .strategy_rd_supervisor_prompt import (
     strategy_rd_supervisor_continue_prompt,
     strategy_rd_supervisor_prompt,
 )
+
+# Sharpe 阈值：达到此水平视为"业绩明确达标"，停止迭代以节省预算
+_GOOD_SHARPE_THRESHOLD = 1.5
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -98,9 +98,11 @@ class StrategyRdSupervisor:
         if "should_continue" in result:
             should_continue = bool(result.get("should_continue"))
         else:
-            sharpe = backtest_result.get("sharpe_ratio") or (
-                backtest_result.get("metrics", {}) or {}
-            ).get("sharpe_ratio") or 0
+            sharpe = (
+                backtest_result.get("sharpe_ratio")
+                or (backtest_result.get("metrics", {}) or {}).get("sharpe_ratio")
+                or 0
+            )
             already_good = (
                 isinstance(sharpe, (int, float)) and sharpe >= _GOOD_SHARPE_THRESHOLD
             )
