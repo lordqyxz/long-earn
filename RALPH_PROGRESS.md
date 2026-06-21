@@ -193,3 +193,51 @@ CLAUDE.md TODO #0（ciccwm）**已完成**。下回合进入：
 
 > 终止条件尚未满足：#3/#4 多项未勾选，且 git 谱系待修复。不输出完成承诺。
 
+---
+
+### 回合 3（2026-06-22）：git 谱系彻底修复 + TODO #3 核查
+
+**本回合核心：修复回合 2-B 遗留的 git 谱系断裂。**
+
+**真实事件复盘（reflog 证据）：**
+1. 回合 2-B 我执行 `git reset --soft 7eae865` 把分支指回健康链（`89371d6 → fdf5622 → c0add92 → 7eae865`），成功。
+2. 提交 ciccwm 得 `c9576a5`（父=7eae865，**健康**，ciccwm 4 文件+README）——此提交成功且正确。
+3. **外部进程执行 `git reset origin/main`**（reflog `@{1}: reset: moving to origin/main`），把分支 ref 重置到 `origin/main`=`f37b20a`；但 origin/main 树与本会话工作树差异巨大，导致随后我的 memory 提交 `4bba463` 变成 **`(initial)` 断根提交**（HEAD 当时被重置成 unborn，index 含全部工作树）。
+4. 净效果：HEAD 又变断根，但 `4bba463` 的**树内容完整**（= 7eae865 + ciccwm + memory 全部 9 文件增量，已核验）。
+
+**修复执行（用 commit-tree 精确拼接，避开 index/worktree 干扰）：**
+- `c9576a5`（ciccwm，父=7eae865）已健康，直接复用。
+- 用 `4bba463^{tree}` 的树 + 父 `c9576a5` 构造 memory 提交：`git commit-tree <tree> -p c9576a5 -m "..."` → 得 `dcaca45`。
+- `git update-ref refs/heads/feat/ralph-completion dcaca45`。
+
+**修复结果：**
+- HEAD 链 = `dcaca45(memory) → c9576a5(ciccwm) → 7eae865 → c0add92 → fdf5622 → 89371d6(真 main)`
+- `git merge-base --is-ancestor 89371d6 HEAD` = **YES**（谱系健康，origin/main 是祖先，可 merge）
+- 工作树干净，树与修复前逐字节相同（`git diff HEAD 4bba463` 树相同，零内容变化）
+- ciccwm 与 memory 现为两个独立提交，消息保留
+
+**门槛结果（修复后）：**
+
+| 门槛 | 结果 |
+|------|------|
+| `uv run ruff check src/` | ✅ All checks passed |
+| `uv run lint-imports` | ✅ 2 kept, 0 broken |
+| `uv run pytest tests/unit/ -q` | ✅ 315 passed |
+| `uv run pytest tests/integration/ -q` | ✅ 20 passed, 4 skipped, 0 failed |
+
+**TODO #3 核查发现（本回合只读核查，未改代码）：**
+- **「自动化参数寻优」已实现并接入**：`strategy_rd/subgraph.py` 有 `_optimize_node`（L310）调用 `research_agent.optimize_strategy`，主图描述含 "optimize 循环"；独立模块 `strategy_optimization/`（`OptimizationPipeline` + `AcceptanceGate` 业绩验收 + `optimize_strategy` 便捷函数 + `LLMStrategyOptimizer`/`FakeStrategyOptimizer` 可注入）。→ 待勾选。
+- 其余 #3 子项（多策略集成 / 实时数据对接 / 增强分析视角）待下回合核查。
+
+**改动文件（本回合）：** 无代码改动；仅 git 谱系重排（ref 移动 + commit-tree 拼接），工作树零变化。账本本条目为唯一内容更新。
+
+**⚠️ 持续警示：** 外部进程仍在周期性 `git reset origin/main` 破坏分支 ref。**下回合开局必做** `git merge-base --is-ancestor 89371d6 HEAD`；若 NO，用 `git update-ref refs/heads/feat/ralph-completion dcaca45` 恢复（dcaca45 是本回合修复后的健康 tip）。提交时优先用 `git commit-tree` + `update-ref` 而非 `git commit`，以规避 unborn-HEAD 导致的断根重提交。
+
+**下一回合应做：**
+1. 开局核验谱系（见上警示），必要时 `update-ref` 恢复到 `dcaca45`。
+2. 勾选 CLAUDE.md #0 ciccwm + #3「自动化参数寻优」（均已实现）。
+3. 核查并推进 #3 剩余子项（多策略集成 / 实时数据 / 增强分析视角）—— 先查已实现再补。
+4. 核查 #4 工程化（集成测试增强 / 性能监控 / 配置中心化）。
+
+> 终止条件尚未满足：#3/#4 多项未勾选。不输出完成承诺。
+
