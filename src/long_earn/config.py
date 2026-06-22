@@ -124,6 +124,13 @@ class AppConfig:
     llm_base_url: str = "http://localhost:11434"
     memory_path: str = str(PROJECT_DATA_DIR / "memory.npz")
     init_dir: str = "./init"
+    # 语义嵌入检索配置（解决 TF-IDF 中文分词局限）
+    # embedding_model: ollama 嵌入模型，bge-m3（BAAI，中文专项，1024 维）
+    # reranker_model: ollama 重排模型，bge-reranker-v2-m3（对 embedding 候选二次精排）
+    # embedding_base_url: 空字符串表示复用 llm_base_url
+    embedding_model: str = "bge-m3"
+    reranker_model: str = "bge-reranker-v2-m3"
+    embedding_base_url: str = ""
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
@@ -146,6 +153,9 @@ class AppConfig:
             llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
             memory_path=os.getenv("MEMORY_PATH", str(PROJECT_DATA_DIR / "memory.npz")),
             init_dir=os.getenv("INIT_DIR", "./init"),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "bge-m3"),
+            reranker_model=os.getenv("RERANKER_MODEL", "bge-reranker-v2-m3"),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL", ""),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),

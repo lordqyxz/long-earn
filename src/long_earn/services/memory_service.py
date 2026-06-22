@@ -94,7 +94,11 @@ class MemoryServiceImpl(MemoryService):
         """懒加载嵌入检索器；embed extra 不可用时返回 None（回退纯 TF-IDF）。"""
         if self._embedding is not None:
             return self._embedding
-        retriever = EmbeddingRetriever()
+        retriever = EmbeddingRetriever(
+            model_name=self.config.embedding_model,
+            base_url=self.config.embedding_base_url or self.config.llm_base_url,
+            reranker_model=self.config.reranker_model,
+        )
         if retriever.is_available:
             self._embedding = retriever
             self.logger.info("语义嵌入检索已启用（TF-IDF + 嵌入混合检索）")
