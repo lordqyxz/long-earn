@@ -5,8 +5,6 @@
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from long_earn.memory.embedding import EmbeddingRetriever
 from long_earn.memory.store import MemoryStore
 
