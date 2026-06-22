@@ -158,3 +158,61 @@ class TestEmbeddingRetriever:
 
         results = retriever.hybrid_search(store, "动量", k=2, apply_decay=False)
         assert len(results) >= 1
+
+    def test_ollama_backend_not_available_returns_false(self):
+        """ollama 后端不可用时 is_available 返回 False"""
+        retriever = EmbeddingRetriever(
+            model_name="bge-m3",
+            base_url="http://localhost:99999",
+            backend="ollama",
+        )
+        assert not retriever.is_available
+
+    def test_ollama_embedding_search_fallback(self):
+        """ollama 不可用时 embedding_search 返回空列表"""
+        retriever = EmbeddingRetriever(
+            model_name="bge-m3",
+            base_url="http://localhost:99999",
+            backend="ollama",
+        )
+        store = MemoryStore()
+        store.add_fact("test content")
+        results = retriever.embedding_search(store, "test", k=3)
+        assert results == []
+
+    def test_ollama_hybrid_search_fallback(self):
+        """ollama 不可用时 hybrid_search 回退到 TF-IDF"""
+        retriever = EmbeddingRetriever(
+            model_name="bge-m3",
+            base_url="http://localhost:99999",
+            backend="ollama",
+        )
+        store = MemoryStore()
+        store.add_fact("momentum strategy based on price trend")
+        store.add_fact("mean reversion strategy")
+        results = retriever.hybrid_search(store, "momentum trend", k=2, apply_decay=False)
+        assert len(results) >= 1
+
+    def test_ollama_rerank_disabled_when_not_available(self):
+        """ollama 不可用时 rerank 不执行"""
+        retriever = EmbeddingRetriever(
+            model_name="bge-m3",
+            base_url="http://localhost:99999",
+            backend="ollama",
+            enable_reranker=True,
+        )
+        store = MemoryStore()
+        store.add_fact("test content")
+        # embedding_search 返回空，rerank 不会执行
+        results = retriever.embedding_search(store, "test", k=3)
+        assert results == []
+
+    def test_ollama_rerank_skipped_when_no_candidates(self):
+        """空候选列表时 rerank 直接返回"""
+        retriever = EmbeddingRetriever(
+            model_name="bge-m3",
+            base_url="http://localhost:11434",
+            backend="ollama",
+        )
+        results = retriever._rerank("test query", [])
+        assert results == []

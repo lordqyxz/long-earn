@@ -12,6 +12,8 @@ class TestAppConfigFromEnv:
         monkeypatch.setenv("MAX_ITERATIONS", "10")
         monkeypatch.setenv("STRATEGY_KEYWORDS", "alpha,beta")
         monkeypatch.setenv("STOCK_ANALYSIS_KEYWORDS", "财报")
+        monkeypatch.setenv("EMBEDDING_MODEL", "bge-m3")
+        monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:11434")
 
         config = AppConfig.from_env()
         assert config.llm_type == "openai"
@@ -19,6 +21,15 @@ class TestAppConfigFromEnv:
         assert config.max_iterations == 10
         assert config.strategy_keywords == ("alpha", "beta")
         assert config.stock_analysis_keywords == ("财报",)
+        assert config.embedding_model == "bge-m3"
+        assert config.embedding_base_url == "http://localhost:11434"
+
+    def test_embedding_config_defaults(self):
+        """embedding 配置应有合理的默认值"""
+        config = AppConfig()
+        assert config.embedding_model == "bge-m3"
+        assert config.reranker_model == "bge-reranker-v2-m3"
+        assert config.embedding_base_url == ""
 
 
 class TestAppConfigValidate:
