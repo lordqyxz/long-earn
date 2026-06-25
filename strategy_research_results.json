@@ -1,0 +1,29 @@
+{
+  "query": "研究一个基于净利润增长和ROE的选股策略，要求近三个月收益率最大化",
+  "best_recent_return": 0.17286971538519702,
+  "best_round": 1,
+  "recent_eval_window": "2026-03-25~2026-06-25",
+  "history_eval_window": "2022-01-01~2026-03-24",
+  "rounds": [
+    {
+      "round": 1,
+      "recent_return": 0.17286971538519702,
+      "recent_sharpe": 2.155413459464423,
+      "recent_drawdown": -0.1380341312890113,
+      "history_return": 0.44321025783569756,
+      "strategy_yaml": "strategy:\n  name: NetProfitGrowthROERelatedStrategy\n  description: 基于净利润增长率和净资产收益率的选择，识别近三个月盈利能力和成长性较高的股票获取超额收益\n  universe:\n    type: csi300\n  start_date: 2020-01-01\n  end_date: 2023-12-31\n  factors:\n    net_profit_yoy: net_profit_yoy\n    roe: roe\n  signals:\n    - type: filter\n      condition: net_profit_yoy > 0.2 and roe > 0.15\n    - type: rank\n      by: net_profit_yoy\n      ascending: false\n      top: 10\n  weights:\n    method: equal",
+      "reflection": "根据回测结果，当前策略在风险控制方面表现一般。主要问题体现在波动较大和回撤较多，这可能会导致投资者的不满和资金的风险。具体分析如下：",
+      "elapsed": 141.10240173339844
+    },
+    {
+      "round": 2,
+      "recent_return": 0.0,
+      "recent_sharpe": 0.0,
+      "recent_drawdown": 0.0,
+      "history_return": 0.0,
+      "strategy_yaml": "strategy:\n  name: ValueGrowthStrategy\n  description: 结合价值与成长性的股票策略\n  universe:\n    type: csi300\n  start_date: '2020-01-01'\n  end_date: '2023-12-31'\n  signals:\n    - type: filter\n      condition: roe > 0.1 & revenue_yoy > 0.15\n    - type: rank\n      by: pe_ratio\n      ascending: false\n      top: 10\n  weights:\n    method: equal",
+      "reflection": "从回测结果来看，当前策略在风险控制方面存在一定的问题。主要表现为回撤和波动较大，特别是在因子筛选过程中出现了一些失败的情况（eps、pb_ratio、pe_ratio）。这可能导致了整体投资组合的风险水平较高，并且在市场波动较大的情况下容易受到不利影响。主要原因可能在于策略选择的指标过多或不够严谨，以及未能充分考虑到这些指标之间的相互关系和影响因素。",
+      "elapsed": 398.6819546222687
+    }
+  ]
+}

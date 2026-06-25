@@ -1,0 +1,19 @@
+strategy:
+  name: NetProfitGrowthROERelatedStrategy
+  description: 基于净利润增长率和净资产收益率的选择，识别近三个月盈利能力和成长性较高的股票获取超额收益
+  universe:
+    type: csi300
+  start_date: 2020-01-01
+  end_date: 2023-12-31
+  factors:
+    net_profit_yoy: net_profit_yoy
+    roe: roe
+  signals:
+    - type: filter
+      condition: net_profit_yoy > 0.2 and roe > 0.15
+    - type: rank
+      by: net_profit_yoy
+      ascending: false
+      top: 10
+  weights:
+    method: equal
