@@ -1,12 +1,13 @@
-"""模拟撮合经纪人
+﻿"""模拟撮合经纪人
 
 负责将订单 (OrderEvent) 转换为成交记录 (FillEvent)，并计算交易成本。
 支持市价单、限价单、止损单、止损限价单及 OCO 订单。
 """
 
-import logging
 import uuid
 from dataclasses import dataclass
+
+from loguru import logger
 
 from long_earn.backtest.domain.entities import (
     ExecType,
@@ -16,8 +17,6 @@ from long_earn.backtest.domain.entities import (
     OrderStatus,
 )
 from long_earn.backtest.domain.exceptions import OrderExecutionError
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass

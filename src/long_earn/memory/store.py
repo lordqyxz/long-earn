@@ -1,4 +1,4 @@
-"""记忆存储 — 综合事实 + 向量检索 + 关系图的统一记忆系统
+﻿"""记忆存储 — 综合事实 + 向量检索 + 关系图的统一记忆系统
 
 基于 numpy/pandas 技术底座，无外部向量数据库依赖。
 
@@ -12,7 +12,6 @@
 v2.0 新增：记忆衰减、冲突检测、记忆压缩
 """
 
-import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -20,11 +19,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from long_earn.memory.graph import RelationGraph
 from long_earn.memory.tfidf import TfidfVectorizer, cosine_similarity
-
-logger = logging.getLogger(__name__)
 
 # ── 时间常量 ─────────────────────────────────────────────────────
 SECONDS_PER_DAY = 86400.0

@@ -1,4 +1,4 @@
-"""数据提供者模块
+﻿"""数据提供者模块
 
 统一的数据获取接口，支持多数据源自动降级：
   DuckDB 缓存 → miniqmt (xtquant) → akshare
@@ -11,15 +11,12 @@
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 from typing import Protocol
 
 import pandas as pd
 
 from long_earn.backtest.data.cache import DataCache
-
-logger = logging.getLogger(__name__)
-
 
 class DataProvider(Protocol):
     """数据提供者统一接口。

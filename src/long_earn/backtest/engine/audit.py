@@ -1,16 +1,14 @@
-import json
-import logging
+﻿import json
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
+from loguru import logger
 
 from long_earn.backtest.data.cache import DEFAULT_CACHE_PATH
 from long_earn.backtest.domain.interfaces import AuditProvider, AuditRecord
-
-logger = logging.getLogger(__name__)
 
 
 class DuckDBAuditProvider(AuditProvider):

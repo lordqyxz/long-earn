@@ -1,4 +1,4 @@
-"""算子目录自动扫描器与契约校验
+﻿"""算子目录自动扫描器与契约校验
 
 首次 ``import long_earn.backtest.operators`` 时递归扫描 ``operators/`` 下所有
 ``*.py``（跳过 ``_`` 前缀文件），收集带 ``@operator`` 装饰的类，逐一做契约
@@ -24,17 +24,16 @@
 """
 
 import importlib
-import logging
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from long_earn.backtest.operators.base import (
     Operator,
     OperatorContractError,
     validate_contract,
 )
-
-logger = logging.getLogger(__name__)
 
 _REGISTRY_DIR = Path(__file__).resolve().parent
 # 算子包的规范 dotted 前缀（与本文件在源码树中的位置一致）

@@ -1,21 +1,19 @@
-"""回测审计分析工具
+﻿"""回测审计分析工具
 
 基于 DuckDB 审计日志，提供回测结果分析、风险指标计算、多策略对比等功能。
 同时提供可视化所需的结构化 JSON 数据导出接口。
 """
 
 import json
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.data.cache import DEFAULT_CACHE_PATH
-
-logger = logging.getLogger(__name__)
 
 # 风险指标计算所需的最小日收益率数据点数
 _MIN_DAILY_RETURNS_FOR_RISK = 2

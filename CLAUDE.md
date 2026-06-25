@@ -100,6 +100,7 @@ RuntimeContext(dataclass)
 - 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见上文「质量门槛」）
 - 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
 - 中文注释和文档字符串
+- **日志统一使用 loguru**：禁止 `import logging` / `logging.getLogger`；所有模块直接 `from loguru import logger`。日志格式由 `LoggerServiceImpl` 统一配置（带颜色、时间、模块名、函数名、行号）。脚本入口需 `logger.remove()` 后 `logger.add(sys.stderr, ...)` 配置，格式与 `LoggerServiceImpl` 一致。
 
 ### 依赖注入
 
@@ -262,6 +263,23 @@ src/long_earn/memory/
 | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
 | STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔）|
 | STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔）|
+
+### LLM 服务启动
+
+默认使用 Ollama 作为 LLM 后端。启动方式：
+
+```sh
+ollama serve                    # 启动 Ollama 服务（默认端口 11434）
+ollama pull <model>             # 拉取模型，如 deepseek-v4-flash:cloud
+```
+
+未启动时项目会因连接 `http://localhost:11434` 失败而报错。验证服务是否就绪：
+
+```sh
+curl http://localhost:11434/api/tags    # 返回已安装模型列表
+```
+
+切换到 DashScope / OpenAI 时无需运行 Ollama，仅需在 `.env` 配置对应 API Key。
 
 ## 关键约束
 

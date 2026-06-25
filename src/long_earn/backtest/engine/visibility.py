@@ -1,16 +1,13 @@
-"""可见性守护模块
+﻿"""可见性守护模块
 
 负责严格控制回测过程中的数据可见性，从架构层面杜绝未来函数 (Look-ahead bias)。
 """
 
-import logging
 from datetime import datetime
 
 import polars as pl
 
 from long_earn.backtest.domain.exceptions import BacktestDomainError
-
-logger = logging.getLogger(__name__)
 
 
 class FutureDataError(BacktestDomainError):

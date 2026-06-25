@@ -3,13 +3,12 @@
 使用 DuckDB 作为本地缓存数据库，支持高效的向量化查询。
 """
 
-import logging
+import contextlib
 from pathlib import Path
 
 import duckdb
 import pandas as pd
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 DEFAULT_CACHE_PATH = Path(__file__).parent.parent.parent.parent.parent / ".cache" / "backtest_cache.duckdb"
 
@@ -301,8 +300,9 @@ class DataCache:
 
     def close(self) -> None:
         """关闭数据库连接"""
-        if self._conn and not self._conn.closed:
-            self._conn.close()
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                self._conn.close()
             self._conn = None
 
     def __enter__(self):

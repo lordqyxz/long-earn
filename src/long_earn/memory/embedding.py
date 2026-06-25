@@ -1,4 +1,4 @@
-"""嵌入向量检索 — 基于 Sentence-Transformers 的语义检索增强
+﻿"""嵌入向量检索 — 基于 Sentence-Transformers 的语义检索增强
 
 为 MemoryStore 提供可选的嵌入模型混合检索能力，
 在 TF-IDF 基础上引入语义相似度，提升长文本和近义表达的匹配质量。
@@ -11,14 +11,12 @@
 如果 sentence-transformers 未安装，回退到纯 TF-IDF 检索。
 """
 
-import logging
 from typing import Any
 
 import numpy as np
+from loguru import logger
 
 from long_earn.memory.tfidf import cosine_similarity
-
-logger = logging.getLogger(__name__)
 
 _HAS_SENTENCE_TRANSFORMERS = False
 try:

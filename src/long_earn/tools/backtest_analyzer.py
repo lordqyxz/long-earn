@@ -1,14 +1,12 @@
-import json
-import logging
+﻿import json
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.data.cache import DEFAULT_CACHE_PATH
-
-logger = logging.getLogger(__name__)
 
 
 class BacktestAnalyzer:

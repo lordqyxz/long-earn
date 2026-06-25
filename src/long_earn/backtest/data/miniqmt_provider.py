@@ -1,4 +1,4 @@
-"""基于 miniqmt (xtquant.xtdata) 的本地数据提供者。
+﻿"""基于 miniqmt (xtquant.xtdata) 的本地数据提供者。
 
 数据获取策略：DuckDB 缓存优先，miniqmt 增量补充。
 
@@ -16,17 +16,15 @@ xtquant 数据格式说明：
 
 from __future__ import annotations
 
-import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
+from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
-
-logger = logging.getLogger(__name__)
 
 # 缓存数据过期阈值（天）：超过此天数视为过期，需从 miniqmt 更新
 STALE_THRESHOLD_DAYS = 5

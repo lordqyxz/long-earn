@@ -1,4 +1,4 @@
-"""回测可视化 API 服务
+﻿"""回测可视化 API 服务
 
 提供 RESTful API 端点，供 Web 可视化仪表盘消费审计数据。
 使用标准库 http.server，无额外依赖。
@@ -13,15 +13,14 @@
 """
 
 import json
-import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from long_earn.tools.backtest_analyzer import BacktestAnalyzer
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from long_earn.tools.backtest_analyzer import BacktestAnalyzer
 
 _HERE = Path(__file__).parent
 _DASHBOARD_HTML = _HERE / "backtest_dashboard.html"

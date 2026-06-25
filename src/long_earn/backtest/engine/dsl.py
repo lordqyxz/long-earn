@@ -1,21 +1,19 @@
-"""YAML DSL 解析与编译模块
+﻿"""YAML DSL 解析与编译模块
 
 将 LLM 生成的 YAML 策略描述解析为可执行的数据结构。
 """
 
 import datetime
-import logging
 import re
 from typing import Any
 
 import yaml
+from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
 from long_earn.backtest.engine.broker import (
     TradingCostConfig as BrokerTradingCostConfig,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class SignalFilter(BaseModel):

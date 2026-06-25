@@ -1,14 +1,14 @@
-"""投资组合管理器
+﻿"""投资组合管理器
 
 负责将策略生成的信号转换为具体订单，并管理实时持仓与资金。
 """
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.domain.entities import (
     FillEvent,
@@ -19,9 +19,6 @@ from long_earn.backtest.domain.entities import (
 
 if TYPE_CHECKING:
     from long_earn.backtest.engine.broker import TradingCostConfig
-
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class PortfolioState:

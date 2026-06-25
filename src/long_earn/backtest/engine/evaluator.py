@@ -1,18 +1,15 @@
-"""安全表达式求值器
+﻿"""安全表达式求值器
 
 基于 AST 遍历的安全表达式求值，替代 eval()。
 仅支持白名单操作：算术、比较、逻辑运算、内置函数（abs/min/max/sum/mean/std 等）。
 """
 
 import ast
-import logging
 import operator
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-logger = logging.getLogger(__name__)
 
 # 安全运算符白名单
 _SAFE_OPERATORS: dict[type[ast.AST], Any] = {

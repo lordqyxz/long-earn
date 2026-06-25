@@ -1,19 +1,16 @@
-"""股票池管理模块（miniqmt 版）
+﻿"""股票池管理模块（miniqmt 版）
 
 使用 xtquant.xtdata 接口获取指数成分股和板块股票列表。
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Protocol
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.miniqmt_provider import (
     get_universe_provider as _miniqmt_universe,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class UniverseProvider(Protocol):

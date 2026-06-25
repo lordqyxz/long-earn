@@ -1,4 +1,4 @@
-"""akshare 降级数据提供者。
+﻿"""akshare 降级数据提供者。
 
 当 miniqmt 不可用且 DuckDB 缓存无数据时，降级到 akshare 获取数据。
 akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
@@ -8,15 +8,13 @@ akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
 import pandas as pd
+from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
-
-logger = logging.getLogger(__name__)
 
 # akshare 中文列名 → 标准英文列名
 KLINE_COLUMN_MAP = {
