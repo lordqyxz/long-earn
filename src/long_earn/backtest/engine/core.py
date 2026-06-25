@@ -1,15 +1,15 @@
-"""事件驱动回测引擎核心
+﻿"""事件驱动回测引擎核心
 
 实现 T 维度迭代 × S 维度向量化 (Slab) 的执行链路。
 """
 
 import contextlib
-import logging
 import uuid
 from typing import Any
 
 import numpy as np
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.domain.entities import (
     MarketDataEvent,
@@ -22,8 +22,6 @@ from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.backtest.engine.visibility import VisibilityGuard
 from long_earn.backtest.models import BacktestResult
-
-logger = logging.getLogger(__name__)
 
 
 def _empty_bm() -> dict[str, float]:
@@ -70,12 +68,13 @@ class EventDrivenBacktestEngine:
         max_drawdown_limit: float | None = None,
         max_position_pct: float = 1.0,
         max_positions: int = 0,
+        audit_logger: InMemoryAuditTrail | None = None,
     ):
         self.data_provider = data_provider
         self.universe_provider = universe_provider
         self.cost_config = cost_config or TradingCostConfig()
         self.audit_provider = audit_provider
-        self.audit_logger = InMemoryAuditTrail()
+        self.audit_logger = audit_logger or InMemoryAuditTrail()
         self.stop_loss = stop_loss
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
@@ -83,13 +82,14 @@ class EventDrivenBacktestEngine:
 
     # ── 主入口 ────────────────────────────────────────────────
 
-    def run(
+    def run(  # noqa: PLR0913
         self,
         strategy: BaseStrategy,
         start_date: str,
         end_date: str,
         symbols: list[str],
         benchmark_symbol: str = "",
+        full_data: pl.DataFrame | None = None,
     ) -> BacktestResult:
         """执行回测
 
@@ -99,9 +99,19 @@ class EventDrivenBacktestEngine:
             end_date: 结束日期
             symbols: 候选股票列表
             benchmark_symbol: 基准指数代码（如 "000300"），用于计算 Alpha/Beta 等
+            full_data: 预加载的完整数据面板；传入则跳过 _prepare_data()，适合并行回测
         """
         try:
-            full_data = self._prepare_data(symbols, start_date, end_date)
+            if full_data is None:
+                full_data = self._prepare_data(symbols, start_date, end_date)
+            else:
+                # 防御性日期过滤：即使外部传入 full_data，也确保只取 [start_date, end_date] 范围
+                date_col = "timestamp" if "timestamp" in full_data.columns else "date"
+                start_dt = pl.lit(start_date).str.to_datetime()
+                end_dt = pl.lit(end_date).str.to_datetime()
+                full_data = full_data.filter(
+                    (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
+                )
             if full_data.is_empty():
                 return BacktestResult(success=False, message="加载数据为空")
 
@@ -671,7 +681,8 @@ class EventDrivenBacktestEngine:
             self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
-                strategy, train_start, train_end, symbols, benchmark_symbol
+                strategy, train_start, train_end, symbols, benchmark_symbol,
+                full_data=full_data,
             )
             if train_result.success:
                 train_metrics = {
@@ -694,7 +705,8 @@ class EventDrivenBacktestEngine:
             self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
-                strategy, test_start, test_end, symbols, benchmark_symbol
+                strategy, test_start, test_end, symbols, benchmark_symbol,
+                full_data=full_data,
             )
             if test_result.success:
                 test_metrics = {
