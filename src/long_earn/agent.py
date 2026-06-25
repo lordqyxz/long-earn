@@ -6,10 +6,10 @@ import json
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.core.llm_utils import parse_llm_json
+from long_earn.core.render import render
 from long_earn.services import LLMService, LoggerService, MonitoringService
 from long_earn.state import State
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
@@ -55,28 +55,25 @@ def _intent_analyze_node(
 
         logger.info(f"开始分析用户意图：{user_query}")
 
-        routing_prompt = PromptTemplate(
-            input_variables=["user_query"],
-            template="""请分析以下用户查询，确定用户意图并选择最合适的子图进行路由。
+        routing_template = """请分析以下用户查询，确定用户意图并选择最合适的子图进行路由。
 
-用户查询：{user_query}
+用户查询：${user_query}
 
 可用的子图:
 1. strategy_rd (策略研究) - 用于投资策略研究、投资思路分析、策略制定等
 2. stock_analysis (股票分析) - 用于具体股票分析、股票代码查询、公司基本面分析等
 
 请根据以下 JSON 格式输出路由决策:
-{{
+{
     "route": "strategy_rd" 或 "stock_analysis",
     "reason": "简短的路由理由"
-}}
+}
 
-只输出 JSON，不要其他内容。""",
-        )
+只输出 JSON，不要其他内容。"""
 
         try:
             response = llm_service.invoke(
-                routing_prompt.format(user_query=user_query),
+                render(routing_template, {"user_query": user_query}),
                 format="json",
             )
             if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -191,34 +188,29 @@ def _summarize_node(
             logger.warning("无结果可汇总")
             return {"summary": "抱歉，我无法处理您的请求，请稍后再试。"}
 
-        summarize_prompt = PromptTemplate(
-            input_variables=[
-                "user_query",
-                "strategy_result",
-                "stock_analysis_result",
-                "routing_reason",
-            ],
-            template="""请根据以下研究结果生成一段证据详实，保持原有文本专业性的基础上、友好的回复，直接面向客户，综合概述技术细节。如果某部分结果为空，请忽略该部分。
-用户原始问题：{user_query}
-路由类型：{routing_reason}
+        summarize_template = """请根据以下研究结果生成一段证据详实，保持原有文本专业性的基础上、友好的回复，直接面向客户，综合概述技术细节。如果某部分结果为空，请忽略该部分。
+用户原始问题：${user_query}
+路由类型：${routing_reason}
 
 策略研究结果:
-{strategy_result}
+${strategy_result}
 
 股票分析结果:
-{stock_analysis_result}
+${stock_analysis_result}
 
 针对股票分析结果，总结各个视角下最佳买入区间，以表格样式汇总给我。
-""",
-        )
+"""
 
         try:
             response = llm_service.invoke(
-                summarize_prompt.format(
-                    user_query=user_query,
-                    strategy_result=strategy_result or "无",
-                    stock_analysis_result=stock_analysis_result or "无",
-                    routing_reason=routing_reason,
+                render(
+                    summarize_template,
+                    {
+                        "user_query": user_query,
+                        "strategy_result": strategy_result or "无",
+                        "stock_analysis_result": stock_analysis_result or "无",
+                        "routing_reason": routing_reason,
+                    },
                 )
             )
             summary = response.content.strip()

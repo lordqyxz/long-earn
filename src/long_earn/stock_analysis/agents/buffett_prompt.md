@@ -1,4 +1,4 @@
----
+﻿---
 version: 1.0.0
 description: 巴菲特价值投资分析提示词
 author: Long Earn Team
@@ -21,7 +21,7 @@ tags:
 ## 输入数据
 股票数据：
 
-{stock_data}
+${stock_data}
 
 
 ## 分析框架

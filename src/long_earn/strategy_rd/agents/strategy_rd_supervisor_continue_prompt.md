@@ -1,4 +1,4 @@
----
+﻿---
 version: 0.1.0
 description: 策略监督器继续迭代决策提示词 - 判断是否继续优化策略 - 迭代次数控制 - 过拟合风险评估 - iteration (int): 当前迭代次数 - max_iterations (int): 最大迭
 tags:
@@ -11,23 +11,23 @@ tags:
 
 ### 上下文
 当前状态：
-- 迭代次数：{iteration} / {max_iterations}
-- 剩余迭代机会：{remaining_iterations}
+- 迭代次数：${iteration} / ${max_iterations}
+- 剩余迭代机会：${remaining_iterations}
 
 策略信息：
-{strategy}
+${strategy}
 
 回测结果：
-{backtest_result}
+${backtest_result}
 
 反思内容：
-{reflection}
+${reflection}
 
 改进建议：
-{improvement_suggestions}
+${improvement_suggestions}
 
 迭代历史：
-{iteration_history}
+${iteration_history}
 
 目标条件：
 - 年化收益率 > 10%
@@ -55,13 +55,13 @@ tags:
 ### 输出格式
 请严格按照以下 JSON 格式返回决策：
 ```json
-{{
+{
     "should_continue": true 或 false,
     "reason": "详细决策理由",
     "confidence": "高/中/低",
     "risk_assessment": "继续优化的风险评估",
     "recommendation": "具体建议"
-}}
+}
 ```
 
 ### 约束条件

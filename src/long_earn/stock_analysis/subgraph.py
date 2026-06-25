@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
+from long_earn.core.render import render
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
 from long_earn.stock_analysis.agents.charles_munger_analyst import CharlesMungerAnalyst
 from long_earn.stock_analysis.agents.extract_prompt import extract_prompt
@@ -85,7 +86,7 @@ def get_stock_data(
     if not stock_code and not stock_name:
         llm_service = context.require_llm()
         query = state.get("query", "")
-        formatted_prompt = extract_prompt.format(query=query)
+        formatted_prompt = render(extract_prompt, {"query": query})
         response = llm_service.invoke(formatted_prompt)
         response_content = (
             response.content if hasattr(response, "content") else str(response)

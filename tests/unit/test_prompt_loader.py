@@ -9,7 +9,7 @@ class TestMarkdownPromptTemplate:
     def test_auto_extract_variables(self, tmp_path: Path):
         prompt_file = tmp_path / "test.md"
         prompt_file.write_text(
-            "分析 {{stock}} 在 {{date}} 的数据，使用 {{market}} 市场",
+            "分析 ${stock} 在 ${date} 的数据，使用 ${market} 市场",
             encoding="utf-8",
         )
         caller_file = tmp_path / "caller.py"
@@ -20,7 +20,7 @@ class TestMarkdownPromptTemplate:
 
     def test_format_prompt(self, tmp_path: Path):
         prompt_file = tmp_path / "test.md"
-        prompt_file.write_text("你好，{{name}}！欢迎来到{{place}}。", encoding="utf-8")
+        prompt_file.write_text("你好，${name}！欢迎来到${place}。", encoding="utf-8")
         caller_file = tmp_path / "caller.py"
         caller_file.write_text("# caller", encoding="utf-8")
 
@@ -28,10 +28,10 @@ class TestMarkdownPromptTemplate:
         formatted = prompt.format(name="张三", place="北京")
         assert formatted == "你好，张三！欢迎来到北京。"
 
-    def test_code_block_escaping(self, tmp_path: Path):
+    def test_code_block_no_interference(self, tmp_path: Path):
         prompt_file = tmp_path / "test.md"
         prompt_file.write_text(
-            "分析 {{query}}\n```python\ndata = {'key': 'value'}\n```\n结果",
+            "分析 ${query}\n```python\ndata = {'key': 'value'}\n```\n结果",
             encoding="utf-8",
         )
         caller_file = tmp_path / "caller.py"

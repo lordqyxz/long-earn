@@ -6,7 +6,7 @@ from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
 from .strategy_research_prompt import (
     create_strategy_research_prompt,
-    strategy_optimize_prompt,
+    render_strategy_optimize_prompt,
 )
 
 if TYPE_CHECKING:
@@ -586,7 +586,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             filter(None, [knowledge_context or "", memory_section])
         ) or "无"
 
-        prompt = strategy_optimize_prompt.format(
+        prompt = render_strategy_optimize_prompt(
             strategy=strategy,
             suggestions_text=suggestions_str,
             backtest_history=backtest_history,

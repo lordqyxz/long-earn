@@ -1,4 +1,4 @@
-# 策略开发提示词
+﻿# 策略开发提示词
 
 ## 任务描述
 
@@ -6,15 +6,15 @@
 
 ## 策略信息
 
-{strategy}
+${strategy}
 
 ## 目标市场
 
-{target_market}
+${target_market}
 
 ## 回测参数
 
-{backtest_params}
+${backtest_params}
 
 ## 回测系统接口要求
 

@@ -3,11 +3,13 @@
 提供策略研究、优化等场景的提示词模板。
 """
 
-from langchain_core.prompts import PromptTemplate
+from __future__ import annotations
+
+from typing import Any
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
+from long_earn.core.render import render
 
-# 从 Markdown 文件加载策略研究提示词模板
 _research_prompt_template = MarkdownPromptTemplate(
     "strategy_research_prompt.md",
     ["target_market", "query", "strategy_examples", "strategy_context"],
@@ -37,27 +39,19 @@ def create_strategy_research_prompt(
     )
 
 
-# 策略优化提示词 - 内联定义（无对应 md 文件）
-strategy_optimize_prompt = PromptTemplate(
-    input_variables=[
-        "strategy",
-        "suggestions_text",
-        "backtest_history",
-        "market_characteristics",
-    ],
-    template="""你是一位世界顶级的量化策略优化专家。请根据改进建议优化当前策略。
+strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专家。请根据改进建议优化当前策略。
 
 ## 当前策略
-{strategy}
+${strategy}
 
 ## 改进建议
-{suggestions_text}
+${suggestions_text}
 
 ## 历史回测结果
-{backtest_history}
+${backtest_history}
 
 ## 市场特征
-{market_characteristics}
+${market_characteristics}
 
 ## 可用数据字段（必须且只能使用以下字段）
 行情：open, high, low, close, volume
@@ -76,19 +70,43 @@ strategy_optimize_prompt = PromptTemplate(
 ## 输出格式
 请严格按照以下 JSON 格式返回优化后的策略：
 ```json
-{{
+{
     "strategy_name": "优化后的策略名称",
     "strategy_type": "策略类型",
     "rationale": "优化理由",
     "investment_logic": "优化后的投资逻辑",
     "factors_used": [],
-    "position_management": {{}},
-    "risk_control": {{}},
-    "backtest_params": {{}},
-    "expected_metrics": {{}},
+    "position_management": {},
+    "risk_control": {},
+    "backtest_params": {},
+    "expected_metrics": {},
     "potential_risks": [],
     "improvement_directions": []
-}}
+}
 ```
-""",
-)
+"""
+
+
+def render_strategy_optimize_prompt(
+    strategy: Any,
+    suggestions_text: str,
+    backtest_history: str,
+    market_characteristics: str,
+) -> str:
+    """渲染策略优化提示词
+
+    Args:
+        strategy: 当前策略（dict 或 str，自动 str() 转换）
+        suggestions_text: 改进建议文本
+        backtest_history: 历史回测结果
+        market_characteristics: 市场特征
+    """
+    return render(
+        strategy_optimize_prompt,
+        {
+            "strategy": strategy,
+            "suggestions_text": suggestions_text,
+            "backtest_history": backtest_history,
+            "market_characteristics": market_characteristics,
+        },
+    )
