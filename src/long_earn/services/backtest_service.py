@@ -1,4 +1,4 @@
-"""回测服务实现
+﻿"""回测服务实现
 
 对接事件驱动回测引擎，支持 YAML DSL 策略描述。
 """
@@ -550,3 +550,103 @@ class BacktestServiceImpl(BacktestService):
                 "error_category": "engine_error",
                 "error_detail": str(e),
             }
+
+    def run_grid(  # noqa: PLR0913
+        self,
+        strategy_template: str,
+        param_grid: Any,
+        start_date: str = "",
+        end_date: str = "",
+        universe_type: str = "csi300",
+        benchmark_symbol: str = "",
+        allow_large_grid: bool = False,
+    ) -> dict[str, Any]:
+        """参数网格并行回测。"""
+        from long_earn.backtest.engine.parallel import ParallelRunner  # noqa: PLC0415
+
+        start_date = start_date or self.config.backtest_start_date
+        end_date = end_date or self.config.backtest_end_date
+
+        universe_provider = MiniQmtUniverseProvider()
+        symbols = universe_provider.get_symbols(
+            universe_type, end_date.replace("-", "")
+        )
+        formatted_symbols = PandasToPolarsProvider._format_symbols(symbols)
+
+        if self.logger:
+            self.logger.info(
+                f"[grid] 股票池: {universe_type}, {len(formatted_symbols)} 只"
+            )
+
+        runner = ParallelRunner()
+        result = runner.run_grid(
+            strategy_template=strategy_template,
+            param_grid=param_grid,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=formatted_symbols,
+            benchmark_symbol=benchmark_symbol,
+            allow_large_grid=allow_large_grid,
+        )
+
+        return {
+            "total": len(result.outcomes),
+            "success_count": result.success_count,
+            "failure_count": result.failure_count,
+            "best_sharpe": result.best.sharpe_ratio if result.best else None,
+            "best_return": result.best_by_return.total_return
+            if result.best_by_return
+            else None,
+            "best_param_desc": result.best.param_desc if result.best else "",
+            "outcomes": [
+                {
+                    "task_id": o.task_id,
+                    "success": o.success,
+                    "total_return": o.total_return,
+                    "sharpe_ratio": o.sharpe_ratio,
+                    "max_drawdown": o.max_drawdown,
+                    "error": o.error,
+                    "param_desc": o.param_desc,
+                }
+                for o in result.outcomes
+            ],
+        }
+
+    def run_walk_forward_parallel(  # noqa: PLR0913
+        self,
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
+        n_splits: int = 3,
+        universe_type: str = "csi300",
+        benchmark_symbol: str = "",
+    ) -> dict[str, Any]:
+        """Walk-Forward 并行回测。"""
+        from long_earn.backtest.engine.parallel import ParallelRunner  # noqa: PLC0415
+
+        start_date = start_date or self.config.backtest_start_date
+        end_date = end_date or self.config.backtest_end_date
+
+        universe_provider = MiniQmtUniverseProvider()
+        symbols = universe_provider.get_symbols(
+            universe_type, end_date.replace("-", "")
+        )
+        formatted_symbols = PandasToPolarsProvider._format_symbols(symbols)
+
+        if self.logger:
+            self.logger.info(
+                f"[walk_forward_parallel] 股票池: {universe_type}, "
+                f"{len(formatted_symbols)} 只, n_splits={n_splits}"
+            )
+
+        runner = ParallelRunner()
+        result = runner.run_walk_forward_parallel(
+            strategy_yaml=strategy_yaml,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=formatted_symbols,
+            n_splits=n_splits,
+            benchmark_symbol=benchmark_symbol,
+        )
+
+        return result
