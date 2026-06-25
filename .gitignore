@@ -33,3 +33,6 @@ pyrightconfig.json
 # Ralph Loop 运行时状态
 .claude/ralph-state.md
 .claude/.ralph-loop.local.md
+
+# Windows 保留设备名误生成文件
+nul
