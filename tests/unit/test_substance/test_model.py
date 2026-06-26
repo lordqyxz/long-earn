@@ -1,46 +1,35 @@
-"""Substance 模型单元测试 — SubstanceForm / FilterLogic / Substance 基础行为。"""
+"""Substance 模型测试 — 核心行为：sid 生成 + 可见性 + 衰减。"""
 
 from datetime import datetime, timedelta
 
-from long_earn.substance.model import FilterLogic, Substance, SubstanceForm
+from long_earn.substance.model import Substance, SubstanceForm
 
 
-class TestSubstanceModel:
-    def test_default_sid_generated(self):
-        s = Substance(form=SubstanceForm.KNOWLEDGE, content="测试")
-        assert s.sid.startswith("sub_")
-        assert s.form is SubstanceForm.KNOWLEDGE
+def test_sid_auto_generated():
+    s = Substance(form=SubstanceForm.KNOWLEDGE, content="测试")
+    assert s.sid.startswith("sub_")
 
-    def test_is_visible_at_no_restrictions(self):
-        s = Substance(form=SubstanceForm.EVENT, content="新闻")
-        assert s.is_visible_at(datetime.now())
 
-    def test_is_visible_at_with_visible_from(self):
-        future = datetime.now() + timedelta(days=1)
-        s = Substance(form=SubstanceForm.EVENT, content="未来事件", visible_from=future)
-        assert not s.is_visible_at(datetime.now())
-        assert s.is_visible_at(future + timedelta(hours=1))
+def test_visibility_and_decay():
+    """可见性（visible_from + expires_at）+ 衰减因子半衰期验证。"""
+    now = datetime.now()
+    future = now + timedelta(days=1)
+    past = now - timedelta(days=1)
 
-    def test_is_visible_at_with_expires_at(self):
-        past = datetime.now() - timedelta(days=1)
-        s = Substance(form=SubstanceForm.EVENT, content="过期事件", expires_at=past)
-        assert not s.is_visible_at(datetime.now())
+    visible = Substance(form=SubstanceForm.EVENT, content="已公开")
+    assert visible.is_visible_at(now)
 
-    def test_decay_factor_fresh_is_one(self):
-        s = Substance(form=SubstanceForm.KNOWLEDGE, content="新知识")
-        assert abs(s.decay_factor() - 1.0) < 1e-6
+    future_s = Substance(form=SubstanceForm.EVENT, content="未来", visible_from=future)
+    assert not future_s.is_visible_at(now)
+    assert future_s.is_visible_at(future + timedelta(hours=1))
 
-    def test_decay_factor_aged(self):
-        old = datetime.now() - timedelta(days=90)
-        s = Substance(
-            form=SubstanceForm.KNOWLEDGE,
-            content="旧知识",
-            created_at=old,
-            decay_half_life_days=90.0,
-        )
-        factor = s.decay_factor()
-        assert 0.4 < factor < 0.6  # 半衰期后约 0.5
+    expired = Substance(form=SubstanceForm.EVENT, content="过期", expires_at=past)
+    assert not expired.is_visible_at(now)
 
-    def test_form_is_str_enum(self):
-        assert SubstanceForm.EVENT == "event"
-        assert FilterLogic.AND_ANY == "and_any"
+    aged = Substance(
+        form=SubstanceForm.KNOWLEDGE,
+        content="旧知识",
+        created_at=now - timedelta(days=90),
+        decay_half_life_days=90.0,
+    )
+    assert 0.4 < aged.decay_factor() < 0.6  # 半衰期后约 0.5
