@@ -39,11 +39,13 @@ long_earn/
 ├── src/long_earn/           # 主项目源码
 │   ├── backtest/            # 内嵌回测引擎
 │   │   ├── domain/          #   领域模型（实体、值对象、异常）
-│   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器
-│   │   └── data/            #   数据提供（miniqmt/xtdat + DuckDB 缓存）
-│   ├── core/                # 核心工具（prompt_loader, llm_utils）
-│   ├── substance/           # 物质-运动统一架构（Substance + Motion，见 ADR-007）
-│   │   └── indices/         #   RetrievalIndex（keyword+semantic 双通道）+ GraphIndex（邻接表）
+│   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器 + 并行编排 + 参数网格 + 共享数据底座
+│   │   ├── operators/       #   算子框架（factor/filter/rank/compose/technical + 因果检测）
+│   │   └── data/            #   数据提供（Composite 多源降级：DuckDB → miniqmt → akshare）
+│   ├── core/                # 核心工具（prompt_loader `${var}`、render 纯函数渲染、llm_utils）
+│   ├── memory/              # 记忆系统（ADR-004，v2.0；**ADR-007 物质-运动架构待落地，见 TODO**）
+│   ├── operator_dev/        # 算子研发子图（sandbox + backlog + spec + agents）
+│   ├── strategy_optimization/ # 策略优化 pipeline（acceptance / optimizer）
 │   ├── services/            # 服务接口与实现
 │   ├── state.py             # 主图状态定义
 │   ├── strategy_rd/         # 策略研发子图
@@ -56,8 +58,8 @@ long_earn/
 │   └── utils/               # 通用工具（llm_factory, logger）
 ├── tests/                   # 测试
 │   ├── unit/                # 单元测试
-│   │   ├── test_backtest/  # 回测引擎测试
-│   │   ├── test_substance/ # 物质-运动架构测试
+│   │   ├── test_backtest/  # 回测引擎测试（含并行 / 参数网格 / 渲染器）
+│   │   ├── test_memory/    # 记忆系统测试（ADR-004 v2.0；ADR-007 落地后改 test_substance/）
 │   │   ├── test_services/  # 服务层测试
 │   │   ├── test_strategy_rd/ # 策略研发测试
 │   │   └── test_config.py  # 配置测试
@@ -78,7 +80,7 @@ create_runtime_context(config) / initialize_context(config)
     ↓
 RuntimeContext(dataclass)
     ├── llm_service: LLMService (Protocol)
-    ├── memory: MemoryService (Protocol)        # 委托 SubstanceStore（ADR-007）
+    ├── memory: MemoryService (Protocol)        # 当前委托 MemoryStore（ADR-004 v2.0）；ADR-007 落地后改委托 SubstanceStore
     ├── stock_service: StockService (Protocol)
     ├── backtest_service: BacktestService (Protocol)
     ├── logger: LoggerService
@@ -127,7 +129,7 @@ def my_node(state: State, context: RuntimeContext):
 
 ### Prompt 管理
 
-使用 `MarkdownPromptTemplate` 加载 `.md` 文件。变量使用 `{{variable}}` 双花括号语法（自动转换为 LangChain 的 `{variable}`）；代码块内大括号自动转义。frontmatter 可选，支持 `version`/`description` 字段。
+使用 `MarkdownPromptTemplate` 加载 `.md` 文件。变量使用 `${variable}` 语法（POSIX/bash/JS 模板字面量同款，跨语言可移植）；底层由 `core/render.py` 纯函数渲染（已解耦 LangChain，代码块内大括号无需转义）。frontmatter 可选，支持 `version`/`description` 字段。
 
 ```python
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
@@ -141,7 +143,7 @@ prompt = prompt_template.format(query=query)
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
 - **子项目为 git submodule**：`remoteMiniQmt/` 通过 `.gitmodules` 引入，clone 后需 `git submodule update --init --recursive` 才会有内容
-- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已废弃。
+- **记忆系统**：当前基于 ADR-004 v2.0（numpy/pandas 三级记忆 + MemoryStore + RelationGraph），持久化路径配置项已为 `substances.jsonl` 但**实际仍走旧 npz/pkl 路径**。ADR-007 物质-运动统一架构（`substance/` 模块）已 Accepted 但**尚未实施**——文档/TODO 中"v3.0 进行中"为失真描述，实际 Phase 1 未启动。落地后将统一为 `Substance`，旧 `memory/` 移除。
 - **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），首次运行时会通过 miniqmt (xtquant) 获取数据。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
 - **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)
@@ -155,7 +157,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库（Superseded by ADR-007）
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
 - [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Proposed）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；参考实现见 `D:\dev\cidd\.claude\skills\ciccwm-*/scripts/`。
-- [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。
+- [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**Accepted，尚未实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。落地前旧 `memory/`（ADR-004 v2.0）仍在生产路径。
 
 ## 调研文档
 
@@ -233,7 +235,9 @@ src/long_earn/backtest/
 
 ## 记忆系统
 
-基于物质-运动统一架构（[ADR-007](docs/adr/007-unified-substance-architecture.md)），事件/关系/知识/策略经验统一为 `Substance`：
+> **当前状态**：生产路径仍是 ADR-004 v2.0（`src/long_earn/memory/`，numpy/pandas + MemoryStore + RelationGraph）。ADR-007 物质-运动统一架构（`src/long_earn/substance/`）已 Accepted 但**尚未实施**——下列 `substance/` 模块树为落地后的目标结构，当前不存在。
+
+ADR-007 落地后的目标模块树：
 
 ```txt
 src/long_earn/substance/
@@ -262,7 +266,7 @@ src/long_earn/substance/
 | LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
 | DASHSCOPE_API_KEY | — | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填）|
 | OPENAI_API_KEY | — | OpenAI API Key（LLM_TYPE=openai 时必填）|
-| MEMORY_PATH | ~/.long\_earn/substances.jsonl | 记忆持久化路径（物质-运动架构，JSONL） |
+| MEMORY_PATH | ~/.long\_earn/substances.jsonl | 记忆持久化路径（ADR-007 落地后的目标值；当前 v2.0 实际走 npz/pkl） |
 | INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
 | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
@@ -311,12 +315,10 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 记忆服务实现 | `src/long_earn/services/memory_service.py` |
 | LLM 服务实现 | `src/long_earn/services/llm_service.py` |
 | 股票信息服务 | `src/long_earn/services/stock_service.py` |
-| 物质模型 | `src/long_earn/substance/model.py` |
-| 物质存储引擎 | `src/long_earn/substance/store.py` |
-| 运动层（激活/衰减/冲突/压缩） | `src/long_earn/substance/motion.py` |
-| 检索索引（keyword+semantic） | `src/long_earn/substance/indices/retrieval.py` |
-| 图索引（邻接表） | `src/long_earn/substance/indices/graph.py` |
-| 持久化（JSONL） | `src/long_earn/substance/persistence.py` |
+| 记忆存储（ADR-004 v2.0，当前生产路径） | `src/long_earn/memory/store.py` |
+| 记忆图（ADR-004 v2.0） | `src/long_earn/memory/graph.py` |
+| 记忆 TF-IDF（ADR-004 v2.0） | `src/long_earn/memory/tfidf.py` |
+| 记忆 embedding（ADR-004 v2.0） | `src/long_earn/memory/embedding.py` |
 | 领域实体 & 值对象 | `src/long_earn/backtest/domain/entities.py` |
 | 领域异常 | `src/long_earn/backtest/domain/exceptions.py` |
 | 抽象接口 (AuditProvider) | `src/long_earn/backtest/domain/interfaces.py` |
@@ -331,6 +333,13 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | YAML DSL 解析器 | `src/long_earn/backtest/engine/dsl.py` |
 | 安全表达式求值器 | `src/long_earn/backtest/engine/evaluator.py` |
 | 审计提供者 | `src/long_earn/backtest/engine/audit.py` |
+| 并行编排层 | `src/long_earn/backtest/engine/parallel.py` |
+| 参数网格 | `src/long_earn/backtest/engine/param_grid.py` |
+| 共享数据底座 (SharedMemory) | `src/long_earn/backtest/engine/shared_data.py` |
+| 算子框架基类 | `src/long_earn/backtest/operators/base.py` |
+| 因果检测 | `src/long_earn/backtest/operators/causality.py` |
+| 算子研发子图 | `src/long_earn/operator_dev/subgraph.py` |
+| 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
 | 数据提供者 | `src/long_earn/backtest/data/provider.py` |
 | miniqmt 数据封装 | `src/long_earn/backtest/data/miniqmt_provider.py` |
@@ -400,25 +409,26 @@ remoteMiniQmt/
 
 详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。在 `backtest/data/` 新增 `ciccwm_client.py` + `ciccwm_provider.py`：实现 `DataProvider` Protocol（行情历史→`get_price_panel`，财务报表→`get_financial_panel`），接入 `CompositeDataProvider` 降级链，优先级紧跟 miniqmt 之后、akshare 之前（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力（miniqmt、akshare 均无），以 Protocol 外扩展方法暴露，失败不静默降级。参考实现为 cidd 项目下已实测可用的三个 skill 脚本，凭证复用 `~/.config/ciccwm/config.json`。
 
-### 0. 新闻事件推理引擎 — 进行中（ADR-007）
+### 0. 新闻事件推理引擎 — 待启动（ADR-007）
 
 基于物质-运动统一架构（[ADR-007](docs/adr/007-unified-substance-architecture.md)），为系统增加新闻事件推理能力。详见 ADR-007 实施计划。
 
-- **Phase 1（进行中）**：SubstanceStore 核心 + 旧 `memory/` 移除。Pydantic Substance 模型 + 双索引（RetrievalIndex keyword/semantic + GraphIndex 邻接表）+ WorldInfo 激活引擎 + JSONL 持久化。`MemoryServiceImpl` 委托 SubstanceStore，Protocol 不变 → 消费方零改动。
+- **Phase 1（未启动）**：SubstanceStore 核心 + 旧 `memory/` 移除。Pydantic Substance 模型 + 双索引（RetrievalIndex keyword/semantic + GraphIndex 邻接表）+ WorldInfo 激活引擎 + JSONL 持久化。`MemoryServiceImpl` 委托 SubstanceStore，Protocol 不变 → 消费方零改动。
 - **Phase 2**：多源采集器（Kimi 联网搜索 / 腾讯新闻 / ciccwm 热榜）+ 事件推理子图（collect→extract→propagate→conflict→save）+ 主图路由。L2 影响传播推理（LLM 辅助建立事件→影响标的因果链）。
 - **Phase 3**：子图集成（stock_analysis / strategy_rd 调 `store.activate()` 注入事件上下文）+ Dashboard 事件流可视化。
 
-### 2. 记忆系统 — v3.0 物质-运动架构重构（进行中，见 ADR-007）
+### 2. 记忆系统 — v3.0 物质-运动架构重构（待启动，见 ADR-007）
 
-旧 v2.0 的 4 项（语义增强检索/记忆压缩/记忆衰减/冲突检测）随 Phase 1 一并重构为物质-运动架构的原生能力：
+> ADR-007 已 Accepted 但 Phase 1 尚未启动。下列 4 项为旧 v2.0 已实现的能力，落地后将由物质-运动架构的原生能力替代；当前勾选反映的是旧 v2.0 状态。
 
-- [x] **语义增强检索** → RetrievalIndex 双通道（keyword + semantic TF-IDF/embedding 融合）
-- [x] **记忆压缩与总结** → `motion.compress()`（修复聚类算法）
-- [x] **记忆衰减机制** → `motion.decay()`（按 form 配不同半衰期）
-- [x] **冲突检测** → `motion.detect_conflicts()`（可配置词库，不再硬编码）
+- [x] **语义增强检索** → RetrievalIndex 双通道（keyword + semantic TF-IDF/embedding 融合）*（旧 v2.0 已实现，ADR-007 落地后重构）*
+- [x] **记忆压缩与总结** → `motion.compress()`（修复聚类算法）*（旧 v2.0 已实现，ADR-007 落地后重构）*
+- [x] **记忆衰减机制** → `motion.decay()`（按 form 配不同半衰期）*（旧 v2.0 已实现，ADR-007 落地后重构）*
+- [x] **冲突检测** → `motion.detect_conflicts()`（可配置词库，不再硬编码）*（旧 v2.0 已实现，ADR-007 落地后重构）*
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
-- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。
+- [ ] **HTR 假设树精炼**：将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。详见 [`plan/hypothesis-tree-refinement-plan.md`](plan/hypothesis-tree-refinement-plan.md)（5 阶段，依赖 ADR-007 落地）。
+- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。基础设施已交付（`engine/parallel.py` + `param_grid.py`），subgraph 接入待后续轮。
 - [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
 - [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
 - [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。

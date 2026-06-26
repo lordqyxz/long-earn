@@ -1,6 +1,6 @@
 [project]
 name = "long_earn"
-version = "1.0.1"
+version = "1.1.0"
 description = "自我进化的量化交易系统"
 authors = [
     { name = "shiyz", email = "shiyz@eoutlook.com" },

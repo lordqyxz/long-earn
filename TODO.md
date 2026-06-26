@@ -1,7 +1,7 @@
 # TODO.md — 长期演进开发计划
 
-> 最后更新：2026-06-26
-> 当前分支：v1.0.0（开发中）
+> 最后更新：2026-06-27
+> 当前分支：feat/backtest-acceleration（v1.1.0 开发完成，待发版）
 
 ---
 
@@ -184,7 +184,7 @@
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| MarkdownPromptTemplate | ✅ | 支持 frontmatter + `{{variable}}` |
+| MarkdownPromptTemplate | ✅ | 支持 frontmatter + `${variable}`（POSIX/bash/JS 同款，已解耦 LangChain） |
 | Agent Prompt 文件 | ✅ | 各 Agent 同目录 .md prompt |
 | Prompt 版本管理 | ✅ | frontmatter version 字段 |
 
@@ -211,21 +211,21 @@
 - [ ] **配置中心化**：`.env` → `config.yaml` 多环境配置
 - [ ] **依赖管理**：Layer 1 最小依赖（polars + numpy + duckdb），Layer 3 可额外引入 sklearn/lightgbm 等
 
-### 记忆系统增强 ✅ v2.0 完成 (2026-05-19) — 已被 v3.0 取代
+### 记忆系统增强 ✅ v2.0 完成 (2026-05-19) — 当前生产路径
 
-> v2.0 实现已随 ADR-007 物质-运动统一架构重构移除（2026-06）。以下保留为历史记录。
+> ADR-007 物质-运动统一架构已 Accepted 但 Phase 1 **尚未启动**。下列 v2.0 能力仍为当前生产路径（`src/long_earn/memory/`），ADR-007 落地后将被 `substance/` 模块的原生能力替代。
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 记忆衰减 | ✅ v2.0 → v3.0 重构 | → `motion.decay()`（按 form 配不同半衰期） |
-| 冲突检测 | ✅ v2.0 → v3.0 重构 | → `motion.detect_conflicts()`（可配置词库） |
-| 记忆压缩 | ✅ v2.0 → v3.0 重构 | → `motion.compress()`（修复聚类算法） |
-| 语义增强检索 | ✅ v2.0 → v3.0 重构 | → RetrievalIndex 双通道（keyword + semantic 融合） |
-| 主题总结 | ✅ v2.0 → v3.0 重构 | → SubstanceStore 统一检索 |
+| 记忆衰减 | ✅ v2.0 生产中 | → ADR-007 落地后改 `motion.decay()`（按 form 配不同半衰期） |
+| 冲突检测 | ✅ v2.0 生产中 | → ADR-007 落地后改 `motion.detect_conflicts()`（可配置词库） |
+| 记忆压缩 | ✅ v2.0 生产中 | → ADR-007 落地后改 `motion.compress()`（修复聚类算法） |
+| 语义增强检索 | ✅ v2.0 生产中 | → ADR-007 落地后改 RetrievalIndex 双通道（keyword + semantic 融合） |
+| 主题总结 | ✅ v2.0 生产中 | → ADR-007 落地后改 SubstanceStore 统一检索 |
 
-**v2.0 源文件**（已删除）：`src/long_earn/memory/embedding.py`、`tests/unit/test_memory/test_memory_enhanced.py`
+**v2.0 源文件**（仍在生产路径）：`src/long_earn/memory/{store,graph,tfidf,embedding}.py`、`tests/unit/test_memory/`
 
-### 物质-运动统一架构重构 🔨 v3.0 进行中 (2026-06，见 ADR-007)
+### 物质-运动统一架构重构 ⏸️ v3.0 待启动 (ADR-007 Accepted，Phase 1 未启动)
 
 替换旧 `memory/` 模块为 `substance/` 模块。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
 

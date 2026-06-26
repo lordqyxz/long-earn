@@ -1,6 +1,6 @@
 # Long Earn
 
-自我进化的量化交易系统（v1.0.1）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+自我进化的量化交易系统（v1.1.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
 
 ## 系统概览
 
@@ -9,8 +9,8 @@ Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
 - **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
 - **策略研发** — 基于 Reflexion 框架的闭环策略研发：研究 → 开发 → 回测 → 反思 → 优化，支持多轮迭代和自适应知识检索
 - **多视角股票分析** — 从巴菲特、查理芒格、彼得林奇、费雪四个投资大师视角并行分析股票
-- **自我进化** — 策略经验自动沉淀到 3-Tier 记忆系统，后续研发可检索历史经验作为参考
-- **内嵌回测引擎** — 向量化回测引擎直接集成在主项目中，通过 YAML DSL 描述策略，无需外部服务
+- **自我进化** — 策略经验自动沉淀到 3-Tier 记忆系统（ADR-004 v2.0），后续研发可检索历史经验作为参考
+- **内嵌回测引擎** — 事件驱动回测引擎直接集成在主项目中，通过 YAML DSL 描述策略，支持进程级并行回测 + 参数网格寻优
 
 ## 工作流
 
@@ -33,7 +33,7 @@ Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
 
 ### 前置条件
 
-- Python 3.11
+- Python 3.13
 - [uv](https://docs.astral.sh/uv/) 包管理器
 - LLM 服务（默认 Ollama，也支持 DashScope / OpenAI 兼容 API）
 
@@ -67,22 +67,23 @@ uv run python -m long_earn                 # 运行项目
 uv run pytest tests/ -v                    # 运行全部测试
 uv run pytest tests/unit/ -v               # 仅运行单元测试
 uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
-uv run ruff check .                        # 代码检查
+uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
-uv run mypy src/                           # 类型检查
 uv run lint-imports                        # 架构依赖校验
 ```
+
+> 类型检查用 Serena LSP（`mcp__serena__get_diagnostics_for_file`），不使用 mypy / pyright CLI。
 
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `LLM_TYPE` | LLM 类型（ollama/dashscope/openai） | `ollama` |
-| `LLM_MODEL` | 模型名称 | `qwen3.5:cloud` |
+| `LLM_MODEL` | 模型名称 | `deepseek-v4-flash:cloud` |
 | `LLM_BASE_URL` | LLM API 地址 | `http://localhost:11434` |
 | `DASHSCOPE_API_KEY` | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） | — |
 | `OPENAI_API_KEY` | OpenAI API Key（LLM_TYPE=openai 时必填） | — |
-| `MEMORY_PATH` | 记忆持久化路径 | `~/.long_earn/memory.npz` |
+| `MEMORY_PATH` | 记忆持久化路径（当前 v2.0 实际落盘 .npz + .pkl；ADR-007 落地后改 substances.jsonl） | `~/.long_earn/memory.npz` |
 | `INIT_DIR` | 知识库初始化目录 | `./init` |
 | `BACKTEST_START_DATE` | 回测默认起始日期 | `2020-01-01` |
 | `BACKTEST_END_DATE` | 回测默认结束日期 | `2023-12-31` |
@@ -118,18 +119,18 @@ RuntimeContext
 1. **自适应检索** — 根据查询自动从记忆系统检索相关信息，评估是否需要补充检索
 2. **策略研究** — LLM 结合知识上下文生成投资策略
 3. **策略开发** — 将策略转化为 YAML DSL 策略描述
-4. **回测** — 通过内嵌向量化回测引擎执行回测，失败时自动修复代码（最多 3 次）
+4. **回测** — 通过内嵌事件驱动回测引擎执行回测，失败时自动修复代码（最多 3 次）
 5. **反思** — 基于 Tree of Thought 多分支反思，分析回测结果并提出改进方向
 6. **保存经验** — 将策略和反思沉淀到 3-Tier 记忆系统
-7. **监督器** — 评估是否继续迭代（终止条件：年化收益率 > 10% 且夏普比率 > 0.5）
+7. **监督器** — 评估是否继续迭代（终止条件：夏普比率 ≥ 1.5）
 
 ### 股票分析子图
 
-从四个投资大师视角并行分析股票内在价值，通过 akshare 获取股票和财务数据，支持指数退避重试。
+从四个投资大师视角并行分析股票内在价值，通过 miniqmt (xtquant) 获取股票和财务数据。
 
-### 回测引擎（内嵌）
+### 回测引擎（事件驱动，内嵌）
 
-回测引擎已整合到主项目中（`src/long_earn/backtest/`），通过 YAML DSL 描述策略，无需 HTTP 远程调用。
+回测引擎已整合到主项目中（`src/long_earn/backtest/`），通过 YAML DSL 描述策略，无需 HTTP 远程调用。采用事件驱动架构（ADR-005），杜绝未来函数，支持状态化策略与动态风控。
 
 **引擎结构：**
 
@@ -137,52 +138,70 @@ RuntimeContext
 src/long_earn/backtest/
 ├── models.py                # BacktestResult Pydantic 模型
 ├── domain/
-│   ├── entities.py          # 领域实体（Portfolio、DateRange）+ 值对象（PerformanceMetrics）
+│   ├── entities.py          # 领域实体（Portfolio、Event、Order）
 │   └── exceptions.py        # 领域异常层次
 ├── engine/
-│   ├── core.py              # 向量化回测引擎（Pandas MultiIndex 矩阵运算）
+│   ├── core.py              # 事件驱动回测引擎（T 维度迭代 × S 维度向量化）+ Walk-Forward
 │   ├── dsl.py               # YAML DSL 解析器（StrategyDSL + 字段校验）
-│   └── evaluator.py         # AST 白名单表达式求值器
+│   ├── evaluator.py         # AST 白名单表达式求值器（不使用 eval）
+│   ├── broker.py            # 模拟撮合（滑点 / 佣金 / 印花税）+ 高级订单类型
+│   ├── portfolio.py         # 投资组合管理（信号→订单→成交→持仓）
+│   ├── visibility.py        # 可见性守护（杜绝未来函数）
+│   ├── audit.py             # DuckDB 审计存储 + 因果链追踪
+│   ├── telemetry.py         # 可观测性（span 链路追踪）
+│   ├── ml_strategy.py       # ML 策略基类 + 特征工程 + 技术指标
+│   ├── strategy_templates.py # 策略模板库（双均线 / RSI 均值回归 / MACD 柱）
+│   ├── parallel.py          # 进程级并行编排（SharedMemory 零拷贝分发）
+│   ├── param_grid.py        # 参数网格（笛卡尔积 / 显式组合 + 标量插值）
+│   └── shared_data.py       # 共享数据底座（Arrow IPC + SharedMemory）
+├── operators/              # 算子框架（factor/filter/rank/compose + 因果检测）
 └── data/
     ├── cache.py             # DuckDB 本地缓存（行情 / 财务 / 成分股）
-    ├── provider.py          # Akshare 数据获取（行情 + 财务前向填充）
-    └── universe.py          # 股票池管理（沪深 300 / 中证 500 / 板块等）
+    ├── provider.py          # DataProvider Protocol + CompositeDataProvider 多源降级
+    ├── miniqmt_provider.py  # miniqmt (xtquant) 数据获取
+    ├── akshare_provider.py  # akshare fallback 数据获取
+    └── universe.py          # 股票池管理（全 A / csi300 / csi500 / 板块等）
 ```
 
-- **YAML DSL 策略**：LLM 直接生成 YAML 策略描述（因子、信号、权重、风控），引擎解析后执行向量化回测
-- **因子表达式**：支持 `shift(field, n)`、`rank(field)`、`np`/`pd` 函数调用
-- **可用字段**：10 个行情字段（open/high/low/close/volume）和 7 个财务字段（roe/eps/net_profit_yoy 等）
+- **YAML DSL 策略**：LLM 生成 YAML 策略描述（因子、信号、权重、风控），引擎解析后执行
+- **状态化策略**：LLM 可生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行
+- **数据隔离**：策略仅能通过 `engine.current_data` 访问当前时刻数据，确保回测真实性
+- **并行回测**：进程级并行编排（`parallel.py`），SharedMemory 零拷贝分发数据，参数网格自动寻优
+- **Walk-Forward OOS**：时序交叉验证，防止过拟合
 - **股票池**：支持全 A / csi300 / csi500 / main_board / gem / star_board 及组合
-- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，减少 akshare 请求
+- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，多源降级：DuckDB → miniqmt → akshare
 
 ### 记忆系统
 
-基于 numpy/pandas 的 3-Tier 记忆系统，无需外部向量数据库：
+基于 numpy/pandas 的 3-Tier 记忆系统（ADR-004 v2.0），无需外部向量数据库：
 
 ```txt
 src/long_earn/memory/
 ├── store.py                 # 3-Tier 记忆存储（Working / Core / Archival）
 ├── tfidf.py                 # TF-IDF 向量化器 + 余弦相似度检索
+├── embedding.py             # 嵌入混合检索 + TF-IDF 回退
 └── graph.py                 # 关系图存储（entity-relation graph）
 ```
 
 - **Working**：会话级临时上下文（当前推理窗口）
 - **Core**：持久化事实、策略规则、用户偏好
 - **Archival**：历史经验、过往回测结果、已过期的规则
-- **持久化**：`~/.long_earn/memory.npz`
+- **持久化**：`~/.long_earn/memory.npz`（实际落盘 `.npz` + `.pkl`）
 - **检索**：`recall()` 支持按层级、关键词、分类过滤；`search()` 返回格式化字符串
+
+> **ADR-007 物质-运动统一架构**已 Accepted 但尚未实施。落地后将用 `substance/` 模块（Pydantic Substance + 双索引 + JSONL 持久化）替换 `memory/`，Protocol 不变 → 消费方零改动。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
 
 ## 技术栈
 
 | 类别 | 技术 |
 |------|------|
-| 语言 | Python 3.11 |
+| 语言 | Python 3.13 |
 | 工作流框架 | LangGraph |
 | LLM | Ollama（默认）/ DashScope / OpenAI 兼容 API |
-| 回测引擎 | 自研向量化回测引擎（Pandas + NumPy） |
-| 记忆系统 | 3-Tier 记忆（TF-IDF + 余弦相似度 + 关系图） |
+| 回测引擎 | 自研事件驱动回测引擎（Polars + NumPy + DuckDB） |
+| 记忆系统 | 3-Tier 记忆（TF-IDF + embedding 混合检索 + 关系图） |
 | 数据缓存 | DuckDB |
-| 证券数据 | akshare |
+| 证券数据 | miniqmt (xtquant) → akshare（Composite 多源降级） |
 | Web 搜索 | Kimi Web Search / Tavily |
 | 日志 | loguru |
 | 包管理 | uv |
