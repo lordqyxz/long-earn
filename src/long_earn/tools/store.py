@@ -1,21 +1,21 @@
 """知识存储工具
 
-基于 numpy/pandas 记忆系统的知识检索和持久化。
+基于物质-运动统一架构（SubstanceStore）的知识检索和持久化。
 实际业务逻辑已迁移到 MemoryServiceImpl，本模块仅保留 init_system 供启动使用。
 """
 
 import os
 from pathlib import Path
 
-from long_earn.memory.store import MemoryStore
 from long_earn.services.logger_service import LoggerServiceImpl
+from long_earn.substance.store import SubstanceStore
 
 LOGGER = LoggerServiceImpl()
 
 
-def _get_store() -> MemoryStore:
-    """获取 MemoryStore 实例"""
-    return MemoryStore()
+def _get_store() -> SubstanceStore:
+    """获取 SubstanceStore 实例"""
+    return SubstanceStore()
 
 
 def init_system() -> None:
@@ -30,7 +30,9 @@ def init_system() -> None:
             LOGGER.info(f"知识库加载完成，共 {count} 条事实")
 
             memory_path = Path(
-                os.path.expanduser(os.getenv("MEMORY_PATH", "~/.long_earn/memory.npz"))
+                os.path.expanduser(
+                    os.getenv("MEMORY_PATH", "~/.long_earn/substances.jsonl")
+                )
             )
             memory_path.parent.mkdir(parents=True, exist_ok=True)
             store.save(memory_path)

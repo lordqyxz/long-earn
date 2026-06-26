@@ -1,6 +1,8 @@
-"""记忆服务实现 — 基于 MemoryStore 的 3-Tier 记忆系统
+"""记忆服务实现 — 委托 SubstanceStore（物质-运动统一架构，ADR-007）。
 
-Working / Core / Archival 三级记忆，遵循 Letta/MemGPT 模式。
+MemoryService Protocol 8 方法签名不变，内部存储从旧 MemoryStore（numpy/pandas）
+替换为 SubstanceStore（Pydantic Substance + 双索引 + JSONL）。
+消费方（strategy_rd 4 文件 5 调用点）零改动。
 """
 
 import json
@@ -9,30 +11,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from long_earn.memory.store import MemoryStore
 from long_earn.services import LoggerService, MemoryService
+from long_earn.substance.model import Substance, SubstanceForm
+from long_earn.substance.store import SubstanceStore
 
 if TYPE_CHECKING:
     from long_earn.config import AppConfig
 
 
 class MemoryServiceImpl(MemoryService):
-    """3-Tier 记忆服务"""
+    """记忆服务 — 委托 SubstanceStore 实现 Protocol 契约。"""
 
     def __init__(self, config: "AppConfig", logger: LoggerService):
         self.config = config
         self.logger = logger
-        self._store = MemoryStore()
+        self._store = SubstanceStore()
         self._initialized = False
 
     def initialize(self) -> None:
+        """初始化记忆系统（加载持久化 JSONL 或从 init 目录构建）。"""
         if self._initialized:
             return
 
         persistent_path = Path(self.config.memory_path).expanduser()
         if persistent_path.exists() and self._store.load(persistent_path):
             self._initialized = True
-            self.logger.info(f"记忆已加载 ({self._store.fact_count} 条)")
+            self.logger.info(f"记忆已加载 ({self._store.count} 条物质)")
             return
 
         init_dir = Path(self.config.init_dir)
@@ -54,7 +58,7 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         **filters,
     ) -> list[dict[str, Any]]:
-        """语义检索记忆"""
+        """语义检索记忆 — 委托 store.search()。"""
         try:
             return self._store.search(query, k=k, **filters)
         except Exception as e:
@@ -69,18 +73,21 @@ class MemoryServiceImpl(MemoryService):
         tier: str = "core",
         **metadata,
     ) -> str:
-        """存入记忆"""
+        """存入记忆 — 构造 knowledge 物质并添加到 store。"""
         metadata.setdefault("tier", tier)
         metadata.setdefault("created_at", datetime.now().isoformat())
-        idx = self._store.add_fact(content, metadata)
-        fact_id = f"mem_{idx:06d}"
-        self.logger.debug(f"记忆已存储 [{tier}]: {fact_id}")
-        # 自动持久化到磁盘
+        s = Substance(
+            form=SubstanceForm.KNOWLEDGE,
+            content=content,
+            metadata=metadata,
+        )
+        sid = self._store.add(s)
+        self.logger.debug(f"记忆已存储 [{tier}]: {sid}")
         self._auto_save()
-        return fact_id
+        return sid
 
     def _auto_save(self) -> None:
-        """自动持久化记忆到磁盘"""
+        """自动持久化记忆到磁盘。"""
         try:
             persistent_path = Path(self.config.memory_path).expanduser()
             self._store.save(persistent_path)
@@ -90,7 +97,7 @@ class MemoryServiceImpl(MemoryService):
     # ── Reflect ────────────────────────────────────────────────
 
     def reflect(self, session_summary: str) -> list[str]:
-        """反思整合 — 提炼会话经验为持久规则
+        """反思整合 — 提炼会话经验为持久规则。
 
         流程：
         1. 提取关键洞察 → Core 记忆
@@ -99,7 +106,6 @@ class MemoryServiceImpl(MemoryService):
         """
         ids: list[str] = []
 
-        # 提取策略名称和关键指标
         name_match = re.search(r"策略[名称]*[：:]\s*(.+?)(?:\n|$)", session_summary)
         strategy_name = name_match.group(1).strip() if name_match else "未命名策略"
 
@@ -108,7 +114,6 @@ class MemoryServiceImpl(MemoryService):
         )
         sharpe = float(sharpe_match.group(1)) if sharpe_match else 0.0
 
-        # 存储为核心记忆
         fact_id = self.remember(
             content=session_summary,
             tier="core",
@@ -120,7 +125,6 @@ class MemoryServiceImpl(MemoryService):
         )
         ids.append(fact_id)
 
-        # 建立与相关概念的关系
         for keyword, relation in [
             ("动量", "momentum"),
             ("价值", "value"),
@@ -145,8 +149,8 @@ class MemoryServiceImpl(MemoryService):
         relation: str = "related_to",
         weight: float = 1.0,
     ) -> None:
-        """建立知识实体关系"""
-        self._store.add_relation(source, target, weight)
+        """建立知识实体关系 — 构造 relation 物质。"""
+        self._store.add_relation(source, target, weight, relation_type=relation)
         self.logger.debug(f"关系: {source} --[{relation}]--> {target}")
 
     # ── Convenience: backward-compatible aliases ────────────────
@@ -157,7 +161,7 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         **filters,
     ) -> list[str]:
-        """便捷方法: 检索并返回格式化字符串（兼容旧 KnowledgeService 调用）"""
+        """便捷方法: 检索并返回格式化字符串。"""
         categories = filters.get("categories") or filters.get("category", [])
         terms = filters.get("terms") or filters.get("term", [])
         source_files = filters.get("source_files") or filters.get("source_file", [])
@@ -189,7 +193,7 @@ class MemoryServiceImpl(MemoryService):
         return output
 
     def save(self, content: str, metadata: dict[str, Any]) -> bool:
-        """便捷方法: 保存知识"""
+        """便捷方法: 保存知识。"""
         try:
             self.remember(content, **metadata)
             return True
@@ -206,7 +210,7 @@ class MemoryServiceImpl(MemoryService):
         reflection: str,
         error_history: list[dict] | None = None,
     ) -> bool:
-        """便捷方法: 保存策略经验"""
+        """便捷方法: 保存策略经验。"""
         try:
             content = f"""# 策略经验：{strategy_name}
 
@@ -232,9 +236,6 @@ class MemoryServiceImpl(MemoryService):
 {json.dumps(error_history, ensure_ascii=False, indent=2)}
 """
 
-            # 兼容扁平结构（BacktestServiceImpl.run 实际返回）：
-            # 优先取扁平字段，回退到嵌套 metrics 子字典；
-            # 这样存入 experience 的 metadata 始终带真实数值，便于后续记忆检索匹配。
             metrics_payload = backtest_result.get("metrics", {}) or {}
             flat_keys = (
                 "total_return",
@@ -272,7 +273,7 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         min_sharpe: float | None = None,
     ) -> list[dict]:
-        """便捷方法: 搜索历史经验
+        """便捷方法: 搜索历史经验。
 
         min_sharpe 过滤：用显式 None 检查避免 `0 or fallback` 链
         把合法低值 sharpe=0 当成"缺失"误回退。

@@ -108,6 +108,13 @@ type = "independence"
 modules = ["long_earn.services"]
 message = "services 层不应依赖 tools 模块"
 
+[[tool.importlinter.contracts]]
+id = "substance_independent"
+name = "物质层不依赖上层模块"
+type = "independence"
+modules = ["long_earn.substance"]
+message = "substance 层不应依赖 services/tools/strategy_rd 等上层模块"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",

@@ -9,7 +9,7 @@ Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
 - **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
 - **策略研发** — 基于 Reflexion 框架的闭环策略研发：研究 → 开发 → 回测 → 反思 → 优化，支持多轮迭代和自适应知识检索
 - **多视角股票分析** — 从巴菲特、查理芒格、彼得林奇、费雪四个投资大师视角并行分析股票
-- **自我进化** — 策略经验自动沉淀到 3-Tier 记忆系统（ADR-004 v2.0），后续研发可检索历史经验作为参考
+- **自我进化** — 策略经验自动沉淀到物质-运动统一架构记忆系统（ADR-007），后续研发可检索历史经验作为参考
 - **内嵌回测引擎** — 事件驱动回测引擎直接集成在主项目中，通过 YAML DSL 描述策略，支持进程级并行回测 + 参数网格寻优
 
 ## 工作流
@@ -83,7 +83,7 @@ uv run lint-imports                        # 架构依赖校验
 | `LLM_BASE_URL` | LLM API 地址 | `http://localhost:11434` |
 | `DASHSCOPE_API_KEY` | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） | — |
 | `OPENAI_API_KEY` | OpenAI API Key（LLM_TYPE=openai 时必填） | — |
-| `MEMORY_PATH` | 记忆持久化路径（当前 v2.0 实际落盘 .npz + .pkl；ADR-007 落地后改 substances.jsonl） | `~/.long_earn/memory.npz` |
+| `MEMORY_PATH` | 记忆持久化路径（物质-运动架构，JSONL） | `~/.long_earn/substances.jsonl` |
 | `INIT_DIR` | 知识库初始化目录 | `./init` |
 | `BACKTEST_START_DATE` | 回测默认起始日期 | `2020-01-01` |
 | `BACKTEST_END_DATE` | 回测默认结束日期 | `2023-12-31` |
@@ -173,23 +173,26 @@ src/long_earn/backtest/
 
 ### 记忆系统
 
-基于 numpy/pandas 的 3-Tier 记忆系统（ADR-004 v2.0），无需外部向量数据库：
+基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`（Pydantic）：
 
 ```txt
-src/long_earn/memory/
-├── store.py                 # 3-Tier 记忆存储（Working / Core / Archival）
-├── tfidf.py                 # TF-IDF 向量化器 + 余弦相似度检索
-├── embedding.py             # 嵌入混合检索 + TF-IDF 回退
-└── graph.py                 # 关系图存储（entity-relation graph）
+src/long_earn/substance/
+├── store.py                 # SubstanceStore（统一存储 + 双索引协调）
+├── model.py                 # Substance(Pydantic) + SubstanceForm + FilterLogic
+├── motion.py                # 运动层（activate/decay/conflict/compress）
+├── persistence.py           # JSONL 读写（无 pickle，有 schema 版本号）
+└── indices/
+    ├── retrieval.py         # RetrievalIndex（keyword 通道 + semantic 通道 + 融合）
+    └── graph.py             # GraphIndex（dict 邻接表 + BFS 返回路径）
 ```
 
-- **Working**：会话级临时上下文（当前推理窗口）
-- **Core**：持久化事实、策略规则、用户偏好
-- **Archival**：历史经验、过往回测结果、已过期的规则
-- **持久化**：`~/.long_earn/memory.npz`（实际落盘 `.npz` + `.pkl`）
-- **检索**：`recall()` 支持按层级、关键词、分类过滤；`search()` 返回格式化字符串
+- **物质 (Substance)**：统一存在基类，`form` 区分 event/relation/knowledge/strategy/backtest
+- **运动 (motion)**：施加在物质上的运算（activate/decay/conflict/compress），不持久化，只产出新物质
+- **双索引**：RetrievalIndex（WorldInfo 关键词触发 + TF-IDF/embedding 语义相似度双通道融合）+ GraphIndex（邻接表图遍历）
+- **持久化**：`~/.long_earn/substances.jsonl`（JSONL，无 pickle，有 schema 版本号）
+- **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见
 
-> **ADR-007 物质-运动统一架构**已 Accepted 但尚未实施。落地后将用 `substance/` 模块（Pydantic Substance + 双索引 + JSONL 持久化）替换 `memory/`，Protocol 不变 → 消费方零改动。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
+> 旧 `memory/` 模块（ADR-004 v2.0）已删除，详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
 
 ## 技术栈
 
@@ -199,7 +202,7 @@ src/long_earn/memory/
 | 工作流框架 | LangGraph |
 | LLM | Ollama（默认）/ DashScope / OpenAI 兼容 API |
 | 回测引擎 | 自研事件驱动回测引擎（Polars + NumPy + DuckDB） |
-| 记忆系统 | 3-Tier 记忆（TF-IDF + embedding 混合检索 + 关系图） |
+| 记忆系统 | 物质-运动统一架构（Substance + 双索引 + JSONL） |
 | 数据缓存 | DuckDB |
 | 证券数据 | miniqmt (xtquant) → akshare（Composite 多源降级） |
 | Web 搜索 | Kimi Web Search / Tavily |

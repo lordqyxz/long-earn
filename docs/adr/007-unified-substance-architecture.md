@@ -1,7 +1,7 @@
 # ADR-007: 物质-运动统一架构（Substance-Motion）
 
 日期: 2026-06
-状态: Accepted
+状态: Accepted, Implemented (Phase 1)
 
 ## 背景
 

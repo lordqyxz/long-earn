@@ -105,7 +105,7 @@ class AppConfig:
     llm_type: str = "ollama"
     llm_model: str = "deepseek-v4-flash:cloud"
     llm_base_url: str = "http://localhost:11434"
-    memory_path: str = str(PROJECT_DATA_DIR / "memory.npz")
+    memory_path: str = str(PROJECT_DATA_DIR / "substances.jsonl")
     init_dir: str = "./init"
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
@@ -127,7 +127,7 @@ class AppConfig:
             llm_type=os.getenv("LLM_TYPE", "ollama"),
             llm_model=os.getenv("LLM_MODEL", "deepseek-v4-flash:cloud"),
             llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
-            memory_path=os.getenv("MEMORY_PATH", str(PROJECT_DATA_DIR / "memory.npz")),
+            memory_path=os.getenv("MEMORY_PATH", str(PROJECT_DATA_DIR / "substances.jsonl")),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
