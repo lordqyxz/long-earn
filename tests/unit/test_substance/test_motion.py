@@ -25,7 +25,6 @@ class TestActivate:
             )
         )
         activated = activate("动量选股", store, budget=10)
-        sids = [s.sid for s in activated]
         assert len(activated) >= 1
         assert any("动量" in s.content for s in activated)
 

@@ -1,7 +1,7 @@
 """知识存储工具
 
-基于物质-运动统一架构（SubstanceStore）的知识检索和持久化。
-实际业务逻辑已迁移到 MemoryServiceImpl，本模块仅保留 init_system 供启动使用。
+基于物质-运动统一架构（SubstanceStore）的知识持久化。
+提供 init_system 供系统初始化使用。
 """
 
 import os
@@ -38,25 +38,3 @@ def init_system() -> None:
             store.save(memory_path)
 
     LOGGER.info("系统初始化完成")
-
-
-def search_knowledge(
-    query: str,
-    k: int = 3,
-    categories: list[str] | None = None,
-    terms: list[str] | None = None,
-    source_files: list[str] | None = None,
-) -> list[str]:
-    """搜索知识库（兼容旧接口）"""
-    try:
-        store = _get_store()
-        return store.search_as_strings(
-            query,
-            k=k,
-            categories=categories,
-            terms=terms,
-            source_files=source_files,
-        )
-    except Exception as e:
-        LOGGER.error(f"搜索知识库失败: {e}")
-        return []

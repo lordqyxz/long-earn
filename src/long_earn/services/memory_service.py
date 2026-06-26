@@ -153,7 +153,7 @@ class MemoryServiceImpl(MemoryService):
         self._store.add_relation(source, target, weight, relation_type=relation)
         self.logger.debug(f"关系: {source} --[{relation}]--> {target}")
 
-    # ── Convenience: backward-compatible aliases ────────────────
+    # ── Search ───────────────────────────────────────────────
 
     def search(
         self,
@@ -161,19 +161,12 @@ class MemoryServiceImpl(MemoryService):
         k: int = 3,
         **filters,
     ) -> list[str]:
-        """便捷方法: 检索并返回格式化字符串。"""
-        categories = filters.get("categories") or filters.get("category", [])
-        terms = filters.get("terms") or filters.get("term", [])
-        source_files = filters.get("source_files") or filters.get("source_file", [])
-        results = self.recall(
-            query,
-            k=k,
-            categories=categories if isinstance(categories, list) else [categories],
-            terms=terms if isinstance(terms, list) else [terms],
-            source_files=source_files
-            if isinstance(source_files, list)
-            else [source_files],
-        )
+        """便捷方法: 检索并返回格式化字符串。
+
+        消费方（mixins._search_knowledge）传 categories= / source_files= 等
+        kwargs 直接透传给 store.search()。
+        """
+        results = self.recall(query, k=k, **filters)
         output = []
         for r in results:
             meta = r["metadata"]
@@ -191,15 +184,6 @@ class MemoryServiceImpl(MemoryService):
 
             output.append(f"{header}\n{content}\n")
         return output
-
-    def save(self, content: str, metadata: dict[str, Any]) -> bool:
-        """便捷方法: 保存知识。"""
-        try:
-            self.remember(content, **metadata)
-            return True
-        except Exception as e:
-            self.logger.error(f"保存失败: {e}")
-            return False
 
     def save_experience(  # noqa: PLR0913
         self,

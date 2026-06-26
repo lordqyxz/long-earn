@@ -1,8 +1,7 @@
 """SubstanceStore — 统一存储 + 索引协调 + 时间过滤。
 
-替代旧 MemoryStore，统一管理 Substance 的增删查和双索引维护。
-对外提供与旧 MemoryStore.search() 兼容的返回格式（dict 含 content/metadata/similarity），
-使 MemoryServiceImpl 委托时消费方零改动。
+管理 Substance 的增删查和双索引维护。
+返回 dict 含 content/metadata/similarity，供 MemoryServiceImpl 委托使用。
 """
 
 from __future__ import annotations
@@ -81,7 +80,6 @@ class SubstanceStore:
             keys=keys or [],
             metadata=meta,
         )
-        # 把旧系统 metadata 中的 term/category/source_file 也存入 metadata
         return self.add(s)
 
     def get_by_sid(self, sid: str) -> Substance | None:
@@ -99,12 +97,6 @@ class SubstanceStore:
     def count(self) -> int:
         """物质总数。"""
         return len(self._substances)
-
-    # 旧 MemoryStore 兼容属性
-    @property
-    def fact_count(self) -> int:
-        """旧兼容：物质总数（knowledge 形态计数）。"""
-        return sum(1 for s in self._substances if s.form is SubstanceForm.KNOWLEDGE)
 
     # ── 检索 ──────────────────────────────────────────────────
 
@@ -128,7 +120,7 @@ class SubstanceStore:
         include_decayed: bool = True,
         visible_at: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """搜索物质库 — 返回与旧 MemoryStore.search() 兼容的格式。
+        """搜索物质库。
 
         Args:
             query: 搜索查询
@@ -209,7 +201,7 @@ class SubstanceStore:
         k: int = 3,
         **kwargs: Any,
     ) -> list[str]:
-        """搜索并返回格式化字符串（兼容旧接口）。"""
+        """搜索并返回格式化字符串。"""
         results = self.search(query, k=k, **kwargs)
         output: list[str] = []
         for r in results:
@@ -265,13 +257,13 @@ class SubstanceStore:
     def load(self, path: str | Path) -> bool:
         """从 JSONL 文件加载。
 
-        旧系统用 .npz + .pkl，新系统用 .jsonl。
-        如果传入旧路径（.npz），自动改查 .jsonl。
+        Args:
+            path: JSONL 文件路径
+
+        Returns:
+            是否成功加载（文件存在且有物质）
         """
         path = Path(path)
-        # 兼容旧路径扩展名
-        if path.suffix == ".npz":
-            path = path.with_suffix(".jsonl")
         if not path.exists():
             logger.warning(f"物质文件不存在: {path}")
             return False

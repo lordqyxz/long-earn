@@ -17,7 +17,7 @@ class TestSubstanceStoreCrud:
         store = SubstanceStore()
         sid = store.add_knowledge("动量策略", metadata={"term": "动量"})
         assert sid.startswith("sub_")
-        assert store.fact_count == 1
+        assert store.count == 1
 
     def test_get_by_sid(self):
         store = SubstanceStore()
