@@ -1,4 +1,4 @@
-﻿"""进程级并行编排层
+"""进程级并行编排层
 
 提供参数网格并行回测和 Walk-Forward 并行回测。
 每个 worker 独立构造引擎实例，通过 SharedMemory 共享数据底座。
@@ -315,6 +315,7 @@ class ParallelRunner:
         from long_earn.backtest.engine.core import (  # noqa: PLC0415
             EventDrivenBacktestEngine,
         )
+
         engine = EventDrivenBacktestEngine()
         timestamps = engine._get_timestamps(full_data)
         splitter = TimeSeriesSplit(n_splits=n_splits)
@@ -395,18 +396,19 @@ class ParallelRunner:
                 }
                 all_test_metrics.append(test_metrics)
 
-            fold_results.append({
-                "fold_id": fold_idx,
-                "train": train_metrics,
-                "test": test_metrics,
-            })
+            fold_results.append(
+                {
+                    "fold_id": fold_idx,
+                    "train": train_metrics,
+                    "test": test_metrics,
+                }
+            )
 
         def _avg(metrics_list: list[dict[str, float]]) -> dict[str, float]:
             if not metrics_list:
                 return {}
             return {
-                k: float(np.mean([m[k] for m in metrics_list]))
-                for k in metrics_list[0]
+                k: float(np.mean([m[k] for m in metrics_list])) for k in metrics_list[0]
             }
 
         return {

@@ -1,4 +1,4 @@
-﻿import json
+import json
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +29,7 @@ class DuckDBAuditProvider(AuditProvider):
         # 创建审计专用 Schema（使用唯一名称避免与数据库文件名冲突）
         conn.execute('CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
         # 创建审计日志表
-        conn.execute('''
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS "backtest_audit".logs (
                 run_id VARCHAR,
                 timestamp TIMESTAMP,
@@ -42,7 +42,7 @@ class DuckDBAuditProvider(AuditProvider):
                 latency_ms DOUBLE,
                 PRIMARY KEY (run_id, trace_id, timestamp)
             )
-        ''')
+        """)
         logger.info(f"Audit provider initialized at {self.db_path}")
 
     def log_event(self, record: AuditRecord) -> None:
@@ -59,10 +59,10 @@ class DuckDBAuditProvider(AuditProvider):
         payload_json = json.dumps(record.payload, default=json_serializable)
 
         conn.execute(
-            '''
+            """
             INSERT INTO "backtest_audit".logs (run_id, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
+            """,
             [
                 record.run_id,
                 record.timestamp,

@@ -1,4 +1,4 @@
-﻿"""akshare 降级数据提供者。
+"""akshare 降级数据提供者。
 
 当 miniqmt 不可用且 DuckDB 缓存无数据时，降级到 akshare 获取数据。
 akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
@@ -198,9 +198,7 @@ class AkshareFallbackProvider:
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并面板（行情 + 财务）。"""
-        price_df = self.get_price_panel(
-            symbols, start_date, end_date, price_fields
-        )
+        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )

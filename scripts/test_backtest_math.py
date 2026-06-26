@@ -26,14 +26,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from long_earn.backtest.domain.entities import (
-    FillEvent,
     OrderEvent,
-    Position,
-    SignalEvent,
 )
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.portfolio import Portfolio
-
 
 # ── 测试工具函数 ──────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-﻿"""记忆存储 — 综合事实 + 向量检索 + 关系图的统一记忆系统
+"""记忆存储 — 综合事实 + 向量检索 + 关系图的统一记忆系统
 
 基于 numpy/pandas 技术底座，无外部向量数据库依赖。
 
@@ -602,8 +602,12 @@ class MemoryStore:
         }
         # 保存 vectorizer 词汇表和 IDF，避免 load 后需要重建
         if self._vectorizer.idf_ is not None:
-            save_data["vocab_keys"] = np.array(list(self._vectorizer.vocabulary_.keys()))
-            save_data["vocab_vals"] = np.array(list(self._vectorizer.vocabulary_.values()))
+            save_data["vocab_keys"] = np.array(
+                list(self._vectorizer.vocabulary_.keys())
+            )
+            save_data["vocab_vals"] = np.array(
+                list(self._vectorizer.vocabulary_.values())
+            )
             save_data["idf"] = self._vectorizer.idf_
 
         np.savez_compressed(path, **save_data, allow_pickle=True)
@@ -641,7 +645,9 @@ class MemoryStore:
                     if "vocab_keys" in data and "idf" in data:
                         keys = data["vocab_keys"]
                         vals = data["vocab_vals"]
-                        self._vectorizer.vocabulary_ = dict(zip(keys, vals, strict=True))
+                        self._vectorizer.vocabulary_ = dict(
+                            zip(keys, vals, strict=True)
+                        )
                         self._vectorizer.idf_ = data["idf"]
                         self._dirty = False
                     elif self._vectorizer.idf_ is not None:

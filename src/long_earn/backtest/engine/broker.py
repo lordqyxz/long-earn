@@ -1,4 +1,4 @@
-﻿"""模拟撮合经纪人
+"""模拟撮合经纪人
 
 负责将订单 (OrderEvent) 转换为成交记录 (FillEvent)，并计算交易成本。
 支持市价单、限价单、止损单、止损限价单及 OCO 订单。
@@ -117,9 +117,7 @@ class Broker:
 
         raise OrderExecutionError(f"未知订单执行类型: {order_type}")
 
-    def check_pending_orders(
-        self, price_lookup: dict[str, float]
-    ) -> list[FillEvent]:
+    def check_pending_orders(self, price_lookup: dict[str, float]) -> list[FillEvent]:
         """
         检查所有待成交订单（每个 bar 调用一次）
 
@@ -217,7 +215,9 @@ class Broker:
         self._cancel_oco_siblings(order)
         return fill
 
-    def _try_fill_limit(self, order: OrderEvent, current_price: float) -> FillEvent | None:
+    def _try_fill_limit(
+        self, order: OrderEvent, current_price: float
+    ) -> FillEvent | None:
         """尝试限价单成交（价格满足条件则成交，否则返回 None）
 
         保守成交规则（避免回测过于乐观）：

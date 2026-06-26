@@ -1,7 +1,7 @@
 # ADR-004: 基于 numpy/pandas 的三级记忆系统
 
 日期: 2025-05
-状态: 已采纳
+状态: Superseded by [ADR-007](007-unified-substance-architecture.md)（2026-06）
 
 ## 背景
 

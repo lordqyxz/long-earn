@@ -10,7 +10,11 @@ import duckdb
 import pandas as pd
 from loguru import logger
 
-DEFAULT_CACHE_PATH = Path(__file__).parent.parent.parent.parent.parent / ".cache" / "backtest_cache.duckdb"
+DEFAULT_CACHE_PATH = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / ".cache"
+    / "backtest_cache.duckdb"
+)
 
 
 class DataCache:
@@ -219,9 +223,15 @@ class DataCache:
 
         # 只选择缓存表中存在的列，缺失列用 NULL 填充
         cache_columns = [
-            "symbol", "report_date",
-            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
-            "eps", "net_profit", "revenue",
+            "symbol",
+            "report_date",
+            "net_profit_yoy",
+            "revenue_yoy",
+            "roe",
+            "gross_margin",
+            "eps",
+            "net_profit",
+            "revenue",
         ]
         for col in cache_columns:
             if col not in df.columns:
@@ -235,8 +245,8 @@ class DataCache:
 
         conn.execute(f"""
             INSERT OR REPLACE INTO financial_quarterly
-            ({', '.join(cache_columns)})
-            SELECT {', '.join(cache_columns)} FROM df
+            ({", ".join(cache_columns)})
+            SELECT {", ".join(cache_columns)} FROM df
         """)
         logger.info(f"缓存财务数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
 

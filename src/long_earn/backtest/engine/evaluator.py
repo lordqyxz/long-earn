@@ -1,4 +1,4 @@
-﻿"""安全表达式求值器
+"""安全表达式求值器
 
 基于 AST 遍历的安全表达式求值，替代 eval()。
 仅支持白名单操作：算术、比较、逻辑运算、内置函数（abs/min/max/sum/mean/std 等）。
@@ -54,19 +54,21 @@ _SAFE_FUNCTIONS: dict[str, Any] = {
 }
 
 # 安全属性白名单（仅允许访问这些属性，防止链式调用如 np.os.system）
-_SAFE_ATTRIBUTES: frozenset[str] = frozenset({
-    "iloc",
-    "loc",
-    "shape",
-    "index",
-    "columns",
-    "values",
-    "name",
-    "dtype",
-    "size",
-    "T",
-    "empty",
-})
+_SAFE_ATTRIBUTES: frozenset[str] = frozenset(
+    {
+        "iloc",
+        "loc",
+        "shape",
+        "index",
+        "columns",
+        "values",
+        "name",
+        "dtype",
+        "size",
+        "T",
+        "empty",
+    }
+)
 
 
 class SafeExpressionError(ValueError):

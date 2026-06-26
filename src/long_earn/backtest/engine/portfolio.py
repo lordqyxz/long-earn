@@ -1,4 +1,4 @@
-﻿"""投资组合管理器
+"""投资组合管理器
 
 负责将策略生成的信号转换为具体订单，并管理实时持仓与资金。
 """
@@ -19,6 +19,7 @@ from long_earn.backtest.domain.entities import (
 
 if TYPE_CHECKING:
     from long_earn.backtest.engine.broker import TradingCostConfig
+
 
 @dataclass
 class PortfolioState:
@@ -94,7 +95,11 @@ class Portfolio:
         """预估卖出净回笼 = 成交金额(扣滑点) - 佣金 - 印花税。"""
         slip = self._slippage_rate()
         proceeds = target_value * (1.0 - slip)
-        return proceeds - self._estimate_commission(proceeds) - proceeds * self._stamp_duty_rate()
+        return (
+            proceeds
+            - self._estimate_commission(proceeds)
+            - proceeds * self._stamp_duty_rate()
+        )
 
     def _max_affordable_buy(self, cash: float) -> float:
         """在现金 ``cash`` 下，反解能承受的最大买入目标金额（含滑点+佣金）。
@@ -150,9 +155,7 @@ class Portfolio:
         for held in self.positions:
             target_weights.setdefault(held, 0.0)
 
-        target_weights = self._apply_position_limits(
-            target_weights, max_positions
-        )
+        target_weights = self._apply_position_limits(target_weights, max_positions)
 
         order_infos = self._compute_order_infos(
             target_weights, current_prices, max_position_pct
@@ -228,12 +231,14 @@ class Portfolio:
                     if diff_val <= 0:
                         continue
 
-            order_infos.append({
-                "symbol": symbol,
-                "order_type": order_type,
-                "diff_val": diff_val,
-                "price": price,
-            })
+            order_infos.append(
+                {
+                    "symbol": symbol,
+                    "order_type": order_type,
+                    "diff_val": diff_val,
+                    "price": price,
+                }
+            )
 
         # 按先卖后买排序，使卖出回笼资金可用于同 bar 买入
         order_infos.sort(key=lambda x: 0 if x["order_type"] == "SELL" else 1)

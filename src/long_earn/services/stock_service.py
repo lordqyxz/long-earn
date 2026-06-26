@@ -60,8 +60,12 @@ class StockServiceImpl(StockService):
             return {
                 "code": stock_code,
                 "name": detail.get("stockName", detail.get("name", "未知")),
-                "current_price": float(tick.get(stock_code, {}).get("latestPrice", 0.0)),
-                "change_percent": float(tick.get(stock_code, {}).get("changeRatio", 0.0)),
+                "current_price": float(
+                    tick.get(stock_code, {}).get("latestPrice", 0.0)
+                ),
+                "change_percent": float(
+                    tick.get(stock_code, {}).get("changeRatio", 0.0)
+                ),
                 "volume": int(tick.get(stock_code, {}).get("volume", 0)),
                 "turnover": float(tick.get(stock_code, {}).get("amount", 0.0)),
                 "total_shares": float(detail.get("totalShare", 0.0)),

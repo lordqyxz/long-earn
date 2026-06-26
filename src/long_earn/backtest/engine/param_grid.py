@@ -19,9 +19,7 @@ def render_template(yaml_template: str, scalar_params: dict[str, Any]) -> str:
     return render(yaml_template, scalar_params)
 
 
-def apply_struct_params(
-    dsl: StrategyDSL, struct_params: dict[str, Any]
-) -> StrategyDSL:
+def apply_struct_params(dsl: StrategyDSL, struct_params: dict[str, Any]) -> StrategyDSL:
     """在解析后的 DSL 对象上做字段深拷贝+赋值。
 
     支持点分路径访问嵌套字段，如 "risk_control.stop_loss" → dsl.risk_control.stop_loss。
@@ -80,9 +78,7 @@ class ParamGrid:
         """
         scalar_combos = self.expand_scalars()
         struct_combos = self.expand_structs()
-        return [
-            (s, st) for s in scalar_combos for st in struct_combos
-        ]
+        return [(s, st) for s in scalar_combos for st in struct_combos]
 
     @property
     def total_combinations(self) -> int:

@@ -1,4 +1,4 @@
-﻿"""基于 miniqmt (xtquant.xtdata) 的本地数据提供者。
+"""基于 miniqmt (xtquant.xtdata) 的本地数据提供者。
 
 数据获取策略：DuckDB 缓存优先，miniqmt 增量补充。
 
@@ -84,7 +84,9 @@ class MiniQmtClient:
                 return future.result(timeout=timeout)
             except FuturesTimeoutError:
                 logger.warning(f"xtdata 调用超时 ({timeout}s): {fn.__name__}")
-                raise TimeoutError(f"xtdata 调用超时 ({timeout}s): {fn.__name__}") from None
+                raise TimeoutError(
+                    f"xtdata 调用超时 ({timeout}s): {fn.__name__}"
+                ) from None
 
     @classmethod
     def get(cls) -> MiniQmtClient:
@@ -108,9 +110,7 @@ class MiniQmtClient:
         disable = os.environ.get("LONG_EARN_DISABLE_XTQUANT", "").strip().lower()
         if disable in ("1", "true", "yes", "on"):
             self._available = False
-            logger.info(
-                "LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用"
-            )
+            logger.info("LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用")
             return self._available
         # 2. 尝试 import；失败则不可用
         try:
@@ -496,9 +496,7 @@ class MiniQmtDataProvider:
         # 3. 若需要刷新且 miniqmt 可用，增量获取
         if need_refresh and self.client.is_available:
             if missing_symbols:
-                logger.info(
-                    f"行情缓存缺失 {len(missing_symbols)} 只，从 miniqmt 补充"
-                )
+                logger.info(f"行情缓存缺失 {len(missing_symbols)} 只，从 miniqmt 补充")
             else:
                 logger.info("行情缓存过期，从 miniqmt 增量更新")
 
@@ -661,7 +659,7 @@ class MiniQmtDataProvider:
                     "total_hldr_eqy_incl_min_int": "total_equity",
                     "s_fa_total_hldr_eqy_exc_min_int": "total_equity",
                 }
-                for xt_col, std_col in equity_fields.items():
+                for xt_col, _std_col in equity_fields.items():
                     if xt_col in balance_df.columns:
                         balance_cols.append(xt_col)
                         break
@@ -716,9 +714,7 @@ class MiniQmtDataProvider:
             logger.warning(f"miniqmt 财务数据下载失败: {e}")
             return None
 
-    def _compute_derived_financials(
-        self, df: pd.DataFrame
-    ) -> pd.DataFrame:
+    def _compute_derived_financials(self, df: pd.DataFrame) -> pd.DataFrame:
         """从原始财务数据计算衍生指标（YoY、ROE、毛利率）。
 
         Args:
@@ -744,13 +740,16 @@ class MiniQmtDataProvider:
                 continue
 
             # 计算毛利率 = (revenue - total_operating_cost) / revenue
-            if "revenue" in symbol_data.columns and "total_operating_cost" in symbol_data.columns:
+            if (
+                "revenue" in symbol_data.columns
+                and "total_operating_cost" in symbol_data.columns
+            ):
                 rev = symbol_data["revenue"].astype(float)
                 cost = symbol_data["total_operating_cost"].astype(float)
                 valid = (rev != 0) & rev.notna() & cost.notna()
                 symbol_data.loc[valid, "gross_margin"] = (
-                    (rev[valid] - cost[valid]) / rev[valid]
-                )
+                    rev[valid] - cost[valid]
+                ) / rev[valid]
 
             # 计算 YoY 增长率：与去年同期比较
             symbol_data["_quarter"] = symbol_data["report_date"].dt.quarter
@@ -766,9 +765,8 @@ class MiniQmtDataProvider:
                     if pd.isna(row.get(field)) or row[field] == 0:
                         continue
                     # 找去年同期数据
-                    last_year_mask = (
-                        (symbol_data["_year"] == row["_year"] - 1)
-                        & (symbol_data["_quarter"] == row["_quarter"])
+                    last_year_mask = (symbol_data["_year"] == row["_year"] - 1) & (
+                        symbol_data["_quarter"] == row["_quarter"]
                     )
                     last_year_data = symbol_data.loc[last_year_mask, field]
                     if not last_year_data.empty and last_year_data.iloc[0] != 0:
@@ -788,9 +786,7 @@ class MiniQmtDataProvider:
                 valid = eq_val.notna() & (eq_val != 0) & np_val.notna()
                 # 年化 ROE：Q1*4, Q2*2, H1*2, Q3*4/3, Q3*2, FY*1
                 quarter = symbol_data["_quarter"]
-                annualize_factor = quarter.map(
-                    {1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0}
-                )
+                annualize_factor = quarter.map({1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0})
                 symbol_data.loc[valid, "roe"] = (
                     np_val[valid] / eq_val[valid]
                 ) * annualize_factor[valid]
@@ -860,9 +856,7 @@ class MiniQmtDataProvider:
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并的数据面板（行情 + 财务）。"""
-        price_df = self.get_price_panel(
-            symbols, start_date, end_date, price_fields
-        )
+        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )
@@ -873,7 +867,7 @@ class MiniQmtDataProvider:
         if fin_df.empty:
             return price_df
         # 检查 fin_df 是否有正确的 MultiIndex
-        if not isinstance(fin_df.index, pd.MultiIndex) or fin_df.index.nlevels < 2:  # noqa: PLR2004
+        if not isinstance(fin_df.index, pd.MultiIndex) or fin_df.index.nlevels < 2:
             # 财务数据 index 不规范，只返回行情数据
             return price_df
         # 统一 index names，确保一致
@@ -883,7 +877,7 @@ class MiniQmtDataProvider:
         p = price_df.reset_index()
         f = fin_df.reset_index()
         idx_cols = [c for c in p.columns if c in f.columns][:2]
-        if len(idx_cols) < 2:  # noqa: PLR2004
+        if len(idx_cols) < 2:
             return price_df
         p[idx_cols[0]] = pd.to_datetime(p[idx_cols[0]])
         f[idx_cols[0]] = pd.to_datetime(f[idx_cols[0]])
@@ -911,9 +905,7 @@ class MiniQmtDataProvider:
             if start <= pd.to_datetime(q, format="%Y%m%d") <= end
         ]
         before_start = [
-            q
-            for q in all_quarters
-            if pd.to_datetime(q, format="%Y%m%d") < start
+            q for q in all_quarters if pd.to_datetime(q, format="%Y%m%d") < start
         ]
         if before_start:
             quarters.append(max(before_start))
@@ -952,9 +944,7 @@ class MiniQmtUniverseProvider:
         # 1. 优先从缓存读取
         # 指数：沪深300 / 中证500 / 上证50 / 中证1000
         if universe_type in INDEX_SECTOR_MAP:
-            return self._get_index_constituents(
-                INDEX_SECTOR_MAP[universe_type], date
-            )
+            return self._get_index_constituents(INDEX_SECTOR_MAP[universe_type], date)
         # 英文板块名映射
         sector_name = BOARD_NAME_MAP.get(universe_type, universe_type)
         # 中文板块名
@@ -971,9 +961,7 @@ class MiniQmtUniverseProvider:
                 self.cache.save_universe(sector_name, date, result)
                 logger.info(f"获取 {sector_name} 板块: {len(result)} 只")
             return result
-        logger.warning(
-            f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}"
-        )
+        logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}")
         return []
 
     def _get_index_constituents(self, index_name: str, date: str) -> list[str]:
@@ -986,9 +974,7 @@ class MiniQmtUniverseProvider:
                 self.cache.save_universe(index_name, date, result)
                 logger.info(f"获取 {index_name} 成分股: {len(result)} 只")
             return result
-        logger.warning(
-            f"缓存无数据且 miniqmt 不可用，无法获取 {index_name} 成分股"
-        )
+        logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取 {index_name} 成分股")
         return []
 
     def _get_all_a_stocks(self, date: str) -> list[str]:
@@ -1011,4 +997,3 @@ class MiniQmtUniverseProvider:
             self.cache.save_universe("all_a", date, unique)
             logger.info(f"全A股聚合: {len(unique)} 只")
         return unique
-

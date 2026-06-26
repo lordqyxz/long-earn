@@ -166,7 +166,9 @@ class MemoryServiceImpl(MemoryService):
             k=k,
             categories=categories if isinstance(categories, list) else [categories],
             terms=terms if isinstance(terms, list) else [terms],
-            source_files=source_files if isinstance(source_files, list) else [source_files],
+            source_files=source_files
+            if isinstance(source_files, list)
+            else [source_files],
         )
         output = []
         for r in results:
@@ -285,9 +287,7 @@ class MemoryServiceImpl(MemoryService):
                 if min_sharpe is not None:
                     s = meta.get("sharpe_ratio")
                     if s is None:
-                        s = (meta.get("backtest_metrics", {}) or {}).get(
-                            "sharpe_ratio"
-                        )
+                        s = (meta.get("backtest_metrics", {}) or {}).get("sharpe_ratio")
                     if s is None or s < min_sharpe:
                         continue
 

@@ -105,7 +105,7 @@ class AppConfig:
     llm_type: str = "ollama"
     llm_model: str = "deepseek-v4-flash:cloud"
     llm_base_url: str = "http://localhost:11434"
-    memory_path: str = str(PROJECT_DATA_DIR / "memory.npz")
+    memory_path: str = str(PROJECT_DATA_DIR / "substances.jsonl")
     init_dir: str = "./init"
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"

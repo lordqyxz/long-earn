@@ -1,4 +1,4 @@
-﻿"""数据提供者模块
+"""数据提供者模块
 
 统一的数据获取接口，支持多数据源自动降级：
   DuckDB 缓存 → miniqmt (xtquant) → akshare
@@ -17,6 +17,7 @@ from typing import Protocol
 import pandas as pd
 
 from long_earn.backtest.data.cache import DataCache
+
 
 class DataProvider(Protocol):
     """数据提供者统一接口。
@@ -210,8 +211,7 @@ class CompositeDataProvider:
 
         # 3. 所有数据源均不可用
         logger.warning(
-            "所有数据源均不可用（miniqmt 不可用 + akshare 不可用），"
-            "行情数据获取失败"
+            "所有数据源均不可用（miniqmt 不可用 + akshare 不可用），行情数据获取失败"
         )
         return pd.DataFrame()
 
@@ -260,9 +260,7 @@ class CompositeDataProvider:
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并面板（行情 + 财务，自动降级）。"""
-        price_df = self.get_price_panel(
-            symbols, start_date, end_date, price_fields
-        )
+        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )
@@ -273,7 +271,7 @@ class CompositeDataProvider:
         if fin_df.empty:
             return price_df
         # 检查 fin_df 是否有正确的 MultiIndex
-        if not isinstance(fin_df.index, pd.MultiIndex) or fin_df.index.nlevels < 2:  # noqa: PLR2004
+        if not isinstance(fin_df.index, pd.MultiIndex) or fin_df.index.nlevels < 2:
             # 财务数据 index 不规范，只返回行情数据
             return price_df
         # 统一 index names，确保一致
@@ -283,7 +281,7 @@ class CompositeDataProvider:
         p = price_df.reset_index()
         f = fin_df.reset_index()
         idx_cols = [c for c in p.columns if c in f.columns][:2]
-        if len(idx_cols) < 2:  # noqa: PLR2004
+        if len(idx_cols) < 2:
             return price_df
         p[idx_cols[0]] = pd.to_datetime(p[idx_cols[0]])
         f[idx_cols[0]] = pd.to_datetime(f[idx_cols[0]])

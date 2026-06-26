@@ -52,9 +52,7 @@ class SharedDataContext:
             self._shm.buf[: len(data)] = data
             self.token = self._shm.name
             self.size = len(data)
-            logger.debug(
-                f"SharedMemory 创建: name={self.token}, size={self.size}"
-            )
+            logger.debug(f"SharedMemory 创建: name={self.token}, size={self.size}")
             atexit.register(self._cleanup)
         except Exception as e:
             logger.warning(f"SharedMemory 不可用，退化为 pickle 路径: {e}")

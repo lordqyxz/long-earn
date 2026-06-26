@@ -173,9 +173,7 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         """搜索历史策略经验"""
 
         try:
-            raw = self.memory.recall(
-                query, k=4, categories=["策略经验"]
-            )
+            raw = self.memory.recall(query, k=4, categories=["策略经验"])
         except Exception:
             if self.logger:
                 self.logger.warning(f"搜索经验失败：{query}")

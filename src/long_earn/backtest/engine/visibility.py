@@ -1,4 +1,4 @@
-﻿"""可见性守护模块
+"""可见性守护模块
 
 负责严格控制回测过程中的数据可见性，从架构层面杜绝未来函数 (Look-ahead bias)。
 """
@@ -137,7 +137,10 @@ class VisibilityGuard:
 
     def _get_history_slice(self) -> pl.DataFrame:
         """获取截至当前时间戳的历史数据切片（带缓存）"""
-        if self._cached_history is not None and self._cached_timestamp == self.current_timestamp:
+        if (
+            self._cached_history is not None
+            and self._cached_timestamp == self.current_timestamp
+        ):
             return self._cached_history
 
         self._cached_history = self._full_data.filter(

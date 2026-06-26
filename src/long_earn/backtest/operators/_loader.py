@@ -1,4 +1,4 @@
-﻿"""算子目录自动扫描器与契约校验
+"""算子目录自动扫描器与契约校验
 
 首次 ``import long_earn.backtest.operators`` 时递归扫描 ``operators/`` 下所有
 ``*.py``（跳过 ``_`` 前缀文件），收集带 ``@operator`` 装饰的类，逐一做契约

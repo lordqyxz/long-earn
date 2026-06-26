@@ -1,4 +1,4 @@
-﻿"""事件驱动回测引擎核心
+"""事件驱动回测引擎核心
 
 实现 T 维度迭代 × S 维度向量化 (Slab) 的执行链路。
 """
@@ -197,9 +197,7 @@ class EventDrivenBacktestEngine:
             if price is not None:
                 with contextlib.suppress(TypeError, ValueError):
                     price_lookup[sym] = float(price)
-        pending_fills = broker.check_pending_orders(
-            price_lookup=price_lookup
-        )
+        pending_fills = broker.check_pending_orders(price_lookup=price_lookup)
         for pf in pending_fills:
             portfolio.update_from_fill(pf)
             self._log_audit(
@@ -294,8 +292,7 @@ class EventDrivenBacktestEngine:
                 continue
 
             pnl_pct = (
-                (check_price - pos.avg_cost) / pos.avg_cost
-                if pos.avg_cost > 0 else 0.0
+                (check_price - pos.avg_cost) / pos.avg_cost if pos.avg_cost > 0 else 0.0
             )
             if pnl_pct > -self.stop_loss:
                 continue
@@ -304,7 +301,9 @@ class EventDrivenBacktestEngine:
             # 现实中止损单触发后通常以触发价附近 + 滑点成交，绝不会恰好 = 日内 low
             stop_threshold = pos.avg_cost * (1 - self.stop_loss)
             # 取 max(止损线, 日内最低价): 真实成交不会优于止损线
-            ref_price = max(stop_threshold, check_price) if check_price else stop_threshold
+            ref_price = (
+                max(stop_threshold, check_price) if check_price else stop_threshold
+            )
             if ref_price > 0:
                 order = OrderEvent(
                     timestamp=ts,
@@ -356,13 +355,13 @@ class EventDrivenBacktestEngine:
         return True
 
     @staticmethod
-    def _lookup_price(slab: pl.DataFrame, symbol: str, field: str = "close") -> float | None:
+    def _lookup_price(
+        slab: pl.DataFrame, symbol: str, field: str = "close"
+    ) -> float | None:
         """从 slab 中查找指定字段的价格"""
         if field not in slab.columns:
             return None
-        price_series = (
-            slab.filter(pl.col("symbol") == symbol).select(field).to_series()
-        )
+        price_series = slab.filter(pl.col("symbol") == symbol).select(field).to_series()
         if price_series.is_empty():
             return None
         result = price_series[0]
@@ -591,7 +590,9 @@ class EventDrivenBacktestEngine:
                 "beta": 0.0,
                 "information_ratio": 0.0,
                 "tracking_error": 0.0,
-                "benchmark_return": float((bm_arr[-1] / bm_arr[0]) - 1) if bm_arr[0] > 0 else 0.0,
+                "benchmark_return": float((bm_arr[-1] / bm_arr[0]) - 1)
+                if bm_arr[0] > 0
+                else 0.0,
             }
 
         # Beta: Cov(R_p, R_m) / Var(R_m)
@@ -609,9 +610,7 @@ class EventDrivenBacktestEngine:
         # 信息比率
         excess = port_returns - bm_returns
         tracking_error = float(np.std(excess, ddof=1)) * np.sqrt(252)
-        information_ratio = (
-            alpha / tracking_error if tracking_error > 0 else 0.0
-        )
+        information_ratio = alpha / tracking_error if tracking_error > 0 else 0.0
         benchmark_return = float((bm_arr[-1] / bm_arr[0]) - 1) if bm_arr[0] > 0 else 0.0
 
         return {
@@ -681,7 +680,11 @@ class EventDrivenBacktestEngine:
             self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
-                strategy, train_start, train_end, symbols, benchmark_symbol,
+                strategy,
+                train_start,
+                train_end,
+                symbols,
+                benchmark_symbol,
                 full_data=full_data,
             )
             if train_result.success:
@@ -694,18 +697,24 @@ class EventDrivenBacktestEngine:
                 all_train_metrics.append(train_metrics)
             else:
                 train_metrics = {"error": train_result.message}
-                failed_folds.append({
-                    "fold_id": fold_idx,
-                    "phase": "train",
-                    "error_category": train_result.error_category or "unknown",
-                    "message": train_result.message,
-                })
+                failed_folds.append(
+                    {
+                        "fold_id": fold_idx,
+                        "phase": "train",
+                        "error_category": train_result.error_category or "unknown",
+                        "message": train_result.message,
+                    }
+                )
 
             # 测试期回测（重置策略状态和审计日志，防止训练期信息泄漏）
             self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
-                strategy, test_start, test_end, symbols, benchmark_symbol,
+                strategy,
+                test_start,
+                test_end,
+                symbols,
+                benchmark_symbol,
                 full_data=full_data,
             )
             if test_result.success:
@@ -718,12 +727,14 @@ class EventDrivenBacktestEngine:
                 all_test_metrics.append(test_metrics)
             else:
                 test_metrics = {"error": test_result.message}
-                failed_folds.append({
-                    "fold_id": fold_idx,
-                    "phase": "test",
-                    "error_category": test_result.error_category or "unknown",
-                    "message": test_result.message,
-                })
+                failed_folds.append(
+                    {
+                        "fold_id": fold_idx,
+                        "phase": "test",
+                        "error_category": test_result.error_category or "unknown",
+                        "message": test_result.message,
+                    }
+                )
 
             fold_results.append(
                 {
@@ -765,7 +776,8 @@ class EventDrivenBacktestEngine:
                     start_dt = pl.lit(start).str.to_datetime()
                     end_dt = pl.lit(end).str.to_datetime()
                     df = df.filter(
-                        (pl.col("timestamp") >= start_dt) & (pl.col("timestamp") <= end_dt)
+                        (pl.col("timestamp") >= start_dt)
+                        & (pl.col("timestamp") <= end_dt)
                     )
                 return df  # type: ignore[no-any-return]
         return pl.DataFrame()
@@ -800,7 +812,7 @@ class EventDrivenBacktestEngine:
         downside = returns[returns < 0]
         # 使用标准下行偏差公式: sqrt(mean(R^2)) for R < 0，不减去均值
         downside_std = (
-            float(np.sqrt(np.mean(downside ** 2))) * np.sqrt(252)
+            float(np.sqrt(np.mean(downside**2))) * np.sqrt(252)
             if len(downside) > 0
             else 0.0
         )

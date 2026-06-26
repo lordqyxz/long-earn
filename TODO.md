@@ -1,6 +1,6 @@
 # TODO.md — 长期演进开发计划
 
-> 最后更新：2026-05-20
+> 最后更新：2026-06-26
 > 当前分支：v1.0.0（开发中）
 
 ---
@@ -211,19 +211,45 @@
 - [ ] **配置中心化**：`.env` → `config.yaml` 多环境配置
 - [ ] **依赖管理**：Layer 1 最小依赖（polars + numpy + duckdb），Layer 3 可额外引入 sklearn/lightgbm 等
 
-### 记忆系统增强 ✅ v2.0 完成 (2026-05-19)
+### 记忆系统增强 ✅ v2.0 完成 (2026-05-19) — 已被 v3.0 取代
+
+> v2.0 实现已随 ADR-007 物质-运动统一架构重构移除（2026-06）。以下保留为历史记录。
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 记忆衰减 | ✅ | 指数衰减曲线，search() 自动按时间降低旧事实权重 |
-| 冲突检测 | ✅ | TF-IDF 高相似度 + 正负面关键词矛盾检测 + 冲突组管理 |
-| 记忆压缩 | ✅ | 贪心聚类合并相似事实，_merge_cluster 保留主事实 + 追加内容 |
-| 语义增强检索 | ✅ | EmbeddingRetriever 模块，sentence-transformers 可选依赖，混合检索融合 TF-IDF + 嵌入评分 |
-| 主题总结 | ✅ | summarize_topic() 聚合检索结果生成主题总结 |
+| 记忆衰减 | ✅ v2.0 → v3.0 重构 | → `motion.decay()`（按 form 配不同半衰期） |
+| 冲突检测 | ✅ v2.0 → v3.0 重构 | → `motion.detect_conflicts()`（可配置词库） |
+| 记忆压缩 | ✅ v2.0 → v3.0 重构 | → `motion.compress()`（修复聚类算法） |
+| 语义增强检索 | ✅ v2.0 → v3.0 重构 | → RetrievalIndex 双通道（keyword + semantic 融合） |
+| 主题总结 | ✅ v2.0 → v3.0 重构 | → SubstanceStore 统一检索 |
 
-**新增源文件**：
-- `src/long_earn/memory/embedding.py` — 嵌入向量检索器（可选依赖，回退 TF-IDF）
-- `tests/unit/test_memory/test_memory_enhanced.py` — 19 个测试覆盖全部新功能
+**v2.0 源文件**（已删除）：`src/long_earn/memory/embedding.py`、`tests/unit/test_memory/test_memory_enhanced.py`
+
+### 物质-运动统一架构重构 🔨 v3.0 进行中 (2026-06，见 ADR-007)
+
+替换旧 `memory/` 模块为 `substance/` 模块。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
+
+**Phase 1：SubstanceStore 核心 + 旧系统移除**
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| 1 | `model.py`（Substance Pydantic）+ `store.py`（SubstanceStore）+ `indices/retrieval.py`（双通道）+ `indices/graph.py`（邻接表）+ `persistence.py`（JSONL） | [ ] |
+| 2 | `motion.py`（activate WorldInfo 引擎 + decay + detect_conflicts + compress） | [ ] |
+| 3 | 重写 `MemoryServiceImpl` 委托 SubstanceStore + 更新 `tools/store.py`（消费方零改动） | [ ] |
+| 4 | 备份旧数据到 temp + 删除 `memory/` + 重写测试 + 更新 config/import-linter/CLAUDE.md | [ ] |
+
+**Phase 2：采集器 + 事件推理子图**
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| 1 | Collector registry + Kimi/Tencent/ciccwm 采集器 | [ ] |
+| 2 | 事件推理子图（collect→extract→propagate→conflict→save）+ 主图路由 | [ ] |
+
+**Phase 3：子图集成 + Dashboard**
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| 1 | stock_analysis/strategy_rd 调 `store.activate()` 注入 + Dashboard 事件流 | [ ] |
 
 ---
 

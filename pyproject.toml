@@ -30,6 +30,7 @@ dependencies = [
     "httpx>=0.25.0",
     "pyarrow>=24.0.0",
     "akshare>=1.18.64",
+    "jieba>=0.42.1",
 ]
 
 [project.scripts]
@@ -66,7 +67,8 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLC0415", "PLR2004", "ARG001", "ARG002", "ARG005", "PLR0913"]
 "tests/integration/conftest.py" = ["PLC0415", "PLR2004", "PLR0912", "PLR0915", "PLW2901"]
-"src/long_earn/backtest/data/provider.py" = ["I001", "PLC0415"]
+"src/long_earn/backtest/data/provider.py" = ["I001", "PLC0415", "PLR2004"]
+"src/long_earn/backtest/data/miniqmt_provider.py" = ["PLR0912", "PLR2004"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

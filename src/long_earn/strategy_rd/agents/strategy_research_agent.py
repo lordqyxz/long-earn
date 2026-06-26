@@ -197,14 +197,20 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         # 回退到嵌套 metrics 字段（兼容历史调用方）
         if return_rate is None or sharpe is None or max_drawdown is None:
             metrics = backtest_result.get("metrics", {}) or {}
-            return_rate = return_rate if return_rate is not None else (
-                metrics.get("return") or metrics.get("annual_return") or 0
+            return_rate = (
+                return_rate
+                if return_rate is not None
+                else (metrics.get("return") or metrics.get("annual_return") or 0)
             )
-            sharpe = sharpe if sharpe is not None else (
-                metrics.get("sharpe_ratio") or metrics.get("sharpe") or 0
+            sharpe = (
+                sharpe
+                if sharpe is not None
+                else (metrics.get("sharpe_ratio") or metrics.get("sharpe") or 0)
             )
-            max_drawdown = max_drawdown if max_drawdown is not None else (
-                metrics.get("max_drawdown") or metrics.get("drawdown") or 0
+            max_drawdown = (
+                max_drawdown
+                if max_drawdown is not None
+                else (metrics.get("max_drawdown") or metrics.get("drawdown") or 0)
             )
 
         return_rate = return_rate or 0
@@ -358,9 +364,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 
             elif direction == "风险控制":
                 max_drawdown = abs(
-                    self._read_metric(
-                        backtest_result, "max_drawdown", ("drawdown",)
-                    )
+                    self._read_metric(backtest_result, "max_drawdown", ("drawdown",))
                 )
                 if max_drawdown > _DRAWDOWN_RISK_THRESHOLD:
                     score += 30
@@ -370,9 +374,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                     score += 5
 
             elif direction == "收益稳定性":
-                sharpe = self._read_metric(
-                    backtest_result, "sharpe_ratio", ("sharpe",)
-                )
+                sharpe = self._read_metric(backtest_result, "sharpe_ratio", ("sharpe",))
                 if sharpe < _POOR_SHARPE_THRESHOLD:
                     score += 30
                 elif sharpe < _MIN_SHARPE_THRESHOLD:
@@ -444,14 +446,20 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         # 回退到嵌套 metrics 字段
         if return_rate is None or sharpe is None or max_drawdown is None:
             metrics = backtest_result.get("metrics", {}) or {}
-            return_rate = return_rate if return_rate is not None else (
-                metrics.get("return") or metrics.get("annual_return")
+            return_rate = (
+                return_rate
+                if return_rate is not None
+                else (metrics.get("return") or metrics.get("annual_return"))
             )
-            sharpe = sharpe if sharpe is not None else (
-                metrics.get("sharpe_ratio") or metrics.get("sharpe")
+            sharpe = (
+                sharpe
+                if sharpe is not None
+                else (metrics.get("sharpe_ratio") or metrics.get("sharpe"))
             )
-            max_drawdown = max_drawdown if max_drawdown is not None else (
-                metrics.get("max_drawdown") or metrics.get("drawdown")
+            max_drawdown = (
+                max_drawdown
+                if max_drawdown is not None
+                else (metrics.get("max_drawdown") or metrics.get("drawdown"))
             )
 
         # 三项核心指标全部缺失才认定"无法获取"——只要任一项有真实值就要用上
@@ -582,9 +590,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         )
         backtest_history = self._format_previous_backtest(previous_backtest)
         memory_section = self._retrieve_past_experience(strategy)
-        market_characteristics = "\n\n".join(
-            filter(None, [knowledge_context or "", memory_section])
-        ) or "无"
+        market_characteristics = (
+            "\n\n".join(filter(None, [knowledge_context or "", memory_section])) or "无"
+        )
 
         prompt = render_strategy_optimize_prompt(
             strategy=strategy,

@@ -24,4 +24,4 @@ class OperatorDevState(TypedDict, total=False):
 
     # 输出
     results: list[dict[str, Any]]  # 每个 spec 的最终结果摘要
-    registered_names: list[str]   # 本轮成功注册的算子名
+    registered_names: list[str]  # 本轮成功注册的算子名

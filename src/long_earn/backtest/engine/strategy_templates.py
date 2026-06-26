@@ -146,7 +146,9 @@ class RSIMeanReversionStrategy(MLSignalStrategy):
         if valid.is_empty():
             return {}
 
-        rsi_values = dict(zip(valid["symbol"].to_list(), valid["rsi_14"].to_list(), strict=True))
+        rsi_values = dict(
+            zip(valid["symbol"].to_list(), valid["rsi_14"].to_list(), strict=True)
+        )
 
         prev_oversold = self._state.get("oversold_days", {})
         prev_overbought = self._state.get("overbought_days", {})

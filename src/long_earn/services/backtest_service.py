@@ -1,4 +1,4 @@
-﻿"""回测服务实现
+"""回测服务实现
 
 对接事件驱动回测引擎，支持 YAML DSL 策略描述。
 """
@@ -73,23 +73,25 @@ class DSLStrategy(BaseStrategy):
         try:
             history_pl = context.get_history_df()
         except Exception as exc:
-            self.step_failures.append({
-                "type": "history_fetch",
-                "step": "on_bar_operators history",
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            self.step_failures.append(
+                {
+                    "type": "history_fetch",
+                    "step": "on_bar_operators history",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             return None
 
         try:
-            selected = self._op_executor.execute(
-                history_pl, context.current_timestamp
-            )
+            selected = self._op_executor.execute(history_pl, context.current_timestamp)
         except Exception as exc:
-            self.step_failures.append({
-                "type": "operator_execute",
-                "step": "operator_executor",
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            self.step_failures.append(
+                {
+                    "type": "operator_execute",
+                    "step": "operator_executor",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             return None
 
         final_weights = self._equal_weights(selected)
@@ -124,9 +126,9 @@ class DSLStrategy(BaseStrategy):
             # 因子层：MultiIndex (timestamp, symbol)，shift(level="symbol") 才能正确按
             # 每只股票的时间序列做位移
             if "timestamp" in history_df.columns and "symbol" in history_df.columns:
-                history_df = history_df.sort_values(
-                    ["symbol", "timestamp"]
-                ).set_index(["timestamp", "symbol"])
+                history_df = history_df.sort_values(["symbol", "timestamp"]).set_index(
+                    ["timestamp", "symbol"]
+                )
             factors_df = self._compute_factors(history_df)
             # 取当前时刻的截面快照（信号和权重在 symbol 单层 index 上工作）
             ct = context.current_timestamp
@@ -139,11 +141,13 @@ class DSLStrategy(BaseStrategy):
                     df = df.set_index("symbol")
         except Exception as exc:
             # 历史数据获取失败时回退旧路径，但记录到 step_failures 便于上层观测
-            self.step_failures.append({
-                "type": "history_fetch",
-                "step": "on_bar history",
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            self.step_failures.append(
+                {
+                    "type": "history_fetch",
+                    "step": "on_bar history",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             df = bars.to_pandas()
             if "symbol" not in df.index.names:
                 df = df.set_index("symbol")
@@ -245,55 +249,67 @@ class DSLStrategy(BaseStrategy):
         if method == "signal":
             return self._signal_weights(df, selected)
         # 未知 method：LLM 写错了配置
-        self.step_failures.append({
-            "type": "weights",
-            "step": f"method={method}",
-            "error": f"未知 weights.method '{method}'，仅支持 equal/signal",
-        })
+        self.step_failures.append(
+            {
+                "type": "weights",
+                "step": f"method={method}",
+                "error": f"未知 weights.method '{method}'，仅支持 equal/signal",
+            }
+        )
         return {}
 
     def _equal_weights(self, selected: list) -> dict[str, float]:
         if not selected:
-            self.step_failures.append({
-                "type": "weights",
-                "step": "method=equal",
-                "error": "selected 为空：信号步骤未选出任何标的",
-            })
+            self.step_failures.append(
+                {
+                    "type": "weights",
+                    "step": "method=equal",
+                    "error": "selected 为空：信号步骤未选出任何标的",
+                }
+            )
             return {}
         weight = 1.0 / len(selected)
         return dict.fromkeys(selected, weight)
 
     def _signal_weights(self, df: Any, selected: list) -> dict[str, float]:
         if not self.dsl.weights.signal_field:
-            self.step_failures.append({
-                "type": "weights",
-                "step": "method=signal",
-                "error": "signal_field 未配置",
-            })
+            self.step_failures.append(
+                {
+                    "type": "weights",
+                    "step": "method=signal",
+                    "error": "signal_field 未配置",
+                }
+            )
             return {}
         field = self.dsl.weights.signal_field
         step_label = f"method=signal,field={field}"
         if field not in df.columns:
-            self.step_failures.append({
-                "type": "weights",
-                "step": step_label,
-                "error": f"signal_field '{field}' 不在 DataFrame 列中",
-            })
+            self.step_failures.append(
+                {
+                    "type": "weights",
+                    "step": step_label,
+                    "error": f"signal_field '{field}' 不在 DataFrame 列中",
+                }
+            )
             return {}
         if not selected:
-            self.step_failures.append({
-                "type": "weights",
-                "step": step_label,
-                "error": "selected 为空：信号步骤未选出任何标的",
-            })
+            self.step_failures.append(
+                {
+                    "type": "weights",
+                    "step": step_label,
+                    "error": "selected 为空：信号步骤未选出任何标的",
+                }
+            )
             return {}
         total = df.loc[selected, field].clip(lower=0).sum()
         if total <= 0:
-            self.step_failures.append({
-                "type": "weights",
-                "step": step_label,
-                "error": "signal_field 在 selected 上的正部和为 0，无法分配权重",
-            })
+            self.step_failures.append(
+                {
+                    "type": "weights",
+                    "step": step_label,
+                    "error": "signal_field 在 selected 上的正部和为 0，无法分配权重",
+                }
+            )
             return {}
         return {s: max(0.0, df.loc[s, field]) / total for s in selected}
 
@@ -371,7 +387,6 @@ class BacktestServiceImpl(BacktestService):
         self.logger = logger
         self.data_provider = data_provider
 
-
     def _build_strategy_diagnostics(
         self,
         strategy_obj: "DSLStrategy",
@@ -406,9 +421,7 @@ class BacktestServiceImpl(BacktestService):
         all_factors_failed = (
             total_factors > 0 and len(failed_factor_aliases) >= total_factors
         )
-        all_steps_failed = (
-            total_steps > 0 and len(failed_step_indices) >= total_steps
-        )
+        all_steps_failed = total_steps > 0 and len(failed_step_indices) >= total_steps
         degenerate = all_factors_failed or all_steps_failed or trade_count == 0
 
         if self.logger and degenerate:
@@ -460,7 +473,6 @@ class BacktestServiceImpl(BacktestService):
             }
 
         try:
-
             engine = EventDrivenBacktestEngine(
                 cost_config=dsl.trading_cost.to_broker_config(),
                 stop_loss=dsl.risk_control.stop_loss,
@@ -478,16 +490,18 @@ class BacktestServiceImpl(BacktestService):
             universe_type = dsl.universe.type or "csi300"
             start_date_str = start_date.replace("-", "")
             universe_provider = MiniQmtUniverseProvider()
-            universe_symbols = universe_provider.get_symbols(universe_type, start_date_str)
+            universe_symbols = universe_provider.get_symbols(
+                universe_type, start_date_str
+            )
 
             # 降级：如果指定股票池为空，尝试 csi300
             if not universe_symbols and universe_type != "csi300":
                 if self.logger:
-                    self.logger.warning(
-                        f"股票池 '{universe_type}' 为空，降级到 csi300"
-                    )
+                    self.logger.warning(f"股票池 '{universe_type}' 为空，降级到 csi300")
                 universe_type = "csi300"
-                universe_symbols = universe_provider.get_symbols("csi300", start_date_str)
+                universe_symbols = universe_provider.get_symbols(
+                    "csi300", start_date_str
+                )
 
             if not universe_symbols:
                 return {
@@ -500,7 +514,9 @@ class BacktestServiceImpl(BacktestService):
             formatted_symbols = PandasToPolarsProvider._format_symbols(universe_symbols)
 
             if self.logger:
-                self.logger.info(f"股票池: {universe_type}, {len(formatted_symbols)} 只股票")
+                self.logger.info(
+                    f"股票池: {universe_type}, {len(formatted_symbols)} 只股票"
+                )
 
             result = engine.run(
                 strategy_obj,

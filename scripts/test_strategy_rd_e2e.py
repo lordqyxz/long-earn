@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from long_earn.config import AppConfig, RuntimeContext
+from long_earn.config import AppConfig
 from long_earn.context_init import initialize_context
 from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
 

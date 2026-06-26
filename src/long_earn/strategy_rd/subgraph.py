@@ -202,12 +202,15 @@ def _backtest_node(
         if error_category in non_refine_categories:
             # 显式标记数值不可信：扁平 0 + 嵌套占位 metrics 同步置零，
             # 避免 reflection / save_experience 把"占位 0"当真实业绩。
-            backtest_result.setdefault("metrics", {
-                "return": 0,
-                "annual_return": 0,
-                "sharpe_ratio": 0,
-                "max_drawdown": 0,
-            })
+            backtest_result.setdefault(
+                "metrics",
+                {
+                    "return": 0,
+                    "annual_return": 0,
+                    "sharpe_ratio": 0,
+                    "max_drawdown": 0,
+                },
+            )
             backtest_result.setdefault("metrics_unreliable", True)
             return {"backtest_result": backtest_result, "code_valid": True}
         return {"backtest_result": backtest_result, "code_valid": False}
@@ -259,9 +262,7 @@ def _refine_node(
         return {"code_valid": False}
 
     if logger:
-        logger.info(
-            f"[代码修复-{target}] 第{refine_count + 1}次修复..."
-        )
+        logger.info(f"[代码修复-{target}] 第{refine_count + 1}次修复...")
 
     refined_code = develop_agent.refine_code(
         strategy=strategy,
@@ -317,9 +318,7 @@ def _optimize_node(
     多轮演进的关键：优先以 **上一轮 optimized_strategy** 作为优化起点，
     而非永远从初始 strategy 开始 —— 否则 N 轮迭代实际只是 N 次独立 v0 优化。
     """
-    base_strategy = (
-        state.get("optimized_strategy") or state.get("strategy", {}) or {}
-    )
+    base_strategy = state.get("optimized_strategy") or state.get("strategy", {}) or {}
     backtest_result = state.get("backtest_result", {}) or {}
     improvement_suggestions: list[str] = state.get("improvement_suggestions", []) or []
 
@@ -329,11 +328,7 @@ def _optimize_node(
     improvement_suggestions = [str(s) for s in improvement_suggestions]
 
     if logger:
-        base_label = (
-            "上一轮优化版"
-            if state.get("optimized_strategy")
-            else "初始版"
-        )
+        base_label = "上一轮优化版" if state.get("optimized_strategy") else "初始版"
         logger.info(
             f"[优化] 起点={base_label}, 改进建议数: {len(improvement_suggestions)}"
         )
@@ -407,12 +402,15 @@ def _backtest_optimized_node(
         error_category = backtest_result.get("error_category", "")
         non_refine_categories = {"engine_error", "insufficient_data"}
         if error_category in non_refine_categories:
-            backtest_result.setdefault("metrics", {
-                "return": 0,
-                "annual_return": 0,
-                "sharpe_ratio": 0,
-                "max_drawdown": 0,
-            })
+            backtest_result.setdefault(
+                "metrics",
+                {
+                    "return": 0,
+                    "annual_return": 0,
+                    "sharpe_ratio": 0,
+                    "max_drawdown": 0,
+                },
+            )
             backtest_result.setdefault("metrics_unreliable", True)
             return {"backtest_result": backtest_result, "code_valid": True}
         return {"backtest_result": backtest_result, "code_valid": False}
@@ -516,9 +514,7 @@ def _refine_cond(_state: State, develop_agent: StrategyDevelopAgent) -> str:
     )
 
 
-def _refine_optimized_cond(
-    _state: State, develop_agent: StrategyDevelopAgent
-) -> str:
+def _refine_optimized_cond(_state: State, develop_agent: StrategyDevelopAgent) -> str:
     """优化版修复后的条件路由：还在预算内 → 重新跑 backtest_optimized；用尽 → reflection。"""
     return (
         "backtest_optimized"

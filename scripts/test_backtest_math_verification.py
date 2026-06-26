@@ -9,10 +9,10 @@
 5. 已实现 P&L：应等于 (卖出价 - 成本价) * 数量 - 交易成本
 """
 
-import sys
 import os
-from datetime import datetime, timedelta
+import sys
 import uuid
+from datetime import datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -20,17 +20,15 @@ import polars as pl
 # 添加源码路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from long_earn.backtest.engine.core import EventDrivenBacktestEngine
-from long_earn.backtest.engine.strategy import BaseStrategy
-from long_earn.backtest.engine.broker import Broker, TradingCostConfig
-from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.domain.entities import (
-    FillEvent,
     OrderEvent,
     Position,
     SignalEvent,
 )
-
+from long_earn.backtest.engine.broker import Broker, TradingCostConfig
+from long_earn.backtest.engine.core import EventDrivenBacktestEngine
+from long_earn.backtest.engine.portfolio import Portfolio
+from long_earn.backtest.engine.strategy import BaseStrategy
 
 # ============================================================================
 # 测试数据生成器
@@ -365,7 +363,6 @@ class ExtendedBacktestEngine(EventDrivenBacktestEngine):
         portfolio.update_market_values(full_data.filter(pl.col("timestamp") == last_ts))
 
     def _build_result(self, portfolio, trading_days):
-        from long_earn.backtest.domain.entities import PerformanceMetrics
         metrics = self._calculate_metrics(portfolio)
 
         from long_earn.backtest.models import BacktestResult
@@ -558,7 +555,7 @@ def test_3_capital_conservation():
             order = OrderEvent(
                 timestamp=ts,
                 trace_id=str(uuid.uuid4()),
-                event_id=f"ord_buy",
+                event_id="ord_buy",
                 symbol="STOCK001",
                 order_type="BUY",
                 quantity=1000,
@@ -875,7 +872,7 @@ def test_6_portfolio_invariant_detailed():
             if "STOCK001" in portfolio.positions:
                 print(f"     警告: 卖出后仍有持仓记录! shares={portfolio.positions['STOCK001'].shares}")
             else:
-                print(f"     卖出后无持仓记录 (正确)")
+                print("     卖出后无持仓记录 (正确)")
 
     # 最终总结
     print(f"\n最终 equity_curve: {[f'{v:.0f}' for v in portfolio.equity_curve]}")
