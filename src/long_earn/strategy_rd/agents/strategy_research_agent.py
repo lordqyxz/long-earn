@@ -1,7 +1,8 @@
-import json
+﻿import json
 from typing import TYPE_CHECKING, Any
 
 from long_earn.core.llm_utils import parse_llm_json
+from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
 from .strategy_research_prompt import (
@@ -622,3 +623,130 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             )
 
         return optimized
+
+    # ── HTR 六步循环方法（ADR-010 Phase 2）──────────────────────
+
+    def observe(self, tree_snapshot: dict[str, Any]) -> dict[str, Any]:
+        """观察阶段 — 分析当前研究状态，识别弱点和下一步方向。"""
+        prompt_template = MarkdownPromptTemplate(
+            "observe_prompt.md", ["current_best", "frontier", "ancestor_insights", "pruned_directions"], __file__
+        )
+        prompt = prompt_template.format(
+            current_best=tree_snapshot.get("current_best", "无"),
+            frontier=tree_snapshot.get("frontier", "无"),
+            ancestor_insights=tree_snapshot.get("ancestor_insights", "无"),
+            pruned_directions=tree_snapshot.get("pruned_directions", "无"),
+        )
+        response = self.llm_service.invoke(prompt)
+        result = parse_llm_json(response.content)
+        if self.logger:
+            self.logger.info(f"[HTR-观察] {result.get('next_focus', '未知')}")
+        return result if isinstance(result, dict) else {"observations": str(result)}
+
+    def ideate(
+        self,
+        observations: dict[str, Any],
+        parent_hypothesis: str = "",
+        child_insights: str = "",
+        pruned_directions: str = "",
+        branching_factor: int = 3,
+    ) -> list[dict[str, Any]]:
+        """假设生成 — 基于观察结果生成改进假设。"""
+        prompt_template = MarkdownPromptTemplate(
+            "ideate_prompt.md",
+            ["observations", "parent_hypothesis", "child_insights", "pruned_directions", "branching_factor"],
+            __file__,
+        )
+        prompt = prompt_template.format(
+            observations=json.dumps(observations, ensure_ascii=False),
+            parent_hypothesis=parent_hypothesis or "无",
+            child_insights=child_insights or "无",
+            pruned_directions=pruned_directions or "无",
+            branching_factor=str(branching_factor),
+        )
+        response = self.llm_service.invoke(prompt)
+        result = parse_llm_json(response.content)
+        hypotheses = result.get("hypotheses", []) if isinstance(result, dict) else []
+        if self.logger:
+            self.logger.info(f"[HTR-假设] 生成 {len(hypotheses)} 个假设")
+        return hypotheses
+
+    def select(
+        self,
+        hypotheses: list[dict[str, Any]],
+        max_select: int = 1,
+    ) -> list[dict[str, Any]]:
+        """选择阶段 — 从假设列表中选择最优的几个进行验证。
+
+        Phase 2 串行模式：默认只选 1 个。Phase 5 并行模式可扩展。
+        """
+        if not hypotheses:
+            return []
+        # 简单策略：按方向多样性选择（避免全部选同一方向）
+        selected: list[dict[str, Any]] = []
+        seen_directions: set[str] = set()
+        for h in hypotheses:
+            direction = h.get("direction", "")
+            if direction not in seen_directions or len(selected) < max_select:
+                selected.append(h)
+                seen_directions.add(direction)
+            if len(selected) >= max_select:
+                break
+        if self.logger:
+            self.logger.info(
+                f"[HTR-选择] 从 {len(hypotheses)} 个假设中选 {len(selected)} 个"
+            )
+        return selected
+
+    def backpropagate_insights(
+        self,
+        parent_hypothesis: str,
+        child_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """洞察反向传播 — 将子节点实验结果抽象为方向级教训。"""
+        prompt_template = MarkdownPromptTemplate(
+            "backpropagate_prompt.md",
+            ["parent_hypothesis", "child_results"],
+            __file__,
+        )
+        prompt = prompt_template.format(
+            parent_hypothesis=parent_hypothesis,
+            child_results=json.dumps(child_results, ensure_ascii=False, default=str),
+        )
+        response = self.llm_service.invoke(prompt)
+        result = parse_llm_json(response.content)
+        if self.logger:
+            self.logger.info(
+                f"[HTR-反向传播] insight={result.get('insight', '')[:80] if isinstance(result, dict) else ''}"
+            )
+        return result if isinstance(result, dict) else {"insight": str(result)}
+
+    def decide(
+        self,
+        tree_state: dict[str, Any],
+    ) -> str:
+        """决策阶段 — 基于树状态决定下一步行动（merge/continue/stop）。"""
+        prompt_template = MarkdownPromptTemplate(
+            "decide_prompt.md",
+            [
+                "node_count", "max_depth", "current_best_oos",
+                "best_dev_score", "best_oos_score",
+                "cycles_used", "max_cycles",
+            ],
+            __file__,
+        )
+        prompt = prompt_template.format(
+            node_count=str(tree_state.get("node_count", 0)),
+            max_depth=str(tree_state.get("max_depth", 0)),
+            current_best_oos=str(tree_state.get("current_best_oos", "无")),
+            best_dev_score=str(tree_state.get("best_dev_score", 0)),
+            best_oos_score=str(tree_state.get("best_oos_score", "无")),
+            cycles_used=str(tree_state.get("cycles_used", 0)),
+            max_cycles=str(tree_state.get("max_cycles", 10)),
+        )
+        response = self.llm_service.invoke(prompt)
+        result = parse_llm_json(response.content)
+        action = result.get("action", "continue") if isinstance(result, dict) else "continue"
+        if self.logger:
+            self.logger.info(f"[HTR-决策] action={action}")
+        return action
