@@ -172,3 +172,35 @@ class TestPhase4MemoryIntegration:
 
         # search_hypothesis_trees 应被调用（hot-start）
         assert memory.search_hypothesis_trees.called
+
+
+class TestPhase5ParallelDispatch:
+    """Phase 5: Send fan-out 并行分发。"""
+
+    def test_dispatch_cond_single_returns_executor(self):
+        """单假设时 _dispatch_cond 返回 'executor'（串行）。"""
+        from long_earn.strategy_rd.htr_subgraph import _dispatch_cond
+
+        state = {"selected_leaves": ["node_1"]}
+        result = _dispatch_cond(state)  # type: ignore[arg-type]
+        assert result == "executor"
+
+    def test_dispatch_cond_multi_returns_send_list(self):
+        """多假设时 _dispatch_cond 返回 Send 列表（并行 fan-out）。"""
+        from langgraph.types import Send
+
+        from long_earn.strategy_rd.htr_subgraph import _dispatch_cond
+
+        state = {"selected_leaves": ["node_1", "node_2", "node_3"]}
+        result = _dispatch_cond(state)  # type: ignore[arg-type]
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert all(isinstance(s, Send) for s in result)
+
+    def test_subgraph_with_parallel_compiles(self):
+        """含 executor_single 节点的子图应能编译。"""
+        from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
+
+        context = _make_mock_context()
+        subgraph = create_htr_subgraph(context)
+        assert subgraph is not None

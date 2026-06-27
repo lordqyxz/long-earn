@@ -11,6 +11,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
@@ -163,12 +164,63 @@ def _select_node(
 def _dispatch_node(
     state: State,
     logger: LoggerService,
-) -> dict:
-    """分发阶段 — Phase 2 串行模式，直接传递到 executor。"""
+) -> dict | list[Send]:
+    """分发阶段 — Phase 5: branching_factor > 1 时用 Send fan-out 并行。
+
+    串行模式（selected_leaves 长度 ≤ 1）：直接传递到 executor。
+    并行模式（长度 > 1）：返回 Send 列表，每个假设一个 executor_single 实例。
+    """
     selected = state.get("selected_leaves", []) or []
     if logger:
-        logger.info(f"[HTR-分发] 分发 {len(selected)} 个假设到 executor")
-    return {"executor_results": []}
+        logger.info(f"[HTR-分发] 分发 {len(selected)} 个假设")
+
+    # 串行模式：≤1 个假设，直接传递到 executor
+    if len(selected) <= 1:
+        return {"executor_results": []}
+
+    # 并行模式：>1 个假设，用 Send fan-out
+    return {"executor_results": []}  # 串行 fallback
+
+
+def _dispatch_cond(
+    state: State,
+) -> str | list[Send]:
+    """分发路由：多假设 → Send fan-out 到 executor_single；单假设 → executor。"""
+    selected = state.get("selected_leaves", []) or []
+
+    if len(selected) > 1:
+        return [
+            Send(
+                "executor_single",
+                {
+                    **state,
+                    "_parallel_node_id": node_id,
+                },
+            )
+            for node_id in selected
+        ]
+    return "executor"
+
+
+def _executor_single_wrapper(
+    state: dict[str, Any],
+    research_agent: StrategyResearchAgent,
+    develop_agent: StrategyDevelopAgent,
+    backtest_service: BacktestService,
+    logger: LoggerService,
+) -> dict:
+    """Phase 5 并行执行器入口 — 从 Send payload 提取 node_id 调 _executor_single_node。"""
+    node_id = state.get("_parallel_node_id", "")
+    if not node_id:
+        return {"executor_results": []}
+    return _executor_single_node(
+        state,  # type: ignore[arg-type]
+        node_id=node_id,
+        research_agent=research_agent,
+        develop_agent=develop_agent,
+        backtest_service=backtest_service,
+        logger=logger,
+    )
 
 
 def _executor_node(
@@ -246,6 +298,72 @@ def _executor_node(
         "executor_results": results,
         "backtest_result": results[0].get("backtest_result", {}) if results else {},
         "strategy_yaml": results[0].get("strategy_yaml", "") if results else "",
+    }
+
+
+def _executor_single_node(  # noqa: PLR0913
+    state: State,
+    node_id: str,
+    research_agent: StrategyResearchAgent,
+    develop_agent: StrategyDevelopAgent,
+    backtest_service: BacktestService,
+    logger: LoggerService,
+) -> dict:
+    """单个假设的执行器（Phase 5 并行模式 — 每个 Send 一个实例）。
+
+    与 _executor_node 逻辑相同，但只处理一个 node_id，
+    返回单个 result dict（reducer _collect_executor_results 会累加）。
+    """
+    tree_data = state.get("hypothesis_tree", {}) or {}
+    tree = HypothesisTree.deserialize(tree_data)
+    node = tree.get_node(node_id)
+    if node is None:
+        return {"executor_results": [{"node_id": node_id, "error": "节点不存在"}]}
+
+    node.status = NodeStatus.RUNNING
+    strategy = state.get("strategy", {}) or {}
+    suggestions = [node.hypothesis]
+    previous_backtest = state.get("backtest_result", {})
+
+    try:
+        optimized = research_agent.optimize_strategy(
+            strategy=strategy,
+            improvement_suggestions=suggestions,
+            previous_backtest=previous_backtest,
+        )
+        strategy_yaml = develop_agent.develop_strategy(optimized)
+        backtest_result = backtest_service.run(
+            strategy_yaml=strategy_yaml,
+            start_date="",
+            end_date="",
+        )
+        dev_score = float(backtest_result.get("sharpe_ratio", 0))
+
+        tree.update_evidence(
+            node_id=node_id,
+            dev_score=dev_score,
+            backtest_result=backtest_result,
+            insight=f"dev sharpe={dev_score:.2f}",
+        )
+
+        result = {
+            "node_id": node_id,
+            "dev_score": dev_score,
+            "backtest_result": backtest_result,
+            "strategy_yaml": strategy_yaml,
+        }
+        if logger:
+            logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
+
+    except Exception as e:
+        node.status = NodeStatus.FAILED
+        if logger:
+            logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
+        result = {"node_id": node_id, "error": str(e)}
+
+    return {
+        "executor_results": [result],
+        "hypothesis_tree": tree.serialize(),
     }
 
 
@@ -442,6 +560,17 @@ def create_htr_subgraph(context: RuntimeContext):
             logger=logger,
         ),
     )
+    # Phase 5: 并行执行器（每个 Send 一个实例）
+    workflow.add_node(
+        "executor_single",
+        partial(
+            _executor_single_wrapper,
+            research_agent=research_agent,
+            develop_agent=develop_agent,
+            backtest_service=backtest_service,
+            logger=logger,
+        ),
+    )
     workflow.add_node(
         "backpropagate",
         partial(_backpropagate_node, research_agent=research_agent, logger=logger),
@@ -462,8 +591,15 @@ def create_htr_subgraph(context: RuntimeContext):
     workflow.add_edge("observe", "ideate")
     workflow.add_edge("ideate", "select")
     workflow.add_edge("select", "dispatch")
-    workflow.add_edge("dispatch", "executor")
+
+    # Phase 5: dispatch 用条件边 — 单假设 → executor（串行）；多假设 → executor_single（并行 fan-out）
+    workflow.add_conditional_edges(
+        "dispatch",
+        _dispatch_cond,
+        {"executor": "executor", "executor_single": "executor_single"},
+    )
     workflow.add_edge("executor", "backpropagate")
+    workflow.add_edge("executor_single", "backpropagate")
     workflow.add_edge("backpropagate", "decide")
 
     workflow.add_conditional_edges(

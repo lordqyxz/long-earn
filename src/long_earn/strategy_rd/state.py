@@ -6,6 +6,13 @@ def _last_wins(_left: Any, right: Any) -> Any:
     return right
 
 
+def _collect_executor_results(_left: list[Any], right: Any) -> list[Any]:
+    """Reducer: 累加并行 executor 结果（ADR-010 Phase 5 Send fan-out join）。"""
+    if isinstance(right, list):
+        return _left + right
+    return [*_left, right]
+
+
 class State(TypedDict, total=False):
     """策略研究子图的状态 - Reflexion 模式"""
 
@@ -49,7 +56,7 @@ class State(TypedDict, total=False):
     hypothesis_tree: dict[str, Any] | None
     current_best_node_id: str | None
     selected_leaves: list[str] | None
-    executor_results: list[dict[str, Any]] | None
+    executor_results: Annotated[list[dict[str, Any]], _collect_executor_results] | None
     run_id: str | None
     oos_threshold: float
     oos_n_splits: int
