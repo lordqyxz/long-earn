@@ -13,7 +13,12 @@ from .state import State
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
-from long_earn.services import BacktestService, LoggerService, MemoryService
+from long_earn.services import (
+    BacktestService,
+    LoggerService,
+    MemoryService,
+    StrategyExperience,
+)
 
 MAX_CODE_REFINES = 3
 MAX_RETRIEVALS = 3
@@ -442,19 +447,21 @@ def _save_experience_node(
     if logger:
         logger.info(f"[保存经验] 保存策略经验: {strategy_name}")
 
-    success = memory.save_experience(
-        strategy_code=strategy_code,
-        strategy_name=strategy_name,
-        design_rationale=design_rationale,
-        backtest_result=backtest_result,
+    experience = StrategyExperience(
+        name=strategy_name,
+        code=strategy_code,
+        rationale=design_rationale,
+        metrics=backtest_result,
         reflection=reflection,
         error_history=error_history if error_history else None,
     )
+    exp_id = memory.save_experience(experience)
+    saved = bool(exp_id)
 
     if logger:
-        logger.info(f"[保存经验] {'成功' if success else '失败'}")
+        logger.info(f"[保存经验] {'成功' if saved else '失败'}")
 
-    return {"experience_saved": success}
+    return {"experience_saved": saved}
 
 
 def _supervisor_node(

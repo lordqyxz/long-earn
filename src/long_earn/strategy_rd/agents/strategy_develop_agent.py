@@ -1,5 +1,4 @@
 import json
-import re
 from typing import TYPE_CHECKING, Any
 
 from long_earn.core.llm_utils import parse_llm_json
@@ -152,62 +151,26 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
 
     def _get_experience_context(self, strategy_info: str) -> str:
         """获取成功案例参考"""
-        results = self._search_experience(strategy_info, min_sharpe=0.5)
+        try:
+            results = self.memory.search_experience(
+                query=strategy_info, k=_MAX_EXPERIENCES, min_sharpe=0.5
+            )
+        except Exception:
+            if self.logger:
+                self.logger.warning(f"搜索经验失败：{strategy_info}")
+            return ""
+
         if not results:
             return ""
 
         context = "\n\n## 成功案例:\n"
         for exp in results[:2]:
             context += (
-                f"\n### {exp['name']}\n"
-                f"设计思路：{exp['rationale'][:200]}...\n"
-                f"```python\n{exp['code'][:500]}\n```\n"
+                f"\n### {exp.name}\n"
+                f"设计思路：{exp.rationale[:200]}...\n"
+                f"```python\n{exp.code[:500]}\n```\n"
             )
         return context
-
-    def _search_experience(
-        self,
-        query: str,
-        min_sharpe: float | None = None,
-    ) -> list[dict]:
-        """搜索历史策略经验"""
-
-        try:
-            raw = self.memory.recall(query, k=4, categories=["策略经验"])
-        except Exception:
-            if self.logger:
-                self.logger.warning(f"搜索经验失败：{query}")
-            return []
-
-        results: list[dict] = []
-        for r in raw:
-            meta = r["metadata"]
-            if min_sharpe:
-                sharpe = meta.get("sharpe_ratio", 0)
-                if sharpe < min_sharpe:
-                    continue
-
-            content = r["content"]
-            code_match = re.search(r"```python\n(.*?)```", content, re.DOTALL)
-            rationale_match = re.search(
-                r"## 设计思路\n(.*?)## 策略代码", content, re.DOTALL
-            )
-
-            results.append(
-                {
-                    "name": meta.get("term", ""),
-                    "code": code_match.group(1).strip() if code_match else "",
-                    "rationale": (
-                        rationale_match.group(1).strip() if rationale_match else ""
-                    ),
-                    "metrics": meta,
-                }
-            )
-
-            if len(results) >= _MAX_EXPERIENCES:
-                break
-
-        return results
 
     def get_error_history(self) -> list[dict]:
         """获取错误历史"""

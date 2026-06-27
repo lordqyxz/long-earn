@@ -1,17 +1,16 @@
 """记忆服务实现 — 委托 SubstanceStore（物质-运动统一架构，ADR-007）。
 
-MemoryService Protocol 8 方法签名不变，内部存储从旧 MemoryStore（numpy/pandas）
-替换为 SubstanceStore（Pydantic Substance + 双索引 + JSONL）。
-消费方（strategy_rd 4 文件 5 调用点）零改动。
+MemoryService Protocol 4 方法（ADR-007 破坏性收窄）：
+- search: 知识检索（格式化字符串）
+- save_experience: 策略经验存取（StrategyExperience 值对象，结构化 metadata）
+- search_experience: 策略经验检索（返回 list[StrategyExperience]，无 markdown 往返）
+- initialize: 生命周期初始化
 """
 
-import json
-import re
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from long_earn.services import LoggerService, MemoryService
+from long_earn.services import LoggerService, MemoryService, StrategyExperience
 from long_earn.substance.model import Substance, SubstanceForm
 from long_earn.substance.store import SubstanceStore
 
@@ -49,125 +48,17 @@ class MemoryServiceImpl(MemoryService):
 
         self._initialized = True
 
-    # ── Recall ─────────────────────────────────────────────────
-
-    def recall(
-        self,
-        query: str,
-        tier: str = "core",  # noqa: ARG002
-        k: int = 3,
-        **filters,
-    ) -> list[dict[str, Any]]:
-        """语义检索记忆 — 委托 store.search()。"""
-        try:
-            return self._store.search(query, k=k, **filters)
-        except Exception as e:
-            self.logger.error(f"记忆检索失败: {e}")
-            return []
-
-    # ── Remember ───────────────────────────────────────────────
-
-    def remember(
-        self,
-        content: str,
-        tier: str = "core",
-        **metadata,
-    ) -> str:
-        """存入记忆 — 构造 knowledge 物质并添加到 store。"""
-        metadata.setdefault("tier", tier)
-        metadata.setdefault("created_at", datetime.now().isoformat())
-        s = Substance(
-            form=SubstanceForm.KNOWLEDGE,
-            content=content,
-            metadata=metadata,
-        )
-        sid = self._store.add(s)
-        self.logger.debug(f"记忆已存储 [{tier}]: {sid}")
-        self._auto_save()
-        return sid
-
-    def _auto_save(self) -> None:
-        """自动持久化记忆到磁盘。"""
-        try:
-            persistent_path = Path(self.config.memory_path).expanduser()
-            self._store.save(persistent_path)
-        except Exception as e:
-            self.logger.warning(f"记忆自动保存失败: {e}")
-
-    # ── Reflect ────────────────────────────────────────────────
-
-    def reflect(self, session_summary: str) -> list[str]:
-        """反思整合 — 提炼会话经验为持久规则。
-
-        流程：
-        1. 提取关键洞察 → Core 记忆
-        2. 标记成功/失败模式 → 建立关系边
-        3. 过期规则 → Archival
-        """
-        ids: list[str] = []
-
-        name_match = re.search(r"策略[名称]*[：:]\s*(.+?)(?:\n|$)", session_summary)
-        strategy_name = name_match.group(1).strip() if name_match else "未命名策略"
-
-        sharpe_match = re.search(
-            r"[Ss]harpe[_\s]*[Rr]atio[：:]\s*([\d.]+)", session_summary
-        )
-        sharpe = float(sharpe_match.group(1)) if sharpe_match else 0.0
-
-        fact_id = self.remember(
-            content=session_summary,
-            tier="core",
-            term=strategy_name,
-            category="策略经验",
-            experience_type="strategy",
-            sharpe_ratio=sharpe,
-            reflected_at=datetime.now().isoformat(),
-        )
-        ids.append(fact_id)
-
-        for keyword, relation in [
-            ("动量", "momentum"),
-            ("价值", "value"),
-            ("反转", "reversal"),
-            ("波动率", "volatility"),
-            ("成长", "growth"),
-            ("质量", "quality"),
-        ]:
-            if keyword in session_summary:
-                self.relate(fact_id, relation, "implements")
-                ids.append(f"{fact_id}→{relation}")
-
-        self.logger.info(f"反思完成: {fact_id} (Sharpe={sharpe:.3f})")
-        return ids
-
-    # ── Relate ─────────────────────────────────────────────────
-
-    def relate(
-        self,
-        source: str,
-        target: str,
-        relation: str = "related_to",
-        weight: float = 1.0,
-    ) -> None:
-        """建立知识实体关系 — 构造 relation 物质。"""
-        self._store.add_relation(source, target, weight, relation_type=relation)
-        self.logger.debug(f"关系: {source} --[{relation}]--> {target}")
-
-    # ── Search ───────────────────────────────────────────────
+    # ── 知识检索 ───────────────────────────────────────────────
 
     def search(
         self,
         query: str,
         k: int = 3,
-        **filters,
+        **filters: Any,
     ) -> list[str]:
-        """便捷方法: 检索并返回格式化字符串。
-
-        消费方（mixins._search_knowledge）传 categories= / source_files= 等
-        kwargs 直接透传给 store.search()。
-        """
-        results = self.recall(query, k=k, **filters)
-        output = []
+        """检索知识片段，返回格式化字符串供 prompt 注入。"""
+        results = self._store.search(query, k=k, **filters)
+        output: list[str] = []
         for r in results:
             meta = r["metadata"]
             source = meta.get("source_file", "unknown")
@@ -185,116 +76,81 @@ class MemoryServiceImpl(MemoryService):
             output.append(f"{header}\n{content}\n")
         return output
 
-    def save_experience(  # noqa: PLR0913
-        self,
-        strategy_code: str,
-        strategy_name: str,
-        design_rationale: str,
-        backtest_result: dict,
-        reflection: str,
-        error_history: list[dict] | None = None,
-    ) -> bool:
-        """便捷方法: 保存策略经验。"""
-        try:
-            content = f"""# 策略经验：{strategy_name}
+    # ── 策略经验 ───────────────────────────────────────────────
 
-## 设计思路
-{design_rationale}
-
-## 策略代码
-```python
-{strategy_code}
-```
-
-## 回测结果
-```json
-{json.dumps(backtest_result, ensure_ascii=False, indent=2)}
-```
-
-## 反思结论
-{reflection}
-"""
-            if error_history:
-                content += f"""
-## 错误历史
-{json.dumps(error_history, ensure_ascii=False, indent=2)}
-"""
-
-            metrics_payload = backtest_result.get("metrics", {}) or {}
-            flat_keys = (
-                "total_return",
-                "annual_return",
-                "sharpe_ratio",
-                "max_drawdown",
-                "volatility",
-                "win_rate",
-                "calmar_ratio",
-                "sortino_ratio",
-                "trading_days",
-            )
-            for key in flat_keys:
-                if backtest_result.get(key) is not None:
-                    metrics_payload.setdefault(key, backtest_result[key])
-
-            self.remember(
-                content,
-                tier="core",
-                term=strategy_name,
-                category="策略经验",
-                experience_type="strategy",
-                backtest_metrics=metrics_payload,
-                backtest_success=bool(backtest_result.get("success", True))
-                and not backtest_result.get("error"),
-            )
-            return True
-        except Exception as e:
-            self.logger.error(f"保存经验失败: {e}")
-            return False
+    def save_experience(self, experience: StrategyExperience) -> str:
+        """保存策略经验 — 构造 knowledge 物质，字段存入结构化 metadata（无 markdown）。"""
+        metrics = experience.metrics or {}
+        s = Substance(
+            form=SubstanceForm.KNOWLEDGE,
+            content=experience.rationale or experience.name,
+            keys=[experience.name] if experience.name else [],
+            metadata={
+                "experience_type": "strategy",
+                "term": experience.name,
+                "category": "策略经验",
+                "strategy_code": experience.code,
+                "design_rationale": experience.rationale,
+                "backtest_metrics": metrics,
+                "reflection": experience.reflection,
+                "error_history": experience.error_history or [],
+                "sharpe_ratio": metrics.get("sharpe_ratio"),
+                "backtest_success": not metrics.get("error"),
+            },
+        )
+        sid = self._store.add(s)
+        self._auto_save()
+        self.logger.debug(f"策略经验已存储: {experience.name} ({sid})")
+        return sid
 
     def search_experience(
         self,
         query: str,
         k: int = 3,
         min_sharpe: float | None = None,
-    ) -> list[dict]:
-        """便捷方法: 搜索历史经验。
-
-        min_sharpe 过滤：用显式 None 检查避免 `0 or fallback` 链
-        把合法低值 sharpe=0 当成"缺失"误回退。
-        """
+    ) -> list[StrategyExperience]:
+        """搜索历史策略经验 — 从结构化 metadata 重建 StrategyExperience（无 regex）。"""
         try:
-            results = self.recall(query, k=k * 2, min_similarity=0.05)
-            experiences: list[dict] = []
-            for r in results:
-                meta = r["metadata"]
-                if meta.get("experience_type") != "strategy":
-                    continue
-                if min_sharpe is not None:
-                    s = meta.get("sharpe_ratio")
-                    if s is None:
-                        s = (meta.get("backtest_metrics", {}) or {}).get("sharpe_ratio")
-                    if s is None or s < min_sharpe:
-                        continue
-
-                content = r["content"]
-                code_match = re.search(r"```python\n(.*?)```", content, re.DOTALL)
-                code = code_match.group(1).strip() if code_match else ""
-                rationale_match = re.search(
-                    r"## 设计思路\n(.*?)## 策略代码", content, re.DOTALL
-                )
-                rationale = rationale_match.group(1).strip() if rationale_match else ""
-
-                experiences.append(
-                    {
-                        "name": meta.get("term", ""),
-                        "code": code,
-                        "rationale": rationale,
-                        "metrics": meta.get("backtest_metrics", {}),
-                    }
-                )
-                if len(experiences) >= k:
-                    break
-            return experiences
+            results = self._store.search(
+                query, k=k * 2, min_similarity=0.05, categories=["策略经验"]
+            )
         except Exception as e:
             self.logger.error(f"搜索经验失败: {e}")
             return []
+
+        experiences: list[StrategyExperience] = []
+        for r in results:
+            meta = r["metadata"]
+            if meta.get("experience_type") != "strategy":
+                continue
+
+            if min_sharpe is not None:
+                s = meta.get("sharpe_ratio")
+                if s is None:
+                    s = (meta.get("backtest_metrics", {}) or {}).get("sharpe_ratio")
+                if s is None or s < min_sharpe:
+                    continue
+
+            experiences.append(
+                StrategyExperience(
+                    name=meta.get("term", ""),
+                    code=meta.get("strategy_code", ""),
+                    rationale=meta.get("design_rationale", ""),
+                    metrics=meta.get("backtest_metrics", {}) or {},
+                    reflection=meta.get("reflection", ""),
+                    error_history=meta.get("error_history"),
+                )
+            )
+            if len(experiences) >= k:
+                break
+        return experiences
+
+    # ── 内部 ───────────────────────────────────────────────────
+
+    def _auto_save(self) -> None:
+        """自动持久化记忆到磁盘。"""
+        try:
+            persistent_path = Path(self.config.memory_path).expanduser()
+            self._store.save(persistent_path)
+        except Exception as e:
+            self.logger.warning(f"记忆自动保存失败: {e}")

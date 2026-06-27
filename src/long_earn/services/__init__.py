@@ -4,134 +4,52 @@
 遵循 Clean Architecture：本层定义抽象，infrastructure 层实现。
 """
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-# ── Memory Service (3-Tier Memory) ───────────────────────────────
+# ── Memory Service ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class StrategyExperience:
+    """策略经验值对象 — 统一 save/search 数据契约，消灭 markdown 往返 regex。"""
+
+    name: str
+    code: str
+    rationale: str
+    metrics: dict[str, Any]
+    reflection: str = ""
+    error_history: list[dict[str, Any]] | None = None
 
 
 class MemoryService(Protocol):
-    """三级记忆系统 — 遵循 Letta/MemGPT 分级记忆模式
+    """记忆服务 — 知识与策略经验的统一存取（ADR-007 Substance 后端）。
 
-    Working: 会话级临时上下文（当前推理窗口）
-    Core:    持久化事实、策略规则、用户偏好
-    Archival: 历史经验、过往回测结果、已过期的规则
+    4 方法接口（ADR-007 破坏性收窄，删僵尸方法 reflect/relate/remember/recall
+    + tier 死参）。
     """
 
-    def recall(
-        self,
-        query: str,
-        tier: str = "core",
-        k: int = 3,
-        **filters,
-    ) -> list[dict[str, Any]]:
-        """从指定记忆层级检索
+    def search(self, query: str, k: int = 3, **filters: Any) -> list[str]:
+        """检索知识/经验片段，返回可注入 prompt 的格式化字符串。
 
         Args:
             query: 自然语言查询
-            tier: 记忆层级 (working | core | archival)
             k: 返回结果数
             **filters: 元数据过滤 (category, term, source_file 等)
-
-        Returns:
-            [{content, metadata, similarity}, ...]
-        """
-        ...
-
-    def remember(
-        self,
-        content: str,
-        tier: str = "core",
-        **metadata,
-    ) -> str:
-        """存入记忆
-
-        Args:
-            content: 文本内容
-            tier: 目标层级
-            **metadata: 元数据 (term, category, experience_type 等)
-
-        Returns:
-            事实 ID
-        """
-        ...
-
-    def search(
-        self,
-        query: str,
-        k: int = 3,
-        **filters,
-    ) -> list[str]:
-        """便捷检索 — 返回格式化字符串结果
-
-        Args:
-            query: 自然语言查询
-            k: 返回结果数
-            **filters: 元数据过滤
 
         Returns:
             ["【来源: ...】\\n...", ...]
         """
         ...
 
-    def reflect(
-        self,
-        session_summary: str,
-    ) -> list[str]:
-        """反思整合 — 将会话经验提炼为持久规则
-
-        这是 Agent 反思循环的核心：每次策略研发完成后，
-        将学到的教训提升到 Core，过期的规则归档到 Archival。
+    def save_experience(self, experience: StrategyExperience) -> str:
+        """保存一次策略研发经验，返回经验 ID。
 
         Args:
-            session_summary: 会话总结（设计思路、回测结果、反思结论）
+            experience: 策略经验值对象
 
         Returns:
-            新创建/更新的事实 ID 列表
-        """
-        ...
-
-    def relate(
-        self,
-        source: str,
-        target: str,
-        relation: str = "related_to",
-        weight: float = 1.0,
-    ) -> None:
-        """建立知识实体间的关系边
-
-        Args:
-            source: 源实体 ID
-            target: 目标实体 ID
-            relation: 关系类型 (related_to | depends_on | contradicts | improves)
-            weight: 关系强度 0-1
-        """
-        ...
-
-    def initialize(self) -> None:
-        """初始化记忆系统（加载持久化数据）"""
-        ...
-
-    def save_experience(  # noqa: PLR0913
-        self,
-        strategy_code: str,
-        strategy_name: str,
-        design_rationale: str,
-        backtest_result: dict[str, Any],
-        reflection: str,
-        error_history: list[dict[str, Any]] | None = None,
-    ) -> bool:
-        """保存策略经验到记忆系统
-
-        Args:
-            strategy_code: 策略代码/YAML
-            strategy_name: 策略名称
-            design_rationale: 设计思路
-            backtest_result: 回测结果字典
-            reflection: 反思结论
-            error_history: 错误历史（可选）
-
-        Returns:
-            是否保存成功
+            经验 ID（Substance sid）
         """
         ...
 
@@ -140,17 +58,21 @@ class MemoryService(Protocol):
         query: str,
         k: int = 3,
         min_sharpe: float | None = None,
-    ) -> list[dict[str, Any]]:
-        """搜索历史策略经验
+    ) -> list[StrategyExperience]:
+        """按语义检索同类历史策略经验。
 
         Args:
             query: 查询文本
             k: 返回结果数
-            min_sharpe: 最低夏普比率过滤
+            min_sharpe: 最低夏普比率过滤（None 表示不过滤）
 
         Returns:
-            匹配的经验列表，每项包含 name, code, rationale, metrics
+            匹配的策略经验列表
         """
+        ...
+
+    def initialize(self) -> None:
+        """初始化记忆系统（加载持久化数据 / init 目录）。"""
         ...
 
 

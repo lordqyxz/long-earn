@@ -147,7 +147,7 @@ prompt = prompt_template.format(query=query)
 - **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已删除。
 - **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
-- **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)
+- **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)。算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)）以 `prove_causality` 因果性数学证明替代表达式白名单，作为新策略的主执行路径；旧表达式路径向后兼容保留。
 - **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
 
 ## 架构决策记录 (ADR)
@@ -158,7 +158,10 @@ prompt = prompt_template.format(query=query)
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库（Superseded by ADR-007）
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
 - [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Accepted）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；已实现 `ciccwm_client.py` + `ciccwm_provider.py`，接入 `CompositeDataProvider` 降级链（DuckDB → miniqmt → ciccwm → akshare）。
-- [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**已实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。旧 `memory/`（ADR-004 v2.0）已删除。
+- [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**已实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。旧 `memory/`（ADR-004 v2.0）已删除。`MemoryService` Protocol 破坏性收窄 8 → 4 方法（删僵尸方法 `reflect`/`relate`/`remember`/`recall` + `tier` 死参；`save_experience` 收 `StrategyExperience` 值对象，`search_experience` 返回 `list[StrategyExperience]`，消灭 markdown 往返 regex 契约）；否决拆 `KnowledgeService` + `ExperienceService`（Substance 模型下无本质区别，仅 metadata 标签差异）。
+- [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md): 并行回测 + 统一模板渲染（**已实施**）。`${var}` 占位符语法（跨语言可移植）+ 纯函数渲染器解耦 LangChain + 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格（标量插值 + 对象层变换）。删除 80 行转义逻辑；32 核并行回测；`BacktestService.run_grid` / `run_walk_forward_parallel`。
+- [ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md): 算子目录 + 算子研发子图（**核心链路已实施**）。类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）替代 ADR-003 自由表达式 DSL；`prove_causality` 因果性数学证明（未来扰动不变性）作算子上线硬约束；operator_dev 异步闭环（spec→审计→因果证明→注册）+ strategy_optimization 验收（sharpe 严格提升）。**后续**：gap_detector 接入 / register 写盘 / 主图挂载 / 退役 evaluator。
+- [ADR-010](docs/adr/010-hypothesis-tree-refinement.md): 假设树精炼 HTR（**Proposed**）。将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。**混合持久化**：树本体独立 JSON Store，摘要回写 ADR-007 SubstanceStore 做 hot-start。5 阶段实施。
 
 ## 调研文档
 
@@ -339,6 +342,7 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 共享数据底座 (SharedMemory) | `src/long_earn/backtest/engine/shared_data.py` |
 | 算子框架基类 | `src/long_earn/backtest/operators/base.py` |
 | 因果检测 | `src/long_earn/backtest/operators/causality.py` |
+| 算子目录策略执行器 | `src/long_earn/backtest/engine/operator_executor.py` |
 | 算子研发子图 | `src/long_earn/operator_dev/subgraph.py` |
 | 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
@@ -430,11 +434,18 @@ ADR-007 Phase 1 已落地，下列 4 项已由物质-运动架构的原生能力
 - [x] **冲突检测** → `motion.detect_conflicts()`（可配置词库，不再硬编码）
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
-- [ ] **HTR 假设树精炼**：将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。详见 [`plan/hypothesis-tree-refinement-plan.md`](plan/hypothesis-tree-refinement-plan.md)（5 阶段，依赖 ADR-007 落地）。
-- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。基础设施已交付（`engine/parallel.py` + `param_grid.py`），subgraph 接入待后续轮。
+- [ ] **HTR 假设树精炼**：将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。详见 [ADR-010](docs/adr/010-hypothesis-tree-refinement.md)（5 阶段，依赖 ADR-007 落地）。
+- [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。基础设施已交付（`engine/parallel.py` + `param_grid.py`，见 [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md)），subgraph 接入待后续轮。
 - [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
 - [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
 - [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
+
+### 3.5 算子目录与算子研发 (Operator Catalog & Dev, 见 ADR-009)
+- [ ] **gap_detector 接入**：strategy_rd `reflection` 后新增 `gap_detector` 节点，扫描 `improvement_suggestions` 与算子目录差异，产出 `OperatorSpec` 写 backlog，串联 operator_dev 异步闭环。
+- [ ] **operator_dev register 写盘**：register 节点写 `.py` 到 `operators/<category>/`，产物持久化到代码库走 CI/审查（当前仅内存热注册）。
+- [ ] **主图挂载**：`agent.py` 注册 operator_dev / strategy_optimization 子图入口，支持 CLI / 路由触发。
+- [ ] **清理双套体系**：评估 `ml_strategy.py` / `strategy_templates.py` 是否可由算子目录 + 新 DSL 完全替代。
+- [ ] **退役 evaluator**：策略全部迁移到算子路径后删除 `SafeExpressionEvaluator` + `_extract_field_names`（ADR-003 标记 Superseded by ADR-009）。
 
 ### 4. 工程化与质量 (Engineering & Quality)
 - [ ] **集成测试增强**：针对 `strategy_rd` 的全链路流程编写更多端到端集成测试。
