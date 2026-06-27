@@ -1,7 +1,7 @@
 # ADR-010: 假设树精炼（Hypothesis Tree Refinement, HTR）
 
 日期: 2026-06
-状态: Accepted, Implemented (Phase 1-3); Phase 4-5 pending
+状态: Accepted, Implemented (Phase 1-5 complete)
 
 ## 背景
 
