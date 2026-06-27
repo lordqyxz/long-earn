@@ -41,7 +41,7 @@ class BacktestAnalyzer:
         df = conn.execute(
             """
             SELECT event_type, status, COUNT(*) as count
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ?
             GROUP BY event_type, status
             """,
@@ -58,7 +58,7 @@ class BacktestAnalyzer:
         current_id = trace_id
         while True:
             res = conn.execute(
-                "SELECT parent_id FROM audit.logs WHERE trace_id = ? LIMIT 1",
+                "SELECT parent_id FROM backtest_audit.logs WHERE trace_id = ? LIMIT 1",
                 [current_id],
             ).fetchone()
             if not res or not res[0]:
@@ -74,7 +74,7 @@ class BacktestAnalyzer:
                 continue
             visited.add(curr)
             res = conn.execute(
-                "SELECT trace_id FROM audit.logs WHERE parent_id = ?",
+                "SELECT trace_id FROM backtest_audit.logs WHERE parent_id = ?",
                 [curr],
             ).fetchall()
             for row in res:
@@ -83,7 +83,7 @@ class BacktestAnalyzer:
                     queue.append(row[0])
 
         query = (
-            "SELECT * FROM audit.logs WHERE trace_id IN ("
+            "SELECT * FROM backtest_audit.logs WHERE trace_id IN ("
             + ",".join(["?"] * len(related_ids))
             + ") ORDER BY timestamp ASC"
         )
@@ -96,7 +96,7 @@ class BacktestAnalyzer:
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
         conn = self._get_conn()
-        query = "SELECT * FROM audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        query = "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
         params: list[Any] = [run_id]
         if event_type:
             query += " AND event_type = ?"
@@ -137,7 +137,7 @@ class BacktestAnalyzer:
         rows = conn.execute(
             """
             SELECT timestamp, payload->>'$.portfolio_value' as value
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'MARKET_DATA'
             ORDER BY timestamp ASC
             """,
@@ -320,7 +320,7 @@ class BacktestAnalyzer:
             # 获取交易统计
             conn = self._get_conn()
             trade_count_row = conn.execute(
-                "SELECT COUNT(*) FROM audit.logs "
+                "SELECT COUNT(*) FROM backtest_audit.logs "
                 "WHERE run_id = ? AND event_type = 'FILL'",
                 [rid],
             ).fetchone()
@@ -353,7 +353,7 @@ class BacktestAnalyzer:
         rows = conn.execute(
             """
             SELECT timestamp, payload->>'$.portfolio_value' as value
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'MARKET_DATA'
             ORDER BY timestamp ASC
             """,
@@ -375,7 +375,7 @@ class BacktestAnalyzer:
         fills = conn.execute(
             """
             SELECT timestamp, trace_id, parent_id, payload
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'FILL'
             ORDER BY timestamp ASC
             """,
@@ -407,7 +407,7 @@ class BacktestAnalyzer:
         signals = conn.execute(
             """
             SELECT timestamp, payload
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'SIGNAL'
             ORDER BY timestamp ASC
             """,
@@ -437,7 +437,7 @@ class BacktestAnalyzer:
         perf = conn.execute(
             """
             SELECT event_type, COUNT(*) as count
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ?
             GROUP BY event_type
             ORDER BY count DESC
@@ -449,18 +449,18 @@ class BacktestAnalyzer:
         event_breakdown: dict[str, int] = {row[0]: row[1] for row in perf}
 
         first_ts = conn.execute(
-            "SELECT MIN(timestamp) FROM audit.logs WHERE run_id = ?",
+            "SELECT MIN(timestamp) FROM backtest_audit.logs WHERE run_id = ?",
             [run_id],
         ).fetchone()[0]
         last_ts = conn.execute(
-            "SELECT MAX(timestamp) FROM audit.logs WHERE run_id = ?",
+            "SELECT MAX(timestamp) FROM backtest_audit.logs WHERE run_id = ?",
             [run_id],
         ).fetchone()[0]
 
         # 尝试从 MARKET_DATA 载荷中提取回测基准指标
         bm_row = conn.execute(
             """
-            SELECT payload FROM audit.logs
+            SELECT payload FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'MARKET_DATA'
             ORDER BY timestamp DESC LIMIT 1
             """,
@@ -480,6 +480,9 @@ class BacktestAnalyzer:
         # 附加风险指标
         risk = self.get_risk_metrics(run_id)
 
+        # 附加交易标的列表（供仪表盘展示个股图表）
+        traded_symbols = self.get_traded_symbols(run_id)
+
         return {
             "run_id": run_id,
             "total_events": total_events,
@@ -493,4 +496,192 @@ class BacktestAnalyzer:
             "signal_history": self.export_signal_history(run_id),
             "benchmark": bm,
             "risk_metrics": risk,
+            "traded_symbols": traded_symbols,
         }
+
+    # ── 交易数据导出与可视化接口 ──────────────────────────────────────
+
+    def get_traded_symbols(self, run_id: str) -> list[str]:
+        """获取某次回测中所有被交易过的标的代码（去重，按代码升序）"""
+        traces = self.export_trade_traces(run_id)
+        symbols = sorted({t["symbol"] for t in traces if t["symbol"]})
+        return symbols
+
+    def export_trade_traces(self, run_id: str) -> list[dict[str, Any]]:
+        """导出完整交易日志（含时间、代码、方向、价格、数量、金额、持仓市值）
+
+        每条记录对应一次成交（FILL 事件），金额 = 价格 × 数量。
+        """
+        conn = self._get_conn()
+        fills = conn.execute(
+            """
+            SELECT timestamp, trace_id, payload
+            FROM backtest_audit.logs
+            WHERE run_id = ? AND event_type = 'FILL'
+            ORDER BY timestamp ASC
+            """,
+            [run_id],
+        ).fetchall()
+        conn.close()
+
+        traces: list[dict[str, Any]] = []
+        for row in fills:
+            payload: dict[str, Any] = (
+                json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {})
+            )
+            price = float(payload.get("price", 0))
+            quantity = float(payload.get("quantity", 0))
+            traces.append(
+                {
+                    "time": str(row[0]) if row[0] else "",
+                    "trace_id": row[1],
+                    "symbol": payload.get("symbol", ""),
+                    "direction": payload.get("type", ""),
+                    "price": price,
+                    "quantity": quantity,
+                    "amount": round(price * quantity, 2),
+                    "portfolio_value": float(payload.get("portfolio_value", 0)),
+                }
+            )
+        return traces
+
+    def export_trade_traces_to_file(
+        self,
+        run_id: str,
+        output_path: str | Path,
+        fmt: str = "csv",
+    ) -> Path:
+        """导出交易日志到文件
+
+        Args:
+            run_id: 回测运行 ID
+            output_path: 输出文件路径
+            fmt: 文件格式，'csv' 或 'json'
+
+        Returns:
+            实际写入的文件路径（自动补全后缀）
+        """
+        output_path = Path(output_path)
+        traces = self.export_trade_traces(run_id)
+
+        if fmt.lower() == "json":
+            if output_path.suffix.lower() not in {".json", ".jsonl"}:
+                output_path = output_path.with_suffix(".json")
+            output_path.write_text(
+                json.dumps(
+                    {"run_id": run_id, "trade_count": len(traces), "trades": traces},
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+        else:
+            if output_path.suffix.lower() != ".csv":
+                output_path = output_path.with_suffix(".csv")
+            df = pl.DataFrame(traces) if traces else pl.DataFrame(
+                schema={
+                    "time": pl.Utf8,
+                    "trace_id": pl.Utf8,
+                    "symbol": pl.Utf8,
+                    "direction": pl.Utf8,
+                    "price": pl.Float64,
+                    "quantity": pl.Float64,
+                    "amount": pl.Float64,
+                    "portfolio_value": pl.Float64,
+                }
+            )
+            df.write_csv(str(output_path))
+
+        logger.info(f"交易日志已导出: {output_path} ({len(traces)} 笔)")
+        return output_path
+
+    def export_symbol_chart_data(
+        self, run_id: str, symbol: str
+    ) -> dict[str, Any]:
+        """导出单只标的的价格走势 + 买卖点标注数据（用于绘制图表）
+
+        从 price_daily 表读取该标的的日线行情（open/high/low/close/volume），
+        并从审计日志中提取该标的的所有成交点（买入/卖出），返回结构化数据
+        供前端绘制价格走势图并在图上标注买卖时间、价格、数量。
+
+        Args:
+            run_id: 回测运行 ID
+            symbol: 标的代码
+
+        Returns:
+            dict 包含 symbol、price_history（日期/开/高/低/收/量）、
+            trade_points（时间/方向/价格/数量/金额）
+        """
+        conn = self._get_conn()
+
+        # 1. 读取该标的的价格走势（从 price_daily 表）
+        price_rows = conn.execute(
+            """
+            SELECT date, open, high, low, close, volume
+            FROM price_daily
+            WHERE symbol = ?
+            ORDER BY date ASC
+            """,
+            [symbol],
+        ).fetchall()
+
+        price_history: list[dict[str, Any]] = []
+        for row in price_rows:
+            price_history.append(
+                {
+                    "date": str(row[0]) if row[0] else "",
+                    "open": float(row[1]) if row[1] is not None else None,
+                    "high": float(row[2]) if row[2] is not None else None,
+                    "low": float(row[3]) if row[3] is not None else None,
+                    "close": float(row[4]) if row[4] is not None else None,
+                    "volume": float(row[5]) if row[5] is not None else 0.0,
+                }
+            )
+
+        # 2. 读取该标的的成交点（从审计日志，按 symbol 在 Python 端过滤
+        #    避免 DuckDB JSON 路径提取与比较的类型转换问题）
+        fill_rows = conn.execute(
+            """
+            SELECT timestamp, payload
+            FROM backtest_audit.logs
+            WHERE run_id = ? AND event_type = 'FILL'
+            ORDER BY timestamp ASC
+            """,
+            [run_id],
+        ).fetchall()
+        conn.close()
+
+        trade_points: list[dict[str, Any]] = []
+        for row in fill_rows:
+            payload: dict[str, Any] = (
+                json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+            )
+            if payload.get("symbol", "") != symbol:
+                continue
+            price = float(payload.get("price", 0))
+            quantity = float(payload.get("quantity", 0))
+            trade_points.append(
+                {
+                    "time": str(row[0]) if row[0] else "",
+                    "direction": payload.get("type", ""),
+                    "price": price,
+                    "quantity": quantity,
+                    "amount": round(price * quantity, 2),
+                }
+            )
+
+        return {
+            "symbol": symbol,
+            "run_id": run_id,
+            "price_history": price_history,
+            "trade_points": trade_points,
+        }
+
+    def export_all_symbol_charts(self, run_id: str) -> list[dict[str, Any]]:
+        """导出本次回测中所有交易标的的图表数据
+
+        便捷方法：自动发现所有被交易过的标的，逐个导出价格走势 + 买卖点。
+        """
+        symbols = self.get_traded_symbols(run_id)
+        return [self.export_symbol_chart_data(run_id, sym) for sym in symbols]

@@ -72,6 +72,7 @@ const API = '';  // 空 = 同源
 let equityChart = null;
 let returnsChart = null;
 let eventChart = null;
+let symbolCharts = [];  // 个股价格图表实例数组
 
 // ── Chart.js 深色主题通用配置 ──
 function chartBaseOptions() {
@@ -178,6 +179,8 @@ function renderDashboard(data, runId) {
   if (equityChart) { equityChart.destroy(); equityChart = null; }
   if (returnsChart) { returnsChart.destroy(); returnsChart = null; }
   if (eventChart) { eventChart.destroy(); eventChart = null; }
+  symbolCharts.forEach(c => c.destroy());
+  symbolCharts = [];
 
   const equity = data.equity_curve || [];
   const trades = data.trade_journal || [];
@@ -185,6 +188,7 @@ function renderDashboard(data, runId) {
   const events = data.event_breakdown || {};
   const benchmark = data.benchmark || {};
   const risk = data.risk_metrics || {};
+  const tradedSymbols = data.traded_symbols || [];
 
   const startVal = equity.length > 0 ? equity[0].value : 1_000_000;
   const endVal = equity.length > 0 ? equity[equity.length - 1].value : startVal;
@@ -246,12 +250,34 @@ function renderDashboard(data, runId) {
     html += '</table></div>';
   }
 
+  // ── 交易数据导出 ──
+  if (trades.length > 0) {
+    html += '<div class="chart-container"><h3>导出交易日志</h3>';
+    html += '<p style="color:#94a3b8;font-size:13px;margin-bottom:12px;">导出本次回测的全部成交记录（时间、标的、方向、价格、数量、金额）</p>';
+    html += '<button class="compare-btn" onclick="exportTrades(\'' + runId + '\', \'csv\')">下载 CSV</button> ';
+    html += '<button class="compare-btn" onclick="exportTrades(\'' + runId + '\', \'json\')" style="margin-left:8px;">下载 JSON</button>';
+    html += '</div>';
+  }
+
+  // ── 交易标的图表（价格走势 + 买卖点标注） ──
+  if (tradedSymbols.length > 0) {
+    html += '<div class="chart-container"><h3>交易标的图表（价格走势 + 买卖点标注）</h3>';
+    html += '<p style="color:#94a3b8;font-size:13px;margin-bottom:12px;">共 ' + tradedSymbols.length + ' 只交易标的，每只标的价格走势图上标注买入（▲ 绿）和卖出（▼ 红）时间点</p>';
+    html += '<div id="symbolChartsContainer"><div class="loading"><div class="spinner"></div>加载交易标的图表</div></div>';
+    html += '</div>';
+  }
+
   content.innerHTML = html;
 
   // 绘制图表
   drawEquityChart(equity);
   drawEventChart(events);
   drawReturnsChart(equity);
+
+  // 异步加载交易标的图表
+  if (tradedSymbols.length > 0) {
+    loadSymbolCharts(runId, tradedSymbols);
+  }
 }
 
 function card(title, value, positive, sub) {
@@ -538,6 +564,182 @@ function renderCompareTable(comparison) {
 
   html += '</tbody></table></div></div>';
   compareDiv.innerHTML = html;
+}
+
+// ── 导出交易日志（CSV / JSON 下载） ──
+function exportTrades(runId, fmt) {
+  const url = API + '/api/runs/' + runId + '/export?format=' + fmt;
+  // 触发浏览器下载
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'trades_' + runId.slice(0, 8) + '.' + fmt;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ── 加载并渲染交易标的图表（价格走势 + 买卖点） ──
+async function loadSymbolCharts(runId, symbols) {
+  const container = document.getElementById('symbolChartsContainer');
+  if (!container) return;
+
+  // 逐个加载标的图表（避免一次性请求过多）
+  container.innerHTML = '';
+  for (let i = 0; i < symbols.length; i++) {
+    const sym = symbols[i];
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chart-container';
+    wrapper.style.marginBottom = '16px';
+    wrapper.innerHTML = '<h3 style="color:#94a3b8;font-size:14px;">' + sym + ' — 价格走势与交易点</h3><div class="chart-wrapper" style="height:300px;"><canvas id="symChart_' + i + '"></canvas></div>';
+    container.appendChild(wrapper);
+
+    try {
+      const res = await fetch(API + '/api/runs/' + runId + '/symbol/' + encodeURIComponent(sym) + '/chart');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      drawSymbolChart(data, 'symChart_' + i, sym);
+    } catch (e) {
+      const canvas = document.getElementById('symChart_' + i);
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.font = '14px sans-serif';
+        ctx.fillStyle = '#ef4444';
+        ctx.textAlign = 'center';
+        ctx.fillText('加载失败: ' + e.message, canvas.width / 2, canvas.height / 2);
+      }
+    }
+  }
+}
+
+// ── 绘制单个标的的价格走势图 + 买卖点标注 ──
+function drawSymbolChart(data, canvasId, symbol) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  const prices = (data.price_history || []).filter(p => p.close != null);
+  const tradePoints = data.trade_points || [];
+
+  if (prices.length < 2) {
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('该标的价格数据不足，无法绘制', canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  const labels = prices.map(p => p.date || '');
+  const closeValues = prices.map(p => p.close);
+
+  // 买卖点散点数据（按时间戳匹配价格序列）
+  const buyPoints = [];
+  const sellPoints = [];
+  tradePoints.forEach(tp => {
+    const tpDate = (tp.time || '').slice(0, 10);
+    const idx = labels.indexOf(tpDate);
+    const pointData = idx >= 0 ? { x: idx, y: closeValues[idx] } : null;
+    const point = {
+      x: idx >= 0 ? labels[idx] : tpDate,
+      y: tp.price,
+      quantity: tp.quantity,
+      amount: tp.amount,
+      direction: tp.direction,
+    };
+    if (tp.direction === 'BUY') {
+      buyPoints.push(point);
+    } else {
+      sellPoints.push(point);
+    }
+  });
+
+  const opts = Object.assign({}, chartBaseOptions(), {
+    plugins: {
+      legend: {
+        labels: { color: '#94a3b8', font: { size: 12 } },
+        data: ['收盘价', '买入', '卖出'],
+      },
+      tooltip: {
+        backgroundColor: '#1e293b',
+        titleColor: '#f8fafc',
+        bodyColor: '#e2e8f0',
+        borderColor: '#334155',
+        borderWidth: 1,
+        padding: 12,
+        cornerRadius: 8,
+        callbacks: {
+          label: function(ctx) {
+            const raw = ctx.raw;
+            if (raw.direction) {
+              const dir = raw.direction === 'BUY' ? '买入' : '卖出';
+              return dir + ' 价格: ¥' + (raw.y || 0).toFixed(2) + ' 数量: ' + (raw.quantity || 0).toFixed(0) + ' 金额: ¥' + (raw.amount || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+            }
+            return '收盘价: ¥' + (raw.y || 0).toFixed(2);
+          }
+        },
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: '#64748b', maxTicksLimit: 10, font: { size: 11 } },
+        grid: { color: 'rgba(51,65,85,0.4)', drawBorder: false },
+        border: { color: '#334155' },
+      },
+      y: {
+        ticks: { color: '#64748b', font: { size: 11 }, callback: v => '¥' + v.toFixed(2) },
+        grid: { color: 'rgba(51,65,85,0.4)', drawBorder: false },
+        border: { color: '#334155' },
+      },
+    },
+  });
+
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: '收盘价',
+          data: closeValues,
+          borderColor: '#60a5fa',
+          backgroundColor: 'rgba(96,165,250,0.08)',
+          fill: false,
+          tension: 0.1,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          pointHoverBackgroundColor: '#60a5fa',
+          borderWidth: 1.5,
+          order: 2,
+        },
+        {
+          label: '买入',
+          data: buyPoints,
+          type: 'scatter',
+          backgroundColor: 'rgba(34,197,94,0.9)',
+          borderColor: '#22c55e',
+          pointStyle: 'triangle',
+          pointRadius: 8,
+          pointHoverRadius: 10,
+          showLine: false,
+          order: 1,
+        },
+        {
+          label: '卖出',
+          data: sellPoints,
+          type: 'scatter',
+          backgroundColor: 'rgba(239,68,68,0.9)',
+          borderColor: '#ef4444',
+          pointStyle: 'triangle',
+          pointRadius: 8,
+          pointHoverRadius: 10,
+          rotation: 180,
+          showLine: false,
+          order: 0,
+        },
+      ],
+    },
+    options: opts,
+  });
+  symbolCharts.push(chart);
 }
 
 loadRuns();

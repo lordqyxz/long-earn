@@ -1,7 +1,7 @@
 # ADR-006: 引入 ciccwm 财经数据 Provider
 
 ## 状态
-Proposed
+Accepted
 
 ## 上下文
 

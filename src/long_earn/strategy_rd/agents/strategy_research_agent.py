@@ -566,7 +566,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         if not past:
             return ""
         lines = [
-            f"- {p.get('name', '?')}: metrics={p.get('metrics', {})}" for p in past
+            f"- {p.name}: metrics={p.metrics}" for p in past
         ]
         return "历史同类经验：\n" + "\n".join(lines)
 

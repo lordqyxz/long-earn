@@ -4,7 +4,7 @@ import json
 from unittest.mock import MagicMock
 
 from long_earn.config import RuntimeContext
-from long_earn.services import MemoryService
+from long_earn.services import MemoryService, StrategyExperience
 from long_earn.services.backtest_service import BacktestService
 from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
@@ -21,10 +21,7 @@ def _make_mock_context() -> RuntimeContext:
 
     mock_memory = MagicMock(spec=MemoryService)
     mock_memory.search.return_value = ["test knowledge"]
-    mock_memory.recall.return_value = [
-        {"content": "test", "metadata": {}, "similarity": 0.9}
-    ]
-    mock_memory.save_experience.return_value = True
+    mock_memory.save_experience.return_value = "test-exp-id"
 
     mock_config = MagicMock()
     mock_config.llm_type = "ollama"
@@ -125,12 +122,12 @@ class TestEvolutionLineage:
         # search_experience 返回非空 → 验证记忆注入路径
         context.memory.search_experience = MagicMock(
             return_value=[
-                {
-                    "name": "OldStrategy",
-                    "code": "...",
-                    "rationale": "...",
-                    "metrics": {"sharpe_ratio": 1.5, "total_return": 0.3},
-                }
+                StrategyExperience(
+                    name="OldStrategy",
+                    code="...",
+                    rationale="...",
+                    metrics={"sharpe_ratio": 1.5, "total_return": 0.3},
+                )
             ]
         )
         mock_response = MagicMock()
@@ -678,9 +675,9 @@ class TestMultiRoundEvolutionStaticE2E:
             def __init__(self):
                 self.saved = []
 
-            def save_experience(self, **kw):
-                self.saved.append(kw)
-                return True
+            def save_experience(self, experience):
+                self.saved.append(experience)
+                return "exp-id"
 
             def search_experience(self, **_kw):
                 return []
@@ -718,8 +715,8 @@ class TestMultiRoundEvolutionStaticE2E:
         )
         assert state["experience_saved"] is True
         assert len(memory.saved) == 1
-        # 关键断言 2：扁平回测字段在 backtest_result 中可见，可被记忆系统读到
-        assert memory.saved[0]["backtest_result"]["sharpe_ratio"] == 0.8
+        # 关键断言 2：扁平回测字段在 metrics 中可见，可被记忆系统读到
+        assert memory.saved[0].metrics["sharpe_ratio"] == 0.8
 
         # supervisor → 决定继续
         state.update(
@@ -751,7 +748,7 @@ class TestMultiRoundEvolutionStaticE2E:
         # save_experience 被调用 2 次（每轮一次）
         assert len(memory.saved) == 2
         # 第 2 次保存的指标应是第 2 轮的真实业绩
-        assert memory.saved[1]["backtest_result"]["sharpe_ratio"] == 1.1
+        assert memory.saved[1].metrics["sharpe_ratio"] == 1.1
 
         state.update(
             _supervisor_node(state, supervisor, logger=None)  # type: ignore[arg-type]
@@ -789,39 +786,42 @@ class TestSearchExperienceMinSharpeBoundary:
         但 sharpe=-0.1 必须过滤。"""
         svc = self._make_service()
 
-        def fake_recall(query, k=10, min_similarity=0.05):
+        def fake_store_search(query, k=10, **kw):
             return [
                 {
-                    "content": "## 设计思路\nA\n## 策略代码\n```python\nyaml\n```",
+                    "content": "A",
                     "metadata": {
                         "experience_type": "strategy",
                         "term": "Bad",
                         "backtest_metrics": {"sharpe_ratio": -0.1},
                     },
+                    "similarity": 0.9,
                 },
                 {
-                    "content": "## 设计思路\nB\n## 策略代码\n```python\nyaml\n```",
+                    "content": "B",
                     "metadata": {
                         "experience_type": "strategy",
                         "term": "Zero",
                         "backtest_metrics": {"sharpe_ratio": 0.0},
                     },
+                    "similarity": 0.8,
                 },
                 {
-                    "content": "## 设计思路\nC\n## 策略代码\n```python\nyaml\n```",
+                    "content": "C",
                     "metadata": {
                         "experience_type": "strategy",
                         "term": "Good",
                         "backtest_metrics": {"sharpe_ratio": 1.5},
                     },
+                    "similarity": 0.7,
                 },
             ]
 
-        svc.recall = fake_recall  # type: ignore[method-assign]
+        svc._store.search = fake_store_search  # type: ignore[method-assign]
 
         result = svc.search_experience(query="x", k=5, min_sharpe=0.0)
 
-        names = {r["name"] for r in result}
+        names = {r.name for r in result}
         # Bad (sharpe=-0.1) 必须被过滤
         assert "Bad" not in names, "min_sharpe=0 应过滤负 sharpe"
         # Zero (sharpe=0.0) 通过 (0 >= 0)
@@ -833,19 +833,20 @@ class TestSearchExperienceMinSharpeBoundary:
         """metadata 完全没有 sharpe_ratio 字段时，min_sharpe 被设值就排除（保守）"""
         svc = self._make_service()
 
-        def fake_recall(query, k=10, min_similarity=0.05):
+        def fake_store_search(query, k=10, **kw):
             return [
                 {
-                    "content": "## 设计思路\n.\n## 策略代码\n```python\n.\n```",
+                    "content": ".",
                     "metadata": {
                         "experience_type": "strategy",
                         "term": "NoMetric",
                         "backtest_metrics": {},  # 没 sharpe_ratio
                     },
+                    "similarity": 0.9,
                 },
             ]
 
-        svc.recall = fake_recall  # type: ignore[method-assign]
+        svc._store.search = fake_store_search  # type: ignore[method-assign]
 
         result = svc.search_experience(query="x", k=5, min_sharpe=0.5)
         assert result == [], "min_sharpe 设值且元数据无 sharpe → 必须排除"
@@ -854,27 +855,28 @@ class TestSearchExperienceMinSharpeBoundary:
         """min_sharpe=None 时不应过滤，含负 sharpe 也通过"""
         svc = self._make_service()
 
-        def fake_recall(query, k=10, min_similarity=0.05):
+        def fake_store_search(query, k=10, **kw):
             return [
                 {
-                    "content": "## 设计思路\n.\n## 策略代码\n```python\n.\n```",
+                    "content": ".",
                     "metadata": {
                         "experience_type": "strategy",
                         "term": "Anything",
                         "backtest_metrics": {"sharpe_ratio": -2.0},
                     },
+                    "similarity": 0.9,
                 },
             ]
 
-        svc.recall = fake_recall  # type: ignore[method-assign]
+        svc._store.search = fake_store_search  # type: ignore[method-assign]
 
         result = svc.search_experience(query="x", k=5, min_sharpe=None)
         assert len(result) == 1
-        assert result[0]["name"] == "Anything"
+        assert result[0].name == "Anything"
 
 
 class TestMemorySaveExperience:
-    """记忆系统保存经验时必须把扁平结构的回测指标存进 backtest_metrics 元数据"""
+    """记忆系统保存经验时必须把回测指标存进 backtest_metrics 元数据"""
 
     def test_flat_backtest_keys_are_persisted(self):
         from long_earn.services.memory_service import MemoryServiceImpl
@@ -882,32 +884,28 @@ class TestMemorySaveExperience:
         config = MagicMock()
         config.memory_path = ":memory:"
         service = MemoryServiceImpl(config, MagicMock(spec=LoggerService))
-        # 拦截 remember，捕获 metadata
-        captured = {}
 
-        def fake_remember(content, **kw):
-            captured.update(kw)
-            return "id-1"
-
-        service.remember = fake_remember  # type: ignore[method-assign]
-
-        ok = service.save_experience(
-            strategy_code="yaml",
-            strategy_name="X",
-            design_rationale="r",
-            backtest_result={
-                "total_return": 0.42,
-                "sharpe_ratio": 1.2,
-                "max_drawdown": -0.1,
-                "success": True,
-            },
-            reflection="ok",
+        exp_id = service.save_experience(
+            StrategyExperience(
+                name="X",
+                code="yaml",
+                rationale="r",
+                metrics={
+                    "total_return": 0.42,
+                    "sharpe_ratio": 1.2,
+                    "max_drawdown": -0.1,
+                },
+                reflection="ok",
+            )
         )
 
-        assert ok is True
-        metrics = captured.get("backtest_metrics", {})
-        # 扁平字段被持久化（之前永远是空 {}）
+        assert exp_id  # 返回非空 ID
+        substances = service._store.get_all()
+        assert len(substances) == 1
+        meta = substances[0].metadata
+        metrics = meta.get("backtest_metrics", {})
+        # 扁平字段被持久化
         assert metrics.get("total_return") == 0.42
         assert metrics.get("sharpe_ratio") == 1.2
         assert metrics.get("max_drawdown") == -0.1
-        assert captured.get("backtest_success") is True
+        assert meta.get("backtest_success") is True

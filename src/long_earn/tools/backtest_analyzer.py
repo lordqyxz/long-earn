@@ -29,7 +29,7 @@ class BacktestAnalyzer:
         df = conn.execute(
             """
             SELECT event_type, status, COUNT(*) as count
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ?
             GROUP BY event_type, status
             """,
@@ -46,7 +46,7 @@ class BacktestAnalyzer:
         current_id = trace_id
         while True:
             res = conn.execute(
-                "SELECT parent_id FROM audit.logs WHERE trace_id = ? LIMIT 1",
+                "SELECT parent_id FROM backtest_audit.logs WHERE trace_id = ? LIMIT 1",
                 [current_id],
             ).fetchone()
             if not res or not res[0]:
@@ -62,7 +62,7 @@ class BacktestAnalyzer:
                 continue
             visited.add(curr)
             res = conn.execute(
-                "SELECT trace_id FROM audit.logs WHERE parent_id = ?",
+                "SELECT trace_id FROM backtest_audit.logs WHERE parent_id = ?",
                 [curr],
             ).fetchall()
             for row in res:
@@ -71,7 +71,7 @@ class BacktestAnalyzer:
                     queue.append(row[0])
 
         query = (
-            "SELECT * FROM audit.logs WHERE trace_id IN ("
+            "SELECT * FROM backtest_audit.logs WHERE trace_id IN ("
             + ",".join(["?"] * len(related_ids))
             + ") ORDER BY timestamp ASC"
         )
@@ -84,7 +84,7 @@ class BacktestAnalyzer:
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
         conn = self._get_conn()
-        query = "SELECT * FROM audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        query = "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
         params = [run_id]
         if event_type:
             query += " AND event_type = ?"
@@ -117,7 +117,7 @@ class BacktestAnalyzer:
         rows = conn.execute(
             """
             SELECT timestamp, payload->>'$.portfolio_value' as value
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'MARKET_DATA'
             ORDER BY timestamp ASC
             """,
@@ -139,7 +139,7 @@ class BacktestAnalyzer:
         fills = conn.execute(
             """
             SELECT timestamp, trace_id, parent_id, payload
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'FILL'
             ORDER BY timestamp ASC
             """,
@@ -169,7 +169,7 @@ class BacktestAnalyzer:
         signals = conn.execute(
             """
             SELECT timestamp, payload
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'SIGNAL'
             ORDER BY timestamp ASC
             """,
@@ -194,7 +194,7 @@ class BacktestAnalyzer:
         perf = conn.execute(
             """
             SELECT event_type, COUNT(*) as count
-            FROM audit.logs
+            FROM backtest_audit.logs
             WHERE run_id = ?
             GROUP BY event_type
             ORDER BY count DESC
@@ -206,16 +206,16 @@ class BacktestAnalyzer:
         event_breakdown = {row[0]: row[1] for row in perf}
 
         first_ts = conn.execute(
-            "SELECT MIN(timestamp) FROM audit.logs WHERE run_id = ?", [run_id]
+            "SELECT MIN(timestamp) FROM backtest_audit.logs WHERE run_id = ?", [run_id]
         ).fetchone()[0]
         last_ts = conn.execute(
-            "SELECT MAX(timestamp) FROM audit.logs WHERE run_id = ?", [run_id]
+            "SELECT MAX(timestamp) FROM backtest_audit.logs WHERE run_id = ?", [run_id]
         ).fetchone()[0]
 
         # 尝试从 MARKET_DATA 载荷中提取回测指标
         bm_row = conn.execute(
             """
-            SELECT payload FROM audit.logs
+            SELECT payload FROM backtest_audit.logs
             WHERE run_id = ? AND event_type = 'MARKET_DATA'
             ORDER BY timestamp DESC LIMIT 1
             """,

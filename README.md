@@ -171,6 +171,70 @@ src/long_earn/backtest/
 - **股票池**：支持全 A / csi300 / csi500 / main_board / gem / star_board 及组合
 - **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，多源降级：DuckDB → miniqmt → akshare
 
+### 交易日志存储、导出与可视化
+
+回测引擎执行时会将完整交易日志（时间、标的、方向、价格、数量、金额、持仓市值）持久化到 DuckDB，并提供数据导出和 Web 可视化功能。
+
+**数据存储**
+
+回测执行时，引擎通过 `DuckDBAuditProvider` 将以下事件写入 DuckDB 的 `backtest_audit.logs` 表：
+
+| 事件类型 | 记录内容 |
+|---------|---------|
+| `FILL` | 成交记录（标的、方向、价格、数量、金额、持仓市值） |
+| `ORDER` | 订单请求（标的、方向、数量） |
+| `SIGNAL` | 策略信号（目标权重） |
+| `MARKET_DATA` | 每个 bar 的组合市值快照（用于权益曲线） |
+
+数据库位置：`.cache/backtest_cache.duckdb`（与行情缓存同库，独立 schema）。
+
+**Web 可视化仪表盘**
+
+启动可视化服务：
+
+```sh
+uv run python -m long_earn.dashboard.api
+```
+
+浏览器访问 `http://localhost:8090` 即可查看仪表盘，包含：
+
+- 权益曲线、日收益率分布、事件分布
+- 交易明细表（时间 / 标的 / 方向 / 价格 / 数量 / 持仓市值）
+- **交易标的图表**：为每只交易过的标的绘制价格走势图，并在图上标注买入（绿色 ▲）和卖出（红色 ▼）时间点，鼠标悬停显示价格、数量、金额
+- 风险指标（年化收益、夏普比率、最大回撤、VaR/CVaR）
+- 多策略对比
+
+**REST API 导出**
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/runs` | 列出所有回测运行 |
+| `GET /api/runs/{run_id}/symbols` | 该次回测交易过的标的列表 |
+| `GET /api/runs/{run_id}/trades` | 交易日志（JSON） |
+| `GET /api/runs/{run_id}/export?format=csv` | 导出交易日志为 CSV 文件下载 |
+| `GET /api/runs/{run_id}/export?format=json` | 导出交易日志为 JSON 文件下载 |
+| `GET /api/runs/{run_id}/symbol/{symbol}/chart` | 单只标的的价格走势 + 买卖点标注数据 |
+| `GET /api/runs/{run_id}/symbol_charts` | 全部交易标的的图表数据 |
+
+**代码调用导出**
+
+```python
+from long_earn.dashboard.analyzer import BacktestAnalyzer
+
+analyzer = BacktestAnalyzer()
+
+# 导出交易日志到文件
+analyzer.export_trade_traces_to_file("run_id", "trades.csv", fmt="csv")
+analyzer.export_trade_traces_to_file("run_id", "trades.json", fmt="json")
+
+# 获取单只标的的价格走势 + 买卖点（用于自定义可视化）
+chart_data = analyzer.export_symbol_chart_data("run_id", "600000.SH")
+# chart_data = {"symbol": "600000.SH", "price_history": [...], "trade_points": [...]}
+
+# 获取所有交易标的的图表数据
+all_charts = analyzer.export_all_symbol_charts("run_id")
+```
+
 ### 记忆系统
 
 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`（Pydantic）：
