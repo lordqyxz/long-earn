@@ -145,6 +145,65 @@ class MemoryServiceImpl(MemoryService):
                 break
         return experiences
 
+    # ── 假设树摘要（ADR-010 Phase 4）──────────────────────────
+
+    def save_hypothesis_tree(
+        self,
+        run_id: str,
+        best_insight: str,
+        best_direction: str,
+        node_count: int,
+    ) -> str:
+        """保存假设树摘要为 knowledge Substance（category="研究树"）。"""
+        s = Substance(
+            form=SubstanceForm.KNOWLEDGE,
+            content=best_insight or f"研究 {run_id} 无洞察",
+            keys=[run_id, best_direction] if best_direction else [run_id],
+            metadata={
+                "experience_type": "hypothesis_tree",
+                "category": "研究树",
+                "term": run_id,
+                "best_insight": best_insight,
+                "best_direction": best_direction,
+                "node_count": node_count,
+            },
+        )
+        sid = self._store.add(s)
+        self._auto_save()
+        self.logger.debug(f"假设树摘要已存储: {run_id} ({sid})")
+        return sid
+
+    def search_hypothesis_trees(
+        self,
+        query: str,
+        k: int = 3,
+    ) -> list[dict[str, Any]]:
+        """检索历史假设树摘要（hot-start）。"""
+        try:
+            results = self._store.search(
+                query, k=k * 2, min_similarity=0.05, categories=["研究树"]
+            )
+        except Exception as e:
+            self.logger.error(f"搜索假设树摘要失败: {e}")
+            return []
+
+        trees: list[dict[str, Any]] = []
+        for r in results:
+            meta = r["metadata"]
+            if meta.get("experience_type") != "hypothesis_tree":
+                continue
+            trees.append(
+                {
+                    "run_id": meta.get("term", ""),
+                    "best_insight": meta.get("best_insight", ""),
+                    "best_direction": meta.get("best_direction", ""),
+                    "node_count": meta.get("node_count", 0),
+                }
+            )
+            if len(trees) >= k:
+                break
+        return trees
+
     # ── 内部 ───────────────────────────────────────────────────
 
     def _auto_save(self) -> None:

@@ -23,7 +23,7 @@ from long_earn.strategy_rd.tree_store import HypothesisTreeStore
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-    from long_earn.services import BacktestService, LoggerService
+    from long_earn.services import BacktestService, LoggerService, MemoryService
 
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
@@ -82,9 +82,10 @@ def _observe_node(
 def _ideate_node(
     state: State,
     research_agent: StrategyResearchAgent,
-    logger: LoggerService,  # noqa: ARG001
+    memory: MemoryService,
+    logger: LoggerService,
 ) -> dict:
-    """假设生成 — 基于观察结果生成改进假设。"""
+    """假设生成 — 基于观察结果 + 历史树洞察（hot-start）生成改进假设。"""
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
@@ -97,9 +98,23 @@ def _ideate_node(
         {"next_focus": observations_raw} if isinstance(observations_raw, str) else observations_raw
     )
 
+    # Hot-start: 检索历史假设树洞察
+    child_insights = ""
+    try:
+        past_trees = memory.search_hypothesis_trees(query=parent_hypothesis or "策略优化", k=2)
+        if past_trees:
+            child_insights = "\n".join(
+                f"- {t.get('best_direction', '')}: {t.get('best_insight', '')[:100]}"
+                for t in past_trees
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"[HTR-ideate] 历史树检索失败: {e}")
+
     hypotheses = research_agent.ideate(
         observations=observations,
         parent_hypothesis=parent_hypothesis,
+        child_insights=child_insights,
         branching_factor=HTR_BRANCHING_FACTOR,
     )
 
@@ -408,13 +423,13 @@ def create_htr_subgraph(context: RuntimeContext):
 
     logger = context.logger
     backtest_service = context.require_backtest()
-    _ = context.require_memory()  # 确保记忆可用
+    memory = context.require_memory()
 
     workflow = StateGraph(State)
 
     workflow.add_node("init_tree", partial(_init_tree_node, logger=logger))
     workflow.add_node("observe", partial(_observe_node, research_agent=research_agent, logger=logger))
-    workflow.add_node("ideate", partial(_ideate_node, research_agent=research_agent, logger=logger))
+    workflow.add_node("ideate", partial(_ideate_node, research_agent=research_agent, memory=memory, logger=logger))
     workflow.add_node("select", partial(_select_node, research_agent=research_agent, logger=logger))
     workflow.add_node("dispatch", partial(_dispatch_node, logger=logger))
     workflow.add_node(
@@ -440,7 +455,7 @@ def create_htr_subgraph(context: RuntimeContext):
             logger=logger,
         ),
     )
-    workflow.add_node("save_tree", partial(_save_tree_node, logger=logger))
+    workflow.add_node("save_tree", partial(_save_tree_node, memory=memory, logger=logger))
 
     workflow.add_edge(START, "init_tree")
     workflow.add_edge("init_tree", "observe")
@@ -464,14 +479,31 @@ def create_htr_subgraph(context: RuntimeContext):
 
 def _save_tree_node(
     state: State,
+    memory: MemoryService,
     logger: LoggerService,
 ) -> dict:
-    """保存假设树到磁盘。"""
+    """保存假设树到磁盘 + 树摘要回写 SubstanceStore（ADR-010 Phase 4）。"""
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
+    # 1. 保存完整树到 JSON Store
     store = HypothesisTreeStore()
     store.save(tree)
+
+    # 2. 树摘要回写 SubstanceStore（hot-start 检索用）
+    best = tree.best_node()
+    best_insight = best.insight if best else ""
+    best_direction = best.direction if best else ""
+    try:
+        memory.save_hypothesis_tree(
+            run_id=tree.run_id,
+            best_insight=best_insight,
+            best_direction=best_direction,
+            node_count=tree.node_count,
+        )
+    except Exception as e:
+        if logger:
+            logger.warning(f"[HTR] 树摘要回写失败: {e}")
 
     if logger:
         logger.info(f"[HTR] 假设树已保存: {tree.run_id} ({tree.node_count} 节点)")

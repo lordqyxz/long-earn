@@ -75,6 +75,42 @@ class MemoryService(Protocol):
         """初始化记忆系统（加载持久化数据 / init 目录）。"""
         ...
 
+    def save_hypothesis_tree(
+        self,
+        run_id: str,
+        best_insight: str,
+        best_direction: str,
+        node_count: int,
+    ) -> str:
+        """保存假设树摘要到记忆（ADR-010 Phase 4 hot-start）。
+
+        Args:
+            run_id: 研究 run ID
+            best_insight: 最佳洞察摘要
+            best_direction: 最佳改进方向
+            node_count: 节点总数
+
+        Returns:
+            物质 ID
+        """
+        ...
+
+    def search_hypothesis_trees(
+        self,
+        query: str,
+        k: int = 3,
+    ) -> list[dict[str, Any]]:
+        """检索历史假设树摘要（ADR-010 Phase 4 hot-start）。
+
+        Args:
+            query: 查询文本
+            k: 返回结果数
+
+        Returns:
+            匹配的树摘要列表，每项含 run_id / best_insight / best_direction
+        """
+        ...
+
 
 # ── LLM Service ──────────────────────────────────────────────────
 
