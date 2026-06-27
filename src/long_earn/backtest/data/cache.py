@@ -10,11 +10,7 @@ import duckdb
 import pandas as pd
 from loguru import logger
 
-DEFAULT_CACHE_PATH = (
-    Path(__file__).parent.parent.parent.parent.parent
-    / ".cache"
-    / "backtest_cache.duckdb"
-)
+DEFAULT_CACHE_PATH = Path.home() / ".long_earn" / "backtest_cache.duckdb"
 
 
 class DataCache:
