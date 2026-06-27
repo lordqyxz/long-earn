@@ -45,5 +45,15 @@ class State(TypedDict, total=False):
     retrieval_keywords: list[str] | None
     adaptive_retrieval_history: list[dict[str, Any]] | None
 
+    # HTR 假设树状态（ADR-010）
+    hypothesis_tree: dict[str, Any] | None
+    current_best_node_id: str | None
+    selected_leaves: list[str] | None
+    executor_results: list[dict[str, Any]] | None
+    run_id: str | None
+    oos_threshold: float
+    oos_n_splits: int
+    operator_gaps: list[dict[str, str]] | None
+
 
 StrategyResearchState = State
