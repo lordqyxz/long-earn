@@ -687,3 +687,86 @@ class BacktestServiceImpl(BacktestService):
         )
 
         return result
+
+    def run_oos(
+        self,
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
+        n_splits: int = 3,
+    ) -> dict[str, Any]:
+        """Walk-Forward OOS 验证（ADR-010 Phase 3 held-out 门）。
+
+        在测试集区间上跑 Walk-Forward，返回 OOS 指标供合并决策。
+        使用 config.test_start_date / test_end_date 作为默认区间。
+
+        Args:
+            strategy_yaml: 策略 YAML
+            start_date: OOS 起始日期（默认 config.test_start_date）
+            end_date: OOS 结束日期（默认 config.test_end_date）
+            n_splits: Walk-Forward 折叠数
+
+        Returns:
+            WalkForwardResult dict: n_splits / fold_results / average_test_metrics /
+            failed_folds / oos_sharpe
+        """
+        start_date = start_date or getattr(
+            self.config, "test_start_date", "2025-01-01"
+        )
+        end_date = end_date or getattr(
+            self.config, "test_end_date", "2026-03-24"
+        )
+
+        if self.logger:
+            self.logger.info(
+                f"[OOS] Walk-Forward {start_date}~{end_date} n_splits={n_splits}"
+            )
+
+        try:
+            wf_result = self._engine.walk_forward_run(
+                strategy_yaml=strategy_yaml,
+                start_date=start_date,
+                end_date=end_date,
+                n_splits=n_splits,
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[OOS] Walk-Forward 失败: {e}")
+            return {
+                "n_splits": n_splits,
+                "fold_results": [],
+                "average_test_metrics": {},
+                "failed_folds": list(range(n_splits)),
+                "oos_sharpe": None,
+                "error": str(e),
+            }
+
+        fold_results = wf_result.get("folds", [])
+        test_metrics = [
+            f.get("test_metrics", {}) or {} for f in fold_results
+        ]
+        failed_folds = [
+            i for i, f in enumerate(fold_results) if f.get("error")
+        ]
+
+        # 计算平均 OOS 指标
+        avg_metrics: dict[str, float] = {}
+        if test_metrics:
+            for key in ("sharpe_ratio", "total_return", "max_drawdown"):
+                values = [
+                    float(m.get(key, 0))
+                    for m in test_metrics
+                    if m.get(key) is not None
+                ]
+                if values:
+                    avg_metrics[key] = sum(values) / len(values)
+
+        oos_sharpe = avg_metrics.get("sharpe_ratio")
+
+        return {
+            "n_splits": n_splits,
+            "fold_results": fold_results,
+            "average_test_metrics": avg_metrics,
+            "failed_folds": failed_folds,
+            "oos_sharpe": oos_sharpe,
+        }

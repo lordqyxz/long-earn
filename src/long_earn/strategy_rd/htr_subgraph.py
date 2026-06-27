@@ -270,44 +270,122 @@ def _backpropagate_node(
     return {"hypothesis_tree": tree.serialize()}
 
 
+def _evaluate_oos_and_merge(  # noqa: PLR0913
+    tree: HypothesisTree,
+    best_result: dict[str, Any],
+    current_best_oos: float | None,
+    backtest_service: BacktestService,
+    oos_n_splits: int,
+    oos_threshold: float,
+    logger: LoggerService,
+) -> str:
+    """对最佳候选跑 OOS 验证并决定 merge/continue。"""
+    best_node_id = best_result.get("node_id", "")
+    best_yaml = best_result.get("strategy_yaml", "")
+
+    oos_score: float | None = None
+    if best_yaml and not best_result.get("error"):
+        try:
+            oos_result = backtest_service.run_oos(
+                strategy_yaml=best_yaml,
+                n_splits=oos_n_splits,
+            )
+            oos_score = oos_result.get("oos_sharpe")
+            if logger:
+                logger.info(f"[HTR-OOS] 节点 {best_node_id} oos_sharpe={oos_score}")
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-OOS] OOS 验证失败: {e}")
+
+    if best_node_id and oos_score is not None:
+        tree.update_evidence(node_id=best_node_id, oos_score=oos_score)
+
+    if oos_score is not None and (
+        current_best_oos is None or oos_score > current_best_oos + oos_threshold
+    ):
+        tree.update_evidence(node_id=best_node_id, status=NodeStatus.MERGED)
+        tree.current_best_id = best_node_id
+        if logger:
+            logger.info(
+                f"[HTR-合并] 节点 {best_node_id} 合并 "
+                f"(oos={oos_score:.2f} > best={current_best_oos})"
+            )
+        return "merge"
+    return "continue"
+
+
 def _decide_node(
     state: State,
     research_agent: StrategyResearchAgent,
+    backtest_service: BacktestService,
     logger: LoggerService,
 ) -> dict:
-    """决策阶段 — 决定 merge/continue/stop。"""
+    """决策阶段 — 决定 merge/continue/stop。
+
+    Phase 3: 对本轮最佳 dev 候选跑 Walk-Forward OOS，
+    oos_score > current_best_oos + threshold → merge。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     iteration = state.get("iteration", 0)
+    oos_threshold = state.get("oos_threshold", HTR_MERGE_THRESHOLD)
+    oos_n_splits = state.get("oos_n_splits", 3)
 
     best = tree.best_node()
     current_best_oos = best.oos_score if best else None
 
-    # 找本轮最佳 dev 候选
     results = state.get("executor_results", []) or []
-    best_dev = max((r.get("dev_score", 0) for r in results), default=0.0)
+    oos_score: float | None = None
+    if not results:
+        action = "continue"
+    else:
+        best_result = max(results, key=lambda r: r.get("dev_score", 0))
+        action = _evaluate_oos_and_merge(
+            tree, best_result, current_best_oos,
+            backtest_service, oos_n_splits, oos_threshold, logger,
+        )
+        oos_score = tree.get_node(best_result.get("node_id", "")).oos_score if best_result.get("node_id") else None
 
     tree_state = {
         "node_count": tree.node_count,
         "max_depth": max((n.depth for n in tree.all_nodes()), default=0),
         "current_best_oos": current_best_oos,
-        "best_dev_score": best_dev,
-        "best_oos_score": None,  # Phase 3 加入 OOS
+        "best_dev_score": max((r.get("dev_score", 0) for r in results), default=0.0),
+        "best_oos_score": oos_score,
         "cycles_used": iteration,
         "max_cycles": HTR_MAX_CYCLES,
     }
 
-    action = research_agent.decide(tree_state)
-
-    # 安全兜底：达到最大周期或深度时强制停止
-    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH:
+    llm_action = research_agent.decide(tree_state)
+    # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
+    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
         action = "stop"
 
     if logger:
         logger.info(f"[HTR-决策] action={action}, iteration={iteration}")
 
     next_iteration = iteration + 1
-    return {"iteration": next_iteration, "result": action}
+    return {
+        "iteration": next_iteration,
+        "result": action,
+        "hypothesis_tree": tree.serialize(),
+    }
+
+    # LLM 决策（可覆盖安全兜底）
+    llm_action = research_agent.decide(tree_state)
+    # 安全兜底：达到最大周期或深度时强制停止
+    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
+        action = "stop"
+
+    if logger:
+        logger.info(f"[HTR-决策] action={action}, iteration={iteration}")
+
+    next_iteration = iteration + 1
+    return {
+        "iteration": next_iteration,
+        "result": action,
+        "hypothesis_tree": tree.serialize(),
+    }
 
 
 def _decide_cond(state: State) -> str:
@@ -353,7 +431,15 @@ def create_htr_subgraph(context: RuntimeContext):
         "backpropagate",
         partial(_backpropagate_node, research_agent=research_agent, logger=logger),
     )
-    workflow.add_node("decide", partial(_decide_node, research_agent=research_agent, logger=logger))
+    workflow.add_node(
+        "decide",
+        partial(
+            _decide_node,
+            research_agent=research_agent,
+            backtest_service=backtest_service,
+            logger=logger,
+        ),
+    )
     workflow.add_node("save_tree", partial(_save_tree_node, logger=logger))
 
     workflow.add_edge(START, "init_tree")

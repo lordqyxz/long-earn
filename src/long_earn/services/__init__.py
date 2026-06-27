@@ -124,6 +124,26 @@ class BacktestService(Protocol):
         """
         ...
 
+    def run_oos(
+        self,
+        strategy_yaml: str,
+        start_date: str = "",
+        end_date: str = "",
+        n_splits: int = 3,
+    ) -> dict[str, Any]:
+        """运行 Walk-Forward OOS 验证（ADR-010 held-out 门）
+
+        Args:
+            strategy_yaml: YAML DSL 策略描述
+            start_date: OOS 区间起始（测试集）
+            end_date: OOS 区间结束
+            n_splits: Walk-Forward 折叠数
+
+        Returns:
+            Walk-Forward 结果字典，含 oos_sharpe / fold_results / average_test_metrics
+        """
+        ...
+
 
 # ── Stock Service ────────────────────────────────────────────────
 

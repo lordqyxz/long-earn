@@ -42,3 +42,21 @@ class BacktestResult(BaseModel):
     attribution: dict[str, float] | None = Field(
         default=None, description="每只股票的 P&L 归因"
     )
+
+
+class WalkForwardResult(BaseModel):
+    """Walk-Forward OOS 验证结果（ADR-010 Phase 3）。"""
+
+    n_splits: int = Field(description="折叠数")
+    fold_results: list[dict[str, Any]] = Field(
+        default_factory=list, description="每个折叠的 test 指标"
+    )
+    average_test_metrics: dict[str, float] = Field(
+        default_factory=dict, description="所有折叠 test 指标的平均值"
+    )
+    failed_folds: list[int] = Field(
+        default_factory=list, description="失败折叠的索引"
+    )
+    oos_sharpe: float | None = Field(
+        default=None, description="OOS 平均夏普比率（合并门主判据）"
+    )

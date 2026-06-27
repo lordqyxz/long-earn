@@ -81,13 +81,14 @@ class TestDecideNodeLogic:
         )
 
         agent = StrategyResearchAgent(context=context)
+        backtest_service = context.require_backtest()
 
         state = {
             "hypothesis_tree": tree.serialize(),
             "iteration": 100,  # 超过 HTR_MAX_CYCLES=10
             "executor_results": [],
         }
-        result = _decide_node(state, agent, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(state, agent, backtest_service, logger=None)  # type: ignore[arg-type]
         assert result["result"] == "stop"
 
     def test_max_depth_forces_stop(self):
@@ -107,11 +108,12 @@ class TestDecideNodeLogic:
         )
 
         agent = StrategyResearchAgent(context=context)
+        backtest_service = context.require_backtest()
 
         state = {
             "hypothesis_tree": tree.serialize(),
             "iteration": 0,
             "executor_results": [],
         }
-        result = _decide_node(state, agent, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(state, agent, backtest_service, logger=None)  # type: ignore[arg-type]
         assert result["result"] == "stop"
