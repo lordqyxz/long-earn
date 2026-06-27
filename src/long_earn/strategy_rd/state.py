@@ -36,6 +36,7 @@ class State(TypedDict, total=False):
     # code_valid 可能被并发节点同时更新，使用 last-wins reducer
     code_valid: Annotated[bool, _last_wins]
     experience_saved: bool
+    operator_gaps: list[dict[str, str]] | None
 
     retrieval_count: int
     max_retrievals: int

@@ -12,7 +12,10 @@ from .state import State
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
+    from long_earn.operator_dev.backlog import OperatorBacklog
 
+from long_earn.backtest.operators import list_operators
+from long_earn.operator_dev.spec import OperatorSpec, OperatorSpecPriority
 from long_earn.services import (
     BacktestService,
     LoggerService,
@@ -22,6 +25,30 @@ from long_earn.services import (
 
 MAX_CODE_REFINES = 3
 MAX_RETRIEVALS = 3
+
+# gap_detector 关键词→算子能力映射（中文金融术语 → 算子目录已有算子名）
+_GAP_KEYWORD_MAP: dict[str, list[str]] = {
+    "动量": ["returns", "shift"],
+    "收益率": ["returns"],
+    "移动平均": ["sma", "ema"],
+    "均线": ["sma", "ema"],
+    "MACD": ["macd"],
+    "RSI": ["rsi"],
+    "布林": ["bollinger"],
+    "超买": ["rsi"],
+    "超卖": ["rsi"],
+    "排名": ["rank_top"],
+    "排序": ["rank_top"],
+    "筛选": ["filter_threshold"],
+    "过滤": ["filter_threshold"],
+    "窗口": ["windowed"],
+    "均值": ["windowed", "sma"],
+    "标准差": ["windowed"],
+    "波动率": ["windowed"],
+    "位移": ["shift"],
+    "算术": ["arithmetic"],
+    "加减乘除": ["arithmetic"],
+}
 
 
 def _init_iteration(
@@ -313,6 +340,87 @@ def _reflection_node(
     }
 
 
+# ── 算子缺口检测（ADR-009 gap_detector）─────────────────────────
+
+# 改进建议关键词 → 算子能力映射（用于检测目录是否已覆盖）
+_GAP_KEYWORD_MAP: dict[str, tuple[str, str, str]] = {
+    # keyword: (operator_name, category, intent)
+    "动量": ("momentum", "factor", "计算价格动量（区间收益率）"),
+    "rsi": ("rsi", "technical", "RSI 超买超卖相对强弱指标"),
+    "macd": ("macd", "technical", "MACD 指标移动平均收敛发散"),
+    "布林": ("bollinger", "technical", "布林带上下轨计算"),
+    "止盈": ("take_profit", "filter", "动态止盈条件过滤"),
+    "止损": ("stop_loss", "filter", "动态止损条件过滤"),
+    "成交量": ("volume_weighted", "factor", "成交量加权因子"),
+    "波动率": ("realized_volatility", "factor", "已实现波动率计算"),
+    "换手率": ("turnover", "factor", "换手率因子"),
+}
+
+
+def _gap_detector_node(
+    state: State,
+    logger: LoggerService,
+) -> dict:
+    """算子缺口检测节点 — 扫描改进建议与算子目录差异，产出 OperatorSpec 写 backlog。
+
+    非阻塞：检测到缺口写入 backlog 后立即返回，策略研发不等待算子开发。
+    """
+    backlog = _operator_backlog
+    if backlog is None:
+        return {"operator_gaps": []}
+
+    suggestions: list[str] = state.get("improvement_suggestions", []) or []
+    if not suggestions:
+        return {"operator_gaps": []}
+
+    strategy_yaml = state.get("strategy_yaml", "") or state.get(
+        "optimized_strategy_yaml", ""
+    ) or ""
+    if not strategy_yaml:
+        return {"operator_gaps": []}
+
+    # 获取当前算子目录已有算子名
+    try:
+        existing_ops = {op["name"] for op in list_operators()}
+    except Exception:
+        existing_ops = set()
+
+    # 扫描改进建议，匹配关键词检测缺口
+    gaps: list[dict[str, str]] = []
+    for suggestion in suggestions:
+        suggestion_lower = str(suggestion).lower()
+        for keyword, (op_name, category, intent) in _GAP_KEYWORD_MAP.items():
+            if keyword.lower() not in suggestion_lower:
+                continue
+            if op_name in existing_ops:
+                continue  # 目录已有，不是缺口
+
+            spec = OperatorSpec(
+                name=op_name,
+                intent=intent,
+                input_fields=["close", "volume"] if "volume" in keyword else ["close"],
+                category=category,
+                expected_output="每行 float",
+                reference_strategy=strategy_yaml[:500],
+                motivation=f"改进建议「{suggestion[:100]}」需要 {keyword} 能力，目录暂缺",
+                priority=OperatorSpecPriority.NORMAL,
+            )
+            submitted = backlog.submit(spec)
+            if submitted:
+                gaps.append(
+                    {"name": op_name, "intent": intent, "keyword": keyword}
+                )
+                if logger:
+                    logger.info(
+                        f"[缺口检测] 发现算子缺口: {op_name} ({category}) — {intent}"
+                    )
+
+    return {"operator_gaps": gaps}
+
+
+_operator_backlog: "OperatorBacklog | None" = None  # type: ignore[name-defined]
+
+
 def _optimize_node(
     state: State,
     research_agent: StrategyResearchAgent,
@@ -552,6 +660,10 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     backtest_service = context.require_backtest()
     memory = context.require_memory()
 
+    # 设置 gap_detector 的 backlog 引用（ADR-009）
+    global _operator_backlog  # noqa: PLW0603
+    _operator_backlog = context.operator_backlog
+
     workflow = StateGraph(State)
 
     workflow.add_node(
@@ -601,6 +713,9 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     workflow.add_node(
         "reflection",
         partial(_reflection_node, research_agent=research_agent, logger=logger),
+    )
+    workflow.add_node(
+        "gap_detector", partial(_gap_detector_node, logger=logger)
     )
     workflow.add_node(
         "optimize",
@@ -657,7 +772,8 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         {"backtest": "backtest", "reflection": "reflection"},
     )
 
-    workflow.add_edge("reflection", "save_experience")
+    workflow.add_edge("reflection", "gap_detector")
+    workflow.add_edge("gap_detector", "save_experience")
     workflow.add_edge("save_experience", "supervisor")
 
     workflow.add_conditional_edges(

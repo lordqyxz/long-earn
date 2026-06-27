@@ -6,6 +6,7 @@
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.provider import CompositeDataProvider as DataProviderImpl
 from long_earn.config import AppConfig, RuntimeContext
+from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.services.backtest_service import BacktestServiceImpl
 from long_earn.services.llm_service import LLMServiceImpl
 from long_earn.services.logger_service import LoggerServiceImpl
@@ -44,6 +45,9 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     data_cache = DataCache()
     data_provider = DataProviderImpl(cache=data_cache)
 
+    # 2b. 算子缺口队列（strategy_rd gap_detector 写入 / operator_dev 消费）
+    operator_backlog = OperatorBacklog()
+
     # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
     llm_service = LLMServiceImpl(config, logger)
     memory = MemoryServiceImpl(config, logger)
@@ -59,6 +63,7 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         stock_service=stock_service,
         backtest_service=backtest_service,
         data_provider=data_provider,
+        operator_backlog=operator_backlog,
     )
 
 

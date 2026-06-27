@@ -20,6 +20,7 @@ from long_earn.services import (
 
 if TYPE_CHECKING:
     from long_earn.backtest.data.provider import DataProvider
+    from long_earn.operator_dev.backlog import OperatorBacklog
 
 # 项目数据目录
 _project_root = Path(__file__).parent.parent.parent.parent
@@ -61,6 +62,8 @@ class RuntimeContext:
 
     # 数据层（可选）
     data_provider: "DataProvider | None" = None
+    # 算子缺口队列（可选，gap_detector 写入 / operator_dev 消费）
+    operator_backlog: "OperatorBacklog | None" = None
 
     def require_llm(self) -> LLMService:
         """获取 LLM 服务（非空保证，等价于读 ``self.llm_service``）"""
