@@ -16,10 +16,12 @@
 """
 
 import json
+import shutil
+import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from loguru import logger
 
@@ -27,6 +29,11 @@ from long_earn.dashboard.analyzer import BacktestAnalyzer
 
 _HERE = Path(__file__).parent
 _DASHBOARD_HTML = _HERE / "templates" / "dashboard.html"
+
+# URL 路径分段索引：/api/runs/{run_id}/symbol/{symbol}/chart
+# split('/') 后为 ['', 'api', 'runs', run_id(3), 'symbol', symbol(5), 'chart']
+_RUN_ID_INDEX = 3
+_SYMBOL_INDEX = 5
 
 
 def _html_response(
@@ -50,6 +57,22 @@ def _json_response(
     )
 
 
+def _file_response(
+    handler: BaseHTTPRequestHandler, file_path: Path, content_type: str, filename: str
+) -> None:
+    """以文件下载方式响应（带 Content-Disposition 触发浏览器下载）"""
+    data = file_path.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header(
+        "Content-Disposition", f'attachment; filename="{filename}"'
+    )
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 class VisualizationServer(BaseHTTPRequestHandler):
     """HTTP 请求处理器（可视化 API 服务）
 
@@ -61,39 +84,61 @@ class VisualizationServer(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        query = parsed.query
 
         if path in {"/", ""}:
             self._serve_dashboard()
-        elif path == "/api/runs":
-            self._list_runs()
-        elif path.startswith("/api/runs/") and path.endswith("/summary"):
-            run_id = path.split("/")[3]
-            self._run_summary(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/equity"):
-            run_id = path.split("/")[3]
-            self._run_equity(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/trades"):
-            run_id = path.split("/")[3]
-            self._run_trades(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/signals"):
-            run_id = path.split("/")[3]
-            self._run_signals(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/attribution"):
-            run_id = path.split("/")[3]
-            self._run_attribution(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/dashboard"):
-            run_id = path.split("/")[3]
-            self._run_dashboard(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/risk"):
-            run_id = path.split("/")[3]
-            self._run_risk(run_id)
-        elif path.startswith("/api/runs/") and path.endswith("/daily_returns"):
-            run_id = path.split("/")[3]
-            self._run_daily_returns(run_id)
-        elif path == "/api/health":
+            return
+        if path == "/api/health":
             self._health()
-        else:
-            _json_response(self, {"error": "Not found"}, 404)
+            return
+        if path == "/api/runs":
+            self._list_runs()
+            return
+
+        # /api/runs/{run_id}/<suffix> 路由
+        if path.startswith("/api/runs/"):
+            self._route_run_endpoint(path, query)
+            return
+
+        _json_response(self, {"error": "Not found"}, 404)
+
+    def _route_run_endpoint(self, path: str, query: str) -> None:
+        """路由 /api/runs/{run_id}/<suffix> 形式的端点"""
+        parts = path.split("/")
+        # parts: ['', 'api', 'runs', '<run_id>', ...]
+        run_id = parts[3] if len(parts) > _RUN_ID_INDEX else ""
+
+        # 简单后缀路由表：suffix -> handler（handler 接收 run_id）
+        suffix_routes: dict[str, Any] = {
+            "/summary": self._run_summary,
+            "/equity": self._run_equity,
+            "/trades": self._run_trades,
+            "/signals": self._run_signals,
+            "/attribution": self._run_attribution,
+            "/dashboard": self._run_dashboard,
+            "/risk": self._run_risk,
+            "/daily_returns": self._run_daily_returns,
+            "/symbols": self._traded_symbols,
+            "/symbol_charts": self._all_symbol_charts,
+        }
+        for suffix, handler in suffix_routes.items():
+            if path.endswith(suffix):
+                handler(run_id)
+                return
+
+        # 导出端点需要额外 query 参数
+        if path.endswith("/export"):
+            self._export_trades(run_id, query)
+            return
+
+        # 个股图表：/api/runs/{run_id}/symbol/{symbol}/chart
+        if "/symbol/" in path and path.endswith("/chart"):
+            symbol = parts[_SYMBOL_INDEX] if len(parts) > _SYMBOL_INDEX else ""
+            self._symbol_chart(run_id, symbol)
+            return
+
+        _json_response(self, {"error": "Not found"}, 404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -130,7 +175,7 @@ class VisualizationServer(BaseHTTPRequestHandler):
         analyzer = self._get_analyzer()
         df = analyzer.run_custom_query(
             "SELECT DISTINCT run_id, MIN(timestamp) as started "
-            "FROM audit.logs GROUP BY run_id ORDER BY started DESC"
+            "FROM backtest_audit.logs GROUP BY run_id ORDER BY started DESC"
         )
         if df.is_empty():
             _json_response(self, {"runs": []})
@@ -238,6 +283,56 @@ class VisualizationServer(BaseHTTPRequestHandler):
             },
         )
 
+    # ── 交易导出与个股图表端点 ───────────────────────────────────────
+
+    def _traded_symbols(self, run_id: str) -> None:
+        """返回本次回测中所有被交易过的标的代码列表"""
+        analyzer = self._get_analyzer()
+        symbols = analyzer.get_traded_symbols(run_id)
+        _json_response(self, {"run_id": run_id, "symbols": symbols})
+
+    def _export_trades(self, run_id: str, query: str) -> None:
+        """导出交易日志为 CSV 或 JSON 文件下载
+
+        查询参数 format=csv（默认）| json
+        """
+        params = parse_qs(query)
+        fmt = (params.get("format", ["csv"])[0]).lower()
+        if fmt not in {"csv", "json"}:
+            _json_response(self, {"error": "format 仅支持 csv / json"}, 400)
+            return
+
+        analyzer = self._get_analyzer()
+        try:
+            tmp_dir = Path(tempfile.mkdtemp())
+            base_name = f"trades_{run_id[:8]}"
+            out_path = analyzer.export_trade_traces_to_file(
+                run_id, tmp_dir / base_name, fmt=fmt
+            )
+            content_type = (
+                "text/csv; charset=utf-8"
+                if fmt == "csv"
+                else "application/json; charset=utf-8"
+            )
+            _file_response(self, out_path, content_type, out_path.name)
+        except Exception as e:
+            logger.exception("导出交易日志失败")
+            _json_response(self, {"error": str(e)}, 500)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _symbol_chart(self, run_id: str, symbol: str) -> None:
+        """返回单只标的的价格走势 + 买卖点标注数据"""
+        analyzer = self._get_analyzer()
+        data = analyzer.export_symbol_chart_data(run_id, symbol)
+        _json_response(self, data)
+
+    def _all_symbol_charts(self, run_id: str) -> None:
+        """返回本次回测中所有交易标的的价格走势 + 买卖点标注数据"""
+        analyzer = self._get_analyzer()
+        charts = analyzer.export_all_symbol_charts(run_id)
+        _json_response(self, {"run_id": run_id, "symbols": len(charts), "charts": charts})
+
 
 def serve_visualization(
     host: str = "0.0.0.0",
@@ -264,6 +359,10 @@ def serve_visualization(
     logger.info("    GET /api/runs/{run_id}/trades")
     logger.info("    GET /api/runs/{run_id}/signals")
     logger.info("    GET /api/runs/{run_id}/risk")
+    logger.info("    GET /api/runs/{run_id}/symbols          交易标的列表")
+    logger.info("    GET /api/runs/{run_id}/export?format=csv  导出交易日志(CSV)")
+    logger.info("    GET /api/runs/{run_id}/symbol/{symbol}/chart  个股价格+买卖点")
+    logger.info("    GET /api/runs/{run_id}/symbol_charts      全部标的图表数据")
     logger.info("    POST /api/compare")
 
     try:
@@ -275,3 +374,15 @@ def serve_visualization(
 
 # 向后兼容别名：旧代码中使用 BacktestAPIHandler 的地方仍可正常工作
 BacktestAPIHandler = VisualizationServer
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="回测可视化 API 服务")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument("--port", type=int, default=8090, help="监听端口")
+    parser.add_argument("--db", default="", help="DuckDB 审计数据库路径")
+    args = parser.parse_args()
+
+    serve_visualization(host=args.host, port=args.port, db_path=args.db)

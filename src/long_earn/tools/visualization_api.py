@@ -94,7 +94,7 @@ class BacktestAPIHandler(BaseHTTPRequestHandler):
         """列出所有回测运行"""
         analyzer = self._get_analyzer()
         df = analyzer.run_custom_query(
-            "SELECT DISTINCT run_id, MIN(timestamp) as started FROM audit.logs GROUP BY run_id ORDER BY started DESC"
+            "SELECT DISTINCT run_id, MIN(timestamp) as started FROM backtest_audit.logs GROUP BY run_id ORDER BY started DESC"
         )
         if df.is_empty():
             _json_response(self, {"runs": []})

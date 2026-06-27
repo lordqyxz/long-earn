@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 from long_earn.backtest.data.miniqmt_provider import MiniQmtUniverseProvider
+from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
     parse_strategy_yaml,
@@ -442,6 +443,19 @@ class BacktestServiceImpl(BacktestService):
             "degenerate": degenerate,
         }
 
+    def _create_audit_provider(self) -> Any:
+        """创建 DuckDB 审计提供者，失败时返回 None（不阻断回测）
+
+        审计为旁路：回测把交易日志（时间/标的/价格/数量/金额）持久化到 DuckDB，
+        供后续导出与可视化消费。初始化失败仅告警，不影响策略计算。
+        """
+        try:
+            return DuckDBAuditProvider()
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"审计存储初始化失败，回测将不写 DuckDB: {exc}")
+            return None
+
     def run(
         self,
         strategy_yaml: str,
@@ -473,11 +487,18 @@ class BacktestServiceImpl(BacktestService):
             }
 
         try:
+            # 注入 DuckDB 审计提供者：回测执行时把交易日志（FILL/ORDER/SIGNAL/
+            # MARKET_DATA 事件，含时间、标的、价格、数量、金额、持仓市值等）
+            # 持久化到 DuckDB（backtest_audit.logs），供后续导出与可视化消费。
+            # 失败不阻断回测（审计为旁路，不参与策略计算）。
+            audit_provider = self._create_audit_provider()
+
             engine = EventDrivenBacktestEngine(
                 cost_config=dsl.trading_cost.to_broker_config(),
                 stop_loss=dsl.risk_control.stop_loss,
                 max_drawdown_limit=dsl.risk_control.max_drawdown_limit,
                 max_position_pct=dsl.risk_control.max_position_per_stock,
+                audit_provider=audit_provider,
             )
 
             data_provider = self.data_provider

@@ -145,6 +145,12 @@ class EventDrivenBacktestEngine:
             return BacktestResult(
                 success=False, message=str(e), error_category="engine_error"
             )
+        finally:
+            # 释放审计存储连接（DuckDB 连接需显式关闭，避免句柄泄漏）
+            close = getattr(self.audit_provider, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
 
     # ── 初始化辅助 ────────────────────────────────────────────
 
