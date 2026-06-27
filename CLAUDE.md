@@ -41,7 +41,7 @@ long_earn/
 │   │   ├── domain/          #   领域模型（实体、值对象、异常）
 │   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器 + 并行编排 + 参数网格 + 共享数据底座
 │   │   ├── operators/       #   算子框架（factor/filter/rank/compose/technical + 因果检测）
-│   │   └── data/            #   数据提供（Composite 多源降级：DuckDB → miniqmt → akshare）
+│   │   └── data/            #   数据提供（Composite 多源降级：DuckDB → miniqmt → ciccwm → akshare）
 │   ├── core/                # 核心工具（prompt_loader `${var}`、render 纯函数渲染、llm_utils）
 │   ├── substance/           # 物质-运动统一架构（Substance + Motion，ADR-007，已实施）
 │   │   └── indices/         #   RetrievalIndex（keyword+semantic 双通道）+ GraphIndex（邻接表）
@@ -145,7 +145,7 @@ prompt = prompt_template.format(query=query)
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
 - **子项目为 git submodule**：`remoteMiniQmt/` 通过 `.gitmodules` 引入，clone 后需 `git submodule update --init --recursive` 才会有内容
 - **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已删除。
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），首次运行时会通过 miniqmt (xtquant) 获取数据。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
 - **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)
 - **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
@@ -157,7 +157,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库（Superseded by ADR-007）
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
-- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Proposed）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；参考实现见 `D:\dev\cidd\.claude\skills\ciccwm-*/scripts/`。
+- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Accepted）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；已实现 `ciccwm_client.py` + `ciccwm_provider.py`，接入 `CompositeDataProvider` 降级链（DuckDB → miniqmt → ciccwm → akshare）。
 - [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**已实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。旧 `memory/`（ADR-004 v2.0）已删除。
 
 ## 调研文档
@@ -343,6 +343,8 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
 | 数据提供者 | `src/long_earn/backtest/data/provider.py` |
+| ciccwm HTTP 客户端 | `src/long_earn/backtest/data/ciccwm_client.py` |
+| ciccwm 数据提供者 | `src/long_earn/backtest/data/ciccwm_provider.py` |
 | miniqmt 数据封装 | `src/long_earn/backtest/data/miniqmt_provider.py` |
 | DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
 | 股票池管理 | `src/long_earn/backtest/data/universe.py` |
@@ -406,9 +408,9 @@ remoteMiniQmt/
 
 后续优化项暂无规划，按需添加。
 
-### 0. ciccwm 财经数据 Provider — 待实现
+### 0. ciccwm 财经数据 Provider — 已交付
 
-详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。在 `backtest/data/` 新增 `ciccwm_client.py` + `ciccwm_provider.py`：实现 `DataProvider` Protocol（行情历史→`get_price_panel`，财务报表→`get_financial_panel`），接入 `CompositeDataProvider` 降级链，优先级紧跟 miniqmt 之后、akshare 之前（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力（miniqmt、akshare 均无），以 Protocol 外扩展方法暴露，失败不静默降级。参考实现为 cidd 项目下已实测可用的三个 skill 脚本，凭证复用 `~/.config/ciccwm/config.json`。
+详见 [ADR-006](docs/adr/006-ciccwm-data-provider.md)。已实现 `ciccwm_client.py`（HTTP 客户端 + 鉴权 + 解析，合并三个 skill 公共逻辑）+ `ciccwm_provider.py`（`DataProvider` Protocol + ciccwm 独占扩展方法），接入 `CompositeDataProvider` 降级链（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力，以 Protocol 外扩展方法暴露，失败不静默降级。凭证复用 `~/.config/ciccwm/config.json`。
 
 ### 0. 新闻事件推理引擎 — Phase 2 待启动（ADR-007 Phase 1 已完成）
 

@@ -69,6 +69,8 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "tests/integration/conftest.py" = ["PLC0415", "PLR2004", "PLR0912", "PLR0915", "PLW2901"]
 "src/long_earn/backtest/data/provider.py" = ["I001", "PLC0415", "PLR2004"]
 "src/long_earn/backtest/data/miniqmt_provider.py" = ["PLR0912", "PLR2004"]
+"src/long_earn/backtest/data/ciccwm_client.py" = ["PLC0415", "PLR2004"]
+"src/long_earn/backtest/data/ciccwm_provider.py" = ["PLR2004"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

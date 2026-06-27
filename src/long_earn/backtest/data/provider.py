@@ -1,7 +1,7 @@
 """数据提供者模块
 
 统一的数据获取接口，支持多数据源自动降级：
-  DuckDB 缓存 → miniqmt (xtquant) → akshare
+  DuckDB 缓存 → miniqmt (xtquant) → ciccwm → akshare
 
 架构设计：
   - DataProvider Protocol：统一接口，上层服务只依赖此接口
@@ -94,20 +94,23 @@ class DataProvider(Protocol):
 
 
 class CompositeDataProvider:
-    """组合数据提供者：DuckDB 缓存 → miniqmt → akshare 自动降级。
+    """组合数据提供者：DuckDB 缓存 → miniqmt → ciccwm → akshare 自动降级。
 
     数据获取策略：
     1. 优先从 DuckDB 缓存读取
     2. 缓存缺失/过期时，尝试 miniqmt 增量更新
-    3. miniqmt 不可用且缓存无数据时，降级到 akshare
-    4. 每次从远程获取的数据自动写入 DuckDB 缓存
+    3. miniqmt 不可用且缓存无数据时，降级到 ciccwm（HTTP，无本地依赖）
+    4. ciccwm 也不可用时，最终降级到 akshare
+    5. 每次从远程获取的数据自动写入 DuckDB 缓存
     """
 
     def __init__(self, cache: DataCache | None = None) -> None:
         self.cache = cache or DataCache()
         self._miniqmt: DataProvider | None = None
+        self._ciccwm: DataProvider | None = None
         self._akshare: DataProvider | None = None
         self._miniqmt_available: bool | None = None
+        self._ciccwm_available: bool | None = None
         self._akshare_available: bool | None = None
 
     @staticmethod
@@ -150,6 +153,30 @@ class CompositeDataProvider:
         return self._miniqmt_available
 
     @property
+    def ciccwm_available(self) -> bool:
+        """检测 ciccwm 是否可用。"""
+        if self._ciccwm_available is not None:
+            return self._ciccwm_available
+        provider = self._get_ciccwm()
+        self._ciccwm_available = provider.is_available if provider else False
+        return self._ciccwm_available
+
+    def _get_ciccwm(self) -> DataProvider | None:
+        """延迟加载 ciccwm 提供者。"""
+        if self._ciccwm is not None:
+            return self._ciccwm
+        try:
+            from long_earn.backtest.data.ciccwm_provider import (
+                CiccwmDataProvider,
+            )
+
+            self._ciccwm = CiccwmDataProvider(self.cache)
+            return self._ciccwm
+        except Exception as e:
+            logger.warning(f"ciccwm 提供者加载失败: {e}")
+            return None
+
+    @property
     def akshare_available(self) -> bool:
         """检测 akshare 是否可用。"""
         if self._akshare_available is not None:
@@ -186,7 +213,10 @@ class CompositeDataProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取行情数据面板（自动降级）。"""
+        """获取行情数据面板（自动降级）。
+
+        降级链：DuckDB 缓存 → miniqmt → ciccwm → akshare。
+        """
         if not symbols:
             return pd.DataFrame()
 
@@ -201,17 +231,25 @@ class CompositeDataProvider:
             if not df.empty:
                 return df
 
-        # 2. miniqmt 提供者返回空（缓存无数据 + miniqmt 不可用），降级到 akshare
+        # 2. ciccwm 降级（紧跟 miniqmt，优先于 akshare，字段口径更稳定）
+        ci = self._get_ciccwm()
+        if ci is not None and ci.is_available:
+            self._log_source("ciccwm（miniqmt 不可用且缓存无数据，降级获取）")
+            df = ci.get_price_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
+
+        # 3. akshare 最终降级
         ak = self._get_akshare()
         if ak is not None:
-            self._log_source("akshare（miniqmt 不可用且缓存无数据，降级获取）")
+            self._log_source("akshare（miniqmt + ciccwm 均不可用，最终降级）")
             df = ak.get_price_panel(symbols, start_date, end_date, fields)
             if not df.empty:
                 return df
 
-        # 3. 所有数据源均不可用
+        # 4. 所有数据源均不可用
         logger.warning(
-            "所有数据源均不可用（miniqmt 不可用 + akshare 不可用），行情数据获取失败"
+            "所有数据源均不可用（miniqmt + ciccwm + akshare），行情数据获取失败"
         )
         return pd.DataFrame()
 
@@ -224,7 +262,10 @@ class CompositeDataProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取财务数据面板（自动降级）。"""
+        """获取财务数据面板（自动降级）。
+
+        降级链：DuckDB 缓存 → miniqmt → ciccwm → akshare。
+        """
         if not symbols:
             return pd.DataFrame()
 
@@ -238,10 +279,18 @@ class CompositeDataProvider:
             if not df.empty:
                 return df
 
-        # 2. 降级到 akshare
+        # 2. ciccwm 降级
+        ci = self._get_ciccwm()
+        if ci is not None and ci.is_available:
+            self._log_source("ciccwm（miniqmt 不可用且缓存无数据，降级获取）")
+            df = ci.get_financial_panel(symbols, start_date, end_date, fields)
+            if not df.empty:
+                return df
+
+        # 3. akshare 最终降级
         ak = self._get_akshare()
         if ak is not None:
-            self._log_source("akshare（miniqmt 不可用且缓存无数据，降级获取）")
+            self._log_source("akshare（miniqmt + ciccwm 均不可用，最终降级）")
             df = ak.get_financial_panel(symbols, start_date, end_date, fields)
             if not df.empty:
                 return df
@@ -295,7 +344,7 @@ def create_data_provider(cache: DataCache | None = None) -> CompositeDataProvide
     """工厂函数：创建组合数据提供者。
 
     自动检测可用数据源，按优先级组合：
-    DuckDB 缓存 → miniqmt → akshare
+    DuckDB 缓存 → miniqmt → ciccwm → akshare
 
     Args:
         cache: DuckDB 缓存实例，默认自动创建
