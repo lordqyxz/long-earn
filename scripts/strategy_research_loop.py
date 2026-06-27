@@ -46,12 +46,11 @@ logger.add(
     ),
 )
 
-# 近三个月评估窗口
-RECENT_START = "2026-03-25"
-RECENT_END = "2026-06-25"
-# 历史训练窗口
-HISTORY_START = "2022-01-01"
-HISTORY_END = "2026-03-24"
+# 量化数据分割（从 config 读取，默认值见 AppConfig）
+RECENT_START = ""  # 验证集起始（initialize 时从 config 读）
+RECENT_END = ""
+HISTORY_START = ""  # 训练集起始
+HISTORY_END = ""
 
 RESULTS_FILE = project_root / "strategy_research_results.json"
 
@@ -287,18 +286,26 @@ def _save_results(
 
 def main() -> None:
     """主函数。"""
+    global RECENT_START, RECENT_END, HISTORY_START, HISTORY_END  # noqa: PLW0603
     args = _parse_args()
+
+    config = AppConfig.from_env()
+    # 从 config 读取量化数据分割日期
+    HISTORY_START = config.train_start_date
+    HISTORY_END = config.test_end_date
+    RECENT_START = config.validation_start_date
+    RECENT_END = config.validation_end_date
 
     logger.info("=" * 60)
     logger.info("自主策略研究循环")
     logger.info(f"查询: {args.query}")
     logger.info(f"最大轮次: {args.max_rounds}")
-    logger.info(f"评估窗口: {RECENT_START} ~ {RECENT_END}")
+    logger.info(f"训练区间: {HISTORY_START} ~ {HISTORY_END}")
+    logger.info(f"验证区间: {RECENT_START} ~ {RECENT_END}")
     logger.info("=" * 60)
 
-    config = AppConfig.from_env()
     config.backtest_start_date = HISTORY_START
-    config.backtest_end_date = RECENT_END
+    config.backtest_end_date = HISTORY_END
     ctx = initialize_context(config)
     backtest_service = ctx.require_backtest()
 

@@ -262,6 +262,30 @@ src/long_earn/substance/
 - **持久化**：`~/.long_earn/substances.jsonl`（JSONL，无 pickle，有 schema 版本号）。
 - **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见。
 
+## 量化数据分割规范（必须遵守）
+
+> **此规范是量化分析的铁律，防止过拟合和前视偏差。所有策略研发、回测、优化必须严格遵守。**
+
+三段式数据分割，每段有且仅有指定用途，**不得交叉使用**：
+
+| 区间 | 环境变量 | 默认值 | 用途 | 约束 |
+|------|----------|--------|------|------|
+| **训练集 (In-Sample)** | `TRAIN_START` / `TRAIN_END` | 2022-01-01 ~ 2024-12-31 | 策略研发、因子选择、参数寻优 | 自由使用，可反复回测 |
+| **测试集 (Out-of-Sample)** | `TEST_START` / `TEST_END` | 2025-01-01 ~ 2026-03-24 | Walk-Forward OOS held-out 验证 | **仅用于合并决策**，不得用于参数调优 |
+| **验证集 (Forward)** | `VALIDATION_START` / `VALIDATION_END` | 2026-03-25 ~ 2026-06-25 | 前瞻验证，模拟实盘 | **开发阶段绝对禁止使用**，仅在最终评估时触碰一次 |
+
+### 规则
+
+1. **训练集可反复使用**：策略研发、因子筛选、参数网格寻优、ToT 反思等全部在训练集上进行。
+2. **测试集仅在合并门触碰**：ADR-010 HTR 的 `_decide` 节点对 best dev 候选跑 Walk-Forward OOS，`oos_score > current_best + threshold` 才合并。测试集**不得**用于参数调优或日常回测。
+3. **验证集最后触碰一次**：`strategy_research_loop.py` 的 `evaluate_recent_performance` 使用验证集做最终评估，**整个研发过程中仅此一次**。验证集业绩是系统对外报告的唯一指标。
+4. **比例参考**：训练 ~55%、测试 ~30%、验证 ~15%（按时间跨度）。可根据数据量调整，但三段必须分离。
+5. **禁止前视偏差**：训练集策略不得隐式或显式地"偷看"测试集/验证集的结果来调整参数。HTR 的 held-out 门就是此规则的系统级保证。
+
+### 配置
+
+`AppConfig` 新增 `train_start_date` / `train_end_date` / `test_start_date` / `test_end_date` / `validation_start_date` / `validation_end_date` 字段，从环境变量读取。`strategy_research_loop.py` 和 HTR 子图从 config 读取这些日期，不再硬编码。
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -275,6 +299,12 @@ src/long_earn/substance/
 | INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
 | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
+| TRAIN_START | 2022-01-01 | 训练集起始（量化数据分割规范）|
+| TRAIN_END | 2024-12-31 | 训练集结束 |
+| TEST_START | 2025-01-01 | 测试集起始（Walk-Forward OOS）|
+| TEST_END | 2026-03-24 | 测试集结束 |
+| VALIDATION_START | 2026-03-25 | 验证集起始（前瞻验证）|
+| VALIDATION_END | 2026-06-25 | 验证集结束 |
 | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
 | STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔）|
 | STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔）|

@@ -110,6 +110,13 @@ class AppConfig:
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
+    # 量化数据分割（CLAUDE.md「量化数据分割规范」）
+    train_start_date: str = "2022-01-01"
+    train_end_date: str = "2024-12-31"
+    test_start_date: str = "2025-01-01"
+    test_end_date: str = "2026-03-24"
+    validation_start_date: str = "2026-03-25"
+    validation_end_date: str = "2026-06-25"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
 
@@ -132,6 +139,12 @@ class AppConfig:
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
+            train_start_date=os.getenv("TRAIN_START", "2022-01-01"),
+            train_end_date=os.getenv("TRAIN_END", "2024-12-31"),
+            test_start_date=os.getenv("TEST_START", "2025-01-01"),
+            test_end_date=os.getenv("TEST_END", "2026-03-24"),
+            validation_start_date=os.getenv("VALIDATION_START", "2026-03-25"),
+            validation_end_date=os.getenv("VALIDATION_END", "2026-06-25"),
             strategy_keywords=tuple(
                 k.strip() for k in strategy_env.split(",") if k.strip()
             ),
