@@ -1,4 +1,4 @@
-"""ciccwm 数据层单元测试
+﻿"""ciccwm 数据层单元测试
 
 覆盖 ADR-006 定义的「系统关键环节」：
   - 凭证加载（缺失/为空/JSON 格式错误/BOM 容错）
@@ -31,8 +31,10 @@ from long_earn.backtest.data.ciccwm_client import (
 )
 from long_earn.backtest.data.ciccwm_provider import (
     CiccwmDataProvider,
-    _ciccwm_to_xt,
-    _xt_to_ciccwm,
+)
+from long_earn.backtest.data.symbol import (
+    ciccwm_to_xt,
+    xt_to_ciccwm,
 )
 
 # ── 凭证加载 ─────────────────────────────────────────────────────────────
@@ -276,42 +278,42 @@ class TestSymbolConversion:
 
     def test_shanghai(self):
         """上海证券交易所：.SH → market=1。"""
-        assert _xt_to_ciccwm("600519.SH") == ("600519", 1)
+        assert xt_to_ciccwm("600519.SH") == ("600519", 1)
 
     def test_shenzhen(self):
         """深圳证券交易所：.SZ → market=0。"""
-        assert _xt_to_ciccwm("000001.SZ") == ("000001", 0)
+        assert xt_to_ciccwm("000001.SZ") == ("000001", 0)
 
     def test_bse(self):
         """北交所：.BJ → market=2。"""
-        assert _xt_to_ciccwm("430047.BJ") == ("430047", 2)
+        assert xt_to_ciccwm("430047.BJ") == ("430047", 2)
 
     def test_hk(self):
         """港股：.HK → market=31。"""
-        assert _xt_to_ciccwm("00700.HK") == ("00700", 31)
+        assert xt_to_ciccwm("00700.HK") == ("00700", 31)
 
     def test_reverse_sh(self):
         """反向转换：market=1 → .SH。"""
-        assert _ciccwm_to_xt("600519", 1) == "600519.SH"
+        assert ciccwm_to_xt("600519", 1) == "600519.SH"
 
     def test_reverse_sz(self):
         """反向转换：market=0 → .SZ。"""
-        assert _ciccwm_to_xt("000001", 0) == "000001.SZ"
+        assert ciccwm_to_xt("000001", 0) == "000001.SZ"
 
     def test_invalid_format_raises(self):
         """无效格式抛 ValueError。"""
         with pytest.raises(ValueError, match="无法解析"):
-            _xt_to_ciccwm("invalid_code")
+            xt_to_ciccwm("invalid_code")
 
     def test_unknown_suffix_raises(self):
         """未知后缀抛 ValueError。"""
         with pytest.raises(ValueError, match="未知市场后缀"):
-            _xt_to_ciccwm("600519.XX")
+            xt_to_ciccwm("600519.XX")
 
     def test_unknown_market_raises(self):
         """未知 market 数值抛 ValueError。"""
         with pytest.raises(ValueError, match="未知市场代码"):
-            _ciccwm_to_xt("600519", 999)
+            ciccwm_to_xt("600519", 999)
 
 
 # ── Provider is_available（不依赖网络） ──────────────────────────────────

@@ -169,10 +169,51 @@ _MAX_GRID_DEFAULT = 256
 
 
 class ParallelRunner:
-    """并行回测编排器。"""
+    """并行回测编排器。
 
-    def __init__(self, max_workers: int = 0) -> None:
+    Args:
+        max_workers: 进程池大小，默认 ``os.cpu_count()``。
+        data_provider: 可选的数据提供者（面向 :class:`DataProvider` 业务接口）。
+            注入时主进程预取走降级链（DuckDB→miniqmt→ciccwm→akshare）；
+            未注入时退回本地 :class:`MiniQmtDataProvider`（向后兼容）。
+    """
+
+    def __init__(
+        self,
+        max_workers: int = 0,
+        data_provider: Any = None,
+    ) -> None:
         self.max_workers = max_workers or os.cpu_count() or 1
+        self.data_provider = data_provider
+
+    def _prepare_data(
+        self, symbols: list[str], start_date: str, end_date: str
+    ) -> Any:
+        """预取合并面板为 polars DataFrame（主进程执行，worker 通过 SharedMemory 共享）。
+
+        优先用注入的 ``data_provider``（走降级链），未注入时退回 ``MiniQmtDataProvider``。
+        """
+        from long_earn.backtest.data.polars_adapter import (  # noqa: PLC0415
+            PandasToPolarsProvider,
+        )
+
+        if self.data_provider is not None:
+            provider = self.data_provider
+            # 已实现 get_merged_panel_as_polars 的 provider（如 CompositeDataProvider）
+            # 直接调用；否则用 PandasToPolarsProvider 适配
+            if hasattr(provider, "get_merged_panel_as_polars"):
+                return provider.get_merged_panel_as_polars(symbols, start_date, end_date)
+            return PandasToPolarsProvider(provider).get_merged_panel_as_polars(
+                symbols, start_date, end_date
+            )
+        # 向后兼容：未注入时退回本地 MiniQmtDataProvider
+        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
+            MiniQmtDataProvider,
+        )
+
+        return PandasToPolarsProvider(MiniQmtDataProvider()).get_merged_panel_as_polars(
+            symbols, start_date, end_date
+        )
 
     def run_grid(  # noqa: PLR0913
         self,
@@ -219,18 +260,7 @@ class ParallelRunner:
         max_drawdown_limit = first_dsl.risk_control.max_drawdown_limit
         max_position_pct = first_dsl.risk_control.max_position_per_stock
 
-        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
-            MiniQmtDataProvider,
-        )
-        from long_earn.services.backtest_service import (  # noqa: PLC0415
-            PandasToPolarsProvider,
-        )
-
-        data_provider = MiniQmtDataProvider()
-        pandas_provider = PandasToPolarsProvider(data_provider)
-        full_data = pandas_provider.get_merged_panel_as_polars(
-            symbols, start_date, end_date
-        )
+        full_data = self._prepare_data(symbols, start_date, end_date)
 
         if full_data.is_empty():
             logger.error("[grid] 数据预取为空，无法执行并行回测")
@@ -288,21 +318,11 @@ class ParallelRunner:
         benchmark_symbol: str = "",
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
-        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
-            MiniQmtDataProvider,
-        )
         from long_earn.backtest.engine.ml_strategy import (  # noqa: PLC0415
             TimeSeriesSplit,
         )
-        from long_earn.services.backtest_service import (  # noqa: PLC0415
-            PandasToPolarsProvider,
-        )
 
-        data_provider = MiniQmtDataProvider()
-        pandas_provider = PandasToPolarsProvider(data_provider)
-        full_data = pandas_provider.get_merged_panel_as_polars(
-            symbols, start_date, end_date
-        )
+        full_data = self._prepare_data(symbols, start_date, end_date)
 
         if full_data.is_empty():
             return {"error": "数据预取为空"}

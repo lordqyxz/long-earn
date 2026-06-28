@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 from loguru import logger
-from typing import Protocol
+from typing import Any, Protocol
 
 import pandas as pd
+import polars as pl
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.polars_adapter import to_polars_panel
 
 
 class DataProvider(Protocol):
@@ -90,6 +92,77 @@ class DataProvider(Protocol):
         Returns:
             DataFrame，index 为 (date, symbol)，行情+财务列
         """
+        ...
+
+    def get_merged_panel_as_polars(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """获取合并面板并转为 polars DataFrame（引擎消费接口）。
+
+        默认实现委托 :class:`PandasToPolarsProvider` 包装 ``get_merged_panel``，
+        子类可直接继承或覆盖以提供更高效的 polars 原生路径。
+
+        Returns:
+            polars DataFrame，含 timestamp / symbol / close 等列；空数据返回空 DataFrame
+        """
+        ...
+
+
+class MarketIntelligenceProvider(Protocol):
+    """市场情报能力接口（第二组接口，与 :class:`DataProvider` 分离）。
+
+    定位差异：
+      - ``DataProvider``（行情/财务）：有降级链兜底（DuckDB→miniqmt→ciccwm→akshare），
+        失败静默降级到下一源。
+      - ``MarketIntelligenceProvider``（资金流向/排行/板块/资讯）：ciccwm 独占，
+        **无降级链**，失败显式报错或返回空（ADR-006 约定）。
+
+    实现者：仅 :class:`CiccwmDataProvider`。上层通过 ``context.market_intelligence``
+    显式获取，而非从 ``data_provider`` 上调扩展方法。
+    """
+
+    @property
+    def is_available(self) -> bool:
+        """情报源是否可用。"""
+        ...
+
+    def get_fund_flow(self, symbol: str) -> pd.DataFrame:
+        """获取个股资金流向（当日）。"""
+        ...
+
+    def get_ranking(
+        self,
+        market: int = 6,
+        limit: int = 10,
+        sort_type: int = 1,
+    ) -> pd.DataFrame:
+        """获取涨跌幅排行。"""
+        ...
+
+    def get_related_blocks(self, symbol: str) -> list[dict[str, Any]]:
+        """获取个股关联板块。"""
+        ...
+
+    def get_hot_rank(
+        self,
+        page_size: int = 10,
+        page_num: int = 1,
+        news_type: int = 1,
+    ) -> pd.DataFrame:
+        """获取今日热榜资讯。"""
+        ...
+
+    def get_topic_news(
+        self,
+        spec_subject_id: int | None = None,
+        page_size: int = 20,
+        page_num: int = 1,
+        news_type: int = 1,
+    ) -> pd.DataFrame:
+        """获取专题资讯列表。"""
         ...
 
 
@@ -320,6 +393,57 @@ class CompositeDataProvider:
         logger.warning("所有数据源均不可用，财务数据获取失败")
         return pd.DataFrame()
 
+    # ── 股票池（universe，自动降级） ──────────────────────────────────────
+
+    def get_symbols(self, universe_type: str, date: str = "") -> list[str]:
+        """获取股票池（自动降级：miniqmt → ciccwm → akshare）。
+
+        将 universe 纳入与行情/财务同构的降级链，避免 xtquant 不可用时
+        股票池获取断链。各 leaf provider 需实现 ``get_symbols`` 时自行处理
+        板块/指数映射；未实现的 provider 静默跳过。
+        """
+        # 1. miniqmt（已注入或延迟加载的 MiniQmtDataProvider 内含 universe 能力）
+        mq = self.miniqmt
+        if mq is not None:
+            symbols = self._try_get_symbols(mq, universe_type, date)
+            if symbols:
+                return symbols
+
+        # 2. ciccwm 降级
+        ci = self._get_ciccwm()
+        if ci is not None and ci.is_available:
+            symbols = self._try_get_symbols(ci, universe_type, date)
+            if symbols:
+                self._log_source("ciccwm universe（miniqmt 不可用，降级获取股票池）")
+                return symbols
+
+        # 3. akshare 最终降级
+        ak = self._get_akshare()
+        if ak is not None:
+            symbols = self._try_get_symbols(ak, universe_type, date)
+            if symbols:
+                self._log_source("akshare universe（miniqmt + ciccwm 均不可用，最终降级）")
+                return symbols
+
+        logger.warning(
+            f"所有数据源均不可用，股票池 '{universe_type}' 获取失败"
+        )
+        return []
+
+    @staticmethod
+    def _try_get_symbols(
+        provider: DataProvider, universe_type: str, date: str
+    ) -> list[str]:
+        """安全调用 provider 的 get_symbols，未实现或异常时返回空列表。"""
+        try:
+            fn = getattr(provider, "get_symbols", None)
+            if fn is None:
+                return []
+            return list(fn(universe_type, date) or [])
+        except Exception as e:
+            logger.warning(f"{type(provider).__name__}.get_symbols 失败: {e}")
+            return []
+
     # ── 合并面板 ─────────────────────────────────────────────────────────
 
     def get_merged_panel(
@@ -360,6 +484,20 @@ class CompositeDataProvider:
         merged = merged.set_index(idx_cols)
         merged = merged.groupby(level=idx_cols[1]).ffill()
         return merged.sort_index()
+
+    def get_merged_panel_as_polars(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """获取合并面板并转为 polars（实现 DataProvider Protocol）。
+
+        直接委托 :func:`to_polars_panel` 包装自身的 ``get_merged_panel``，
+        让引擎可经统一接口消费降级链结果。
+        """
+        df = self.get_merged_panel(symbols, start_date, end_date)
+        return to_polars_panel(df)
 
 
 def create_data_provider(

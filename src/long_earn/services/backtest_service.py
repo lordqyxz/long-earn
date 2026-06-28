@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 from long_earn.backtest.data.miniqmt_provider import MiniQmtUniverseProvider
+from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
 from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
@@ -315,60 +316,6 @@ class DSLStrategy(BaseStrategy):
         return {s: max(0.0, df.loc[s, field]) / total for s in selected}
 
 
-class PandasToPolarsProvider:
-    """将 miniqmt pandas DataFrame 适配为 Polars 输出"""
-
-    def __init__(self, pandas_provider: Any):
-        self._provider = pandas_provider
-
-    def get_merged_panel_as_polars(
-        self, symbols: list[str], start_date: str, end_date: str
-    ) -> pl.DataFrame:
-        # 获取合并的价格和财务数据面板
-        # 注意：symbols 已由调用方格式化（含 .SH/.SZ 后缀），无需重复格式化
-        df = self._provider.get_merged_panel(
-            symbols,
-            start_date,
-            end_date,
-            price_fields=["open", "high", "low", "close", "volume"],
-            financial_fields=[
-                "net_profit_yoy",
-                "roe",
-                "revenue_yoy",
-                "gross_margin",
-            ],
-        )
-        if df is None or df.empty:
-            return pl.DataFrame()
-
-        df = df.reset_index()
-        # 确保 date 列存在并重命名为 timestamp
-        if "date" in df.columns:
-            df = df.rename(columns={"date": "timestamp"})
-
-        required_cols = {"timestamp", "symbol", "close"}
-        missing = required_cols - set(df.columns)
-        if missing:
-            raise ValueError(f"数据缺少必要列: {missing}")
-
-        return pl.from_pandas(df)
-
-    @staticmethod
-    def _format_symbols(symbols: list[str]) -> list[str]:
-        """确保符号格式正确（000001 -> 000001.SZ, 600000 -> 600000.SH）"""
-        formatted = []
-        for s in symbols:
-            if "." in s:
-                formatted.append(s)
-            elif s.startswith(("60", "68")):
-                formatted.append(f"{s}.SH")
-            elif s.startswith(("00", "30")):
-                formatted.append(f"{s}.SZ")
-            else:
-                formatted.append(s)
-        return formatted
-
-
 class BacktestServiceImpl(BacktestService):
     """回测服务实现（直接调用事件驱动引擎）
 
@@ -456,6 +403,27 @@ class BacktestServiceImpl(BacktestService):
                 self.logger.warning(f"审计存储初始化失败，回测将不写 DuckDB: {exc}")
             return None
 
+    def _get_universe_symbols(self, universe_type: str, date: str) -> list[str]:
+        """获取股票池（优先走 data_provider 降级链，退回 MiniQmtUniverseProvider）。
+
+        将 universe 获取纳入 DI 容器管理：注入了 ``data_provider``（如
+        ``CompositeDataProvider``）时走降级链（miniqmt→ciccwm→akshare），
+        xtquant 不可用时不再断链；未注入时退回直接构造 ``MiniQmtUniverseProvider``。
+        """
+        if self.data_provider is not None:
+            try:
+                fn = getattr(self.data_provider, "get_symbols", None)
+                if fn is not None:
+                    symbols = list(fn(universe_type, date) or [])
+                    if symbols:
+                        return symbols
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(
+                        f"data_provider.get_symbols 失败，退回 MiniQmtUniverseProvider: {exc}"
+                    )
+        return MiniQmtUniverseProvider().get_symbols(universe_type, date)
+
     def run(
         self,
         strategy_yaml: str,
@@ -502,27 +470,24 @@ class BacktestServiceImpl(BacktestService):
             )
 
             data_provider = self.data_provider
-            if data_provider is not None and hasattr(data_provider, "get_merged_panel"):
-                engine.data_provider = PandasToPolarsProvider(data_provider)
+            if data_provider is not None:
+                # DataProvider Protocol 已定义 get_merged_panel_as_polars；
+                # 直接注入让引擎经统一接口消费（CompositeDataProvider 等已实现）。
+                engine.data_provider = data_provider
 
             strategy_obj = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
 
-            # 根据 DSL 配置获取股票池
+            # 根据 DSL 配置获取股票池（优先走 data_provider 降级链）
             universe_type = dsl.universe.type or "csi300"
             start_date_str = start_date.replace("-", "")
-            universe_provider = MiniQmtUniverseProvider()
-            universe_symbols = universe_provider.get_symbols(
-                universe_type, start_date_str
-            )
+            universe_symbols = self._get_universe_symbols(universe_type, start_date_str)
 
             # 降级：如果指定股票池为空，尝试 csi300
             if not universe_symbols and universe_type != "csi300":
                 if self.logger:
                     self.logger.warning(f"股票池 '{universe_type}' 为空，降级到 csi300")
                 universe_type = "csi300"
-                universe_symbols = universe_provider.get_symbols(
-                    "csi300", start_date_str
-                )
+                universe_symbols = self._get_universe_symbols("csi300", start_date_str)
 
             if not universe_symbols:
                 return {
@@ -532,7 +497,7 @@ class BacktestServiceImpl(BacktestService):
                 }
 
             # 格式化股票代码（添加 .SH/.SZ 后缀）
-            formatted_symbols = PandasToPolarsProvider._format_symbols(universe_symbols)
+            formatted_symbols = PandasToPolarsProvider.format_symbols(universe_symbols)
 
             if self.logger:
                 self.logger.info(
@@ -604,18 +569,15 @@ class BacktestServiceImpl(BacktestService):
         start_date = start_date or self.config.backtest_start_date
         end_date = end_date or self.config.backtest_end_date
 
-        universe_provider = MiniQmtUniverseProvider()
-        symbols = universe_provider.get_symbols(
-            universe_type, end_date.replace("-", "")
-        )
-        formatted_symbols = PandasToPolarsProvider._format_symbols(symbols)
+        symbols = self._get_universe_symbols(universe_type, end_date.replace("-", ""))
+        formatted_symbols = PandasToPolarsProvider.format_symbols(symbols)
 
         if self.logger:
             self.logger.info(
                 f"[grid] 股票池: {universe_type}, {len(formatted_symbols)} 只"
             )
 
-        runner = ParallelRunner()
+        runner = ParallelRunner(data_provider=self.data_provider)
         result = runner.run_grid(
             strategy_template=strategy_template,
             param_grid=param_grid,
@@ -664,11 +626,8 @@ class BacktestServiceImpl(BacktestService):
         start_date = start_date or self.config.backtest_start_date
         end_date = end_date or self.config.backtest_end_date
 
-        universe_provider = MiniQmtUniverseProvider()
-        symbols = universe_provider.get_symbols(
-            universe_type, end_date.replace("-", "")
-        )
-        formatted_symbols = PandasToPolarsProvider._format_symbols(symbols)
+        symbols = self._get_universe_symbols(universe_type, end_date.replace("-", ""))
+        formatted_symbols = PandasToPolarsProvider.format_symbols(symbols)
 
         if self.logger:
             self.logger.info(
@@ -676,7 +635,7 @@ class BacktestServiceImpl(BacktestService):
                 f"{len(formatted_symbols)} 只, n_splits={n_splits}"
             )
 
-        runner = ParallelRunner()
+        runner = ParallelRunner(data_provider=self.data_provider)
         result = runner.run_walk_forward_parallel(
             strategy_yaml=strategy_yaml,
             start_date=start_date,

@@ -22,9 +22,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
+import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.polars_adapter import to_polars_panel
 
 # 缓存数据过期阈值（天）：超过此天数视为过期，需从 miniqmt 更新
 STALE_THRESHOLD_DAYS = 5
@@ -889,6 +891,23 @@ class MiniQmtDataProvider:
         merged = merged.sort_index()
         merged = merged.groupby(level=idx_cols[1]).ffill()
         return merged.sort_index()
+
+    def get_merged_panel_as_polars(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """获取合并面板并转为 polars（实现 DataProvider Protocol）。"""
+        df = self.get_merged_panel(symbols, start_date, end_date)
+        return to_polars_panel(df)
+
+    def get_symbols(self, universe_type: str, date: str = "") -> list[str]:
+        """获取股票池（实现 universe 降级链接口）。
+
+        委托给 :class:`MiniQmtUniverseProvider`，共享同一 DuckDB 缓存。
+        """
+        return MiniQmtUniverseProvider(self.cache).get_symbols(universe_type, date)
 
     @staticmethod
     def _get_quarters_between(start_date: str, end_date: str) -> list[str]:

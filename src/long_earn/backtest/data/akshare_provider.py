@@ -1,4 +1,4 @@
-"""akshare 降级数据提供者。
+﻿"""akshare 降级数据提供者。
 
 当 miniqmt 不可用且 DuckDB 缓存无数据时，降级到 akshare 获取数据。
 akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
@@ -8,13 +8,15 @@ akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pandas as pd
+import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.polars_adapter import to_polars_panel
+from long_earn.backtest.data.symbol import xt_to_ak
 
 # akshare 中文列名 → 标准英文列名
 KLINE_COLUMN_MAP = {
@@ -26,23 +28,6 @@ KLINE_COLUMN_MAP = {
     "最低": "low",
     "成交量": "volume",
 }
-
-# xtquant 代码格式 → akshare 代码格式
-# 600519.SH → 600519, 000001.SZ → 000001
-XT_TO_AK_CODE = re.compile(r"^(\d{6})\.[A-Z]+$")
-
-
-def _xt_to_ak(symbol: str) -> str:
-    """将 xtquant 代码转为 akshare 代码（去掉后缀）。"""
-    m = XT_TO_AK_CODE.match(symbol)
-    return m.group(1) if m else symbol
-
-
-def _ak_to_xt(code: str) -> str:
-    """将 akshare 代码转为 xtquant 格式。"""
-    if code.startswith(("6", "9")):
-        return f"{code}.SH"
-    return f"{code}.SZ"
 
 
 class AkshareFallbackProvider:
@@ -88,7 +73,7 @@ class AkshareFallbackProvider:
         all_dfs: list[pd.DataFrame] = []
 
         for symbol in symbols:
-            ak_code = _xt_to_ak(symbol)
+            ak_code = xt_to_ak(symbol)
             try:
                 df = self._ak.stock_zh_a_hist(
                     symbol=ak_code,
@@ -144,7 +129,7 @@ class AkshareFallbackProvider:
         all_dfs: list[pd.DataFrame] = []
 
         for symbol in symbols:
-            ak_code = _xt_to_ak(symbol)
+            ak_code = xt_to_ak(symbol)
             try:
                 df = self._ak.stock_financial_report_sina(
                     stock=ak_code, symbol="利润表"
@@ -211,3 +196,13 @@ class AkshareFallbackProvider:
         merged = price_df.join(fin_df, how="outer")
         merged = merged.groupby(level="symbol").ffill()
         return merged.sort_index()
+
+    def get_merged_panel_as_polars(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """获取合并面板并转为 polars（实现 DataProvider Protocol）。"""
+        df = self.get_merged_panel(symbols, start_date, end_date)
+        return to_polars_panel(df)

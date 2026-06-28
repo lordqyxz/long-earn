@@ -3,6 +3,8 @@
 提供统一的运行时上下文创建和初始化。
 """
 
+from typing import TYPE_CHECKING
+
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.provider import CompositeDataProvider as DataProviderImpl
 from long_earn.config import AppConfig, RuntimeContext
@@ -13,6 +15,9 @@ from long_earn.services.logger_service import LoggerServiceImpl
 from long_earn.services.memory_service import MemoryServiceImpl
 from long_earn.services.monitoring_service import MonitoringServiceImpl
 from long_earn.services.stock_service import StockServiceImpl
+
+if TYPE_CHECKING:
+    from long_earn.backtest.data.provider import MarketIntelligenceProvider
 
 
 def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
@@ -48,6 +53,19 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     # 2b. 算子缺口队列（strategy_rd gap_detector 写入 / operator_dev 消费）
     operator_backlog = OperatorBacklog()
 
+    # 2c. 市场情报能力（ciccwm 可用时注入；与 data_provider 分离的第二组接口）
+    market_intelligence: MarketIntelligenceProvider | None = None
+    try:
+        from long_earn.backtest.data.ciccwm_provider import (  # noqa: PLC0415
+            CiccwmDataProvider,
+        )
+
+        _ciccwm_intel = CiccwmDataProvider(data_cache)
+        if _ciccwm_intel.is_available:
+            market_intelligence = _ciccwm_intel
+    except Exception as exc:
+        logger.warning(f"market_intelligence 初始化失败: {exc}")
+
     # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
     llm_service = LLMServiceImpl(config, logger)
     memory = MemoryServiceImpl(config, logger)
@@ -63,6 +81,7 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         stock_service=stock_service,
         backtest_service=backtest_service,
         data_provider=data_provider,
+        market_intelligence=market_intelligence,
         operator_backlog=operator_backlog,
     )
 

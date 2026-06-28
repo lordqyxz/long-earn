@@ -1,4 +1,4 @@
-"""中金财富 (ciccwm) 数据提供者。
+﻿"""中金财富 (ciccwm) 数据提供者。
 
 实现 ``DataProvider`` Protocol（行情/财务），并提供 ciccwm 独占的扩展能力
 （资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯）。
@@ -19,31 +19,19 @@ ciccwm 紧跟 miniqmt，优先于 akshare：
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pandas as pd
+import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data import ciccwm_client as client
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.polars_adapter import to_polars_panel
+from long_earn.backtest.data.provider import MarketIntelligenceProvider
+from long_earn.backtest.data.symbol import xt_to_ciccwm
 
-# ── 符号格式转换 ─────────────────────────────────────────────────────────
-
-# xtquant 格式：600519.SH / 000001.SZ / 600519.BJ / 00700.HK
-_XT_SYMBOL_RE = re.compile(r"^(\d{4,6})\.([A-Z]+)$")
-
-# 后缀 → ciccwm market 数值
-_SUFFIX_TO_MARKET: dict[str, int] = {
-    "SZ": client.MARKET_SHENZHEN,
-    "SH": client.MARKET_SHANGHAI,
-    "BJ": client.MARKET_BSE,
-    "HK": client.MARKET_HK,
-    "US": client.MARKET_US,
-}
-
-# market 数值 → 后缀（反向转换）
-_MARKET_TO_SUFFIX: dict[int, str] = {v: k for k, v in _SUFFIX_TO_MARKET.items()}
+# ── 字段映射常量 ───────────────────────────────────────────────────────────
 
 # 标准行情字段
 DEFAULT_PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
@@ -70,43 +58,15 @@ RANKING_MAX_LIMIT = 80
 HISTORY_DEFAULT_DAYS = 5
 
 
-def _xt_to_ciccwm(symbol: str) -> tuple[str, int]:
-    """将 xtquant 格式代码转为 ciccwm (code, market)。
-
-    Args:
-        symbol: xtquant 格式，如 ``600519.SH`` / ``000001.SZ``
-
-    Returns:
-        (code, market) 元组，如 ``("600519", 1)``
-
-    Raises:
-        ValueError: 无法识别的代码格式
-    """
-    m = _XT_SYMBOL_RE.match(symbol)
-    if not m:
-        raise ValueError(f"无法解析的代码格式: {symbol}")
-    code = m.group(1)
-    suffix = m.group(2)
-    market = _SUFFIX_TO_MARKET.get(suffix)
-    if market is None:
-        raise ValueError(f"未知市场后缀: {suffix} (symbol={symbol})")
-    return code, market
-
-
-def _ciccwm_to_xt(code: str, market: int) -> str:
-    """将 ciccwm (code, market) 转为 xtquant 格式。"""
-    suffix = _MARKET_TO_SUFFIX.get(market)
-    if suffix is None:
-        raise ValueError(f"未知市场代码: {market}")
-    return f"{code}.{suffix}"
-
-
-class CiccwmDataProvider:
+class CiccwmDataProvider(MarketIntelligenceProvider):
     """中金财富 (ciccwm) 数据提供者。
 
-    实现 ``DataProvider`` Protocol（行情/财务），并额外提供 ciccwm 独占能力方法。
-    纯 HTTP 实现，不依赖本地 miniQMT 客户端。
+    同时实现两组接口：
+      - :class:`DataProvider`（行情/财务）：进降级链，miniqmt 不可用时接管。
+      - :class:`MarketIntelligenceProvider`（资金流向/排行/板块/资讯）：
+        ciccwm 独占，无降级，失败显式报错（ADR-006）。
 
+    纯 HTTP 实现，不依赖本地 miniQMT 客户端。
     获取的行情/财务数据自动写入 DuckDB 缓存，后续查询可直接走缓存。
     """
 
@@ -161,7 +121,7 @@ class CiccwmDataProvider:
         all_dfs: list[pd.DataFrame] = []
         for symbol in symbols:
             try:
-                code, market = _xt_to_ciccwm(symbol)
+                code, market = xt_to_ciccwm(symbol)
             except ValueError as e:
                 logger.warning(f"跳过无法解析的代码 {symbol}: {e}")
                 continue
@@ -244,7 +204,7 @@ class CiccwmDataProvider:
 
         for symbol in symbols:
             try:
-                code, _market = _xt_to_ciccwm(symbol)
+                code, _market = xt_to_ciccwm(symbol)
             except ValueError as e:
                 logger.warning(f"跳过无法解析的代码 {symbol}: {e}")
                 continue
@@ -390,7 +350,17 @@ class CiccwmDataProvider:
         merged = merged.groupby(level="symbol").ffill()
         return merged.sort_index()
 
-    # ── 扩展能力（ciccwm 独占，不进 DataProvider Protocol） ────────────────
+    def get_merged_panel_as_polars(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """获取合并面板并转为 polars（实现 DataProvider Protocol）。"""
+        df = self.get_merged_panel(symbols, start_date, end_date)
+        return to_polars_panel(df)
+
+    # ── MarketIntelligenceProvider 接口实现（ciccwm 独占，无降级链） ──────
 
     def get_fund_flow(self, symbol: str) -> pd.DataFrame:
         """获取个股资金流向（当日）。
@@ -408,7 +378,7 @@ class CiccwmDataProvider:
             return pd.DataFrame()
 
         try:
-            code, market = _xt_to_ciccwm(symbol)
+            code, market = xt_to_ciccwm(symbol)
         except ValueError as e:
             logger.warning(f"无法解析代码 {symbol}: {e}")
             return pd.DataFrame()
@@ -483,7 +453,7 @@ class CiccwmDataProvider:
             return []
 
         try:
-            code, market = _xt_to_ciccwm(symbol)
+            code, market = xt_to_ciccwm(symbol)
         except ValueError as e:
             logger.warning(f"无法解析代码 {symbol}: {e}")
             return []
