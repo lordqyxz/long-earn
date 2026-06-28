@@ -102,11 +102,24 @@ class CompositeDataProvider:
     3. miniqmt 不可用且缓存无数据时，降级到 ciccwm（HTTP，无本地依赖）
     4. ciccwm 也不可用时，最终降级到 akshare
     5. 每次从远程获取的数据自动写入 DuckDB 缓存
+
+    miniqmt 后端可注入：传入 ``miniqmt_provider`` 可替换默认的本地
+    :class:`MiniQmtDataProvider`，未来可用于远端 xtquant 服务（同样实现
+    :class:`DataProvider` 接口）。``cache`` 仅在未注入 provider 时用于
+    构造默认本地 provider；注入 provider 时由调用方自行管理其缓存。
     """
 
-    def __init__(self, cache: DataCache | None = None) -> None:
+    def __init__(
+        self,
+        cache: DataCache | None = None,
+        *,
+        miniqmt_provider: DataProvider | None = None,
+    ) -> None:
         self.cache = cache or DataCache()
-        self._miniqmt: DataProvider | None = None
+        # 显式注入的 miniqmt 后端（面向 DataProvider 业务接口，对齐 ciccwm/akshare）。
+        # 不注入时延迟加载本地 MiniQmtDataProvider；注入时直接使用，不再延迟加载。
+        self._injected_miniqmt: DataProvider | None = miniqmt_provider
+        self._miniqmt: DataProvider | None = miniqmt_provider
         self._ciccwm: DataProvider | None = None
         self._akshare: DataProvider | None = None
         self._miniqmt_available: bool | None = None
@@ -125,9 +138,10 @@ class CompositeDataProvider:
 
     @property
     def miniqmt(self) -> DataProvider | None:
-        """延迟加载 miniqmt 提供者。"""
+        """延迟加载 miniqmt 提供者（已注入则直接返回）。"""
         if self._miniqmt is not None:
             return self._miniqmt
+        # 未注入：延迟加载本地 MiniQmtDataProvider
         try:
             from long_earn.backtest.data.miniqmt_provider import (
                 MiniQmtDataProvider,
@@ -144,6 +158,14 @@ class CompositeDataProvider:
         """检测 miniqmt 是否可用。"""
         if self._miniqmt_available is not None:
             return self._miniqmt_available
+        # 已注入的 provider：直接读其 is_available
+        if self._injected_miniqmt is not None:
+            try:
+                self._miniqmt_available = self._injected_miniqmt.is_available
+            except Exception:
+                self._miniqmt_available = False
+            return self._miniqmt_available
+        # 未注入：检测本地 xtquant
         try:
             from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
 
@@ -340,7 +362,11 @@ class CompositeDataProvider:
         return merged.sort_index()
 
 
-def create_data_provider(cache: DataCache | None = None) -> CompositeDataProvider:
+def create_data_provider(
+    cache: DataCache | None = None,
+    *,
+    miniqmt_provider: DataProvider | None = None,
+) -> CompositeDataProvider:
     """工厂函数：创建组合数据提供者。
 
     自动检测可用数据源，按优先级组合：
@@ -348,11 +374,15 @@ def create_data_provider(cache: DataCache | None = None) -> CompositeDataProvide
 
     Args:
         cache: DuckDB 缓存实例，默认自动创建
+        miniqmt_provider: 可选的 miniqmt 后端提供者（面向 ``DataProvider``
+            业务接口）。不传则延迟加载本地 :class:`MiniQmtDataProvider`；
+            传入远端实现（同样实现 :class:`DataProvider`）即可切换到远端
+            xtquant 服务，无需改动上层。
 
     Returns:
         CompositeDataProvider 实例
     """
-    return CompositeDataProvider(cache)
+    return CompositeDataProvider(cache, miniqmt_provider=miniqmt_provider)
 
 
 # 向后兼容别名
