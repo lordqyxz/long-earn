@@ -17,7 +17,6 @@ from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.broker import TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.strategy import BaseStrategy
-from long_earn.tools.backtest_analyzer import BacktestAnalyzer
 
 
 class MockStrategy(BaseStrategy):

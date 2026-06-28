@@ -11,9 +11,9 @@ class TestStrategyRDSubgraph:
 
     def test_subgraph_compiles(self):
         """子图应能成功编译"""
-        from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
-        from long_earn.context_init import create_runtime_context
         from long_earn.config import AppConfig
+        from long_earn.context_init import create_runtime_context
+        from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
 
         config = AppConfig.from_env()
         ctx = create_runtime_context(config)
@@ -26,9 +26,9 @@ class TestStrategyRDSubgraph:
 
     def test_subgraph_nodes_exist(self):
         """子图应包含关键节点"""
-        from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
-        from long_earn.context_init import create_runtime_context
         from long_earn.config import AppConfig
+        from long_earn.context_init import create_runtime_context
+        from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
 
         config = AppConfig.from_env()
         ctx = create_runtime_context(config)

@@ -3,7 +3,7 @@
 验证 BacktestAPIHandler 的公共接口行为，而非仅 hasattr。
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from long_earn.dashboard.api import BacktestAPIHandler, serve_visualization
 

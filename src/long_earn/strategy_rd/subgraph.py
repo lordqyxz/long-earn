@@ -26,30 +26,6 @@ from long_earn.services import (
 MAX_CODE_REFINES = 3
 MAX_RETRIEVALS = 3
 
-# gap_detector 关键词→算子能力映射（中文金融术语 → 算子目录已有算子名）
-_GAP_KEYWORD_MAP: dict[str, list[str]] = {
-    "动量": ["returns", "shift"],
-    "收益率": ["returns"],
-    "移动平均": ["sma", "ema"],
-    "均线": ["sma", "ema"],
-    "MACD": ["macd"],
-    "RSI": ["rsi"],
-    "布林": ["bollinger"],
-    "超买": ["rsi"],
-    "超卖": ["rsi"],
-    "排名": ["rank_top"],
-    "排序": ["rank_top"],
-    "筛选": ["filter_threshold"],
-    "过滤": ["filter_threshold"],
-    "窗口": ["windowed"],
-    "均值": ["windowed", "sma"],
-    "标准差": ["windowed"],
-    "波动率": ["windowed"],
-    "位移": ["shift"],
-    "算术": ["arithmetic"],
-    "加减乘除": ["arithmetic"],
-}
-
 
 def _init_iteration(
     state: State,

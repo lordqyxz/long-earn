@@ -7,9 +7,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from long_earn.backtest.domain.entities import FillEvent, Position
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
-from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
 
 

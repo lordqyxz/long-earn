@@ -7,7 +7,6 @@
 - 最大持仓限制
 """
 
-import uuid
 from datetime import datetime, timedelta
 
 import polars as pl

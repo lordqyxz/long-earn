@@ -4,13 +4,9 @@
 """
 
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
-import polars as pl
-
 from long_earn.backtest.engine.audit import AuditLogger, DuckDBAuditProvider
-from long_earn.tools.backtest_analyzer import BacktestAnalyzer
 
 
 def test_analyzer_reads_events_from_db():

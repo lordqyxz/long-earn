@@ -3,7 +3,6 @@
 验证 MarkdownPromptTemplate 正确加载 .md 文件并渲染变量。
 """
 
-import pytest
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 

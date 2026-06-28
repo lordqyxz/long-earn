@@ -36,3 +36,6 @@ pyrightconfig.json
 
 # Windows 保留设备名误生成文件
 nul
+
+# 旧 plan 目录（已迁移到 plans/）
+plan/
