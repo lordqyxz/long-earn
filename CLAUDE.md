@@ -1,6 +1,6 @@
 # long\_earn
 
-自我进化的量化交易系统（v1.0.1）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+自我进化的量化交易系统（v1.1.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发、股票分析和实时行情监控。
 
 ## 常用命令
 
@@ -44,17 +44,18 @@ long_earn/
 │   │   ├── domain/          #   领域模型（实体、值对象、异常）
 │   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器 + 并行编排 + 参数网格 + 共享数据底座
 │   │   ├── operators/       #   算子框架（factor/filter/rank/compose/technical + 因果检测）
-│   │   └── data/            #   数据提供（Composite 多源降级：DuckDB → miniqmt → ciccwm → akshare）
+│   │   └── data/            #   数据提供（三组接口 + 多源降级：DuckDB → miniqmt → ciccwm → akshare）
 │   ├── core/                # 核心工具（prompt_loader `${var}`、render 纯函数渲染、llm_utils）
 │   ├── substance/           # 物质-运动统一架构（Substance + Motion，ADR-007，已实施）
 │   │   └── indices/         #   RetrievalIndex（keyword+semantic 双通道）+ GraphIndex（邻接表）
 │   ├── operator_dev/        # 算子研发子图（sandbox + backlog + spec + agents）
 │   ├── strategy_optimization/ # 策略优化 pipeline（acceptance / optimizer）
 │   ├── services/            # 服务接口与实现
+│   ├── monitoring/          # 实时监控（价格阈值告警，ADR-011）
 │   ├── state.py             # 主图状态定义
-│   ├── strategy_rd/         # 策略研发子图
+│   ├── strategy_rd/         # 策略研发子图（含 HTR 六步循环，ADR-010）
 │   │   └── agents/          # 策略研发 Agent（含同目录 .md prompt）
-│   ├── stock_analysis/      # 股票分析子图
+│   ├── stock_analysis/      # 股票分析子图（5 视角并行，ADR-011）
 │   │   └── agents/          # 多视角分析师 Agent（含同目录 .md prompt）
 │   ├── dashboard/           # 可视化仪表盘（分析器 + API + 前端）
 │   │   └── templates/       #   HTML 仪表盘模板
@@ -69,7 +70,7 @@ long_earn/
 │   │   └── test_config.py  # 配置测试
 │   └── integration/         # 集成测试
 ├── docs/                    # 文档
-│   ├── adr/                 # 架构决策记录
+│   ├── adr/                 # 架构决策记录（ADR-001 ~ 011）
 │   └── research/            # 调研文档
 ├── scripts/                 # 一次性脚本（独立回测、数学验证），不属于主包
 └── langgraph.json           # LangGraph 部署配置
@@ -90,13 +91,24 @@ RuntimeContext(dataclass)
     ├── logger: LoggerService
     ├── monitoring: MonitoringService
     ├── config: AppConfig
-    └── data_provider: DataProvider | None       # 可选；跨子图共享数据提供者
+    ├── data_provider: DataProvider | None              # 第一组接口：历史面板（行情/财务）
+    ├── market_intelligence: MarketIntelligenceProvider | None  # 第二组接口：市场情报（ciccwm 独占）
+    ├── realtime_provider: RealtimeDataProvider | None  # 第三组接口：实时行情（ADR-011）
+    └── operator_backlog: OperatorBacklog | None        # 算子缺口队列（ADR-009）
 ```
+
+数据层三组接口（ADR-006/009/011，面向业务分离）：
+
+| 接口 | 职责 | 降级链 | 实现者 |
+|------|------|--------|--------|
+| `DataProvider` | 历史面板（行情/财务） | DuckDB→miniqmt→ciccwm→akshare | miniqmt/ciccwm/akshare/Composite |
+| `MarketIntelligenceProvider` | 市场情报（资金流向/排行/板块/资讯） | 无降级，ciccwm 独占 | ciccwm |
+| `RealtimeDataProvider` | 实时行情（快照/订阅） | miniqmt→ciccwm | miniqmt/ciccwm/Composite |
 
 主图（`agent.py`）路由到子图：
 
 - **strategy\_rd**：策略研发（start → init\_iteration → initial\_retrieval → adaptive\_retrieval 循环 → develop → backtest → 代码修复循环（最多3次）→ reflection → save\_experience → supervisor → optimize 循环）
-- **stock\_analysis**：股票分析（4 视角并行分析后汇总）
+- **stock\_analysis**：股票分析（5 视角并行分析后汇总：巴菲特/芒格/费雪/林奇/资金流向）
 
 ## 编码规范
 
@@ -146,9 +158,9 @@ prompt = prompt_template.format(query=query)
 ## Gotchas
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
-- **子项目为 git submodule**：`remoteMiniQmt/` 通过 `.gitmodules` 引入，clone 后需 `git submodule update --init --recursive` 才会有内容
 - **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已删除。
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。另有 `remoteMiniQmt/` 子项目提供远程 WebSocket 数据服务。
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
 - **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)。算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)）以 `prove_causality` 因果性数学证明替代表达式白名单，作为新策略的主执行路径；旧表达式路径向后兼容保留。
 - **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
@@ -160,12 +172,12 @@ prompt = prompt_template.format(query=query)
 - [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
 - [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库（Superseded by ADR-007）
 - [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
-- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Accepted）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；已实现 `ciccwm_client.py` + `ciccwm_provider.py`，接入 `CompositeDataProvider` 降级链（DuckDB → miniqmt → ciccwm → akshare）。
+- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Accepted）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；已实现 `ciccwm_client.py` + `ciccwm_provider.py`，接入 `CompositeDataProvider` 降级链（DuckDB → miniqmt → ciccwm → akshare）。资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯为 ciccwm 独占能力，已抽为 `MarketIntelligenceProvider` 第二组接口（不进降级链，失败显式报错）。凭证复用 `~/.config/ciccwm/config.json`。
 - [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**已实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。旧 `memory/`（ADR-004 v2.0）已删除。`MemoryService` Protocol 破坏性收窄 8 → 4 方法（删僵尸方法 `reflect`/`relate`/`remember`/`recall` + `tier` 死参；`save_experience` 收 `StrategyExperience` 值对象，`search_experience` 返回 `list[StrategyExperience]`，消灭 markdown 往返 regex 契约）；否决拆 `KnowledgeService` + `ExperienceService`（Substance 模型下无本质区别，仅 metadata 标签差异）。
 - [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md): 并行回测 + 统一模板渲染（**已实施**）。`${var}` 占位符语法（跨语言可移植）+ 纯函数渲染器解耦 LangChain + 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格（标量插值 + 对象层变换）。删除 80 行转义逻辑；32 核并行回测；`BacktestService.run_grid` / `run_walk_forward_parallel`。
 - [ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md): 算子目录 + 算子研发子图（**核心链路已实施**）。类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）替代 ADR-003 自由表达式 DSL；`prove_causality` 因果性数学证明（未来扰动不变性）作算子上线硬约束；operator_dev 异步闭环（spec→审计→因果证明→注册）+ strategy_optimization 验收（sharpe 严格提升）。gap_detector 已接入 strategy_rd（reflection→gap_detector→save_experience）。**后续**：register 写盘 / 主图挂载 / 退役 evaluator。
 - [ADR-010](docs/adr/010-hypothesis-tree-refinement.md): 假设树精炼 HTR（**已实施**）。将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。**混合持久化**：树本体独立 JSON Store，摘要回写 ADR-007 SubstanceStore 做 hot-start。Phase 1-5 全部完成：假设树领域模型 + 六步循环子图 + held-out 验证门 + 洞察传播记忆增强 + LangGraph Send 并行 fan-out。
-- [ADR-011](docs/adr/011-enhanced-realtime-analysis.md): 增强实时分析能力（**Proposed**）。新增第三组接口 `RealtimeDataProvider`（实时行情快照/订阅，miniqmt→ciccwm 降级）+ `PriceAlertMonitor` 价格阈值告警 + `FundFlowAnalyst` 资金流向视角分析师（`stock_analysis` 子图 4→5 视角）。数据层与分析层闭环：实时行情基础设施为资金流向分析提供能力支撑。
+- [ADR-011](docs/adr/011-enhanced-realtime-analysis.md): 增强实时分析能力（**已实施**）。新增第三组接口 `RealtimeDataProvider`（实时行情快照/订阅，miniqmt→ciccwm 降级）+ `PriceAlertMonitor` 价格阈值告警 + `FundFlowAnalyst` 资金流向视角分析师（`stock_analysis` 子图 4→5 视角）。数据层与分析层闭环：实时行情基础设施为资金流向分析提供能力支撑。
 
 ## 调研文档
 
@@ -232,9 +244,15 @@ src/long_earn/backtest/
 └── data/
     ├── __init__.py
     ├── cache.py             # DuckDB 本地缓存
-    ├── provider.py          # 数据提供者接口（miniqmt 版）
+    ├── provider.py          # 三组 Protocol + CompositeDataProvider（降级链编排）
     ├── miniqmt_provider.py  # xtquant.xtdata 数据获取封装
-    └── universe.py          # 股票池管理（miniqmt 版）
+    ├── ciccwm_client.py     # ciccwm HTTP 客户端 + 鉴权
+    ├── ciccwm_provider.py   # ciccwm 数据提供者（DataProvider + MarketIntelligenceProvider）
+    ├── akshare_provider.py  # akshare 降级数据提供者
+    ├── realtime.py          # 实时行情 Provider（ADR-011，第三组接口）
+    ├── polars_adapter.py    # pandas→polars 适配（to_polars_panel 纯函数）
+    ├── symbol.py            # 统一证券代码符号转换
+    └── universe.py          # 股票池管理
 ```
 
 - **状态化策略**：LLM 生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行。
@@ -381,12 +399,16 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
 | 数据提供者 | `src/long_earn/backtest/data/provider.py` |
+| 实时行情 Provider（ADR-011） | `src/long_earn/backtest/data/realtime.py` |
+| pandas→polars 适配 | `src/long_earn/backtest/data/polars_adapter.py` |
+| 统一符号转换 | `src/long_earn/backtest/data/symbol.py` |
 | ciccwm HTTP 客户端 | `src/long_earn/backtest/data/ciccwm_client.py` |
 | ciccwm 数据提供者 | `src/long_earn/backtest/data/ciccwm_provider.py` |
 | miniqmt 数据封装 | `src/long_earn/backtest/data/miniqmt_provider.py` |
 | DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
 | 股票池管理 | `src/long_earn/backtest/data/universe.py` |
 | 全量数据下载脚本 | `scripts/download_data.py` |
+| 价格阈值告警（ADR-011） | `src/long_earn/monitoring/realtime_alert.py` |
 | Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
 | Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
 | Dashboard HTML 模板 | `src/long_earn/dashboard/templates/dashboard.html` |
@@ -405,6 +427,7 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 策略监督器 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py` |
 | 股票分析子图 | `src/long_earn/stock_analysis/subgraph.py` |
 | 股票分析状态 | `src/long_earn/stock_analysis/state.py` |
+| 资金流向分析师（ADR-011） | `src/long_earn/stock_analysis/agents/fund_flow_analyst.py` |
 | 知识库工具 | `src/long_earn/tools/store.py` |
 | 回测分析器 | `src/long_earn/tools/backtest_analyzer.py` |
 | 可视化 API | `src/long_earn/tools/visualization_api.py` |
@@ -412,32 +435,6 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
 | LangGraph 部署配置 | `langgraph.json` |
 | 环境变量模板 | `.env.example` |
-
-## 子项目：Remote MiniQMT
-
-`remoteMiniQmt/` 是基于 WebSocket 的 miniQMT (xtquant) 远程 SDK，用于将本地 xtquant 行情与交易能力暴露为远程 JSON-RPC 2.0 服务。
-
-```
-remoteMiniQmt/
-├── src/rmt/
-│   ├── protocol.py          # JSON-RPC 协议定义
-│   ├── transport.py         # WebSocket 传输层
-│   ├── types.py             # xtquant 数据类型镜像
-│   ├── constants.py         # xtquant 交易常量镜像
-│   ├── client/
-│   │   ├── data.py          # 远程行情客户端 (RemoteXtData)
-│   │   └── trader.py        # 远程交易客户端 (RemoteXtTrader)
-│   └── server/
-│       ├── engine.py        # xtquant 引擎封装
-│       ├── app.py           # WebSocket JSON-RPC 服务端
-│       └── __main__.py      # 服务启动入口
-└── skills/
-    └── remote-miniqmt-data/  # TRAE Skill 封装
-```
-
-- **服务端**：运行在有 miniQMT 客户端的机器上，`python -m rmt.server` 启动（默认行情 ws://0.0.0.0:8001，交易 ws://0.0.0.0:8002）
-- **客户端**：远程机器通过 `RemoteXtData("ws://server-ip:8001")` 异步连接获取数据
-- **主项目数据层**：`miniqmt_provider.py` 直接调用本地 `xtquant.xtdata`，无需启动 remote 服务；remote 服务用于跨机部署场景
 
 ## 开发待办 (TODO)
 
@@ -469,11 +466,11 @@ ADR-007 Phase 1 已落地，下列 4 项已由物质-运动架构的原生能力
 - [x] **冲突检测** → `motion.detect_conflicts()`（可配置词库，不再硬编码）
 
 ### 3. 策略研发与分析 (Strategy RD & Analysis)
-- [ ] **HTR 假设树精炼**：将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。详见 [ADR-010](docs/adr/010-hypothesis-tree-refinement.md)（5 阶段，依赖 ADR-007 落地）。
+- [x] **HTR 假设树精炼**：将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。详见 [ADR-010](docs/adr/010-hypothesis-tree-refinement.md)（5 阶段，依赖 ADR-007 落地）。
 - [ ] **自动化参数寻优**：在 `strategy_rd` 子图中增加参数自动调优节点。基础设施已交付（`engine/parallel.py` + `param_grid.py`，见 [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md)），subgraph 接入待后续轮。
 - [ ] **多策略集成**：支持将多个研发成功的子策略组合成一个组合策略。
-- [ ] **实时数据对接**：将 miniqmt 静态回测扩展到支持近实时的行情监控与预警。
-- [ ] **增强分析视角**：在 `stock_analysis` 中增加行业对比视角和资金流向分析。
+- [x] **实时数据对接**：新增 `RealtimeDataProvider`（第三组接口，miniqmt→ciccwm 降级）+ `PriceAlertMonitor` 价格阈值告警。详见 [ADR-011](docs/adr/011-enhanced-realtime-analysis.md)。**后续**：近实盘策略接入（将实时行情喂入引擎 `on_bar`）。
+- [x] **增强分析视角**：在 `stock_analysis` 中增加资金流向视角（`FundFlowAnalyst`，第 5 视角，通过 `MarketIntelligenceProvider` 获取 ciccwm 独占数据）。详见 [ADR-011](docs/adr/011-enhanced-realtime-analysis.md)。**后续**：行业对比视角。
 
 ### 3.5 算子目录与算子研发 (Operator Catalog & Dev, 见 ADR-009)
 - [ ] **gap_detector 接入**：strategy_rd `reflection` 后新增 `gap_detector` 节点，扫描 `improvement_suggestions` 与算子目录差异，产出 `OperatorSpec` 写 backlog，串联 operator_dev 异步闭环。
