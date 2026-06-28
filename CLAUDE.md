@@ -165,6 +165,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md): 并行回测 + 统一模板渲染（**已实施**）。`${var}` 占位符语法（跨语言可移植）+ 纯函数渲染器解耦 LangChain + 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格（标量插值 + 对象层变换）。删除 80 行转义逻辑；32 核并行回测；`BacktestService.run_grid` / `run_walk_forward_parallel`。
 - [ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md): 算子目录 + 算子研发子图（**核心链路已实施**）。类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）替代 ADR-003 自由表达式 DSL；`prove_causality` 因果性数学证明（未来扰动不变性）作算子上线硬约束；operator_dev 异步闭环（spec→审计→因果证明→注册）+ strategy_optimization 验收（sharpe 严格提升）。gap_detector 已接入 strategy_rd（reflection→gap_detector→save_experience）。**后续**：register 写盘 / 主图挂载 / 退役 evaluator。
 - [ADR-010](docs/adr/010-hypothesis-tree-refinement.md): 假设树精炼 HTR（**已实施**）。将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。**混合持久化**：树本体独立 JSON Store，摘要回写 ADR-007 SubstanceStore 做 hot-start。Phase 1-5 全部完成：假设树领域模型 + 六步循环子图 + held-out 验证门 + 洞察传播记忆增强 + LangGraph Send 并行 fan-out。
+- [ADR-011](docs/adr/011-enhanced-realtime-analysis.md): 增强实时分析能力（**Proposed**）。新增第三组接口 `RealtimeDataProvider`（实时行情快照/订阅，miniqmt→ciccwm 降级）+ `PriceAlertMonitor` 价格阈值告警 + `FundFlowAnalyst` 资金流向视角分析师（`stock_analysis` 子图 4→5 视角）。数据层与分析层闭环：实时行情基础设施为资金流向分析提供能力支撑。
 
 ## 调研文档
 

@@ -9,6 +9,7 @@ from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
 from long_earn.stock_analysis.agents.charles_munger_analyst import CharlesMungerAnalyst
 from long_earn.stock_analysis.agents.extract_prompt import extract_prompt
 from long_earn.stock_analysis.agents.fiske_analyst import FiskeAnalyst
+from long_earn.stock_analysis.agents.fund_flow_analyst import FundFlowAnalyst
 from long_earn.stock_analysis.agents.petter_analyst import PetterAnalyst
 from long_earn.stock_analysis.state import StockAnalysisState
 
@@ -166,6 +167,7 @@ def route_stock_data(state):
             "charles_munger_analysis",
             "buffett_analysis",
             "fiske_analysis",
+            "fund_flow_analysis",
         ]
 
 
@@ -197,6 +199,13 @@ def fiske_analysis_node(state, context: "RuntimeContext"):
     return {"fiske_analysis": analysis}
 
 
+def fund_flow_analysis_node(state, context: "RuntimeContext"):
+    """资金流向视角分析（ADR-011 第 5 视角）"""
+    fund_flow_analyst = FundFlowAnalyst(context=context)
+    analysis = fund_flow_analyst.analyze(state.get("stock_data", {}))
+    return {"fund_flow_analysis": analysis}
+
+
 def error_handler_node(state):
     """错误处理节点"""
     stock_data = state.get("stock_data", {})
@@ -216,6 +225,8 @@ def summarize_node(state):
         summary += f"巴菲特视角：{state['buffett_analysis']}\n"
     if state.get("fiske_analysis"):
         summary += f"费雪视角：{state['fiske_analysis']}\n"
+    if state.get("fund_flow_analysis"):
+        summary += f"资金流向视角：{state['fund_flow_analysis']}\n"
     return {"summary": summary, "result": summary}
 
 
@@ -241,6 +252,9 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     workflow.add_node(
         "fiske_analysis", lambda state: fiske_analysis_node(state, context)
     )
+    workflow.add_node(
+        "fund_flow_analysis", lambda state: fund_flow_analysis_node(state, context)
+    )
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("error_handler", error_handler_node)
 
@@ -254,15 +268,17 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
             "charles_munger_analysis": "charles_munger_analysis",
             "buffett_analysis": "buffett_analysis",
             "fiske_analysis": "fiske_analysis",
+            "fund_flow_analysis": "fund_flow_analysis",
             "error_handler": "error_handler",
         },
     )
 
-    # 从四个并行节点汇聚到汇总节点
+    # 从五个并行节点汇聚到汇总节点
     workflow.add_edge("petter_analysis", "summarize")
     workflow.add_edge("charles_munger_analysis", "summarize")
     workflow.add_edge("buffett_analysis", "summarize")
     workflow.add_edge("fiske_analysis", "summarize")
+    workflow.add_edge("fund_flow_analysis", "summarize")
     workflow.add_edge("summarize", END)
     workflow.add_edge("error_handler", END)
 

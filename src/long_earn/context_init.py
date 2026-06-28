@@ -18,6 +18,7 @@ from long_earn.services.stock_service import StockServiceImpl
 
 if TYPE_CHECKING:
     from long_earn.backtest.data.provider import MarketIntelligenceProvider
+    from long_earn.backtest.data.realtime import RealtimeDataProvider
 
 
 def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
@@ -66,6 +67,17 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     except Exception as exc:
         logger.warning(f"market_intelligence 初始化失败: {exc}")
 
+    # 2d. 实时行情能力（ADR-011 第三组接口；miniqmt→ciccwm 降级）
+    realtime_provider: RealtimeDataProvider | None = None
+    try:
+        from long_earn.backtest.data.realtime import (  # noqa: PLC0415
+            CompositeRealtimeProvider,
+        )
+
+        realtime_provider = CompositeRealtimeProvider()
+    except Exception as exc:
+        logger.warning(f"realtime_provider 初始化失败: {exc}")
+
     # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
     llm_service = LLMServiceImpl(config, logger)
     memory = MemoryServiceImpl(config, logger)
@@ -82,6 +94,7 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         backtest_service=backtest_service,
         data_provider=data_provider,
         market_intelligence=market_intelligence,
+        realtime_provider=realtime_provider,
         operator_backlog=operator_backlog,
     )
 
