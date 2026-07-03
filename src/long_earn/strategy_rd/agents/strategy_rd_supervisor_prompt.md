@@ -6,13 +6,13 @@
 ## 当前策略数据
 
 策略信息：
-${strategy}
+{{ strategy }}
 
 回测结果：
-${backtest_result}
+{{ backtest_result }}
 
 历史决策记录：
-${decision_history}
+{{ decision_history }}
 
 ## 评估标准
 

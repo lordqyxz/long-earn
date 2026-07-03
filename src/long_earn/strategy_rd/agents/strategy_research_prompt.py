@@ -41,16 +41,16 @@ def create_strategy_research_prompt(
 strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专家。请根据改进建议优化当前策略。
 
 ## 当前策略
-${strategy}
+{{ strategy }}
 
 ## 改进建议
-${suggestions_text}
+{{ suggestions_text }}
 
 ## 历史回测结果
-${backtest_history}
+{{ backtest_history }}
 
 ## 市场特征
-${market_characteristics}
+{{ market_characteristics }}
 
 ## 可用数据字段（必须且只能使用以下字段）
 行情：open, high, low, close, volume

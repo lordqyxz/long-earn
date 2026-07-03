@@ -3,16 +3,16 @@
 你是一个量化策略研究协调器。当前研究状态如下：
 
 ## 当前最佳策略
-${current_best}
+{{ current_best }}
 
 ## 前沿假设
-${frontier}
+{{ frontier }}
 
 ## 祖先洞察
-${ancestor_insights}
+{{ ancestor_insights }}
 
 ## 已剪枝方向
-${pruned_directions}
+{{ pruned_directions }}
 
 ## 任务
 基于以上状态，观察当前研究进展。回答：

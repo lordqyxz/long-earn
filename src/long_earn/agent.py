@@ -61,7 +61,7 @@ def _intent_analyze_node(
 
         routing_template = """请分析以下用户查询，确定用户意图并选择最合适的子图进行路由。
 
-用户查询：${user_query}
+用户查询：{{ user_query }}
 
 可用的子图:
 1. strategy_rd (策略研究) - 用于投资策略研究、投资思路分析、策略制定等
@@ -229,17 +229,17 @@ def _summarize_node(
             return {"summary": "抱歉，我无法处理您的请求，请稍后再试。"}
 
         summarize_template = """请根据以下研究结果生成一段证据详实，保持原有文本专业性的基础上、友好的回复，直接面向客户，综合概述技术细节。如果某部分结果为空，请忽略该部分。
-用户原始问题：${user_query}
-路由类型：${routing_reason}
+用户原始问题：{{ user_query }}
+路由类型：{{ routing_reason }}
 
 策略研究结果:
-${strategy_result}
+{{ strategy_result }}
 
 股票分析结果:
-${stock_analysis_result}
+{{ stock_analysis_result }}
 
 事件推理结果:
-${event_inference_result}
+{{ event_inference_result }}
 
 针对股票分析结果，总结各个视角下最佳买入区间，以表格样式汇总给我。
 """

@@ -6,15 +6,15 @@
 
 ## 待修复策略 YAML
 
-${code}
+{{ code }}
 
 ## 策略描述
 
-${strategy_description}
+{{ strategy_description }}
 
 ## 错误信息
 
-${error_message}
+{{ error_message }}
 
 ## 回测系统接口要求（检查清单）
 
