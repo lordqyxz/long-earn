@@ -2,8 +2,9 @@
 
 提供统一的提示词加载和管理功能，支持 Markdown 格式的提示词模板。
 
-使用 ${var} 占位符语法（POSIX/bash/JS 模板字面量同款），跨语言可移植。
-渲染由 core.render.render() 纯函数完成，不依赖 LangChain。
+使用 jinja2 占位符语法（`{{ var }}`，双花括号 + 空格），默认不 HTML 转义。
+渲染委托 langchain_core.prompts.PromptTemplate(template_format='jinja2')，
+底层为 SandboxedEnvironment（阻断 __class__ 等逃逸）。
 
 使用示例：
     from long_earn.core.prompt_loader import MarkdownPromptTemplate
@@ -31,18 +32,59 @@
         caller_file=__file__,
     )
 
-版本：2.0.0
+版本：3.0.0
 """
 
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 import re
 from pathlib import Path
 from typing import Any
 
-from long_earn.core.render import extract_variables, render
+from langchain_core.prompts import PromptTemplate
+
+# jinja2 变量提取正则：匹配 {{ var }} 形式（双花括号 + 空格 + 标识符）
+_VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_]\w*)\s*\}\}")
+
+
+def render(template: str, variables: dict[str, Any]) -> str:
+    """渲染模板，将 `{{ var }}` 替换为传入的值。
+
+    基于 langchain_core.prompts.PromptTemplate(template_format='jinja2')，
+    默认不 HTML 转义（LLM 提示词场景无需转义）。
+
+    规则：
+    - `{{ var }}` → str(variables[var])
+    - 缺失变量输出空串（jinja2 Undefined 语义）
+    - 不转义 `<>&"` 等字符
+    - SandboxedEnvironment 阻断 `__class__`/`__globals__` 等逃逸
+
+    Args:
+        template: 模板字符串
+        variables: 变量字典
+
+    Returns:
+        渲染后的字符串
+    """
+    return PromptTemplate(
+        template=template,
+        template_format="jinja2",
+        input_variables=_extract_variables(template),
+    ).format(**variables)
+
+
+def _extract_variables(template: str) -> list[str]:
+    """提取模板中所有 `{{ var }}` 变量名（去重保序）。"""
+    seen: set[str] = set()
+    result: list[str] = []
+    for m in _VAR_PATTERN.finditer(template):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
 
 
 class MarkdownPromptTemplate:
@@ -50,10 +92,11 @@ class MarkdownPromptTemplate:
 
     从 Markdown 文件加载提示词，支持：
     - 自动推断文件路径（基于调用者文件位置）
-    - 变量占位符（使用 ${variable_name} 格式）
+    - 变量占位符（使用 `{{ variable_name }}` 格式，jinja2 语法）
     - 缓存机制，避免重复读取文件
     - 支持 Markdown frontmatter 元数据（版本、描述等）
-    - 渲染由 core.render.render() 纯函数完成，不依赖 LangChain
+    - 渲染委托 langchain_core.prompts.PromptTemplate(template_format='jinja2')，
+      默认不 HTML 转义，底层 SandboxedEnvironment 防止 prompt 注入逃逸
     """
 
     def __init__(
@@ -79,14 +122,14 @@ class MarkdownPromptTemplate:
         """
         template_path = Path(template_file)
         if not template_path.is_absolute() and caller_file:
-            template_path = Path(caller_file).parent / template_path
+            template_path = Path(caller_file).parent / template_file
 
         template_content = template_path.read_text(encoding="utf-8")
 
         metadata, template_body = self._parse_frontmatter(template_content)
 
         if input_variables is None:
-            input_variables = extract_variables(template_content)
+            input_variables = _extract_variables(template_body)
 
         self.template = template_body
         self.input_variables = input_variables or []
@@ -95,6 +138,16 @@ class MarkdownPromptTemplate:
         self.template_file = template_path
         self.version = metadata.get("version", "1.0.0")
         self.description = metadata.get("description", "")
+
+        # 构造 jinja2 PromptTemplate 委托渲染
+        # 注：partial_variables 必须传 dict（{}）而非 None，否则
+        # langchain_core 1.3 pre_init_validation 会在 None 上做 `in` 操作报错
+        self._prompt_template = PromptTemplate(
+            template=template_body,
+            template_format="jinja2",
+            input_variables=self.input_variables,
+            partial_variables=self._partial_variables,
+        )
 
     @staticmethod
     def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
@@ -128,12 +181,11 @@ class MarkdownPromptTemplate:
         return {}, content.strip()
 
     def format(self, **kwargs: Any) -> str:
-        """渲染模板，将 ${var} 替换为传入的值。
+        """渲染模板，将 `{{ var }}` 替换为传入的值。
 
         合并 partial_variables 和 kwargs，kwargs 优先。
         """
-        variables = {**self._partial_variables, **kwargs}
-        return render(self.template, variables)
+        return self._prompt_template.format(**kwargs)
 
     def __repr__(self) -> str:
         return (

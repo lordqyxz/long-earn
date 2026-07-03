@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
-from long_earn.core.render import render
+from long_earn.core.prompt_loader import render
 from long_earn.stock_analysis.agents.buffett_analyst import BuffettAnalyst
 from long_earn.stock_analysis.agents.charles_munger_analyst import CharlesMungerAnalyst
 from long_earn.stock_analysis.agents.extract_prompt import extract_prompt
@@ -161,39 +161,75 @@ def route_stock_data(state):
     elif "error" in stock_data:
         return "error_handler"
     else:
-        return [
-            "petter_analysis",
-            "charles_munger_analysis",
-            "buffett_analysis",
-            "fiske_analysis",
-        ]
+        return "event_context"
+
+
+def event_context_node(state, context: "RuntimeContext"):
+    """事件上下文节点 — 激活相关市场事件注入分析师 prompt（ADR-007 Phase 3）"""
+    logger = context.logger
+    memory = context.require_memory()
+    stock_name = state.get("stock_name", "")
+    stock_code = state.get("stock_code", "")
+
+    # 触发文本：股票名 + 代码（任一存在即可）
+    trigger = " ".join(filter(None, [stock_name, stock_code]))
+    if not trigger:
+        return {"event_context": ""}
+
+    event_context = ""
+    if hasattr(memory, "activate_events"):
+        try:
+            events = memory.activate_events(trigger, k=5)
+            if events:
+                event_context = "\n".join(events)
+                if logger:
+                    logger.info(
+                        f"[事件上下文] {trigger} → 激活 {len(events)} 条事件"
+                    )
+        except Exception as e:
+            if logger:
+                logger.warning(f"[事件上下文] 激活失败: {e}")
+
+    return {"event_context": event_context}
 
 
 def petter_analysis_node(state, context: "RuntimeContext"):
     """彼得林奇视角分析"""
     petter_analyst = PetterAnalyst(context=context)
-    analysis = petter_analyst.analyze(state.get("stock_data", {}))
+    analysis = petter_analyst.analyze(
+        state.get("stock_data", {}),
+        event_context=state.get("event_context", ""),
+    )
     return {"petter_analysis": analysis}
 
 
 def charles_munger_analysis_node(state, context: "RuntimeContext"):
     """查理芒格视角分析"""
     charles_munger_analyst = CharlesMungerAnalyst(context=context)
-    analysis = charles_munger_analyst.analyze(state.get("stock_data", {}))
+    analysis = charles_munger_analyst.analyze(
+        state.get("stock_data", {}),
+        event_context=state.get("event_context", ""),
+    )
     return {"charles_munger_analysis": analysis}
 
 
 def buffett_analysis_node(state, context: "RuntimeContext"):
     """巴菲特视角分析"""
     buffett_analyst = BuffettAnalyst(context=context)
-    analysis = buffett_analyst.analyze(state.get("stock_data", {}))
+    analysis = buffett_analyst.analyze(
+        state.get("stock_data", {}),
+        event_context=state.get("event_context", ""),
+    )
     return {"buffett_analysis": analysis}
 
 
 def fiske_analysis_node(state, context: "RuntimeContext"):
     """费雪视角分析"""
     fiske_analyst = FiskeAnalyst(context=context)
-    analysis = fiske_analyst.analyze(state.get("stock_data", {}))
+    analysis = fiske_analyst.analyze(
+        state.get("stock_data", {}),
+        event_context=state.get("event_context", ""),
+    )
     return {"fiske_analysis": analysis}
 
 
@@ -229,6 +265,9 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node("get_stock_data", lambda state: get_stock_data(state, context))
     workflow.add_node(
+        "event_context", lambda state: event_context_node(state, context)
+    )
+    workflow.add_node(
         "petter_analysis", lambda state: petter_analysis_node(state, context)
     )
     workflow.add_node(
@@ -250,13 +289,16 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
         route_stock_data,
         {
             "get_stock_data": "get_stock_data",
-            "petter_analysis": "petter_analysis",
-            "charles_munger_analysis": "charles_munger_analysis",
-            "buffett_analysis": "buffett_analysis",
-            "fiske_analysis": "fiske_analysis",
+            "event_context": "event_context",
             "error_handler": "error_handler",
         },
     )
+
+    # event_context → fan-out 到 4 个分析师
+    workflow.add_edge("event_context", "petter_analysis")
+    workflow.add_edge("event_context", "charles_munger_analysis")
+    workflow.add_edge("event_context", "buffett_analysis")
+    workflow.add_edge("event_context", "fiske_analysis")
 
     # 从四个并行节点汇聚到汇总节点
     workflow.add_edge("petter_analysis", "summarize")

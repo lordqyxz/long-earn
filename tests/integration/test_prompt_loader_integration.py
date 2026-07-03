@@ -42,8 +42,8 @@ class TestPromptLoaderIntegration:
         assert hasattr(template, "version")
         assert hasattr(template, "description")
 
-    def test_code_block_braces_escaped(self):
-        """代码块内大括号应被转义"""
+    def test_code_block_braces_preserved(self):
+        """代码块内 JSON 大括号应被原样保留（jinja2 不与字面 {} 冲突）"""
         from pathlib import Path
         prompt_file = Path(__file__).parent.parent.parent / "src" / "long_earn" / "strategy_rd" / "agents" / "strategy_research_prompt.md"
         template = MarkdownPromptTemplate(
@@ -57,9 +57,10 @@ class TestPromptLoaderIntegration:
             strategy_context="",
         )
 
-        # 代码块内不应有未转义的双花括号
+        # jinja2 渲染后，JSON Schema 的 {} 应被原样保留（不被当作变量）
+        # 检查至少有一个代码块包含字面 JSON 大括号
         import re
 
         code_blocks = re.findall(r"```[\s\S]*?```", prompt)
-        for block in code_blocks:
-            assert "{{" not in block or "}}" not in block
+        json_blocks = [b for b in code_blocks if "{" in b and "}" in b]
+        assert len(json_blocks) > 0, "应至少有一个含 JSON 的代码块"

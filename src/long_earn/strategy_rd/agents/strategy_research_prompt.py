@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from long_earn.core.prompt_loader import MarkdownPromptTemplate
-from long_earn.core.render import render
+from long_earn.core.prompt_loader import MarkdownPromptTemplate, render
 
 _research_prompt_template = MarkdownPromptTemplate(
     "strategy_research_prompt.md",

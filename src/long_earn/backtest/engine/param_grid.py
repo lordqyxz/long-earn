@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from long_earn.backtest.engine.dsl import StrategyDSL
-from long_earn.core.render import render
+from long_earn.core.prompt_loader import render
 
 
 def render_template(yaml_template: str, scalar_params: dict[str, Any]) -> str:
