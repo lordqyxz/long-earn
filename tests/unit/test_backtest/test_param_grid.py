@@ -10,20 +10,22 @@ from long_earn.backtest.engine.param_grid import (
 
 class TestRenderTemplate:
     def test_scalar_interpolation(self):
-        template = "name: ${strategy_name}\nstop_loss: ${stop_loss}"
+        template = "name: {{ strategy_name }}\nstop_loss: {{ stop_loss }}"
         result = render_template(
             template, {"strategy_name": "Momentum", "stop_loss": 0.1}
         )
         assert "Momentum" in result
         assert "0.1" in result
 
-    def test_missing_safe(self):
-        template = "name: ${name}\nthreshold: ${threshold}"
+    def test_missing_empty_string(self):
+        # jinja2 缺失变量输出空串（与旧 safe_substitute 的"原样保留"不同）
+        template = "name: {{ name }}\nthreshold: {{ threshold }}"
         result = render_template(template, {"name": "Test"})
-        assert "${threshold}" in result
+        assert "{{ threshold }}" not in result
+        assert "threshold:" in result  # 空串替换后只剩 key
 
     def test_code_braces_not_affected(self):
-        template = 'factors:\n  score: "close / shift(close, ${lookback}) - 1"'
+        template = 'factors:\n  score: "close / shift(close, {{ lookback }}) - 1"'
         result = render_template(template, {"lookback": 20})
         assert "shift(close, 20)" in result
 
