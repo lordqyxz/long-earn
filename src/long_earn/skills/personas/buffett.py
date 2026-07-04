@@ -37,6 +37,46 @@ EXAMPLES = [
     ),
 ]
 
+# strategy_review 模式 few-shot 示例
+STRATEGY_REVIEW_EXAMPLES = [
+    HumanMessage(
+        content=(
+            "策略详情：{\"strategy_name\": \"低 PE 蓝筹选股\", "
+            "\"factors\": [\"pe<10\", \"roe>15%\"], \"rebalance\": \"monthly\"}\n"
+            "回测结果：{\"total_return\": 0.45, \"max_drawdown\": 0.18, "
+            "\"sharpe_ratio\": 1.2}\n市场事件上下文：央行降息周期"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"接受\", "
+            "\"rationale\": \"策略聚焦低估值高 ROE 蓝筹，符合价值投资原则；"
+            "回测显示稳健的夏普比率与可控回撤，护城河与安全边际兼顾。\", "
+            "\"weaknesses\": [\"PE 阈值偏静态，未区分行业估值中枢差异\"], "
+            "\"suggestions\": [\"按行业分位调整 PE 阈值\", \"增加现金流稳定性过滤\"], "
+            "\"confidence\": 0.8}"
+        )
+    ),
+    HumanMessage(
+        content=(
+            "策略详情：{\"strategy_name\": \"短线动量追涨\", "
+            "\"factors\": [\"5d_return>10%\"], \"holding\": \"3天\"}\n"
+            "回测结果：{\"total_return\": 0.6, \"max_drawdown\": 0.35, "
+            "\"sharpe_ratio\": 0.4}\n市场事件上下文：无"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"拒绝\", "
+            "\"rationale\": \"策略依赖短期价格动量而非企业内在价值，"
+            "回撤过大存在永久性资本损失风险，违背价值投资原则。\", "
+            "\"weaknesses\": [\"无护城河考量\", \"回撤失控\", \"换手过高\"], "
+            "\"suggestions\": [\"改为长期持有逻辑\", \"加入基本面质量过滤\", "
+            "\"设置最大回撤止损\"], \"confidence\": 0.85}"
+        )
+    ),
+]
+
 
 @PersonaRegistry.register
 class BuffettPersona(BasePersona):
@@ -45,13 +85,22 @@ class BuffettPersona(BasePersona):
     name = "buffett"
     display_name = "沃伦·巴菲特"
     perspective = "价值投资"
-    supported_modes = ("stock_analysis",)
+    supported_modes = ("stock_analysis", "strategy_review")
 
     def __init__(self, llm) -> None:
         super().__init__(llm)
         self.examples = EXAMPLES
+        self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
+        """派发到对应 mode 的分析逻辑。"""
+        if context.mode == "stock_analysis":
+            return self._analyze_stock(context)
+        elif context.mode == "strategy_review":
+            return self._review_strategy(context)
+        raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
+
+    def _analyze_stock(self, context: PersonaContext) -> PersonaResult:
         """stock_analysis 模式：加载 buffett/stock_analysis.md，调用 LLM。"""
         prompt = self._load_prompt("stock_analysis")
         messages = prompt.format_messages(
@@ -61,3 +110,15 @@ class BuffettPersona(BasePersona):
         )
         response = self.llm.invoke(messages)
         return self._parse_result(response, "stock_analysis")
+
+    def _review_strategy(self, context: PersonaContext) -> PersonaResult:
+        """strategy_review 模式：加载 buffett/strategy_review.md，调用 LLM。"""
+        prompt = self._load_prompt("strategy_review")
+        messages = prompt.format_messages(
+            strategy=context.target,
+            backtest_result=context.backtest_result or {},
+            event_context=context.event_context,
+            examples=self.strategy_review_examples,
+        )
+        response = self.llm.invoke(messages)
+        return self._parse_result(response, "strategy_review")

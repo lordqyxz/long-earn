@@ -13,6 +13,7 @@ from .state import State
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
     from long_earn.operator_dev.backlog import OperatorBacklog
+    from long_earn.services import LLMService
 
 from long_earn.backtest.operators import list_operators
 from long_earn.operator_dev.spec import OperatorSpec, OperatorSpecPriority
@@ -51,7 +52,7 @@ def _initial_retrieval_node(
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
 ) -> dict:
-    """初始检索节点 - 基础检索获取市场/策略基本信息"""
+    """初始检索节点 - 基础检索获取市场/策略基本信息 + 相关市场事件"""
     query = state.get("query", "")
     if logger:
         logger.info(f"[初始检索] 查询: {query}")
@@ -59,6 +60,19 @@ def _initial_retrieval_node(
     knowledge_context = research_agent._get_knowledge_context(
         query, node_type="research"
     )
+
+    # ADR-007 Phase 3：注入相关市场事件上下文（WorldInfo 激活）
+    event_context = research_agent._get_event_context(query, k=5)
+    if event_context:
+        knowledge_context = (
+            (knowledge_context + "\n\n" if knowledge_context else "")
+            + "### 相关市场事件\n"
+            + event_context
+        )
+        if logger:
+            logger.info(
+                f"[初始检索] 注入事件上下文 {len(event_context)} 字符"
+            )
 
     if logger:
         logger.info(f"[初始检索] 完成, 获取到 {len(knowledge_context)} 字符上下文")
@@ -290,15 +304,61 @@ def _reflection_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
+    llm_service: "LLMService | None" = None,
 ) -> dict:
-    """反思节点 - 分析回测结果并生成改进建议"""
+    """反思节点 - 分析回测结果并生成改进建议
+
+    ADR-012 Phase 2：在 ToT 反思前调用 4 个大师的 strategy_review mode
+    审视当前策略，将大师视角注入反思 prompt 作为补充上下文。
+    大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
+    """
     strategy = state.get("strategy", {}) or {}
     backtest_result = state.get("backtest_result", {}) or {}
 
-    if logger:
-        logger.info("[反思] 开始 ToT 多分支反思...")
+    # ADR-012 Phase 2：调用大师审视策略
+    master_perspectives: dict = {}
+    if llm_service is not None:
+        try:
+            # 延迟导入避免 skills.personas 在测试未安装时影响 subgraph 模块加载
+            from long_earn.skills.personas import PersonaRegistry
+            from long_earn.skills.personas.protocol import PersonaContext
 
-    reflection_result = research_agent.reflect(strategy, backtest_result)
+            personas = PersonaRegistry.create_all(llm_service.get_llm())
+            for name, persona in personas.items():
+                try:
+                    view = persona.analyze(
+                        PersonaContext(
+                            mode="strategy_review",
+                            target=strategy,
+                            backtest_result=backtest_result,
+                        )
+                    )
+                    master_perspectives[name] = view
+                except NotImplementedError:
+                    # 该大师尚未支持 strategy_review mode，跳过
+                    continue
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"大师 {name} 审视失败: {e}")
+                    continue
+        except Exception as e:
+            if logger:
+                logger.warning(f"大师注册表初始化失败: {e}")
+
+    if logger:
+        if master_perspectives:
+            logger.info(
+                f"[反思] 大师审视完成: {len(master_perspectives)} 位提供视角，"
+                f"开始 ToT 多分支反思..."
+            )
+        else:
+            logger.info("[反思] 开始 ToT 多分支反思...")
+
+    reflection_result = research_agent.reflect(
+        strategy,
+        backtest_result,
+        master_perspectives=master_perspectives if master_perspectives else None,
+    )
 
     if logger:
         logger.info(
@@ -688,7 +748,12 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     )
     workflow.add_node(
         "reflection",
-        partial(_reflection_node, research_agent=research_agent, logger=logger),
+        partial(
+            _reflection_node,
+            research_agent=research_agent,
+            logger=logger,
+            llm_service=context.llm_service,
+        ),
     )
     workflow.add_node(
         "gap_detector", partial(_gap_detector_node, logger=logger)

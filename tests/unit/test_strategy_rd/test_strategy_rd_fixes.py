@@ -606,7 +606,7 @@ class TestMultiRoundEvolutionStaticE2E:
             def __init__(self):
                 self.calls: list = []
 
-            def reflect(self, strategy, backtest_result):
+            def reflect(self, strategy, backtest_result, master_perspectives=None):
                 self.calls.append(("reflect", strategy.get("strategy_name")))
                 return {
                     "reflection": "需要降低回撤",

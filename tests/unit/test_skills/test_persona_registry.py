@@ -117,12 +117,12 @@ class TestUnsupportedMode:
     """不支持的模式抛 NotImplementedError。"""
 
     def test_unsupported_mode_raises(self):
-        """strategy_review 模式尚未实现，应抛 NotImplementedError。"""
+        """strategy_generate 模式尚未实现，应抛 NotImplementedError。"""
         mock_llm = MagicMock()
         buffett = BuffettPersona(llm=mock_llm)
 
         ctx = PersonaContext(
-            mode="strategy_review",
+            mode="strategy_generate",
             target={},
         )
         with pytest.raises(NotImplementedError):

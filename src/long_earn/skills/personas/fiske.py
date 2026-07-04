@@ -37,6 +37,51 @@ EXAMPLES = [
     ),
 ]
 
+# strategy_review 模式 few-shot 示例
+STRATEGY_REVIEW_EXAMPLES = [
+    HumanMessage(
+        content=(
+            "策略详情：{\"strategy_name\": \"高研发投入选股\", "
+            "\"factors\": [\"rd_ratio>8%\", \"revenue_growth>15%\"], "
+            "\"rebalance\": \"quarterly\"}\n"
+            "回测结果：{\"total_return\": 0.7, \"max_drawdown\": 0.25, "
+            "\"sharpe_ratio\": 1.3}\n市场事件上下文：产业政策利好"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"接受\", "
+            "\"rationale\": \"策略聚焦高研发投入与营收成长，"
+            "契合成长股投资原则；技术壁垒与创新能力被有效捕捉。\", "
+            "\"weaknesses\": [\"未考虑专利到期风险\", "
+            "\"行业景气度下行缺乏防御机制\"], "
+            "\"suggestions\": [\"加入专利剩余年限因子\", "
+            "\"增加行业景气度过滤\"], \"confidence\": 0.8}"
+        )
+    ),
+    HumanMessage(
+        content=(
+            "策略详情：{\"strategy_name\": \"低估值蓝筹\", "
+            "\"factors\": [\"pe<8\", \"dividend_yield>5%\"], "
+            "\"rebalance\": \"annual\"}\n"
+            "回测结果：{\"total_return\": 0.3, \"max_drawdown\": 0.15, "
+            "\"sharpe_ratio\": 0.9}\n市场事件上下文：无"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"改进\", "
+            "\"rationale\": \"策略与成长性无关，仅关注估值与分红，"
+            "未捕捉研发投入与技术壁垒，成长股原则覆盖不足。\", "
+            "\"weaknesses\": [\"缺乏成长性因子\", \"研发投入缺失\", "
+            "\"技术壁垒未考量\"], "
+            "\"suggestions\": [\"加入营收增长率因子\", "
+            "\"纳入研发占比过滤\", \"增加技术代差评估\"], "
+            "\"confidence\": 0.7}"
+        )
+    ),
+]
+
 
 @PersonaRegistry.register
 class FiskePersona(BasePersona):
@@ -45,13 +90,22 @@ class FiskePersona(BasePersona):
     name = "fiske"
     display_name = "菲利普·费雪"
     perspective = "成长股投资"
-    supported_modes = ("stock_analysis",)
+    supported_modes = ("stock_analysis", "strategy_review")
 
     def __init__(self, llm) -> None:
         super().__init__(llm)
         self.examples = EXAMPLES
+        self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
+        """派发到对应 mode 的分析逻辑。"""
+        if context.mode == "stock_analysis":
+            return self._analyze_stock(context)
+        elif context.mode == "strategy_review":
+            return self._review_strategy(context)
+        raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
+
+    def _analyze_stock(self, context: PersonaContext) -> PersonaResult:
         """stock_analysis 模式：加载 fiske/stock_analysis.md，调用 LLM。"""
         prompt = self._load_prompt("stock_analysis")
         messages = prompt.format_messages(
@@ -61,3 +115,15 @@ class FiskePersona(BasePersona):
         )
         response = self.llm.invoke(messages)
         return self._parse_result(response, "stock_analysis")
+
+    def _review_strategy(self, context: PersonaContext) -> PersonaResult:
+        """strategy_review 模式：加载 fiske/strategy_review.md，调用 LLM。"""
+        prompt = self._load_prompt("strategy_review")
+        messages = prompt.format_messages(
+            strategy=context.target,
+            backtest_result=context.backtest_result or {},
+            event_context=context.event_context,
+            examples=self.strategy_review_examples,
+        )
+        response = self.llm.invoke(messages)
+        return self._parse_result(response, "strategy_review")
