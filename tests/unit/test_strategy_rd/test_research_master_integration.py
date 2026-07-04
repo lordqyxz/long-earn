@@ -305,13 +305,13 @@ class TestResearchNodeCallsPersonas:
 class TestResearchNodeEndToEndWithRealPersonas:
     """_research_node 与真实 PersonaRegistry 的端到端集成。
 
-    验证：4 个真实大师类被注册并能被 _research_node 调用 strategy_generate。
+    验证：5 个真实大师类被注册并能被 _research_node 调用 strategy_generate。
     LLM 仍 mock，重点验证注册表 → persona.analyze → research 链路畅通。
     """
 
     def test_research_node_with_real_persona_registry(self):
-        """使用真实 PersonaRegistry，mock LLM 返回 JSON，验证 4 个大师被调用。"""
-        # 导入 skills.personas 包即触发 4 个内置大师注册
+        """使用真实 PersonaRegistry，mock LLM 返回 JSON，验证 5 个大师被调用。"""
+        # 导入 skills.personas 包即触发 5 个大师注册（4 内置 + livermore）
         from long_earn.skills.personas import PersonaRegistry
 
         # 构造 mock LLM，所有大师调用都返回合法 strategy_generate JSON
@@ -347,10 +347,10 @@ class TestResearchNodeEndToEndWithRealPersonas:
             llm_service=llm_service,
         )
 
-        # 4 个真实大师都被调用（底层 mock_llm.invoke 被调用 4 次，每个大师一次）
-        assert mock_llm.invoke.call_count == 4
+        # 5 个真实大师都被调用（底层 mock_llm.invoke 被调用 5 次，每个大师一次）
+        assert mock_llm.invoke.call_count == 5
 
-        # research_strategy_with_context 被调用，master_hints 含 4 个大师
+        # research_strategy_with_context 被调用，master_hints 含 5 个大师
         assert len(stub_agent.research_calls) == 1
         call = stub_agent.research_calls[0]
         assert call["master_hints"] is not None
@@ -358,6 +358,7 @@ class TestResearchNodeEndToEndWithRealPersonas:
             "buffett",
             "charles_munger",
             "fiske",
+            "livermore",
             "petter",
         }
         # 每个视角都是 PersonaResult

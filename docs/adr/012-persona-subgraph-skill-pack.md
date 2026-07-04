@@ -402,12 +402,79 @@ workflow.add_node("buffett", partial(_buffett_node, persona=personas["buffett"])
 - 测试：策略生成含大师投资逻辑 hint
 - **提交 3**
 
-### 阶段 4：扩展性验证
+### 阶段 4：扩展性验证（已实施）
 
-- 新增 1 个示例大师（如 `livermore`）验证扩展流程
-- 编写扩展文档：如何新增大师（1 类 + N prompt + `__init__.py` import）
-- 测试：新大师自动注册，3 个消费方均可调用
+- 新增 `livermore`（杰西·利弗莫尔，趋势交易）作为扩展示例大师
+- 验证扩展流程：1 个类 + 3 个 prompt + `__init__.py` import 即自动注册
+- 测试：新大师自动注册，stock_analysis / strategy_review / strategy_generate 三个 mode 均可调用
+- 端到端集成：`_research_node` 与 `_reflection_node` 通过 `PersonaRegistry.create_all()` 自动包含 livermore
+- 全量 534 passed（524 + 10 个 livermore 测试）
 - **提交 4**
+
+## 扩展指南：如何新增大师
+
+新增一位大师只需 3 步，无需修改任何消费方代码（stock_analysis / strategy_rd research / strategy_rd reflection 自动通过 `PersonaRegistry.create_all()` 获取新大师）。
+
+### 步骤 1：创建大师类
+
+在 `src/long_earn/skills/personas/` 下新建 `<name>.py`，继承 `BasePersona`，用 `@PersonaRegistry.register` 装饰：
+
+```python
+from langchain_core.messages import AIMessage, HumanMessage
+from long_earn.skills.personas.base import BasePersona
+from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
+from long_earn.skills.personas.registry import PersonaRegistry
+
+EXAMPLES = [...]  # stock_analysis few-shot
+STRATEGY_REVIEW_EXAMPLES = [...]
+STRATEGY_GENERATE_EXAMPLES = [...]
+
+@PersonaRegistry.register
+class XxxPersona(BasePersona):
+    name = "xxx"                       # 注册 key，须与 prompts/<name>/ 目录名一致
+    display_name = "显示名"
+    perspective = "投资视角"
+    supported_modes = ("stock_analysis", "strategy_review", "strategy_generate")
+
+    def __init__(self, llm) -> None:
+        super().__init__(llm)
+        self.examples = EXAMPLES
+        self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
+        self.strategy_generate_examples = STRATEGY_GENERATE_EXAMPLES
+
+    def _do_analyze(self, context: PersonaContext) -> PersonaResult:
+        if context.mode == "stock_analysis":
+            return self._analyze_stock(context)
+        elif context.mode == "strategy_review":
+            return self._review_strategy(context)
+        elif context.mode == "strategy_generate":
+            return self._generate_strategy(context)
+        raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
+
+    def _analyze_stock(self, context): ...      # 加载 stock_analysis.md
+    def _review_strategy(self, context): ...    # 加载 strategy_review.md
+    def _generate_strategy(self, context): ...  # 加载 strategy_generate.md
+```
+
+### 步骤 2：创建 prompt 文件
+
+在 `src/long_earn/skills/personas/prompts/<name>/` 下按 mode 创建 `.md` 文件（frontmatter `messages` 结构，jinja2 `{{ var }}` 语法）：
+
+- `stock_analysis.md`：变量 `stock_data` / `event_context`
+- `strategy_review.md`：变量 `strategy` / `backtest_result` / `event_context`
+- `strategy_generate.md`：变量 `query` / `knowledge_context`
+
+可只实现部分 mode（如仅 `stock_analysis`），未实现的 mode 调用时抛 `NotImplementedError`，消费方自动跳过。
+
+### 步骤 3：在 `__init__.py` 注册 import
+
+在 `src/long_earn/skills/personas/__init__.py` 添加一行 import 即触发注册：
+
+```python
+from long_earn.skills.personas.xxx import XxxPersona
+```
+
+完成。无需修改 `stock_analysis/subgraph.py`、`strategy_rd/subgraph.py` 或任何消费方代码。
 
 ## 与其他 ADR 的关系
 

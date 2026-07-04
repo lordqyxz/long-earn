@@ -308,13 +308,13 @@ class TestReflectionNodeCallsPersonas:
 class TestReflectionNodeEndToEndWithRealPersonas:
     """_reflection_node 与真实 PersonaRegistry 的端到端集成。
 
-    验证：4 个真实大师类被注册并能被 _reflection_node 调用 strategy_review。
+    验证：5 个真实大师类被注册并能被 _reflection_node 调用 strategy_review。
     LLM 仍 mock，重点验证注册表 → persona.analyze → reflect 链路畅通。
     """
 
     def test_reflection_node_with_real_persona_registry(self):
-        """使用真实 PersonaRegistry，mock LLM 返回 JSON，验证 4 个大师被调用。"""
-        # 导入 skills.personas 包即触发 4 个内置大师注册
+        """使用真实 PersonaRegistry，mock LLM 返回 JSON，验证 5 个大师被调用。"""
+        # 导入 skills.personas 包即触发 5 个大师注册（4 内置 + livermore）
         from long_earn.skills.personas import PersonaRegistry
 
         # 构造 mock LLM，所有大师调用都返回合法 strategy_review JSON
@@ -347,10 +347,10 @@ class TestReflectionNodeEndToEndWithRealPersonas:
             llm_service=llm_service,
         )
 
-        # 4 个真实大师都被调用（llm.invoke 被调用 4 次，每个大师一次）
-        assert mock_llm.invoke.call_count == 4
+        # 5 个真实大师都被调用（llm.invoke 被调用 5 次，每个大师一次）
+        assert mock_llm.invoke.call_count == 5
 
-        # reflect 被调用，master_perspectives 含 4 个大师
+        # reflect 被调用，master_perspectives 含 5 个大师
         assert len(stub_agent.reflect_calls) == 1
         call = stub_agent.reflect_calls[0]
         assert call["master_perspectives"] is not None
@@ -358,6 +358,7 @@ class TestReflectionNodeEndToEndWithRealPersonas:
             "buffett",
             "charles_munger",
             "fiske",
+            "livermore",
             "petter",
         }
         # 每个视角都是 PersonaResult
