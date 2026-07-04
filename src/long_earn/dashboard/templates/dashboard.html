@@ -62,8 +62,10 @@
     <span class="loading" style="padding:8px 0;text-align:left;">加载运行列表</span>
   </div>
   <button class="compare-btn" id="compareBtn" onclick="toggleCompare()" style="margin-bottom:16px;">多策略对比</button>
+  <button class="compare-btn" id="eventStreamBtn" onclick="toggleEventStream()" style="margin-bottom:16px;background:#7c3aed;">事件流</button>
   <div id="content"><div class="loading"><div class="spinner"></div>加载中</div></div>
   <div id="compareContent" style="display:none;"></div>
+  <div id="eventStreamContent" style="display:none;"></div>
 </div>
 <script>
 const API = '';  // 空 = 同源
@@ -72,6 +74,7 @@ const API = '';  // 空 = 同源
 let equityChart = null;
 let returnsChart = null;
 let eventChart = null;
+let eventTimelineChart = null;  // 事件流时间线图（ADR-007 Phase 3）
 let symbolCharts = [];  // 个股价格图表实例数组
 
 // ── Chart.js 深色主题通用配置 ──
@@ -740,6 +743,117 @@ function drawSymbolChart(data, canvasId, symbol) {
     options: opts,
   });
   symbolCharts.push(chart);
+}
+
+// ── 事件流（ADR-007 Phase 3）──────────────────────────────────
+
+function toggleEventStream() {
+  const content = document.getElementById('eventStreamContent');
+  const btn = document.getElementById('eventStreamBtn');
+  if (content.style.display === 'none') {
+    content.style.display = 'block';
+    btn.classList.add('active');
+    loadEventStream();
+  } else {
+    content.style.display = 'none';
+    btn.classList.remove('active');
+    if (eventTimelineChart) { eventTimelineChart.destroy(); eventTimelineChart = null; }
+  }
+}
+
+async function loadEventStream() {
+  const content = document.getElementById('eventStreamContent');
+  content.innerHTML = '<div class="loading"><div class="spinner"></div>加载事件流</div>';
+  try {
+    const [statsRes, timelineRes, eventsRes] = await Promise.all([
+      fetch(API + '/api/events/stats').then(r => r.json()),
+      fetch(API + '/api/events/timeline?days=30').then(r => r.json()),
+      fetch(API + '/api/events?limit=50').then(r => r.json()),
+    ]);
+    renderEventStream(statsRes, timelineRes.timeline || [], eventsRes.events || []);
+  } catch (e) {
+    content.innerHTML = `<div class="error-box"><div class="error-title">事件流加载失败</div><div class="error-detail">${escapeHtml(String(e))}</div></div>`;
+  }
+}
+
+function renderEventStream(stats, timeline, events) {
+  const content = document.getElementById('eventStreamContent');
+  const sentiment = stats.by_sentiment || {};
+  const total = stats.total_events || 0;
+
+  // 统计卡片
+  const statsCards = [
+    card('事件总数', total, null, `${stats.total_relations || 0} 条影响关系`),
+    card('利好事件', sentiment.positive || 0, true, 'positive 情绪'),
+    card('利空事件', sentiment.negative || 0, false, 'negative 情绪'),
+    card('中性事件', sentiment.neutral || 0, null, 'neutral 情绪'),
+  ].join('');
+
+  // 热门标的
+  const topSymbols = (stats.top_symbols || []).map(s =>
+    `<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:4px 10px;border-radius:12px;font-size:12px;margin:2px;">${escapeHtml(s.symbol)} (${s.count})</span>`
+  ).join('');
+
+  // 事件列表
+  const eventRows = events.map(ev => {
+    const sentimentColor = ev.sentiment === 'positive' ? '#22c55e' :
+                           ev.sentiment === 'negative' ? '#ef4444' : '#64748b';
+    const symbols = (ev.symbols || []).join(', ');
+    return `<tr>
+      <td style="color:#94a3b8;font-size:11px;">${escapeHtml(ev.created_at.slice(0,16))}</td>
+      <td><span style="color:${sentimentColor};font-weight:600;">${escapeHtml(ev.sentiment)}</span></td>
+      <td style="color:#60a5fa;font-size:12px;">${escapeHtml(symbols)}</td>
+      <td style="color:#94a3b8;font-size:12px;">${escapeHtml(ev.category)}</td>
+      <td style="font-size:12px;">${escapeHtml((ev.content || '').slice(0, 120))}${ev.content && ev.content.length > 120 ? '...' : ''}</td>
+    </tr>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="grid">${statsCards}</div>
+    ${topSymbols ? `<div class="card" style="margin-bottom:24px;"><h3>热门标的</h3><div>${topSymbols}</div></div>` : ''}
+    <div class="chart-container"><h3>事件时间线（最近 30 天）</h3><div class="chart-wrapper"><canvas id="eventTimelineCanvas"></canvas></div></div>
+    <div class="chart-container">
+      <h3>事件列表（最新 ${events.length} 条）</h3>
+      <div style="overflow-x:auto;"><table>
+        <thead><tr><th>时间</th><th>情绪</th><th>标的</th><th>类别</th><th>内容</th></tr></thead>
+        <tbody>${eventRows || '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:24px;">暂无事件</td></tr>'}</tbody>
+      </table></div>
+    </div>
+  `;
+
+  // 绘制时间线
+  drawEventTimeline(timeline);
+}
+
+function drawEventTimeline(timeline) {
+  if (eventTimelineChart) { eventTimelineChart.destroy(); eventTimelineChart = null; }
+  const canvas = document.getElementById('eventTimelineCanvas');
+  if (!canvas || timeline.length === 0) return;
+
+  const labels = timeline.map(t => t.date);
+  const opts = chartBaseOptions();
+  opts.plugins.title = { display: true, text: '每日事件数', color: '#94a3b8' };
+  opts.scales = {
+    x: { ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+    y: { beginAtZero: true, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+  };
+
+  eventTimelineChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: '利好', data: timeline.map(t => t.positive), backgroundColor: '#22c55e', stack: 's' },
+        { label: '利空', data: timeline.map(t => t.negative), backgroundColor: '#ef4444', stack: 's' },
+        { label: '中性', data: timeline.map(t => t.neutral), backgroundColor: '#64748b', stack: 's' },
+      ],
+    },
+    options: opts,
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 loadRuns();

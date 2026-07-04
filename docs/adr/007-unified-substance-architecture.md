@@ -1,7 +1,7 @@
 # ADR-007: 物质-运动统一架构（Substance-Motion）
 
 日期: 2026-06
-状态: Accepted, Implemented (Phase 1)
+状态: Accepted, Implemented (Phase 1-3)
 
 ## 背景
 
@@ -241,11 +241,13 @@ uv run pytest tests/unit/ -v
 ```
 Serena LSP 诊断：每个修改文件 `Error` 级别诊断为空。
 
-### Phase 2：采集器 + 事件推理子图
+### Phase 2：采集器 + 事件推理子图（已实施）
 
-- Collector registry + Kimi（包装现有 `tools/kimi_web_search.py`）/ Tencent / ciccwm 采集器
+- Collector registry + Kimi（包装现有 `tools/kimi_web_search.py`）/ ciccwm 热榜 / ciccwm 专题资讯采集器
 - 事件推理子图：collect → extract → propagate（L2 影响传播，LLM 辅助） → conflict → save
-- 主图新增"事件推理"路由
+- 主图新增 `event_inference` 路由（`EVENT_INFERENCE_KEYWORDS` 关键词触发，优先级最高）
+- `MemoryService.save_events` 落库 EVENT/RELATION 物质 + 冲突组检测（同标的相反情绪归组）
+- 可注入 Fake 实现（FakeEventExtractor / FakeEventPropagator），支持确定性 e2e 测试
 
 ### Phase 3：子图集成 + Dashboard
 

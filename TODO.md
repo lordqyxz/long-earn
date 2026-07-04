@@ -1,7 +1,7 @@
 # TODO.md — 长期演进开发计划
 
-> 最后更新：2026-06-27
-> 当前分支：feat/backtest-acceleration（v1.1.0 开发完成，待发版）
+> 最后更新：2026-07-01
+> 当前分支：feat/substance-architecture
 
 ---
 
@@ -238,18 +238,18 @@
 | 3 | 重写 `MemoryServiceImpl` 委托 SubstanceStore + 更新 `tools/store.py`（消费方零改动） | [x] |
 | 4 | 备份旧数据到 temp + 删除 `memory/` + 重写测试 + 更新 config/import-linter/CLAUDE.md | [x] |
 
-**Phase 2：采集器 + 事件推理子图**
+**Phase 2：采集器 + 事件推理子图** ✅ 已完成 (2026-07-01)
 
 | Step | 内容 | 状态 |
 |------|------|------|
-| 1 | Collector registry + Kimi/Tencent/ciccwm 采集器 | [ ] |
-| 2 | 事件推理子图（collect→extract→propagate→conflict→save）+ 主图路由 | [ ] |
+| 1 | Collector registry + Kimi/ciccwm 热榜/ciccwm 专题采集器 | [x] |
+| 2 | 事件推理子图（collect→extract→propagate→conflict→save）+ 主图路由 | [x] |
 
 **Phase 3：子图集成 + Dashboard**
 
 | Step | 内容 | 状态 |
 |------|------|------|
-| 1 | stock_analysis/strategy_rd 调 `store.activate()` 注入 + Dashboard 事件流 | [ ] |
+| 1 | stock_analysis/strategy_rd 调 `store.activate()` 注入 + Dashboard 事件流 | [x] |
 
 ---
 

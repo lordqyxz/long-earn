@@ -16,12 +16,14 @@ class KnowledgeContextMixin:
                 self.memory = context.memory
                 self.logger = context.logger
                 self._knowledge_cache: dict[str, list[str]] = {}
+                self._event_cache: dict[str, list[str]] = {}
     """
 
     context: "RuntimeContext"
     memory: Any
     logger: Any
     _knowledge_cache: dict[str, list[str]]
+    _event_cache: dict[str, list[str]]
 
     def _search_knowledge(self, query: str, **kwargs) -> list[str]:
         """搜索知识库"""
@@ -55,3 +57,40 @@ class KnowledgeContextMixin:
             self._knowledge_cache[cache_key] = results
             return "\n".join(results)
         return ""
+
+    # ── 事件上下文（ADR-007 Phase 3）──────────────────────────
+
+    def _get_event_context(
+        self,
+        query: str,
+        k: int = 5,
+        use_cache: bool = True,
+    ) -> str:
+        """获取相关市场事件上下文（WorldInfo 激活引擎）。
+
+        与 ``_get_knowledge_context`` 的区别：走关键词触发 + conflict_group 互斥，
+        专门召回 EVENT/RELATION 形态物质，把"相关市场事件"注入 prompt。
+
+        Args:
+            query: 触发文本（股票名/代码、策略主题）
+            k: 返回物质数上限
+            use_cache: 是否使用缓存（同一 query 二次调用命中缓存）
+        """
+        cache_key = f"event:{query}"
+        if use_cache and cache_key in self._event_cache:
+            return "\n".join(self._event_cache[cache_key]) if self._event_cache[cache_key] else ""
+
+        if not hasattr(self.memory, "activate_events"):
+            return ""
+
+        try:
+            events = self.memory.activate_events(query, k=k)
+        except Exception:
+            if self.logger:
+                self.logger.warning(f"激活事件上下文失败: {query}")
+            events = []
+
+        if use_cache:
+            self._event_cache[cache_key] = events
+
+        return "\n".join(events) if events else ""
