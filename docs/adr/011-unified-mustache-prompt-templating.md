@@ -263,14 +263,14 @@ tests/unit/test_backtest/test_param_grid.py           # 标量插值断言改 {{
 - 验证：全量测试套件。
 - **提交 4**。
 
-### 阶段 5：清理与卡口
+### 阶段 5：清理与卡口（已实施）
 
 **目标**：固化新约定，防止回退。
 
-- 删除 `import-linter` 的 `render_independent` 合约（若存在）。
-- 新增 CI grep 卡口：`src/long_earn` 下 `.md` / `.py` / `.yaml` 不允许出现 `${var}` 形式的提示词占位符。
-- 更新 `CLAUDE.md` / 项目文档中关于「提示词模板语法」的说明，指向 ADR-011。
-- 验证：全量测试套件 + lint。
+- 删除 `import-linter` 的 `render_independent` 合约（若存在）。—— 实施时确认 pyproject.toml 已无该合约，无需操作。
+- 新增 CI grep 卡口：`src/long_earn` 下 `.md` / `.py` / `.yaml` 不允许出现 `${var}` 形式的提示词占位符。—— 已加入 `.github/workflows/ci.yml` lint-and-type job。
+- 更新 `CLAUDE.md` / 项目文档中关于「提示词模板语法」的说明，指向 ADR-011。—— CLAUDE.md「Prompt 管理」章节 + ADR 列表 + 已完成清单均已更新。
+- 验证：全量测试套件 + lint。—— 534 passed。
 - **提交 5**。
 
 ## 与其他 ADR 的关系
