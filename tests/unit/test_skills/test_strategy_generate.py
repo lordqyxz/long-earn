@@ -13,9 +13,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from long_earn.config import AppConfig, RuntimeContext
+from long_earn.config import RuntimeContext
 from long_earn.skills.personas import (
     BuffettPersona,
     CharlesMungerPersona,
@@ -25,7 +25,6 @@ from long_earn.skills.personas import (
     PetterPersona,
 )
 from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
-
 
 # ──────────────────────────────────────────────────────────────
 # 1. 单个大师 strategy_generate mode

@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from long_earn.config import RuntimeContext
 from long_earn.services import (
     BacktestService,
@@ -22,7 +20,6 @@ from long_earn.services import (
     MemoryService,
     MonitoringService,
     StockService,
-    StrategyExperience,
 )
 from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
 from long_earn.strategy_rd.subgraph import _reflection_node
@@ -315,7 +312,6 @@ class TestReflectionNodeEndToEndWithRealPersonas:
     def test_reflection_node_with_real_persona_registry(self):
         """使用真实 PersonaRegistry，mock LLM 返回 JSON，验证 5 个大师被调用。"""
         # 导入 skills.personas 包即触发 5 个大师注册（4 内置 + livermore）
-        from long_earn.skills.personas import PersonaRegistry
 
         # 构造 mock LLM，所有大师调用都返回合法 strategy_review JSON
         mock_llm = MagicMock()
