@@ -7,6 +7,8 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from langchain_core.messages import BaseMessage
+
 # ── Memory Service ───────────────────────────────────────────────
 
 
@@ -111,6 +113,56 @@ class MemoryService(Protocol):
         """
         ...
 
+    def save_events(
+        self,
+        events: list[dict[str, Any]],
+        relations: list[dict[str, Any]],
+        conflict_groups: dict[int, str] | None = None,
+    ) -> dict[str, Any]:
+        """保存新闻事件与影响关系物质（ADR-007 Phase 2 事件推理引擎）。
+
+        将 extract 节点产出的事件 dict 列表落库为 ``form=EVENT`` 物质，
+        将 propagate 节点产出的关系 dict 列表落库为 ``form=RELATION`` 物质
+        （通过 ``event_index`` 解析到已保存事件的 sid）。
+
+        Args:
+            events: 事件 dict 列表（content/keys/symbols/sentiment/category/confidence）
+            relations: 关系 dict 列表（event_index/target/relation_type/confidence/
+                direction/rationale）
+            conflict_groups: 事件下标 → 冲突组 ID（conflict 节点产出，可空）
+
+        Returns:
+            ``{"event_sids": [...], "relation_sids": [...], "event_count": int,
+            "relation_count": int}``
+        """
+        ...
+
+    def activate_events(
+        self,
+        query: str,
+        k: int = 5,
+        include_relations: bool = True,
+    ) -> list[str]:
+        """WorldInfo 激活引擎 — 关键词触发事件/关系物质（ADR-007 Phase 3）。
+
+        与 ``search`` 的区别：``search`` 走语义相似度（TF-IDF/embedding）单一通道；
+        ``activate_events`` 走 WorldInfo 关键词触发 + filter_logic + conflict_group
+        互斥 + 递归激活，专门召回 EVENT/RELATION 形态物质，适合把"相关市场事件"
+        注入策略研发/股票分析 prompt。
+
+        Args:
+            query: 触发文本（股票名/代码、策略主题、用户查询）
+            k: 返回物质数上限（token 预算）
+            include_relations: 是否同时返回 RELATION 形态物质（影响传播关系）
+
+        Returns:
+            可直接注入 prompt 的格式化字符串列表，每条形如::
+
+                【事件 | 标的: 600519 | 情绪: positive | 类别: 财报】
+                <事件内容>
+        """
+        ...
+
 
 # ── LLM Service ──────────────────────────────────────────────────
 
@@ -118,11 +170,14 @@ class MemoryService(Protocol):
 class LLMService(Protocol):
     """LLM 调用服务"""
 
-    def invoke(self, prompt: str, format: str = "") -> Any:
+    def invoke(
+        self, prompt: str | list[BaseMessage], format: str = ""
+    ) -> Any:
         """调用 LLM
 
         Args:
-            prompt: 提示词
+            prompt: 提示词，可为字符串或 BaseMessage 列表（多消息对话）。
+                LangChain llm.invoke() 原生支持这两种入参类型。
             format: 输出格式，可选 "json" 强制 JSON 输出
 
         Returns:
