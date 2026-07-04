@@ -191,6 +191,12 @@ class DSLStrategy(BaseStrategy):
         """执行 DSL 信号步骤（filter/rank/expression），返回选中的标的列表
 
         失败的 step 写入 self.step_failures，便于上层判断策略是否真的在工作。
+
+        关键：filter/rank step 失败时 selected 置空并终止后续步骤（保守不选），
+        而非保持初始的"全部股票"。否则一个坏因子（如引用不存在的 volatility
+        字段）会让 filter 静默失效，后续 rank 从全量 df 选 top N，在某些行情下
+        产生虚高收益。终止后续步骤是因为：filter 失败后选股逻辑已残缺，再跑
+        rank 只是从全量股票虚选，结果不可信。
         """
         selected = df.index.unique().tolist()
         for idx, step in enumerate(self.dsl.signals):
@@ -211,6 +217,11 @@ class DSLStrategy(BaseStrategy):
                         "error": str(exc),
                     }
                 )
+                # filter/rank 失败：保守不选 + 终止后续步骤，避免"坏因子 →
+                # filter 失效 → rank 从全量股票虚选 top N → 虚高收益"
+                if step_type in ("filter", "rank"):
+                    selected = []
+                    break
                 continue
         return selected
 
@@ -344,7 +355,7 @@ class BacktestServiceImpl(BacktestService):
         """收集策略层静默失败信息
 
         让上层（reflection / supervisor）能识别"策略实际上几乎啥都没干，
-        业绩 0 是退化结果而非真实表现"。
+        业绩 0 是退化结果而非真实表现"，或"部分因子/信号失败导致回测指标不可信"。
 
         关键：factor_failures / step_failures 跨 bar 累积——每个 bar 都会重新跑
         一遍因子和信号步骤。直接用 len(step_failures) == total_steps 判断"全失败"
@@ -370,15 +381,22 @@ class BacktestServiceImpl(BacktestService):
             total_factors > 0 and len(failed_factor_aliases) >= total_factors
         )
         all_steps_failed = total_steps > 0 and len(failed_step_indices) >= total_steps
+        # 任何 filter/rank step 失败都意味着选股逻辑残缺，回测指标不可信
+        # （filter 失效 → selected 置空 → 策略不交易；或因子失败 → filter 引用缺失字段 → 失效）
+        any_step_failed = len(failed_step_indices) > 0
+        any_factor_failed = len(failed_factor_aliases) > 0
         degenerate = all_factors_failed or all_steps_failed or trade_count == 0
+        # metrics_unreliable: 指标不可信，上层不应基于此做收益对比或验收决策
+        metrics_unreliable = degenerate or any_step_failed or any_factor_failed
 
-        if self.logger and degenerate:
+        if self.logger and metrics_unreliable:
             self.logger.warning(
-                f"策略疑似退化：trade_count={trade_count}, "
+                f"策略指标不可信：trade_count={trade_count}, "
                 f"factor_failures={len(failed_factor_aliases)}/{total_factors} "
                 f"unique（共 {len(factor_failures)} 次）, "
                 f"step_failures={len(failed_step_indices)}/{total_steps} "
-                f"unique（共 {len(step_failures)} 次）"
+                f"unique（共 {len(step_failures)} 次）, "
+                f"degenerate={degenerate}, metrics_unreliable={metrics_unreliable}"
             )
 
         return {
@@ -388,6 +406,7 @@ class BacktestServiceImpl(BacktestService):
             "failed_step_indices": sorted(failed_step_indices),
             "trade_count": trade_count,
             "degenerate": degenerate,
+            "metrics_unreliable": metrics_unreliable,
         }
 
     def _create_audit_provider(self) -> Any:
@@ -521,6 +540,8 @@ class BacktestServiceImpl(BacktestService):
             strategy_diagnostics = self._build_strategy_diagnostics(
                 strategy_obj, dsl, result
             )
+            # 提到顶层：上层（监督器/反思/strategy_optimization）无需深挖 diagnostics
+            metrics_unreliable = strategy_diagnostics.get("metrics_unreliable", False)
 
             if result.success:
                 return {
@@ -535,6 +556,7 @@ class BacktestServiceImpl(BacktestService):
                     "sortino_ratio": result.sortino_ratio,
                     "daily_returns": result.daily_returns,
                     "strategy_diagnostics": strategy_diagnostics,
+                    "metrics_unreliable": metrics_unreliable,
                 }
 
             return {
@@ -542,6 +564,7 @@ class BacktestServiceImpl(BacktestService):
                 "error_category": result.error_category or "unknown",
                 "error_detail": result.error_detail or "",
                 "strategy_diagnostics": strategy_diagnostics,
+                "metrics_unreliable": metrics_unreliable,
             }
 
         except Exception as e:
