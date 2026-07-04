@@ -1,4 +1,4 @@
-﻿"""akshare 降级数据提供者。
+"""akshare 降级数据提供者。
 
 当 miniqmt 不可用且 DuckDB 缓存无数据时，降级到 akshare 获取数据。
 akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
@@ -8,7 +8,7 @@ akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import polars as pl
@@ -16,7 +16,7 @@ from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.polars_adapter import to_polars_panel
-from long_earn.backtest.data.symbol import xt_to_ak
+from long_earn.backtest.data.symbol import ak_to_xt, xt_to_ak
 
 # akshare 中文列名 → 标准英文列名
 KLINE_COLUMN_MAP = {
@@ -206,3 +206,58 @@ class AkshareFallbackProvider:
         """获取合并面板并转为 polars（实现 DataProvider Protocol）。"""
         df = self.get_merged_panel(symbols, start_date, end_date)
         return to_polars_panel(df)
+
+    # universe_type → akshare 指数代码
+    _INDEX_AK_CODE: ClassVar[dict[str, str]] = {
+        "csi300": "000300",
+        "csi500": "000905",
+        "sse50": "000016",
+        "csi1000": "000852",
+    }
+
+    def get_symbols(self, universe_type: str, date: str = "") -> list[str]:
+        """获取股票池（指数成分股），通过 akshare 降级获取。
+
+        支持 csi300 / csi500 / sse50 / csi1000 四个指数；
+        其他 universe_type 返回空列表（由上层降级链处理）。
+        获取后写入 DuckDB 缓存。
+        """
+        if not self.is_available:
+            return []
+
+        # 支持复合 universe："csi300+csi500"
+        if "+" in universe_type:
+            parts = universe_type.split("+")
+            symbols: set[str] = set()
+            for part in parts:
+                symbols.update(self.get_symbols(part.strip(), date))
+            return sorted(symbols)
+
+        ak_index_code = self._INDEX_AK_CODE.get(universe_type)
+        if ak_index_code is None:
+            return []
+
+        # 1. 优先从缓存读取
+        cached = self.cache.get_universe(universe_type, date)
+        if cached:
+            return cached
+
+        # 2. 从 akshare 获取指数成分股
+        try:
+            df = self._ak.index_stock_cons_csindex(symbol=ak_index_code)
+            if df is not None and not df.empty:
+                # akshare 返回的列名含"成分券代码"，取 6 位数字代码
+                code_col = "成分券代码" if "成分券代码" in df.columns else df.columns[0]
+                codes = df[code_col].astype(str).str.zfill(6).tolist()
+                symbols_xt = [ak_to_xt(c) for c in codes if c.isdigit()]
+                if symbols_xt:
+                    self.cache.save_universe(universe_type, date, symbols_xt)
+                    logger.info(
+                        f"[akshare 降级] 获取 {universe_type} 成分股: "
+                        f"{len(symbols_xt)} 只，已写入缓存"
+                    )
+                return symbols_xt
+        except Exception as e:
+            logger.warning(f"[akshare 降级] 获取 {universe_type} 成分股失败: {e}")
+        return []
+

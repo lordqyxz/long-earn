@@ -474,7 +474,8 @@ def _gap_detector_node(
     # 扫描改进建议，匹配关键词检测缺口
     gaps: list[dict[str, str]] = []
     for suggestion in suggestions:
-        suggestion_lower = str(suggestion).lower()
+        suggestion_str = str(suggestion)
+        suggestion_lower = suggestion_str.lower()
         for keyword, (op_name, category, intent) in _GAP_KEYWORD_MAP.items():
             if keyword.lower() not in suggestion_lower:
                 continue
@@ -488,7 +489,7 @@ def _gap_detector_node(
                 category=category,
                 expected_output="每行 float",
                 reference_strategy=strategy_yaml[:500],
-                motivation=f"改进建议「{suggestion[:100]}」需要 {keyword} 能力，目录暂缺",
+                motivation=f"改进建议「{suggestion_str[:100]}」需要 {keyword} 能力，目录暂缺",
                 priority=OperatorSpecPriority.NORMAL,
             )
             submitted = backlog.submit(spec)
