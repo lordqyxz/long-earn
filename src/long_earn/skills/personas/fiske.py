@@ -82,6 +82,42 @@ STRATEGY_REVIEW_EXAMPLES = [
     ),
 ]
 
+# strategy_generate 模式 few-shot 示例
+STRATEGY_GENERATE_EXAMPLES = [
+    HumanMessage(
+        content=(
+            "用户查询：研究一个高研发投入成长股选股策略\n"
+            "已有知识上下文：产业政策利好半导体与新能源，研发投入领先企业增多"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"推荐\", "
+            "\"rationale\": \"高研发投入契合成长股投资原则，"
+            "技术壁垒与创新能力被有效捕捉，产业政策强化成长持续性。\", "
+            "\"suggestions\": [\"以研发占比>8% 与营收增长>15% 双因子筛选\", "
+            "\"加入专利剩余年限因子\", \"增加行业景气度过滤\"], "
+            "\"confidence\": 0.8}"
+        )
+    ),
+    HumanMessage(
+        content=(
+            "用户查询：研究一个低估值蓝筹分红策略\n"
+            "已有知识上下文：无"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"不推荐\", "
+            "\"rationale\": \"低估值蓝筹分红策略与成长性无关，"
+            "未捕捉研发投入与技术壁垒，成长股原则覆盖不足。\", "
+            "\"suggestions\": [\"加入营收增长率因子\", "
+            "\"纳入研发占比过滤\", \"增加技术代差评估\"], "
+            "\"confidence\": 0.7}"
+        )
+    ),
+]
+
 
 @PersonaRegistry.register
 class FiskePersona(BasePersona):
@@ -90,12 +126,13 @@ class FiskePersona(BasePersona):
     name = "fiske"
     display_name = "菲利普·费雪"
     perspective = "成长股投资"
-    supported_modes = ("stock_analysis", "strategy_review")
+    supported_modes = ("stock_analysis", "strategy_review", "strategy_generate")
 
     def __init__(self, llm) -> None:
         super().__init__(llm)
         self.examples = EXAMPLES
         self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
+        self.strategy_generate_examples = STRATEGY_GENERATE_EXAMPLES
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
         """派发到对应 mode 的分析逻辑。"""
@@ -103,6 +140,8 @@ class FiskePersona(BasePersona):
             return self._analyze_stock(context)
         elif context.mode == "strategy_review":
             return self._review_strategy(context)
+        elif context.mode == "strategy_generate":
+            return self._generate_strategy(context)
         raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
 
     def _analyze_stock(self, context: PersonaContext) -> PersonaResult:
@@ -127,3 +166,15 @@ class FiskePersona(BasePersona):
         )
         response = self.llm.invoke(messages)
         return self._parse_result(response, "strategy_review")
+
+    def _generate_strategy(self, context: PersonaContext) -> PersonaResult:
+        """strategy_generate 模式：加载 fiske/strategy_generate.md，调用 LLM。"""
+        prompt = self._load_prompt("strategy_generate")
+        target = context.target or {}
+        messages = prompt.format_messages(
+            query=target.get("query", ""),
+            knowledge_context=target.get("knowledge_context", ""),
+            examples=self.strategy_generate_examples,
+        )
+        response = self.llm.invoke(messages)
+        return self._parse_result(response, "strategy_generate")

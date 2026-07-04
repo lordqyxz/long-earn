@@ -26,6 +26,9 @@ _STOCK_VERDICT_KEYWORDS: tuple[str, ...] = ("买入", "持有", "卖出")
 # strategy_review 模式下 verdict 合法取值
 _STRATEGY_VERDICT_KEYWORDS: tuple[str, ...] = ("接受", "改进", "拒绝")
 
+# strategy_generate 模式下 verdict 合法取值
+_STRATEGY_GENERATE_VERDICT_KEYWORDS: tuple[str, ...] = ("推荐", "谨慎", "不推荐")
+
 
 class BasePersona:
     """大师 Persona 基类。
@@ -83,6 +86,10 @@ class BasePersona:
         weaknesses / suggestions / confidence 字段；解析失败时退化为
         保留原文的 "未知" 结果。
 
+        strategy_generate 模式下 LLM 返回 JSON，含 verdict / rationale /
+        suggestions / confidence 字段（无 weaknesses）；解析失败时同样
+        退化为保留原文的 "未知" 结果。
+
         Args:
             response: LLM invoke 返回值（具有 .content 属性）
             mode: 调用模式
@@ -94,6 +101,9 @@ class BasePersona:
 
         if mode == "strategy_review":
             return self._parse_strategy_review(content)
+
+        if mode == "strategy_generate":
+            return self._parse_strategy_generate(content)
 
         verdict = "未知"
         if mode == "stock_analysis":
@@ -161,6 +171,57 @@ class BasePersona:
             verdict=verdict,
             rationale=str(data.get("rationale", "")),
             weaknesses=weaknesses,
+            suggestions=suggestions,
+            confidence=confidence,
+            raw_analysis=content,
+        )
+
+    @staticmethod
+    def _parse_strategy_generate(content: str) -> PersonaResult:
+        """解析 strategy_generate 模式的 LLM JSON 输出。
+
+        JSON schema:
+        {"verdict": "推荐/谨慎/不推荐", "rationale": "...",
+         "suggestions": [...], "confidence": 0.0-1.0}
+
+        解析失败（LLM 未返回有效 JSON）时，退化为 verdict="未知"，
+        rationale / raw_analysis 保留原始文本，避免阻塞策略生成流程。
+        """
+        try:
+            data = parse_llm_json(content)
+        except Exception:
+            return PersonaResult(
+                verdict="未知",
+                rationale=content,
+                raw_analysis=content,
+            )
+
+        if not isinstance(data, dict):
+            return PersonaResult(
+                verdict="未知",
+                rationale=content,
+                raw_analysis=content,
+            )
+
+        verdict = str(data.get("verdict", "")).strip()
+        if verdict not in _STRATEGY_GENERATE_VERDICT_KEYWORDS:
+            verdict = "未知"
+
+        suggestions = data.get("suggestions") or []
+        if not isinstance(suggestions, list):
+            suggestions = [str(suggestions)]
+        else:
+            suggestions = [str(s) for s in suggestions]
+
+        try:
+            confidence = float(data.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        return PersonaResult(
+            verdict=verdict,
+            rationale=str(data.get("rationale", "")),
             suggestions=suggestions,
             confidence=confidence,
             raw_analysis=content,

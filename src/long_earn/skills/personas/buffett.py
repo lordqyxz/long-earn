@@ -77,6 +77,41 @@ STRATEGY_REVIEW_EXAMPLES = [
     ),
 ]
 
+# strategy_generate 模式 few-shot 示例
+STRATEGY_GENERATE_EXAMPLES = [
+    HumanMessage(
+        content=(
+            "用户查询：研究一个基于低估值蓝筹的选股策略\n"
+            "已有知识上下文：央行降息周期，蓝筹股估值处于历史低位"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"推荐\", "
+            "\"rationale\": \"低估值蓝筹契合价值投资原则，"
+            "降息周期有利于估值修复；关注 ROE 与护城河可持续性。\", "
+            "\"suggestions\": [\"以 ROE>15% 与 PE<10 双因子筛选\", "
+            "\"加入自由现金流稳定性过滤\", \"月度调仓、集中持有优质标的\"], "
+            "\"confidence\": 0.8}"
+        )
+    ),
+    HumanMessage(
+        content=(
+            "用户查询：研究一个短线动量追涨策略\n"
+            "已有知识上下文：无"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"不推荐\", "
+            "\"rationale\": \"短线动量追涨依赖价格博弈而非企业内在价值，"
+            "存在永久性资本损失风险，违背价值投资原则。\", "
+            "\"suggestions\": [\"改为长期持有逻辑\", \"加入基本面质量过滤\", "
+            "\"关注护城河与安全边际\"], \"confidence\": 0.85}"
+        )
+    ),
+]
+
 
 @PersonaRegistry.register
 class BuffettPersona(BasePersona):
@@ -85,12 +120,13 @@ class BuffettPersona(BasePersona):
     name = "buffett"
     display_name = "沃伦·巴菲特"
     perspective = "价值投资"
-    supported_modes = ("stock_analysis", "strategy_review")
+    supported_modes = ("stock_analysis", "strategy_review", "strategy_generate")
 
     def __init__(self, llm) -> None:
         super().__init__(llm)
         self.examples = EXAMPLES
         self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
+        self.strategy_generate_examples = STRATEGY_GENERATE_EXAMPLES
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
         """派发到对应 mode 的分析逻辑。"""
@@ -98,6 +134,8 @@ class BuffettPersona(BasePersona):
             return self._analyze_stock(context)
         elif context.mode == "strategy_review":
             return self._review_strategy(context)
+        elif context.mode == "strategy_generate":
+            return self._generate_strategy(context)
         raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
 
     def _analyze_stock(self, context: PersonaContext) -> PersonaResult:
@@ -122,3 +160,15 @@ class BuffettPersona(BasePersona):
         )
         response = self.llm.invoke(messages)
         return self._parse_result(response, "strategy_review")
+
+    def _generate_strategy(self, context: PersonaContext) -> PersonaResult:
+        """strategy_generate 模式：加载 buffett/strategy_generate.md，调用 LLM。"""
+        prompt = self._load_prompt("strategy_generate")
+        target = context.target or {}
+        messages = prompt.format_messages(
+            query=target.get("query", ""),
+            knowledge_context=target.get("knowledge_context", ""),
+            examples=self.strategy_generate_examples,
+        )
+        response = self.llm.invoke(messages)
+        return self._parse_result(response, "strategy_generate")

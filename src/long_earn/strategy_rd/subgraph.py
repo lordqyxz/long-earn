@@ -151,15 +151,65 @@ def _research_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
+    llm_service: "LLMService | None" = None,
 ) -> dict:
-    """研究节点 - 生成初始策略"""
+    """研究节点 - 生成初始策略
+
+    ADR-012 Phase 3：在策略生成前调用 4 个大师的 strategy_generate mode，
+    将大师视角注入策略研究 prompt 作为补充上下文。
+    大师调用失败时降级为原行为（无大师建议），不阻塞策略生成流程。
+    """
     query = state.get("query", "")
     knowledge_context = state.get("knowledge_context", "")
 
     if logger:
         logger.info(f"[策略研究] 开始研究策略: {query}")
 
-    strategy = research_agent.research_strategy_with_context(query, knowledge_context)
+    # ADR-012 Phase 3：调用大师提供策略生成建议
+    master_hints: dict = {}
+    if llm_service is not None:
+        try:
+            # 延迟导入避免 skills.personas 在测试未安装时影响 subgraph 模块加载
+            from long_earn.skills.personas import PersonaRegistry
+            from long_earn.skills.personas.protocol import PersonaContext
+
+            personas = PersonaRegistry.create_all(llm_service.get_llm())
+            for name, persona in personas.items():
+                try:
+                    hint = persona.analyze(
+                        PersonaContext(
+                            mode="strategy_generate",
+                            target={
+                                "query": query,
+                                "knowledge_context": knowledge_context,
+                            },
+                        )
+                    )
+                    master_hints[name] = hint
+                except NotImplementedError:
+                    # 该大师尚未支持 strategy_generate mode，跳过
+                    continue
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"大师 {name} 策略生成建议失败: {e}")
+                    continue
+        except Exception as e:
+            if logger:
+                logger.warning(f"大师注册表初始化失败: {e}")
+
+    if logger:
+        if master_hints:
+            logger.info(
+                f"[策略研究] 大师策略生成建议完成: {len(master_hints)} 位提供视角"
+            )
+        else:
+            logger.info("[策略研究] 无大师建议，按原流程生成策略")
+
+    strategy = research_agent.research_strategy_with_context(
+        query,
+        knowledge_context,
+        master_hints=master_hints if master_hints else None,
+    )
 
     if logger:
         logger.info(
@@ -719,7 +769,12 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     )
     workflow.add_node(
         "research",
-        partial(_research_node, research_agent=research_agent, logger=logger),
+        partial(
+            _research_node,
+            research_agent=research_agent,
+            logger=logger,
+            llm_service=context.llm_service,
+        ),
     )
     workflow.add_node(
         "develop", partial(_develop_node, develop_agent=develop_agent, logger=logger)

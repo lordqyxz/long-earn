@@ -85,6 +85,43 @@ STRATEGY_REVIEW_EXAMPLES = [
     ),
 ]
 
+# strategy_generate 模式 few-shot 示例
+STRATEGY_GENERATE_EXAMPLES = [
+    HumanMessage(
+        content=(
+            "用户查询：研究一个多因子价值+动量选股策略\n"
+            "已有知识上下文：市场风格切换频繁，价值与动量因子存在轮动效应"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"推荐\", "
+            "\"rationale\": \"从经济学看，价值+动量组合机会成本合理；"
+            "从心理学看，可利用市场近期偏误；"
+            "从概率论看，多因子分散降低单一因子失效风险。\", "
+            "\"suggestions\": [\"延长调仓周期至月度以避免近期偏误\", "
+            "\"加入波动率过滤控制尾部风险\", \"做样本外稳健性检验\"], "
+            "\"confidence\": 0.75}"
+        )
+    ),
+    HumanMessage(
+        content=(
+            "用户查询：研究一个高杠杆趋势跟踪策略\n"
+            "已有知识上下文：无"
+        )
+    ),
+    AIMessage(
+        content=(
+            "{\"verdict\": \"不推荐\", "
+            "\"rationale\": \"从工程学看，高杠杆放大反馈循环风险；"
+            "从心理学看，诱发过度自信偏差；"
+            "从生物学看，策略对环境变化缺乏适应性。\", "
+            "\"suggestions\": [\"降低杠杆至 1 倍\", \"加入动态仓位管理\", "
+            "\"增加压力测试与极端场景检验\"], \"confidence\": 0.9}"
+        )
+    ),
+]
+
 
 @PersonaRegistry.register
 class CharlesMungerPersona(BasePersona):
@@ -93,12 +130,13 @@ class CharlesMungerPersona(BasePersona):
     name = "charles_munger"
     display_name = "查理·芒格"
     perspective = "多学科思维模型"
-    supported_modes = ("stock_analysis", "strategy_review")
+    supported_modes = ("stock_analysis", "strategy_review", "strategy_generate")
 
     def __init__(self, llm) -> None:
         super().__init__(llm)
         self.examples = EXAMPLES
         self.strategy_review_examples = STRATEGY_REVIEW_EXAMPLES
+        self.strategy_generate_examples = STRATEGY_GENERATE_EXAMPLES
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
         """派发到对应 mode 的分析逻辑。"""
@@ -106,6 +144,8 @@ class CharlesMungerPersona(BasePersona):
             return self._analyze_stock(context)
         elif context.mode == "strategy_review":
             return self._review_strategy(context)
+        elif context.mode == "strategy_generate":
+            return self._generate_strategy(context)
         raise NotImplementedError(f"{self.name} 不支持 {context.mode}")
 
     def _analyze_stock(self, context: PersonaContext) -> PersonaResult:
@@ -130,3 +170,15 @@ class CharlesMungerPersona(BasePersona):
         )
         response = self.llm.invoke(messages)
         return self._parse_result(response, "strategy_review")
+
+    def _generate_strategy(self, context: PersonaContext) -> PersonaResult:
+        """strategy_generate 模式：加载 charles_munger/strategy_generate.md，调用 LLM。"""
+        prompt = self._load_prompt("strategy_generate")
+        target = context.target or {}
+        messages = prompt.format_messages(
+            query=target.get("query", ""),
+            knowledge_context=target.get("knowledge_context", ""),
+            examples=self.strategy_generate_examples,
+        )
+        response = self.llm.invoke(messages)
+        return self._parse_result(response, "strategy_generate")

@@ -157,18 +157,36 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         }
 
     def research_strategy_with_context(
-        self, query: str, knowledge_context: str = ""
+        self,
+        query: str,
+        knowledge_context: str = "",
+        master_hints: "dict[str, PersonaResult] | None" = None,
     ) -> dict[str, Any]:
-        """使用已有上下文的研究策略"""
+        """使用已有上下文的研究策略。
+
+        Args:
+            query: 用户研究需求
+            knowledge_context: 已检索到的知识上下文
+            master_hints: name -> PersonaResult 映射，由 _research_node
+                调用 4 个大师 strategy_generate mode 得到。None 或空 dict 时
+                行为与原 research_strategy_with_context 完全一致（向后兼容）。
+        """
 
         if self.logger:
             self.logger.info(f"[策略研究Agent] 开始研究: {query}")
+
+        master_hints_context = self._format_master_hints(master_hints)
+        if master_hints_context and self.logger:
+            self.logger.info(
+                f"[策略研究Agent] 注入大师策略生成建议: {len(master_hints or {})} 位"
+            )
 
         prompt = create_strategy_research_prompt(
             target_market="stock",
             query=query,
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
+            master_hints_context=master_hints_context,
         )
 
         response = self.llm_service.invoke(prompt)
@@ -180,6 +198,61 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             "description": response.content,
             "query": query,
         }
+
+    def _format_master_hints(
+        self, master_hints: "dict[str, PersonaResult] | None"
+    ) -> str:
+        """把大师策略生成建议格式化为 prompt 用的可读文本段落。
+
+        每个大师一段，结构：
+            ## <大师名>建议
+            裁决: <verdict>
+            置信度: <confidence>
+            建议:
+              - <suggestion1>
+              - <suggestion2>
+            依据: <rationale>
+
+        Args:
+            master_hints: name -> PersonaResult 映射；None 或空 dict
+                时返回空串（保持向后兼容，prompt 不出现 master_hints 字样）。
+
+        Returns:
+            可读文本段落；无大师建议时返回 ""。
+        """
+        if not master_hints:
+            return ""
+
+        sections: list[str] = []
+        for name, hint in master_hints.items():
+            # 兼容 PersonaResult 实例与 dict 两种形式
+            if hasattr(hint, "verdict"):
+                verdict = hint.verdict
+                rationale = hint.rationale
+                suggestions = hint.suggestions
+                confidence = hint.confidence
+                display_name = getattr(hint, "display_name", None) or name
+            elif isinstance(hint, dict):
+                verdict = hint.get("verdict", "未知")
+                rationale = hint.get("rationale", "")
+                suggestions = hint.get("suggestions", []) or []
+                confidence = hint.get("confidence", 0.0)
+                display_name = hint.get("display_name", name)
+            else:
+                continue
+
+            suggestions_str = (
+                "\n".join(f"  - {s}" for s in suggestions) if suggestions else "  - 无"
+            )
+            sections.append(
+                f"\n\n## {display_name}建议\n"
+                f"裁决: {verdict}\n"
+                f"置信度: {confidence}\n"
+                f"建议:\n{suggestions_str}\n"
+                f"依据: {rationale}"
+            )
+
+        return "".join(sections)
 
     def _identify_primary_issue(self, backtest_result: dict[str, Any]) -> str:
         """根据回测指标自动判断主要问题方向

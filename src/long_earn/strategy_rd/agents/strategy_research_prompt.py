@@ -11,13 +11,17 @@ from long_earn.core.prompt_loader import MarkdownPromptTemplate, render
 
 _research_prompt_template = MarkdownPromptTemplate(
     "strategy_research_prompt.md",
-    ["target_market", "query", "strategy_examples", "strategy_context"],
+    ["target_market", "query", "strategy_examples", "strategy_context", "master_hints_context"],
     __file__,
 )
 
 
 def create_strategy_research_prompt(
-    target_market: str, query: str, strategy_examples: str, strategy_context: str
+    target_market: str,
+    query: str,
+    strategy_examples: str,
+    strategy_context: str,
+    master_hints_context: str = "",
 ) -> str:
     """创建策略研究提示词
 
@@ -26,6 +30,8 @@ def create_strategy_research_prompt(
         query: 用户查询/需求
         strategy_examples: 历史成功策略参考
         strategy_context: 当前策略上下文
+        master_hints_context: 大师策略生成建议的可读文本段落，为空串时
+            与原行为完全一致（prompt 不出现 master_hints 字样）
 
     Returns:
         格式化后的提示词字符串
@@ -35,6 +41,7 @@ def create_strategy_research_prompt(
         query=query,
         strategy_examples=strategy_examples,
         strategy_context=strategy_context,
+        master_hints_context=master_hints_context,
     )
 
 
