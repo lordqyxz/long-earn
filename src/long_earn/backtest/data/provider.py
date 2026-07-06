@@ -324,6 +324,7 @@ class CompositeDataProvider:
         if mq is not None:
             df = mq.get_price_panel(symbols, start_date, end_date, fields)
             if not df.empty:
+                self._log_source("miniqmt（含 DuckDB 缓存优先）")
                 return df
 
         # 2. ciccwm 降级（紧跟 miniqmt，优先于 akshare，字段口径更稳定）
@@ -333,6 +334,8 @@ class CompositeDataProvider:
             df = ci.get_price_panel(symbols, start_date, end_date, fields)
             if not df.empty:
                 return df
+        elif ci is None or not ci.is_available:
+            logger.info("ciccwm 不可用（凭证缺失或未加载），跳过降级到 akshare")
 
         # 3. akshare 最终降级
         ak = self._get_akshare()
@@ -372,6 +375,7 @@ class CompositeDataProvider:
         if mq is not None:
             df = mq.get_financial_panel(symbols, start_date, end_date, fields)
             if not df.empty:
+                self._log_source("miniqmt（含 DuckDB 缓存优先）")
                 return df
 
         # 2. ciccwm 降级
@@ -381,6 +385,8 @@ class CompositeDataProvider:
             df = ci.get_financial_panel(symbols, start_date, end_date, fields)
             if not df.empty:
                 return df
+        elif ci is None or not ci.is_available:
+            logger.info("ciccwm 不可用（凭证缺失或未加载），跳过降级到 akshare")
 
         # 3. akshare 最终降级
         ak = self._get_akshare()
@@ -407,6 +413,7 @@ class CompositeDataProvider:
         if mq is not None:
             symbols = self._try_get_symbols(mq, universe_type, date)
             if symbols:
+                self._log_source("miniqmt universe（含 DuckDB 缓存优先）")
                 return symbols
 
         # 2. ciccwm 降级
@@ -416,6 +423,8 @@ class CompositeDataProvider:
             if symbols:
                 self._log_source("ciccwm universe（miniqmt 不可用，降级获取股票池）")
                 return symbols
+        elif ci is None or not ci.is_available:
+            logger.info(f"ciccwm 不可用，跳过降级到 akshare 获取股票池 '{universe_type}'")
 
         # 3. akshare 最终降级
         ak = self._get_akshare()
@@ -520,6 +529,9 @@ def create_data_provider(
     Returns:
         CompositeDataProvider 实例
     """
+    logger.info(
+        "已创建 CompositeDataProvider，降级链: DuckDB 缓存 → miniqmt → ciccwm → akshare"
+    )
     return CompositeDataProvider(cache, miniqmt_provider=miniqmt_provider)
 
 

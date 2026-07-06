@@ -133,8 +133,12 @@ class DataCache:
         try:
             df = conn.execute(query, params).fetchdf()
             if df.empty:
+                logger.debug(f"缓存未命中 prices: {len(symbols)} 只股票, {start_date}~{end_date}")
                 return None
             df["date"] = pd.to_datetime(df["date"])
+            logger.debug(
+                f"缓存命中 prices: {len(df)} 行, {df['symbol'].nunique()} 只股票"
+            )
             return df
         except Exception as e:
             logger.warning(f"缓存查询失败: {e}")
@@ -200,8 +204,12 @@ class DataCache:
         try:
             df = conn.execute(query, symbols).fetchdf()
             if df.empty:
+                logger.debug(f"缓存未命中 financials: {len(symbols)} 只股票")
                 return None
             df["report_date"] = pd.to_datetime(df["report_date"])
+            logger.debug(
+                f"缓存命中 financials: {len(df)} 行, {df['symbol'].nunique()} 只股票"
+            )
             return df
         except Exception as e:
             logger.warning(f"缓存查询失败: {e}")
@@ -258,6 +266,7 @@ class DataCache:
                 [index_code],
             ).fetchone()
             if not count or count[0] == 0:
+                logger.debug(f"缓存未命中 universe: {index_code}（表中无此指数）")
                 return []
 
             result = conn.execute(
@@ -273,8 +282,11 @@ class DataCache:
             ).fetchdf()
 
             if result.empty:
+                logger.debug(f"缓存未命中 universe: {index_code}（无匹配日期）")
                 return []
-            return result["symbol"].tolist()
+            symbols = result["symbol"].tolist()
+            logger.debug(f"缓存命中 universe {index_code}: {len(symbols)} 只")
+            return symbols
         except Exception as e:
             logger.warning(f"缓存查询成分股失败: {e}")
             return []
