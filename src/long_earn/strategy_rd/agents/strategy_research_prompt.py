@@ -7,18 +7,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from long_earn.core.prompt_loader import MarkdownPromptTemplate
-from long_earn.core.render import render
+from long_earn.core.prompt_loader import MarkdownPromptTemplate, render
 
 _research_prompt_template = MarkdownPromptTemplate(
     "strategy_research_prompt.md",
-    ["target_market", "query", "strategy_examples", "strategy_context"],
+    ["target_market", "query", "strategy_examples", "strategy_context", "master_hints_context"],
     __file__,
 )
 
 
 def create_strategy_research_prompt(
-    target_market: str, query: str, strategy_examples: str, strategy_context: str
+    target_market: str,
+    query: str,
+    strategy_examples: str,
+    strategy_context: str,
+    master_hints_context: str = "",
 ) -> str:
     """创建策略研究提示词
 
@@ -27,6 +30,8 @@ def create_strategy_research_prompt(
         query: 用户查询/需求
         strategy_examples: 历史成功策略参考
         strategy_context: 当前策略上下文
+        master_hints_context: 大师策略生成建议的可读文本段落，为空串时
+            与原行为完全一致（prompt 不出现 master_hints 字样）
 
     Returns:
         格式化后的提示词字符串
@@ -36,22 +41,23 @@ def create_strategy_research_prompt(
         query=query,
         strategy_examples=strategy_examples,
         strategy_context=strategy_context,
+        master_hints_context=master_hints_context,
     )
 
 
 strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专家。请根据改进建议优化当前策略。
 
 ## 当前策略
-${strategy}
+{{ strategy }}
 
 ## 改进建议
-${suggestions_text}
+{{ suggestions_text }}
 
 ## 历史回测结果
-${backtest_history}
+{{ backtest_history }}
 
 ## 市场特征
-${market_characteristics}
+{{ market_characteristics }}
 
 ## 可用数据字段（必须且只能使用以下字段）
 行情：open, high, low, close, volume

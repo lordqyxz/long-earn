@@ -8,6 +8,7 @@ class StockAnalysisState(TypedDict, total=False):
     stock_code: str
     stock_name: str
     stock_data: dict[str, Any] | None
+    event_context: str | None
     petter_analysis: str | None
     charles_munger_analysis: str | None
     buffett_analysis: str | None

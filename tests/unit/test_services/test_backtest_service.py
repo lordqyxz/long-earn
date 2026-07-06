@@ -438,3 +438,151 @@ class TestBuildStrategyDiagnosticsAccumulation:
         assert set(diag["failed_factor_aliases"]) == {"f0", "f1", "f2"}
         # 3/3 factor 都失败过 → degenerate=True（即使 trade_count > 0）
         assert diag["degenerate"] is True
+
+
+class TestInflatedReturnBugFix:
+    """虚高 bug 回归测试
+
+    复现集成测试发现的生产 bug：因子引用不存在的 volatility 字段 →
+    filter step 异常 → selected 保持初始值（全部股票）→ 策略退化成
+    "从全部股票里选 top N" → 牛市行情下产生虚高收益。
+
+    修复后：filter/rank step 失败时 selected 必须置空（保守不选），
+    且 metrics_unreliable 标志必须为 True，让上层（监督器/反思）能识别
+    指标不可信。
+    """
+
+    def _make_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "symbol": ["A", "B", "C", "D"],
+                "close": [10.0, 20.0, 30.0, 40.0],
+            }
+        ).set_index("symbol")
+
+    def test_filter_step_failure_empties_selected(self):
+        """filter 引用不存在字段失败时，selected 必须为 []（不是全部股票）"""
+        dsl = _StubDSL(
+            signals=[
+                {"type": "filter", "condition": "volatility > 0.2"},  # volatility 不存在
+            ]
+        )
+        strategy = DSLStrategy("t", dsl)
+
+        selected = strategy._execute_signal_steps(self._make_df())
+
+        # 核心：selected 不能是全部股票 ["A","B","C","D"]，必须是 []
+        assert selected == [], (
+            "filter step 失败时 selected 必须置空，否则策略退化为'从全部股票里选 top N'"
+            "产生虚高收益"
+        )
+        # 失败必须可观测
+        assert any(f["type"] == "filter" for f in strategy.step_failures)
+
+    def test_filter_failure_breaks_subsequent_rank(self):
+        """filter 失败后必须 break，不能让后续 rank 从全量 df 虚选 top N"""
+        dsl = _StubDSL(
+            signals=[
+                {"type": "filter", "condition": "volatility > 0.2"},  # 失败
+                {"type": "rank", "by": "close", "top": 2},  # 不应执行
+            ]
+        )
+        strategy = DSLStrategy("t", dsl)
+
+        selected = strategy._execute_signal_steps(self._make_df())
+
+        # 必须 break：selected 为 []，不是 rank 选出的 top 2
+        assert selected == [], (
+            "filter 失败后必须终止后续步骤，否则 rank 从全量股票虚选 top N 产生虚高收益"
+        )
+        # 只有 filter 失败，rank 没执行（不在 step_failures 里）
+        assert len(strategy.step_failures) == 1
+        assert strategy.step_failures[0]["type"] == "filter"
+
+    def test_rank_step_missing_field_returns_empty(self):
+        """rank 引用不存在字段时静默返回 []（不抛异常，但选股结果为空）"""
+        dsl = _StubDSL(
+            signals=[
+                {"type": "rank", "by": "momentum", "top": 2},  # momentum 不存在
+            ]
+        )
+        strategy = DSLStrategy("t", dsl)
+
+        selected = strategy._execute_signal_steps(self._make_df())
+
+        # rank 缺字段时 _apply_rank_step 返回 []，不抛异常
+        assert selected == [], "rank 缺字段时必须返回空列表（保守不选）"
+        # 没有异常 → step_failures 为空（静默退化，由 metrics_unreliable 兜底）
+        assert strategy.step_failures == []
+
+    def test_expression_step_failure_keeps_selected(self):
+        """expression step 失败不影响 selected（它不是选股步骤，continue 不 break）"""
+        dsl = _StubDSL(
+            signals=[
+                {"type": "rank", "by": "close", "top": 2},
+                {"type": "expression", "formula": "ghost_field * 2", "alias": "x"},
+            ]
+        )
+        strategy = DSLStrategy("t", dsl)
+
+        selected = strategy._execute_signal_steps(self._make_df())
+
+        # rank 成功选了 2 只，expression 失败不影响 selected
+        assert len(selected) == 2
+        assert any(f["type"] == "expression" for f in strategy.step_failures)
+
+    def test_metrics_unreliable_when_any_step_fails(self):
+        """任何 step 失败 → metrics_unreliable=True（即使 trade_count > 0）"""
+        svc = _make_service()
+        strategy_obj = type("S", (), {})()
+        strategy_obj.factor_failures = []
+        strategy_obj.step_failures = [
+            {"index": "0", "type": "filter", "step": "x", "error": "boom"},
+        ]
+        dsl = type("D", (), {})()
+        dsl.factors = {}
+        dsl.signals = [{"type": "filter"}, {"type": "rank"}]
+        result = type("R", (), {"trade_count": 100})()
+
+        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
+
+        # 1/2 step 失败，trade_count=100 → degenerate=False
+        assert diag["degenerate"] is False
+        # 但 metrics_unreliable 必须为 True：filter 失败意味着选股逻辑残缺
+        assert diag["metrics_unreliable"] is True
+
+    def test_metrics_unreliable_when_any_factor_fails(self):
+        """任何 factor 失败 → metrics_unreliable=True"""
+        svc = _make_service()
+        strategy_obj = type("S", (), {})()
+        strategy_obj.factor_failures = [
+            {"alias": "volatility", "expr": "x", "error": "boom"},
+        ]
+        strategy_obj.step_failures = []
+        dsl = type("D", (), {})()
+        dsl.factors = {"volatility": "...", "momentum": "..."}
+        dsl.signals = [{"type": "rank", "by": "close"}]
+        result = type("R", (), {"trade_count": 50})()
+
+        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
+
+        # 1/2 factor 失败，trade_count=50 → degenerate=False
+        assert diag["degenerate"] is False
+        # 但 metrics_unreliable 必须为 True
+        assert diag["metrics_unreliable"] is True
+
+    def test_metrics_reliable_when_clean(self):
+        """无任何失败 → metrics_unreliable=False"""
+        svc = _make_service()
+        strategy_obj = type("S", (), {})()
+        strategy_obj.factor_failures = []
+        strategy_obj.step_failures = []
+        dsl = type("D", (), {})()
+        dsl.factors = {"f1": "..."}
+        dsl.signals = [{"type": "rank"}]
+        result = type("R", (), {"trade_count": 100})()
+
+        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
+
+        assert diag["degenerate"] is False
+        assert diag["metrics_unreliable"] is False

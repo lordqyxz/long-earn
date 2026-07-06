@@ -142,6 +142,7 @@ class AppConfig:
     validation_end_date: str = "2026-06-25"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
+    event_inference_keywords: tuple[str, ...] = ("新闻", "事件", "热点", "资讯", "利好", "利空")
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -152,6 +153,7 @@ class AppConfig:
         """
         strategy_env = os.getenv("STRATEGY_KEYWORDS", "策略,思路,投资策略")
         stock_analysis_env = os.getenv("STOCK_ANALYSIS_KEYWORDS", "股票,分析,公司")
+        event_env = os.getenv("EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空")
 
         return cls(
             llm_type=os.getenv("LLM_TYPE", "ollama"),
@@ -173,6 +175,9 @@ class AppConfig:
             ),
             stock_analysis_keywords=tuple(
                 k.strip() for k in stock_analysis_env.split(",") if k.strip()
+            ),
+            event_inference_keywords=tuple(
+                k.strip() for k in event_env.split(",") if k.strip()
             ),
         )
 

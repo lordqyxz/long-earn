@@ -235,7 +235,7 @@ src/long_earn/backtest/models.py   # 新增 WalkForwardResult(BaseModel)
 - **ADR-002**（partial 节点注入）：新节点同样用 partial 绑定服务，沿用 ADR-002 模式。
 - **ADR-005**（事件驱动回测）：Held-out 验证门复用 ADR-005 的 Walk-Forward `walk_forward_run()`。
 - **ADR-007**（物质-运动架构）：**关键依赖**。混合持久化策略——假设树本体独立 JSON Store（层级结构不适合 Substance 扁平模型），树摘要回写 SubstanceStore 为 knowledge 物质（复用双通道检索做 hot-start）。`MemoryService` Protocol 新增两方法，`MemoryServiceImpl` 委托 SubstanceStore，与 ADR-007 其他方法同模式，消费方零改动。
-- **ADR-008**（并行回测 + 统一模板）：HTR executor 内部 backtest 可复用 `run_walk_forward_parallel` 加速 held-out 验证；策略参数化用 ADR-008 的 `${var}` 模板 + `ParamGrid` 做参数寻优。
+- **ADR-008**（并行回测 + 统一模板）：HTR executor 内部 backtest 可复用 `run_walk_forward_parallel` 加速 held-out 验证；`ParamGrid` 做参数寻优（ADR-008 的并行回测编排层 B 部分继续有效）。**注**：ADR-008 A 部分（`${var}` 模板渲染层）已被 ADR-011 废弃，HTR 各 prompt 与 DSL YAML 模板统一遵循 ADR-011 的 `{{var}}`（Mustache）语法。
 - **ADR-009**（算子目录 + operator_dev）：HTR executor 内部的 develop/backtest 复用算子目录 DSL；HTR 假设的"改进方向"若涉及算子缺口，可经 `gap_detector`（ADR-009 后续项）产出 OperatorSpec 进 operator_dev backlog——两系统形成"假设驱动算子研发"闭环。
 
 ## 参考文献

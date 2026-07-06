@@ -1,6 +1,6 @@
 """参数网格 + DSL 模板渲染
 
-支持标量插值（${var}）和对象层变换（DSL 字段深拷贝+赋值）。
+支持标量插值（{{ var }}，jinja2 语法）和对象层变换（DSL 字段深拷贝+赋值）。
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from long_earn.backtest.engine.dsl import StrategyDSL
-from long_earn.core.render import render
+from long_earn.core.prompt_loader import render
 
 
 def render_template(yaml_template: str, scalar_params: dict[str, Any]) -> str:
-    """渲染 YAML 模板，仅做标量 ${var} 插值。"""
+    """渲染 YAML 模板，仅做标量 {{ var }} 插值。"""
     return render(yaml_template, scalar_params)
 
 
@@ -42,7 +42,7 @@ class ParamGrid:
 
     接受 dict[str, list]（笛卡尔积）或 list[dict]（显式组合），展开为 list[dict]。
 
-    标量参数（scalars）在 YAML 渲染阶段做 ${var} 插值；
+    标量参数（scalars）在 YAML 渲染阶段做 {{ var }} 插值；
     结构化参数（structs）在解析后的 DSL 对象上做字段赋值。
     """
 

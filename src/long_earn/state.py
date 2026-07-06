@@ -10,6 +10,7 @@ class State(TypedDict, total=True):
     routing_reason: str
     strategy_result: dict
     stock_analysis_result: dict
+    event_inference_result: dict
     summary: str
     error: str
     metrics: dict[str, Any]

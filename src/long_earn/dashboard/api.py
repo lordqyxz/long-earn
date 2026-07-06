@@ -13,6 +13,13 @@
   GET  /api/runs/{run_id}/risk      — 风险指标
   GET  /api/runs/{run_id}/daily_returns — 日收益率序列
   POST /api/compare                 — 多策略对比
+
+  事件流（ADR-007 Phase 3）：
+  GET  /api/events                  — 列出事件物质（支持 ?symbol&sentiment&category&limit）
+  GET  /api/events/stats            — 事件统计
+  GET  /api/events/timeline         — 事件时间线（按天聚合）
+  GET  /api/events/{sid}            — 事件详情 + 关联关系
+  GET  /api/events/relations        — 列出影响关系物质
 """
 
 import json
@@ -26,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 from loguru import logger
 
 from long_earn.dashboard.analyzer import BacktestAnalyzer
+from long_earn.dashboard.event_analyzer import EventAnalyzer
 
 _HERE = Path(__file__).parent
 _DASHBOARD_HTML = _HERE / "templates" / "dashboard.html"
@@ -80,6 +88,7 @@ class VisualizationServer(BaseHTTPRequestHandler):
     """
 
     analyzer: BacktestAnalyzer | None = None
+    event_analyzer: EventAnalyzer | None = None
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -96,12 +105,36 @@ class VisualizationServer(BaseHTTPRequestHandler):
             self._list_runs()
             return
 
+        # 事件流端点（ADR-007 Phase 3）
+        if self._route_event_endpoint(path, query):
+            return
+
         # /api/runs/{run_id}/<suffix> 路由
         if path.startswith("/api/runs/"):
             self._route_run_endpoint(path, query)
             return
 
         _json_response(self, {"error": "Not found"}, 404)
+
+    def _route_event_endpoint(self, path: str, query: str) -> bool:
+        """路由 /api/events* 端点，已处理返回 True。"""
+        if path == "/api/events":
+            self._list_events(query)
+            return True
+        if path == "/api/events/stats":
+            self._event_stats()
+            return True
+        if path == "/api/events/timeline":
+            self._event_timeline(query)
+            return True
+        if path == "/api/events/relations":
+            self._list_relations(query)
+            return True
+        if path.startswith("/api/events/"):
+            sid = path[len("/api/events/") :]
+            self._get_event(sid)
+            return True
+        return False
 
     def _route_run_endpoint(self, path: str, query: str) -> None:
         """路由 /api/runs/{run_id}/<suffix> 形式的端点"""
@@ -164,6 +197,81 @@ class VisualizationServer(BaseHTTPRequestHandler):
         if VisualizationServer.analyzer is None:
             VisualizationServer.analyzer = BacktestAnalyzer()
         return VisualizationServer.analyzer
+
+    def _get_event_analyzer(self) -> EventAnalyzer:
+        if VisualizationServer.event_analyzer is None:
+            VisualizationServer.event_analyzer = EventAnalyzer()
+        return VisualizationServer.event_analyzer
+
+    # ── 事件流端点（ADR-007 Phase 3）──────────────────────────────
+
+    def _list_events(self, query: str) -> None:
+        """列出事件物质 — GET /api/events
+
+        查询参数：
+            limit: 返回条数上限（默认 50）
+            symbol: 按标的代码过滤（模糊匹配）
+            sentiment: positive / negative / neutral
+            category: 事件类别（模糊匹配）
+        """
+        params = parse_qs(query)
+        limit = int(params.get("limit", ["50"])[0])
+        symbol = params.get("symbol", [None])[0]
+        sentiment = params.get("sentiment", [None])[0]
+        category = params.get("category", [None])[0]
+
+        analyzer = self._get_event_analyzer()
+        events = analyzer.list_events(
+            limit=limit, symbol=symbol, sentiment=sentiment, category=category
+        )
+        _json_response(
+            self,
+            {"count": len(events), "events": events},
+        )
+
+    def _event_stats(self) -> None:
+        """事件统计 — GET /api/events/stats"""
+        analyzer = self._get_event_analyzer()
+        _json_response(self, analyzer.event_stats())
+
+    def _event_timeline(self, query: str) -> None:
+        """事件时间线 — GET /api/events/timeline?days=30"""
+        params = parse_qs(query)
+        days = int(params.get("days", ["30"])[0])
+        analyzer = self._get_event_analyzer()
+        timeline = analyzer.event_timeline(days=days)
+        _json_response(self, {"timeline": timeline})
+
+    def _list_relations(self, query: str) -> None:
+        """列出影响关系物质 — GET /api/events/relations
+
+        查询参数：
+            limit: 返回条数上限（默认 50）
+            target: 按目标标的过滤
+            direction: positive / negative / neutral
+        """
+        params = parse_qs(query)
+        limit = int(params.get("limit", ["50"])[0])
+        target = params.get("target", [None])[0]
+        direction = params.get("direction", [None])[0]
+
+        analyzer = self._get_event_analyzer()
+        relations = analyzer.list_relations(
+            limit=limit, target=target, direction=direction
+        )
+        _json_response(self, {"count": len(relations), "relations": relations})
+
+    def _get_event(self, sid: str) -> None:
+        """事件详情 + 关联关系 — GET /api/events/{sid}"""
+        if not sid:
+            _json_response(self, {"error": "sid is required"}, 400)
+            return
+        analyzer = self._get_event_analyzer()
+        event = analyzer.get_event(sid)
+        if event is None:
+            _json_response(self, {"error": "Event not found"}, 404)
+            return
+        _json_response(self, event)
 
     # ── API 端点 ──────────────────────────────────────────────────────
 
@@ -338,6 +446,7 @@ def serve_visualization(
     host: str = "0.0.0.0",
     port: int = 8090,
     db_path: str | Path = "",
+    substances_path: str | Path = "",
 ) -> None:
     """启动回测可视化 API 服务
 
@@ -345,9 +454,18 @@ def serve_visualization(
         host: 监听地址
         port: 监听端口
         db_path: DuckDB 审计数据库路径
+        substances_path: SubstanceStore JSONL 路径（事件流端点，ADR-007 Phase 3）
     """
     if db_path:
         VisualizationServer.analyzer = BacktestAnalyzer(Path(db_path))
+
+    if substances_path:
+        event_analyzer = EventAnalyzer()
+        if event_analyzer.load(substances_path):
+            VisualizationServer.event_analyzer = event_analyzer
+            logger.info(f"事件物质已加载: {substances_path}")
+        else:
+            logger.warning(f"事件物质加载失败: {substances_path}")
 
     server = HTTPServer((host, port), VisualizationServer)
     logger.info(f"回测可视化 API 服务启动: http://{host}:{port}")
@@ -364,6 +482,12 @@ def serve_visualization(
     logger.info("    GET /api/runs/{run_id}/symbol/{symbol}/chart  个股价格+买卖点")
     logger.info("    GET /api/runs/{run_id}/symbol_charts      全部标的图表数据")
     logger.info("    POST /api/compare")
+    logger.info("  事件流（ADR-007 Phase 3）:")
+    logger.info("    GET /api/events                            事件列表")
+    logger.info("    GET /api/events/stats                      事件统计")
+    logger.info("    GET /api/events/timeline?days=30           事件时间线")
+    logger.info("    GET /api/events/relations                  影响关系列表")
+    logger.info("    GET /api/events/{sid}                      事件详情")
 
     try:
         server.serve_forever()
@@ -383,6 +507,16 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8090, help="监听端口")
     parser.add_argument("--db", default="", help="DuckDB 审计数据库路径")
+    parser.add_argument(
+        "--substances",
+        default="",
+        help="SubstanceStore JSONL 路径（事件流端点）",
+    )
     args = parser.parse_args()
 
-    serve_visualization(host=args.host, port=args.port, db_path=args.db)
+    serve_visualization(
+        host=args.host,
+        port=args.port,
+        db_path=args.db,
+        substances_path=args.substances,
+    )

@@ -3,10 +3,10 @@
 你是一个研究洞察聚合器。将子节点的实验结果抽象为方向级教训。
 
 ## 父假设
-${parent_hypothesis}
+{{ parent_hypothesis }}
 
 ## 子节点结果
-${child_results}
+{{ child_results }}
 
 ## 任务
 分析所有子节点的实验结果，提炼抽象教训：

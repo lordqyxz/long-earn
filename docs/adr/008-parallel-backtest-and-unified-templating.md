@@ -1,7 +1,13 @@
 # ADR-008: 并行回测 + 统一模板渲染（`${var}`）
 
 日期: 2026-06
-状态: Accepted, Implemented
+状态: Partially Superseded（A 部分被 ADR-011 废弃；B 部分继续有效，Implemented）
+
+> **2026-07 更新**：本 ADR 的 **A 部分（统一模板渲染层：`${var}` + 纯函数 + 解耦 LangChain）已被 [ADR-011](011-unified-mustache-prompt-templating.md) 废弃**。新决策统一使用 `langchain_core.prompts.MustacheTemplate`（`{{var}}` 语法），删除自研 `core/render.py`，`MarkdownPromptTemplate` 改为委托 Mustache。
+>
+> A 部分覆盖的子决策中：A1（`${var}` 语法）、A2（纯函数渲染器解耦 LangChain）、A3 中 `render_template` 的渲染引擎——均被 ADR-011 替换。下文 A 部分原文保留作为历史记录，**不再有效**，新代码请遵循 ADR-011。
+>
+> **B 部分（并行回测编排层 B1/B2/B3/B4）完全不受影响**，继续有效。`ParamGrid` / `apply_struct_params` / `ParallelRunner` / `SharedDataContext` / `BacktestService.run_grid` / `run_walk_forward_parallel` 全部不变；仅 `param_grid.render_template` 内部渲染引擎随 ADR-011 切换到 Mustache。
 
 ## 背景
 
@@ -29,6 +35,8 @@
 两个正交但同期交付的基础设施改进：
 
 ### A. 统一模板渲染层：`${var}` + 纯函数渲染 + 解耦 LangChain
+
+> ⚠️ **本节已被 [ADR-011](011-unified-mustache-prompt-templating.md) 废弃（2026-07）。** 以下原文保留作为历史记录，不再有效。新代码请遵循 ADR-011：使用 `langchain_core.prompts.MustacheTemplate`（`{{var}}` 语法），删除 `core/render.py`。
 
 #### A1. 占位符语法统一为 `${var}`
 
@@ -174,6 +182,7 @@ tests/unit/test_backtest/
 
 ## 与其他 ADR 的关系
 
+- **ADR-011**（统一 LangChain Mustache 提示词）：**本 ADR A 部分被废弃**。A1/A2/A3 的渲染引擎决策由 ADR-011 接管（`${var}` → `{{var}}`，删除 `core/render.py`，`MarkdownPromptTemplate` 委托 `MustacheTemplate`）。B 部分（并行回测编排层）不受影响，继续有效。
 - **ADR-002**（partial 节点注入）：并行编排层的节点注入沿用 partial 模式。
 - **ADR-005**（事件驱动回测）：本 ADR 在 ADR-005 引擎之上叠加并行编排，不改引擎核心语义（`run()` 微改向后兼容）。
 - **ADR-009**（算子目录）：参数网格的标量插值用本 ADR 的 `render()`；DSL 模板渲染是算子目录 DSL 的参数化入口。

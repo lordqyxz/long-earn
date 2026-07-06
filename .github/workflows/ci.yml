@@ -15,6 +15,12 @@ jobs:
         with:
           python-version: "3.11"
       - run: uv sync
+      - name: ADR-011 grep 卡口 — 禁止 ${var} 提示词占位符
+        run: |
+          if grep -rn '\${[a-zA-Z_]' src/long_earn --include='*.md' --include='*.py' --include='*.yaml'; then
+            echo "❌ 发现 \${var} 形式的提示词占位符（如上）。请使用 jinja2 {{ var }} 语法（ADR-011）。"
+            exit 1
+          fi
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src/ --ignore-missing-imports

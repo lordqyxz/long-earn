@@ -33,6 +33,7 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         self.memory = context.require_memory()
         self.logger = context.logger
         self._knowledge_cache: dict[str, list[str]] = {}
+        self._event_cache: dict[str, list[str]] = {}
         self._error_history: list[dict] = []
 
     def _get_develop_context(self, query: str) -> str:

@@ -1,4 +1,4 @@
-﻿import json
+import json
 from typing import TYPE_CHECKING, Any
 
 from long_earn.core.llm_utils import parse_llm_json
@@ -12,6 +12,7 @@ from .strategy_research_prompt import (
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
+    from long_earn.skills.personas.protocol import PersonaResult
 
 # 单位语义统一：所有阈值与 BacktestResult 字段一致使用"小数"（return/drawdown 不带 %）
 # 历史上这里曾把 drawdown / return 阈值写成百分比（30、20、10），与扁平 backtest_result
@@ -80,6 +81,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         self.memory = context.require_memory()
         self.logger = context.logger
         self._knowledge_cache: dict[str, list[str]] = {}
+        self._event_cache: dict[str, list[str]] = {}
 
     def _get_research_context(self, query: str, node_type: str | None = None) -> str:
         """获取研究相关知识（按类别过滤）"""
@@ -155,18 +157,36 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         }
 
     def research_strategy_with_context(
-        self, query: str, knowledge_context: str = ""
+        self,
+        query: str,
+        knowledge_context: str = "",
+        master_hints: "dict[str, PersonaResult] | None" = None,
     ) -> dict[str, Any]:
-        """使用已有上下文的研究策略"""
+        """使用已有上下文的研究策略。
+
+        Args:
+            query: 用户研究需求
+            knowledge_context: 已检索到的知识上下文
+            master_hints: name -> PersonaResult 映射，由 _research_node
+                调用 4 个大师 strategy_generate mode 得到。None 或空 dict 时
+                行为与原 research_strategy_with_context 完全一致（向后兼容）。
+        """
 
         if self.logger:
             self.logger.info(f"[策略研究Agent] 开始研究: {query}")
+
+        master_hints_context = self._format_master_hints(master_hints)
+        if master_hints_context and self.logger:
+            self.logger.info(
+                f"[策略研究Agent] 注入大师策略生成建议: {len(master_hints or {})} 位"
+            )
 
         prompt = create_strategy_research_prompt(
             target_market="stock",
             query=query,
             strategy_examples="无",
             strategy_context=knowledge_context if knowledge_context else "无",
+            master_hints_context=master_hints_context,
         )
 
         response = self.llm_service.invoke(prompt)
@@ -178,6 +198,61 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             "description": response.content,
             "query": query,
         }
+
+    def _format_master_hints(
+        self, master_hints: "dict[str, PersonaResult] | None"
+    ) -> str:
+        """把大师策略生成建议格式化为 prompt 用的可读文本段落。
+
+        每个大师一段，结构：
+            ## <大师名>建议
+            裁决: <verdict>
+            置信度: <confidence>
+            建议:
+              - <suggestion1>
+              - <suggestion2>
+            依据: <rationale>
+
+        Args:
+            master_hints: name -> PersonaResult 映射；None 或空 dict
+                时返回空串（保持向后兼容，prompt 不出现 master_hints 字样）。
+
+        Returns:
+            可读文本段落；无大师建议时返回 ""。
+        """
+        if not master_hints:
+            return ""
+
+        sections: list[str] = []
+        for name, hint in master_hints.items():
+            # 兼容 PersonaResult 实例与 dict 两种形式
+            if hasattr(hint, "verdict"):
+                verdict = hint.verdict
+                rationale = hint.rationale
+                suggestions = hint.suggestions
+                confidence = hint.confidence
+                display_name = getattr(hint, "display_name", None) or name
+            elif isinstance(hint, dict):
+                verdict = hint.get("verdict", "未知")
+                rationale = hint.get("rationale", "")
+                suggestions = hint.get("suggestions", []) or []
+                confidence = hint.get("confidence", 0.0)
+                display_name = hint.get("display_name", name)
+            else:
+                continue
+
+            suggestions_str = (
+                "\n".join(f"  - {s}" for s in suggestions) if suggestions else "  - 无"
+            )
+            sections.append(
+                f"\n\n## {display_name}建议\n"
+                f"裁决: {verdict}\n"
+                f"置信度: {confidence}\n"
+                f"建议:\n{suggestions_str}\n"
+                f"依据: {rationale}"
+            )
+
+        return "".join(sections)
 
     def _identify_primary_issue(self, backtest_result: dict[str, Any]) -> str:
         """根据回测指标自动判断主要问题方向
@@ -227,12 +302,42 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         return "收益增强"
 
     def _build_reflection_prompt(
-        self, direction: str, strategy: dict[str, Any], backtest_result: dict[str, Any]
+        self,
+        direction: str,
+        strategy: dict[str, Any],
+        backtest_result: dict[str, Any],
+        master_context: str = "",
     ) -> str:
-        """构建特定方向的反思提示"""
+        """构建特定方向的反思提示
+
+        Args:
+            direction: 反思方向（收益增强/风险控制/收益稳定性）
+            strategy: 当前策略字典
+            backtest_result: 回测结果字典
+            master_context: 大师视角的可读文本段落，非空时作为补充
+                上下文注入 prompt；为空时与原行为完全一致（向后兼容）。
+        """
         direction_config = OPTIMIZATION_DIRECTIONS.get(
             direction, OPTIMIZATION_DIRECTIONS["收益增强"]
         )
+
+        # 大师视角相关段落（仅在非空时注入，保持向后兼容）
+        if master_context:
+            master_section = (
+                f"\n\n<master_perspectives>\n{master_context}\n</master_perspectives>"
+            )
+            framework_extra = (
+                "\n\n若上方 <master_perspectives> 提供了投资大师的审视视角，"
+                "请在反思中综合参考其裁决、弱点与建议，"
+                "但最终改进方案仍以量化数据为依据。"
+            )
+            thinking_master_step = (
+                "\n3. 综合大师视角识别盲点\n4. 提出具体可执行的改进方案"
+            )
+        else:
+            master_section = ""
+            framework_extra = ""
+            thinking_master_step = "\n3. 提出具体可执行的改进方案"
 
         prompt = f"""<role>
 你是一位资深的量化策略分析师，专注于{direction}方向。你的分析以数据为依据，逻辑严密。
@@ -251,7 +356,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 
 <focus>
 {direction_config["focus"]}
-</focus>
+</focus>{master_section}
 
 <analysis_framework>
 请从以下维度进行{direction}分析：
@@ -259,14 +364,13 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 1. 当前策略在{direction}方面的表现
 2. 存在的主要问题及原因
 3. 可行的改进方案
-4. 预期改进效果
+4. 预期改进效果{framework_extra}
 </analysis_framework>
 
 <thinking_process>
 在给出建议前，请按步骤思考：
 1. 首先识别回测结果中的关键指标
-2. 分析当前策略在{direction}方面的问题根源
-3. 提出具体可执行的改进方案
+2. 分析当前策略在{direction}方面的问题根源{thinking_master_step}
 </thinking_process>
 
 <output_format>
@@ -290,7 +394,11 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         return prompt
 
     def _run_branch_reflection(
-        self, direction: str, strategy: dict[str, Any], backtest_result: dict[str, Any]
+        self,
+        direction: str,
+        strategy: dict[str, Any],
+        backtest_result: dict[str, Any],
+        master_context: str = "",
     ) -> dict[str, Any]:
         """运行单个方向的反思"""
         if self.logger:
@@ -299,7 +407,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         knowledge_context = self._get_research_context(
             f"策略{direction}方法", node_type="reflection"
         )
-        prompt = self._build_reflection_prompt(direction, strategy, backtest_result)
+        prompt = self._build_reflection_prompt(
+            direction, strategy, backtest_result, master_context=master_context
+        )
 
         if knowledge_context:
             prompt = prompt + f"\n\n## 参考知识:\n{knowledge_context}"
@@ -388,15 +498,28 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         return sorted(branches, key=lambda x: x["score"], reverse=True)
 
     def reflect_with_tot(
-        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+        self,
+        strategy: dict[str, Any],
+        backtest_result: dict[str, Any],
+        master_context: str = "",
     ) -> dict[str, Any]:
-        """使用思维树(ToT)模型进行多分支反思"""
+        """使用思维树(ToT)模型进行多分支反思
+
+        Args:
+            strategy: 当前策略字典
+            backtest_result: 回测结果字典
+            master_context: 大师视角可读文本段落，非空时注入各分支 prompt；
+                为空时与原 ToT 行为完全一致（向后兼容）。
+        """
         branches = []
 
         for direction in OPTIMIZATION_DIRECTIONS:
             try:
                 result = self._run_branch_reflection(
-                    direction, strategy, backtest_result
+                    direction,
+                    strategy,
+                    backtest_result,
+                    master_context=master_context,
                 )
                 branches.append(
                     {
@@ -499,14 +622,97 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             "tot_enabled": False,
         }
 
+    def _format_master_perspectives(
+        self, master_perspectives: "dict[str, PersonaResult] | None"
+    ) -> str:
+        """把大师审视结果格式化为 prompt 用的可读文本段落。
+
+        每个大师一段，结构：
+            ## <大师名>（<视角>）
+            裁决: <verdict>
+            置信度: <confidence>
+            弱点: <weaknesses 列表>
+            建议: <suggestions 列表>
+            依据: <rationale>
+
+        Args:
+            master_perspectives: name -> PersonaResult 映射；None 或空 dict
+                时返回空串（保持向后兼容）。
+
+        Returns:
+            可读文本段落；无大师视角时返回 ""
+        """
+        if not master_perspectives:
+            return ""
+
+        sections: list[str] = []
+        for name, view in master_perspectives.items():
+            # 兼容 PersonaResult 实例与 dict 两种形式
+            if hasattr(view, "verdict"):
+                verdict = view.verdict
+                rationale = view.rationale
+                weaknesses = view.weaknesses
+                suggestions = view.suggestions
+                confidence = view.confidence
+                display_name = getattr(
+                    view, "display_name", None
+                ) or name
+                perspective = getattr(view, "perspective", None) or ""
+            elif isinstance(view, dict):
+                verdict = view.get("verdict", "未知")
+                rationale = view.get("rationale", "")
+                weaknesses = view.get("weaknesses", []) or []
+                suggestions = view.get("suggestions", []) or []
+                confidence = view.get("confidence", 0.0)
+                display_name = view.get("display_name", name)
+                perspective = view.get("perspective", "")
+            else:
+                continue
+
+            title = f"## {display_name}（{perspective}）" if perspective else f"## {display_name}"
+            weaknesses_str = (
+                "\n".join(f"  - {w}" for w in weaknesses) if weaknesses else "  - 无"
+            )
+            suggestions_str = (
+                "\n".join(f"  - {s}" for s in suggestions) if suggestions else "  - 无"
+            )
+            sections.append(
+                f"{title}\n"
+                f"裁决: {verdict}\n"
+                f"置信度: {confidence}\n"
+                f"弱点:\n{weaknesses_str}\n"
+                f"建议:\n{suggestions_str}\n"
+                f"依据: {rationale}"
+            )
+
+        return "\n\n".join(sections)
+
     def reflect(
-        self, strategy: dict[str, Any], backtest_result: dict[str, Any]
+        self,
+        strategy: dict[str, Any],
+        backtest_result: dict[str, Any],
+        master_perspectives: "dict[str, PersonaResult] | None" = None,
     ) -> dict[str, Any]:
-        """反思 - 分析回测结果并生成改进建议（支持 ToT 模式）"""
+        """反思 - 分析回测结果并生成改进建议（支持 ToT 模式 + 大师视角）
+
+        Args:
+            strategy: 当前策略字典
+            backtest_result: 回测结果字典
+            master_perspectives: name -> PersonaResult 映射，由 _reflection_node
+                调用 4 个大师 strategy_review mode 得到。None 或空 dict 时
+                行为与原 reflect 完全一致（向后兼容）。
+        """
+        master_context = self._format_master_perspectives(master_perspectives)
+        if master_context and self.logger:
+            self.logger.info(
+                f"[反思] 注入大师视角: {len(master_perspectives or {})} 位"
+            )
         try:
             if self.logger:
                 self.logger.info("开始 ToT 多分支反思")
-            return self.reflect_with_tot(strategy, backtest_result)
+            return self.reflect_with_tot(
+                strategy, backtest_result, master_context=master_context
+            )
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"ToT 反思失败，使用极简 fallback: {e}")

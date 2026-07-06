@@ -6,6 +6,7 @@
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import BaseMessage
 
 from long_earn.services import LLMService, LoggerService
 from long_earn.utils.llm_factory import create_llm
@@ -79,13 +80,16 @@ class LLMServiceImpl(LLMService):
             return llm.bind(response_format={"type": "json_object"})
         return llm
 
-    def invoke(self, prompt: str, format: str = "") -> Any:
+    def invoke(
+        self, prompt: str | list[BaseMessage], format: str = ""
+    ) -> Any:
         """调用 LLM
 
         每次都构造新 LLM 实例（避免长连接累积错误）+ 普通异常重试 1 次。
 
         Args:
-            prompt: 提示词
+            prompt: 提示词，可为字符串或 BaseMessage 列表（多消息对话）。
+                LangChain llm.invoke() 原生支持这两种入参类型，此处直接透传。
             format: 输出格式，可选 "json" 强制 JSON 输出
 
         Returns:
