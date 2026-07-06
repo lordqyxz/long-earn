@@ -248,3 +248,132 @@ class TestIndexContract:
             f"index names 缺少 date/timestamp: {result.index.names}"
         )
         assert "symbol" in names, f"index names 缺少 symbol: {result.index.names}"
+
+
+# ── C4. 端到端 PIT 验证：get_financial_panel 完整链路 ──────────────
+
+
+class TestEndToEndPITNoFutureFunction:
+    """端到端验证：get_financial_panel 返回的日频面板必须无未来函数。
+
+    这是 PIT 问题的核心验证：回测在 timestamp=T 的 bar 上读财务数据时，
+    只能看到 visible_from <= T 的报告值，绝不能看到未公布的财报。
+
+    场景：2020-Q1 报告期 2020-03-31，revenue=100。
+    - 2020-03-31 ~ 2020-05-29（披露前）：get_financial_panel 返回的 revenue 必须为 NaN
+    - 2020-05-30 起（披露后）：revenue 必须为 100
+
+    历史背景：akshare provider 之前没有 _quarterly_to_daily，
+    直接用 groupby(level="symbol").ffill() 按报告期截止日前向填充，
+    导致 2020-03-31 当天就能看到 Q1 财报值（实际 4-30 才公布）→ 未来函数 → 489% 虚高。
+    """
+
+    def test_akshare_financial_panel_no_future_function(self, tmp_path: Any):
+        """C4.1 akshare get_financial_panel 端到端验证无未来函数。
+
+        构造 mock akshare 返回季频数据，走完整 get_financial_panel 链路，
+        验证返回的日频面板在披露窗口前 revenue 为 NaN。
+        """
+        from long_earn.backtest.data.akshare_provider import AkshareFallbackProvider
+        from long_earn.backtest.data.cache import DataCache
+        from unittest.mock import MagicMock
+
+        cache = DataCache(db_path=tmp_path / "test_e2e.duckdb")
+        provider = AkshareFallbackProvider(cache=cache)
+
+        # mock _ak.stock_financial_report_sina 返回中文列名 DataFrame
+        # 注意：akshare provider 代码中 result_df["symbol"] = symbol 需要 result_df 有行
+        mock_raw = pd.DataFrame(
+            {
+                "报告日": ["20200331", "20200630"],
+                "营业收入": ["100.0", "200.0"],
+                "净利润": ["10.0", "20.0"],
+            }
+        )
+        provider._ak = MagicMock()
+        provider._ak.stock_financial_report_sina.return_value = mock_raw
+
+        # 查询 2020-04-01 ~ 2020-04-30（报告期后 15-45 天，仍在 60 天延迟内）
+        result = provider.get_financial_panel(
+            ["600519.SH"], "2020-04-01", "2020-04-30", fields=["revenue"]
+        )
+        assert not result.empty, "akshare get_financial_panel 应返回非空日频面板"
+        # 所有日期都在 visible_from(2020-05-30) 之前，revenue 必须全为 NaN
+        assert result["revenue"].isna().all(), (
+            f"PIT 未来函数未修复：akshare get_financial_panel 在 2020-04-01~04-30"
+            f"（报告期后 15-45 天，披露延迟 60 天内）返回了非 NaN revenue，"
+            f"该财报 2020-05-30 才可见。返回值：{result['revenue'].tolist()[:5]}"
+        )
+
+    def test_akshare_financial_panel_visible_after_disclosure(
+        self, tmp_path: Any
+    ):
+        """C4.2 akshare 披露延迟后数据可见——60 天后能看到报告值"""
+        from long_earn.backtest.data.akshare_provider import AkshareFallbackProvider
+        from long_earn.backtest.data.cache import DataCache
+        from unittest.mock import MagicMock
+
+        cache = DataCache(db_path=tmp_path / "test_e2e2.duckdb")
+        provider = AkshareFallbackProvider(cache=cache)
+
+        mock_raw = pd.DataFrame(
+            {
+                "报告日": ["20200331", "20200630"],
+                "营业收入": ["100.0", "200.0"],
+                "净利润": ["10.0", "20.0"],
+            }
+        )
+        provider._ak = MagicMock()
+        provider._ak.stock_financial_report_sina.return_value = mock_raw
+
+        # 查询 2020-06-01 ~ 2020-07-15（第一份报告 2020-05-30 可见）
+        result = provider.get_financial_panel(
+            ["600519.SH"], "2020-06-01", "2020-07-15", fields=["revenue"]
+        )
+        assert not result.empty
+        visible_rows = result[result["revenue"].notna()]
+        assert not visible_rows.empty, "应有可见数据行（第一份报告已披露）"
+        # 所有可见行的 revenue 都应是第一份报告的 100（第二份 2020-08-29 才可见）
+        assert (visible_rows["revenue"] == 100.0).all(), (
+            f"akshare 在 2020-06-01~07-15 的可见行应返回第一份报告 revenue=100，"
+            f"实际={visible_rows['revenue'].tolist()[:5]}"
+        )
+
+    def test_no_provider_returns_raw_quarterly_data(self, tmp_path: Any):
+        """C4.3 防回归：所有 provider 的 get_financial_panel 必须返回日频面板，不能返回季频原始数据。
+
+        季频原始数据（每个报告期一行）是未来函数的来源——
+        如果返回季频，回测引擎在 2020-03-31 的 bar 上直接读到 Q1 财报值，
+        绕过了 PIT 延迟。这个测试确保所有 provider 都走 _quarterly_to_daily。
+        """
+        from long_earn.backtest.data.cache import DataCache
+
+        cache = DataCache(db_path=tmp_path / "test_freq.duckdb")
+        providers = [
+            ("akshare", __import__(
+                "long_earn.backtest.data.akshare_provider",
+                fromlist=["AkshareFallbackProvider"],
+            ).AkshareFallbackProvider(cache=cache)),
+            ("ciccwm", __import__(
+                "long_earn.backtest.data.ciccwm_provider",
+                fromlist=["CiccwmDataProvider"],
+            ).CiccwmDataProvider(cache=cache)),
+            ("miniqmt", __import__(
+                "long_earn.backtest.data.miniqmt_provider",
+                fromlist=["MiniQmtDataProvider"],
+            ).MiniQmtDataProvider(cache=cache)),
+        ]
+
+        for name, provider in providers:
+            # 用 mock 数据走 _quarterly_to_daily（get_financial_panel 的核心 PIT 逻辑）
+            quarterly_df = _make_quarterly_data()
+            trading_dates = pd.date_range("2020-04-01", "2020-04-30", freq="B")
+            result = provider._quarterly_to_daily(
+                quarterly_df, ["600519.SH"], trading_dates, ["revenue"]
+            )
+            # 日频面板的行数应远大于季频（2 行）——4 月有 ~22 个交易日
+            assert len(result) > 10, (
+                f"{name} _quarterly_to_daily 返回行数 {len(result)} 过少，"
+                f"可能返回了季频原始数据（2 行）而非日频面板（~22 行）。"
+                f"这是未来函数的来源——季频数据绕过了 PIT 延迟。"
+            )

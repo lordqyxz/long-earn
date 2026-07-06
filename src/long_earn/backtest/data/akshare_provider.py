@@ -149,20 +149,20 @@ class AkshareFallbackProvider:
                 if df is None or df.empty:
                     continue
 
-                # 标准化列名
-                result_df = pd.DataFrame()
+                # 标准化列名（用 df 的行数初始化，避免给空 DF 赋标量列导致长度不匹配）
+                result_df = pd.DataFrame(index=range(len(df)))
                 result_df["symbol"] = symbol
                 if "报告日" in df.columns:
                     result_df["report_date"] = pd.to_datetime(
-                        df["报告日"], format="%Y%m%d", errors="coerce"
+                        df["报告日"].values, format="%Y%m%d", errors="coerce"
                     )
                 if "营业收入" in df.columns:
                     result_df["revenue"] = pd.to_numeric(
-                        df["营业收入"], errors="coerce"
+                        df["营业收入"].values, errors="coerce"
                     )
                 if "净利润" in df.columns:
                     result_df["net_profit"] = pd.to_numeric(
-                        df["净利润"], errors="coerce"
+                        df["净利润"].values, errors="coerce"
                     )
 
                 result_df = result_df.dropna(subset=["report_date"])
