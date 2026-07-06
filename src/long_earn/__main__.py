@@ -1,35 +1,18 @@
-from dotenv import load_dotenv
+"""long_earn 包入口 —— 委托给统一 typer CLI。
 
-from long_earn.agent import create_main_agent
-from long_earn.context_init import initialize_context
+注册为 console_scripts: ``long_earn = "long_earn.__main__:main"``
+等价于直接执行 ``python -m long_earn``。
 
-load_dotenv()
+子命令: research / download / agent / web
+详见 ``long-earn --help``。
+"""
+
+from long_earn.cli import app
 
 
-def main():
-    """主函数"""
-    context = initialize_context()
-
-    # 创建主 Agent
-    agent = create_main_agent(context)
-
-    # 执行用户查询：分析净利润增长策略
-    user_query = "分析净利润增长策略"
-    context.logger.info(f"开始处理用户查询: {user_query}")
-    print(f"正在处理: {user_query}\n")
-
-    try:
-        result = agent.invoke({"user_query": user_query})
-        print("\n" + "=" * 60)
-        print("分析结果:")
-        print("=" * 60)
-        print(result.get("summary", "无结果"))
-
-        # 输出监控报告
-        context.monitoring.log_report(context.logger)
-    except Exception as e:
-        context.logger.error(f"执行异常: {e}")
-        print(f"\n执行过程中出现错误: {e}")
+def main() -> None:
+    """主函数 —— 转发给 typer app。"""
+    app()
 
 
 if __name__ == "__main__":
