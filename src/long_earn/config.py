@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         DataProvider,
         MarketIntelligenceProvider,
     )
+    from long_earn.backtest.data.realtime import RealtimeDataProvider
     from long_earn.operator_dev.backlog import OperatorBacklog
 
 # 项目数据目录
@@ -67,6 +68,8 @@ class RuntimeContext:
     data_provider: "DataProvider | None" = None
     # 市场情报能力（可选，仅 ciccwm 可用时注入；与 data_provider 分离的第二组接口）
     market_intelligence: "MarketIntelligenceProvider | None" = None
+    # 实时行情能力（可选，ADR-011 第三组接口；miniqmt→ciccwm 降级）
+    realtime_provider: "RealtimeDataProvider | None" = None
     # 算子缺口队列（可选，gap_detector 写入 / operator_dev 消费）
     operator_backlog: "OperatorBacklog | None" = None
 
@@ -97,6 +100,12 @@ class RuntimeContext:
         if self.market_intelligence is None:
             raise RuntimeError("MarketIntelligenceProvider 未初始化（ciccwm 不可用）")
         return self.market_intelligence
+
+    def require_realtime(self) -> "RealtimeDataProvider":
+        """获取实时行情提供者，未注入时抛出明确错误"""
+        if self.realtime_provider is None:
+            raise RuntimeError("RealtimeDataProvider 未初始化")
+        return self.realtime_provider
 
 
 @dataclass

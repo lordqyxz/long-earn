@@ -1,6 +1,6 @@
 # Long Earn
 
-自我进化的量化交易系统（v1.1.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发和股票分析。
+自我进化的量化交易系统（v1.1.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发、股票分析和实时行情监控。
 
 ## 系统概览
 
@@ -8,9 +8,10 @@ Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
 
 - **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
 - **策略研发** — 基于 Reflexion 框架的闭环策略研发：研究 → 开发 → 回测 → 反思 → 优化，支持多轮迭代和自适应知识检索
-- **多视角股票分析** — 从巴菲特、查理芒格、彼得林奇、费雪四个投资大师视角并行分析股票
+- **多视角股票分析** — 从巴菲特、查理芒格、彼得林奇、费雪、资金流向五个视角并行分析股票
 - **自我进化** — 策略经验自动沉淀到物质-运动统一架构记忆系统（ADR-007），后续研发可检索历史经验作为参考
 - **内嵌回测引擎** — 事件驱动回测引擎直接集成在主项目中，通过 YAML DSL 描述策略，支持进程级并行回测 + 参数网格寻优
+- **实时行情监控** — 实时行情 Provider（miniqmt→ciccwm 降级）+ 价格阈值告警（ADR-011）
 
 ## 工作流
 
@@ -22,11 +23,12 @@ Long Earn 是一个 AI 驱动的量化交易研究平台，核心能力包括：
        │         └─ 回测成功 → 反思 → 保存经验 → 监督器 → 优化（循环）
        │         └─ 回测失败 → 代码修复 → 重新回测（最多 3 次）
        └─ 股票分析子图
-            └─ 数据获取 → 四视角并行分析 → 汇总
+            └─ 数据获取 → 五视角并行分析 → 汇总
                  ├─ 巴菲特视角（价值投资）
                  ├─ 查理芒格视角（多学科思维）
                  ├─ 彼得林奇视角（PEG 策略）
-                 └─ 费雪视角（成长股投资）
+                 ├─ 费雪视角（成长股投资）
+                 └─ 资金流向视角（主力资金博弈，ADR-011）
 ```
 
 ## 快速开始
@@ -107,7 +109,11 @@ RuntimeContext
     ├── backtest_service   — 内嵌回测引擎
     ├── logger             — 日志记录
     ├── monitoring         — 性能监控
-    └── config             — 应用配置
+    ├── config             — 应用配置
+    ├── data_provider             — 第一组接口：历史面板（行情/财务）
+    ├── market_intelligence       — 第二组接口：市场情报（ciccwm 独占）
+    ├── realtime_provider         — 第三组接口：实时行情（ADR-011）
+    └── operator_backlog          — 算子缺口队列（ADR-009）
 ```
 
 服务接口定义为 `Protocol` 类，可在测试中轻松替换为 Mock 实现。
@@ -126,7 +132,7 @@ RuntimeContext
 
 ### 股票分析子图
 
-从四个投资大师视角并行分析股票内在价值，通过 miniqmt (xtquant) 获取股票和财务数据。
+从五个视角并行分析股票：巴菲特（价值投资）、查理芒格（多学科思维）、彼得林奇（PEG 策略）、费雪（成长股投资）、资金流向（主力资金博弈，ADR-011）。前四视角通过 miniqmt (xtquant) 获取股票和财务数据，资金流向视角通过 ciccwm 独占的 `MarketIntelligenceProvider` 接口获取。
 
 ### 回测引擎（事件驱动，内嵌）
 
@@ -157,9 +163,14 @@ src/long_earn/backtest/
 ├── operators/              # 算子框架（factor/filter/rank/compose + 因果检测）
 └── data/
     ├── cache.py             # DuckDB 本地缓存（行情 / 财务 / 成分股）
-    ├── provider.py          # DataProvider Protocol + CompositeDataProvider 多源降级
+    ├── provider.py          # 三组 Protocol + CompositeDataProvider 多源降级
     ├── miniqmt_provider.py  # miniqmt (xtquant) 数据获取
+    ├── ciccwm_client.py     # ciccwm HTTP 客户端 + 鉴权
+    ├── ciccwm_provider.py   # ciccwm 数据提供者（DataProvider + MarketIntelligenceProvider）
     ├── akshare_provider.py  # akshare fallback 数据获取
+    ├── realtime.py          # 实时行情 Provider（ADR-011，第三组接口）
+    ├── polars_adapter.py    # pandas→polars 适配（to_polars_panel 纯函数）
+    ├── symbol.py            # 统一证券代码符号转换
     └── universe.py          # 股票池管理（全 A / csi300 / csi500 / 板块等）
 ```
 
@@ -169,7 +180,7 @@ src/long_earn/backtest/
 - **并行回测**：进程级并行编排（`parallel.py`），SharedMemory 零拷贝分发数据，参数网格自动寻优
 - **Walk-Forward OOS**：时序交叉验证，防止过拟合
 - **股票池**：支持全 A / csi300 / csi500 / main_board / gem / star_board 及组合
-- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，多源降级：DuckDB → miniqmt → akshare
+- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，多源降级：DuckDB → miniqmt → ciccwm → akshare
 
 ### 交易日志存储、导出与可视化
 
@@ -268,7 +279,7 @@ src/long_earn/substance/
 | 回测引擎 | 自研事件驱动回测引擎（Polars + NumPy + DuckDB） |
 | 记忆系统 | 物质-运动统一架构（Substance + 双索引 + JSONL） |
 | 数据缓存 | DuckDB |
-| 证券数据 | miniqmt (xtquant) → akshare（Composite 多源降级） |
+| 证券数据 | miniqmt (xtquant) → ciccwm → akshare（三组接口多源降级） |
 | Web 搜索 | Kimi Web Search / Tavily |
 | 日志 | loguru |
 | 包管理 | uv |
