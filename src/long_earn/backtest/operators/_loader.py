@@ -117,7 +117,7 @@ def _register_class(cls: type[Operator]) -> None:
             f"算子 {cls.name} 实例化失败: {type(exc).__name__}: {exc}"
         ) from exc
     OPERATOR_REGISTRY[cls.name] = instance
-    logger.debug("已注册算子: %s (%s)", cls.name, cls.category)
+    logger.debug(f"已注册算子: {cls.name} ({cls.category})")
 
 
 def register_operator(op: Operator) -> None:
