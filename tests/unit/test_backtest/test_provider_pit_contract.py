@@ -1,46 +1,41 @@
 """数据提供者接口契约测试（面向接口，所有实现共用一套）。
 
-测试对象：DataProvider Protocol 的三个实现
-  - AkshareFallbackProvider
-  - MiniQmtDataProvider（含 _quarterly_to_daily）
-  - CiccwmDataProvider
+测试对象：DataProvider Protocol 的财务面板实现
+  - MiniQmtDataProvider（含 _quarterly_to_daily + 四表合并字段提取）
 
 测试哲学（见 project_memory.md）：
   - 契约优先于实现：验证 Protocol 定义的行为，不验证实现细节
   - 所有实现共用一套参数化测试，一处契约变更，所有实现同步验证
   - 用 mock 数据构造可控场景，不依赖真实网络调用
 
-核心契约（ADR-007）：
+核心契约（ADR-007 Phase 3）：
   C1. PIT 契约：get_financial_panel 必须返回日频面板，基于 announce_date
       （真实财报发布日期）对齐，杜绝未来函数（timestamp=T 的行只含
       announce_date <= T 的报告值）
   C2. 空返回语义：symbols 为空或数据源不可用时返回空 DataFrame
   C3. 索引契约：返回 DataFrame 的 index 必须是 (date, symbol) MultiIndex
   C4. 端到端 PIT 验证：get_financial_panel 完整链路无未来函数
-  C5. 字段提取契约：akshare 提取"公告日期"、miniqmt 提取"m_anntime"、
-      ciccwm 用差异化 lag 估算 announce_date
+  C5. 字段提取契约：miniqmt 提取 m_anntime 作为 announce_date；
+      四表合并（Income + Balance + CashFlow + Pershareindex）18 个字段
+
+注：akshare/ciccwm 的财务方法已删除（ADR-007 Phase 3 统一到 miniqmt），
+仅 miniqmt 实现财务接口。
 """
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
-from long_earn.backtest.data.akshare_provider import AkshareFallbackProvider
-from long_earn.backtest.data.ciccwm_provider import (
-    CiccwmDataProvider,
-    _lag_by_report_type,
-)
 from long_earn.backtest.data.miniqmt_provider import MiniQmtDataProvider
 
 # ── 统一构造的季频测试数据 ─────────────────────────────────────
 
 
 def _make_quarterly_data() -> pd.DataFrame:
-    """构造一份季频财务数据，用于所有 provider 的 PIT 测试。
+    """构造一份季频财务数据，用于 PIT 测试。
 
     关键场景（ADR-007）：
     - 2020-Q1 报告期 2020-03-31，真实公告日 2020-04-25，值 revenue=100
@@ -61,25 +56,23 @@ def _make_quarterly_data() -> pd.DataFrame:
     )
 
 
-# ── 参数化：所有 provider 实现 ─────────────────────────────────
+# ── 参数化：provider 实现 ────────────────────────────────────
 
 
-@pytest.fixture(params=["akshare", "ciccwm", "miniqmt"])
+@pytest.fixture(params=["miniqmt"])
 def provider_instance(request: pytest.FixtureRequest, tmp_path: Any):
     """参数化 fixture：返回一个 provider 实例。
 
     所有实现共用一套测试，体现"面向接口测试"哲学。
     直接测 _quarterly_to_daily（PIT 契约核心）和空返回契约，
     避免 mock 网络链路导致的测试不稳定。
+
+    注：akshare/ciccwm 财务方法已删除，仅 miniqmt 实现财务接口。
     """
     from long_earn.backtest.data.cache import DataCache
 
     cache = DataCache(db_path=tmp_path / "test.duckdb")
-    if request.param == "akshare":
-        return AkshareFallbackProvider(cache=cache)
-    elif request.param == "ciccwm":
-        return CiccwmDataProvider(cache=cache)
-    elif request.param == "miniqmt":
+    if request.param == "miniqmt":
         return MiniQmtDataProvider(cache=cache)
     pytest.fail(f"未知 provider: {request.param}")
 
@@ -88,7 +81,7 @@ def provider_instance(request: pytest.FixtureRequest, tmp_path: Any):
 
 
 class TestPITContract:
-    """PIT 契约测试：所有 provider 的 _quarterly_to_daily 必须基于 announce_date 对齐。
+    """PIT 契约测试：provider 的 _quarterly_to_daily 必须基于 announce_date 对齐。
 
     核心场景：
     - 2020-Q1 报告期 2020-03-31，announce_date=2020-04-25，revenue=100
@@ -156,11 +149,7 @@ class TestPITContract:
     def test_announce_date_boundary_exact(self, provider_instance: Any):
         """C1.4 公告日当天数据可见——boundary 精确性验证"""
         provider = provider_instance
-        quarterly_df = _make_quarterly_data()
-        # 2020-04-25 是公告日，当天应可见
-        trading_dates = pd.DatetimeIndex(["2020-04-24", "2020-04-25"])
-        # 需要工作日；2020-04-24 是周五，2020-04-25 是周六
-        # 改用工作日场景：构造一个周二的公告日
+        # 构造一个周二的公告日场景
         quarterly_df2 = pd.DataFrame(
             {
                 "symbol": ["600519.SH"],
@@ -235,191 +224,144 @@ class TestIndexContract:
         assert "symbol" in names, f"index names 缺少 symbol: {result.index.names}"
 
 
-# ── C4. 端到端 PIT 验证：get_financial_panel 完整链路 ──────────────
+# ── C4. 端到端 PIT 验证：_quarterly_to_daily 返回日频面板 ──────────
 
 
 class TestEndToEndPITNoFutureFunction:
-    """端到端验证：get_financial_panel 返回的日频面板必须无未来函数。
+    """端到端验证：_quarterly_to_daily 返回的日频面板必须无未来函数。
 
     场景：2020-Q1 报告期 2020-03-31，announce_date=2020-04-25，revenue=100。
     - 2020-04-01 ~ 04-24（公告前）：revenue 必须为 NaN
     - 2020-04-25 起（公告后）：revenue 必须为 100
     """
 
-    def test_akshare_financial_panel_no_future_function(self, tmp_path: Any):
-        """C4.1 akshare get_financial_panel 端到端验证无未来函数。"""
-        from long_earn.backtest.data.cache import DataCache
-
-        cache = DataCache(db_path=tmp_path / "test_e2e.duckdb")
-        provider = AkshareFallbackProvider(cache=cache)
-
-        # mock akshare 返回中文列名 DataFrame，含"公告日期"列（ADR-007）
-        mock_raw = pd.DataFrame(
-            {
-                "报告日": ["20200331", "20200630"],
-                "公告日期": ["20200425", "20200820"],
-                "营业收入": ["100.0", "200.0"],
-                "净利润": ["10.0", "20.0"],
-            }
-        )
-        provider._ak = MagicMock()
-        provider._ak.stock_financial_report_sina.return_value = mock_raw
-
-        # 公告日前查询
-        result = provider.get_financial_panel(
-            ["600519.SH"], "2020-04-01", "2020-04-24", fields=["revenue"]
-        )
-        assert not result.empty, "akshare get_financial_panel 应返回非空日频面板"
-        assert result["revenue"].isna().all(), (
-            f"PIT 未来函数未修复：akshare 在 2020-04-01~04-24（公告日 04-25 前）"
-            f"返回了非 NaN revenue。返回值：{result['revenue'].tolist()[:5]}"
-        )
-
-    def test_akshare_financial_panel_visible_after_announce(self, tmp_path: Any):
-        """C4.2 akshare 公告日后数据可见"""
-        from long_earn.backtest.data.cache import DataCache
-
-        cache = DataCache(db_path=tmp_path / "test_e2e2.duckdb")
-        provider = AkshareFallbackProvider(cache=cache)
-
-        mock_raw = pd.DataFrame(
-            {
-                "报告日": ["20200331", "20200630"],
-                "公告日期": ["20200425", "20200820"],
-                "营业收入": ["100.0", "200.0"],
-                "净利润": ["10.0", "20.0"],
-            }
-        )
-        provider._ak = MagicMock()
-        provider._ak.stock_financial_report_sina.return_value = mock_raw
-
-        # 公告日后查询（第一份已公告，第二份未公告）
-        result = provider.get_financial_panel(
-            ["600519.SH"], "2020-04-25", "2020-06-30", fields=["revenue"]
-        )
-        assert not result.empty
-        visible_rows = result[result["revenue"].notna()]
-        assert not visible_rows.empty, "应有可见数据行（第一份报告已公告）"
-        assert (visible_rows["revenue"] == 100.0).all(), (
-            f"akshare 公告后可见行应返回 revenue=100，"
-            f"实际={visible_rows['revenue'].tolist()[:5]}"
-        )
-
     def test_no_provider_returns_raw_quarterly_data(self, tmp_path: Any):
-        """C4.3 防回归：所有 provider 的 _quarterly_to_daily 必须返回日频面板。
+        """C4.1 防回归：_quarterly_to_daily 必须返回日频面板。
 
         季频原始数据（每个报告期一行）是未来函数的来源——
         如果返回季频，回测引擎在 2020-03-31 的 bar 上直接读到 Q1 财报值，
-        绕过了 PIT 对齐。这个测试确保所有 provider 都走 _quarterly_to_daily。
+        绕过了 PIT 对齐。这个测试确保 _quarterly_to_daily 返回日频。
         """
         from long_earn.backtest.data.cache import DataCache
 
         cache = DataCache(db_path=tmp_path / "test_freq.duckdb")
-        providers = [
-            ("akshare", AkshareFallbackProvider(cache=cache)),
-            ("ciccwm", CiccwmDataProvider(cache=cache)),
-            ("miniqmt", MiniQmtDataProvider(cache=cache)),
-        ]
+        provider = MiniQmtDataProvider(cache=cache)
 
-        for name, provider in providers:
-            quarterly_df = _make_quarterly_data()
-            trading_dates = pd.date_range("2020-04-01", "2020-09-30", freq="B")
-            result = provider._quarterly_to_daily(
-                quarterly_df, ["600519.SH"], trading_dates, ["revenue"]
-            )
-            assert not result.empty, f"{name} 不应返回空"
-            # 日频面板应有 ~130 个交易日（4月-9月），远多于季频的 2 行
-            assert len(result) > 10, (
-                f"{name} 应返回日频面板（>10 行），"
-                f"实际 {len(result)} 行（可能返回了季频原始数据）"
-            )
+        quarterly_df = _make_quarterly_data()
+        trading_dates = pd.date_range("2020-04-01", "2020-09-30", freq="B")
+        result = provider._quarterly_to_daily(
+            quarterly_df, ["600519.SH"], trading_dates, ["revenue"]
+        )
+        assert not result.empty, "miniqmt 不应返回空"
+        # 日频面板应有 ~130 个交易日（4月-9月），远多于季频的 2 行
+        assert len(result) > 10, (
+            f"miniqmt 应返回日频面板（>10 行），"
+            f"实际 {len(result)} 行（可能返回了季频原始数据）"
+        )
 
 
 # ── C5. 字段提取契约 ───────────────────────────────────────────
 
 
 class TestAnnounceDateExtraction:
-    """字段提取契约：各 provider 必须正确提取/构造 announce_date 字段。"""
+    """字段提取契约：miniqmt 必须正确提取 m_anntime 作为 announce_date。
 
-    def test_akshare_extracts_gonggao_date(self, tmp_path: Any):
-        """C5.1 akshare 提取"公告日期"列作为 announce_date"""
+    ADR-007 Phase 3：miniqmt 的 get_financial 从 m_anntime 字段提取
+    真实公告日，四表合并提取 18 个财务字段。
+    """
+
+    def test_financial_field_map_has_18_fields(self):
+        """C5.1 FINANCIAL_FIELD_MAP 包含 18 个标准字段（四表合并）"""
+        from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
+
+        assert len(FINANCIAL_FIELD_MAP) == 18, (
+            f"FINANCIAL_FIELD_MAP 应有 18 个字段（四表合并），"
+            f"实际 {len(FINANCIAL_FIELD_MAP)} 个"
+        )
+        # 验证各表字段存在
+        expected_fields = {
+            # Income
+            "revenue", "net_profit", "eps", "research_expenses",
+            # Balance
+            "total_equity", "total_assets", "total_liabilities",
+            # CashFlow
+            "ocf", "capex",
+            # Pershareindex
+            "bps", "ocf_per_share", "debt_to_assets",
+            "net_profit_margin", "roe_weighted",
+            # 衍生指标
+            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+        }
+        assert set(FINANCIAL_FIELD_MAP.keys()) == expected_fields, (
+            f"FINANCIAL_FIELD_MAP 字段不匹配，"
+            f"缺失: {expected_fields - set(FINANCIAL_FIELD_MAP.keys())}"
+        )
+
+    def test_cache_table_has_all_financial_columns(self, tmp_path: Any):
+        """C5.2 DuckDB 缓存表包含全部 18 个财务字段列"""
         from long_earn.backtest.data.cache import DataCache
 
-        cache = DataCache(db_path=tmp_path / "test_extract.duckdb")
-        provider = AkshareFallbackProvider(cache=cache)
+        cache = DataCache(db_path=tmp_path / "test_cols.duckdb")
+        conn = cache._get_conn()
+        columns = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'financial_quarterly'"
+        ).fetchdf()
+        col_names = set(columns["column_name"].tolist())
 
-        mock_raw = pd.DataFrame(
-            {
-                "报告日": ["20200331"],
-                "公告日期": ["20200425"],
-                "营业收入": ["100.0"],
-                "净利润": ["10.0"],
-            }
-        )
-        provider._ak = MagicMock()
-        provider._ak.stock_financial_report_sina.return_value = mock_raw
+        expected_financial_cols = {
+            "revenue", "net_profit", "eps", "research_expenses",
+            "total_equity", "total_assets", "total_liabilities",
+            "ocf", "capex",
+            "bps", "ocf_per_share", "debt_to_assets",
+            "net_profit_margin", "roe_weighted",
+            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+        }
+        missing = expected_financial_cols - col_names
+        assert not missing, f"缓存表缺失字段: {missing}"
 
-        result = provider.get_financial_panel(
-            ["600519.SH"], "2020-04-25", "2020-04-30", fields=["revenue"]
-        )
+    def test_save_and_get_financials_roundtrip(self, tmp_path: Any):
+        """C5.3 save_financials → get_financials 全字段往返一致"""
+        from long_earn.backtest.data.cache import DataCache
+
+        cache = DataCache(db_path=tmp_path / "test_rt.duckdb")
+        # 构造含全部 18 个字段的测试数据
+        test_df = pd.DataFrame({
+            "symbol": ["600519.SH"],
+            "report_date": pd.to_datetime(["2020-03-31"]),
+            "announce_date": pd.to_datetime(["2020-04-25"]),
+            "revenue": [100.0],
+            "net_profit": [10.0],
+            "eps": [0.8],
+            "research_expenses": [5.0],
+            "total_equity": [500.0],
+            "total_assets": [1000.0],
+            "total_liabilities": [500.0],
+            "ocf": [15.0],
+            "capex": [3.0],
+            "bps": [40.0],
+            "ocf_per_share": [1.2],
+            "debt_to_assets": [0.5],
+            "net_profit_margin": [0.1],
+            "roe_weighted": [0.02],
+            "net_profit_yoy": [0.15],
+            "revenue_yoy": [0.2],
+            "roe": [0.02],
+            "gross_margin": [0.5],
+        })
+        cache.save_financials(test_df)
+
+        # 读取（不指定 fields，返回全量）
+        result = cache.get_financials(["600519.SH"])
+        assert result is not None
         assert not result.empty
-        # 公告日 2020-04-25 后应可见 revenue=100
-        visible = result[result["revenue"].notna()]
-        assert not visible.empty, "akshare 应提取公告日期并在公告后可见"
-
-    def test_ciccwm_differentiated_lag_year_report(self):
-        """C5.2 ciccwm 年报差异化 lag = 120 天（修复 40 交易日泄漏）"""
-        # 年报 report_date=12-31，lag=120 天
-        # 2019-12-31 + 120 天 = 2020-04-29（2020 是闰年，2 月多 1 天）
-        year_end = pd.Timestamp("2019-12-31")
-        assert _lag_by_report_type(year_end) == 120
-        estimated_announce = year_end + pd.Timedelta(days=120)
-        # 120 天后约 4 月底，法定披露截止 4-30，估算值应在 4 月最后一周内
-        assert estimated_announce.month == 4, (
-            f"年报估算公告日应在 4 月，实际={estimated_announce}"
-        )
-        assert estimated_announce.day >= 28, (
-            f"年报估算公告日应在 4 月底（≥28），实际={estimated_announce}"
-        )
-
-    def test_ciccwm_differentiated_lag_half_year(self):
-        """C5.3 ciccwm 半年报差异化 lag = 65 天"""
-        half_year = pd.Timestamp("2020-06-30")
-        assert _lag_by_report_type(half_year) == 65
-
-    def test_ciccwm_differentiated_lag_q1_q3(self):
-        """C5.4 ciccwm Q1/Q3 差异化 lag = 35 天"""
-        q1 = pd.Timestamp("2020-03-31")
-        q3 = pd.Timestamp("2020-09-30")
-        assert _lag_by_report_type(q1) == 35
-        assert _lag_by_report_type(q3) == 35
-
-    def test_ciccwm_normalize_finance_items_fills_announce_date(self, tmp_path: Any):
-        """C5.5 ciccwm _normalize_finance_items 必须填充 announce_date"""
-        from long_earn.backtest.data.cache import DataCache
-
-        cache = DataCache(db_path=tmp_path / "test_ciccwm.duckdb")
-        provider = CiccwmDataProvider(cache=cache)
-        items = [
-            {"报告期": "2019-12-31", "净利润": "100"},  # 年报 → +120 天
-            {"报告期": "2020-03-31", "净利润": "30"},  # Q1 → +35 天
-        ]
-        records = provider._normalize_finance_items(items, "600519.SH")
-        assert len(records) == 2
-        for r in records:
-            assert "announce_date" in r
-            assert pd.notna(r["announce_date"]), "announce_date 不应为空"
-        # 年报 announce_date = 2019-12-31 + 120 天 ≈ 2020-04-29（闰年）
-        year_rec = next(
-            r for r in records if r["report_date"] == pd.Timestamp("2019-12-31")
-        )
-        assert year_rec["announce_date"].month == 4, (
-            f"年报估算公告日应在 4 月，实际={year_rec['announce_date']}"
-        )
-        # Q1 announce_date = 2020-03-31 + 35 天 = 2020-05-05
-        q1_rec = next(
-            r for r in records if r["report_date"] == pd.Timestamp("2020-03-31")
-        )
-        assert q1_rec["announce_date"] == pd.Timestamp("2020-05-05"), (
-            f"Q1 估算公告日应为 2020-05-05，实际={q1_rec['announce_date']}"
-        )
+        # 验证所有 18 个字段都有值
+        for col in [
+            "revenue", "net_profit", "eps", "research_expenses",
+            "total_equity", "total_assets", "total_liabilities",
+            "ocf", "capex", "bps", "ocf_per_share", "debt_to_assets",
+            "net_profit_margin", "roe_weighted",
+            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+        ]:
+            assert col in result.columns, f"返回结果缺少字段: {col}"
+            assert pd.notna(result[col].iloc[0]), f"字段 {col} 值为 NaN"

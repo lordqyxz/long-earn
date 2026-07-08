@@ -68,20 +68,37 @@ class DataCache:
 
         # 季度财务数据
         # announce_date = 真实财报发布日期（PIT 契约核心，ADR-007）
-        # 旧表无该列时直接 DROP + CREATE（不兼容旧数据，缓存全量重建）
+        # ADR-007 Phase 3：全量字段（Income + Balance + CashFlow + Pershareindex 四表合并）
+        # 旧表字段不全时直接 DROP + CREATE（不兼容旧数据，缓存全量重建）
         conn.execute("DROP TABLE IF EXISTS financial_quarterly")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS financial_quarterly (
                 symbol VARCHAR NOT NULL,
                 report_date DATE NOT NULL,
                 announce_date DATE NOT NULL,
+                -- Income 表字段
+                revenue DOUBLE,
+                net_profit DOUBLE,
+                eps DOUBLE,
+                research_expenses DOUBLE,
+                -- Balance 表字段
+                total_equity DOUBLE,
+                total_assets DOUBLE,
+                total_liabilities DOUBLE,
+                -- CashFlow 表字段
+                ocf DOUBLE,
+                capex DOUBLE,
+                -- Pershareindex 表预计算字段
+                bps DOUBLE,
+                ocf_per_share DOUBLE,
+                debt_to_assets DOUBLE,
+                net_profit_margin DOUBLE,
+                roe_weighted DOUBLE,
+                -- 衍生指标（Pershareindex 预计算优先，手算兜底）
                 net_profit_yoy DOUBLE,
                 revenue_yoy DOUBLE,
                 roe DOUBLE,
                 gross_margin DOUBLE,
-                eps DOUBLE,
-                net_profit DOUBLE,
-                revenue DOUBLE,
                 PRIMARY KEY (symbol, report_date)
             )
         """)
@@ -193,13 +210,23 @@ class DataCache:
         symbols: list[str],
         fields: list[str] | None = None,
     ) -> pd.DataFrame | None:
-        """从缓存获取财务数据"""
+        """从缓存获取财务数据
+
+        Args:
+            symbols: 股票代码列表
+            fields: 需要的财务字段列表；None 表示返回全量字段
+               （symbol/report_date/announce_date + 18 个财务字段）
+        """
         conn = self._get_conn()
-        select_fields = ", ".join(fields) if fields else "*"
+        # 默认返回全量字段；指定 fields 时附加必要的主键列
+        if fields is None:
+            select_clause = "*"
+        else:
+            select_clause = ", ".join(["symbol", "report_date", "announce_date", *fields])
         placeholders = ", ".join(["?"] * len(symbols))
 
         query = f"""
-            SELECT symbol, report_date, announce_date, {select_fields}
+            SELECT {select_clause}
             FROM financial_quarterly
             WHERE symbol IN ({placeholders})
             ORDER BY report_date, symbol
@@ -233,17 +260,34 @@ class DataCache:
             df["announce_date"] = pd.to_datetime(df["announce_date"])
 
         # 只选择缓存表中存在的列，缺失列用 NULL 填充
+        # ADR-007 Phase 3：全量字段（Income + Balance + CashFlow + Pershareindex 四表合并）
         cache_columns = [
             "symbol",
             "report_date",
             "announce_date",
+            # Income 表字段
+            "revenue",
+            "net_profit",
+            "eps",
+            "research_expenses",
+            # Balance 表字段
+            "total_equity",
+            "total_assets",
+            "total_liabilities",
+            # CashFlow 表字段
+            "ocf",
+            "capex",
+            # Pershareindex 表预计算字段
+            "bps",
+            "ocf_per_share",
+            "debt_to_assets",
+            "net_profit_margin",
+            "roe_weighted",
+            # 衍生指标（Pershareindex 预计算优先，手算兜底）
             "net_profit_yoy",
             "revenue_yoy",
             "roe",
             "gross_margin",
-            "eps",
-            "net_profit",
-            "revenue",
         ]
         for col in cache_columns:
             if col not in df.columns:

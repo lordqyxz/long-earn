@@ -1,16 +1,12 @@
 """中金财富 (ciccwm) 数据提供者。
 
-实现 ``DataProvider`` Protocol（行情/财务），并提供 ciccwm 独占的扩展能力
-（资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯）。
+实现 :class:`MarketIntelligenceProvider`（ciccwm 独占的扩展能力：
+资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯），并保留行情降级能力。
 
-降级链定位（ADR-006）::
+定位（ADR-006 + ADR-007 Phase 3）::
 
-    DuckDB 缓存 → miniqmt → ciccwm → akshare
-
-ciccwm 紧跟 miniqmt，优先于 akshare：
-  - **共享数据**（行情/财务）：miniqmt 不可用时 ciccwm 接管，字段口径比 akshare 稳定。
-  - **独占数据**（资金流向/排行/板块/资讯）：miniqmt 与 akshare 均无对应能力，
-    失败时显式报错或返回空，不静默吞错。
+    行情/财务：已统一到 miniqmt（DuckDB 缓存 → miniqmt），ciccwm 降级分支已屏蔽
+    独占数据（资金流向/排行/板块/资讯）：ciccwm 独占，无降级，失败显式报错
 
 符号格式转换在 provider 边界完成：
   - long-earn 内部用 xtquant 格式 ``600519.SH`` / ``000001.SZ``
@@ -36,18 +32,6 @@ from long_earn.backtest.data.symbol import xt_to_ciccwm
 # 标准行情字段
 DEFAULT_PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
 
-# 财务字段映射：ciccwm 财务指标字段 → 标准字段名（与 miniqmt FINANCIAL_FIELD_MAP 对齐）
-# ciccwm 财务返回的字段名是中文缩写，这里映射到 long-earn 标准字段
-CICCWM_FINANCIAL_FIELD_MAP: dict[str, str] = {
-    "净利润": "net_profit",
-    "营业收入": "revenue",
-    "净资产收益率": "roe",
-    "每股收益": "eps",
-    "毛利率": "gross_margin",
-    "净利润同比增长": "net_profit_yoy",
-    "营业收入同比增长": "revenue_yoy",
-}
-
 # 排行最大条数（ciccwm 接口硬限制）
 RANKING_MAX_LIMIT = 80
 
@@ -55,32 +39,17 @@ RANKING_MAX_LIMIT = 80
 HISTORY_DEFAULT_DAYS = 5
 
 
-def _lag_by_report_type(report_date: pd.Timestamp) -> int:
-    """按报告期类型返回法定披露最小 lag（天）。
-
-    ciccwm API 未返回真实公告日，用法定披露窗口估算（ADR-007）：
-      - 年报(Q4, 12-31) → 次年 4-30，需 120 天
-      - 半年报(Q2, 06-30) → 8-31，需 65 天
-      - Q1 (03-31) / Q3 (09-30) → 4-30 / 10-31，需 35 天
-    """
-    month = report_date.month
-    if month == 12:
-        return 120
-    if month == 6:
-        return 65
-    return 35
-
-
 class CiccwmDataProvider(MarketIntelligenceProvider):
     """中金财富 (ciccwm) 数据提供者。
 
-    同时实现两组接口：
-      - :class:`DataProvider`（行情/财务）：进降级链，miniqmt 不可用时接管。
-      - :class:`MarketIntelligenceProvider`（资金流向/排行/板块/资讯）：
-        ciccwm 独占，无降级，失败显式报错（ADR-006）。
+    实现 :class:`MarketIntelligenceProvider`（资金流向/排行/板块/资讯），
+    ciccwm 独占，无降级，失败显式报错（ADR-006）。
+
+    保留行情降级能力（get_price_panel），但财务数据已统一到 miniqmt
+    （ADR-007 Phase 3），不再实现 get_financial_panel。
 
     纯 HTTP 实现，不依赖本地 miniQMT 客户端。
-    获取的行情/财务数据自动写入 DuckDB 缓存，后续查询可直接走缓存。
+    获取的行情数据自动写入 DuckDB 缓存，后续查询可直接走缓存。
     """
 
     def __init__(self, cache: DataCache | None = None) -> None:
@@ -186,170 +155,6 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
         available_fields = [f for f in fields if f in result_df.columns]
         return result_df[available_fields]
 
-    # ── DataProvider Protocol: 财务面板 ──────────────────────────────────
-
-    def get_financial_panel(
-        self,
-        symbols: list[str],
-        start_date: str,
-        end_date: str,
-        fields: list[str] | None = None,
-    ) -> pd.DataFrame:
-        """获取财务数据面板（前向填充到日级）。
-
-        逐 symbol 调 ``query_finance("indicators", code)`` 获取主要指标，
-        按报告期前向填充到日级（使用披露日 + 60 天延迟，避免未来函数）。
-
-        Args:
-            symbols: 股票代码列表
-            start_date: 起始日期
-            end_date: 结束日期
-            fields: 需要的财务字段列表
-
-        Returns:
-            DataFrame，index 为 (date, symbol)
-        """
-        if not symbols or not self.is_available:
-            return pd.DataFrame()
-
-        standard_fields = fields or list(CICCWM_FINANCIAL_FIELD_MAP.values())
-        all_dfs: list[pd.DataFrame] = []
-
-        for symbol in symbols:
-            try:
-                code, _market = xt_to_ciccwm(symbol)
-            except ValueError as e:
-                logger.warning(f"跳过无法解析的代码 {symbol}: {e}")
-                continue
-
-            # ciccwm 财务接口用纯数字代码（不含市场后缀）
-            try:
-                result = client.query_finance(
-                    "indicators", code, qtime="12", gtype="0", limit=10
-                )
-            except client.CICCWMCredentialError:
-                raise
-            except Exception as e:
-                logger.warning(f"ciccwm 获取 {symbol} 财务数据失败: {e}")
-                continue
-
-            items = result.get("items", [])
-            if not items:
-                continue
-
-            records = self._normalize_finance_items(items, symbol)
-            if records:
-                all_dfs.append(pd.DataFrame(records))
-
-        if not all_dfs:
-            return pd.DataFrame()
-
-        quarterly_df = pd.concat(all_dfs, ignore_index=True)
-
-        # 写入 DuckDB 缓存
-        if not quarterly_df.empty and "report_date" in quarterly_df.columns:
-            self.cache.save_financials(quarterly_df)
-            logger.info(
-                f"[ciccwm] 获取 {len(quarterly_df)} 条财务数据，"
-                f"{quarterly_df['symbol'].nunique()} 只股票，已写入缓存"
-            )
-
-        # 前向填充到日级（使用披露日 + 延迟，避免未来函数）
-        trading_dates = pd.date_range(start=start_date, end=end_date, freq="B")
-        return self._quarterly_to_daily(
-            quarterly_df, symbols, trading_dates, standard_fields
-        )
-
-    def _normalize_finance_items(
-        self,
-        items: list[dict[str, Any]],
-        symbol: str,
-    ) -> list[dict[str, Any]]:
-        """将 ciccwm 财务记录标准化为缓存兼容格式。
-
-        ciccwm 财务接口返回的字段名是中文缩写，需要映射到标准字段名。
-        报告期日期字段名不统一（可能是 ``报告期`` / ``截止日期`` / ``date`` 等）。
-
-        ADR-007：ciccwm API 不返回真实公告日，用差异化 lag 估算填充
-        announce_date 字段（年报+120/半年报+65/Q1·Q3+35）。
-        """
-        records: list[dict[str, Any]] = []
-        for item in items:
-            record: dict[str, Any] = {"symbol": symbol}
-
-            # 提取报告期日期
-            report_date = None
-            for key in ("报告期", "截止日期", "date", "报告日期", "REPORT_DATE"):
-                if item.get(key):
-                    report_date = item[key]
-                    break
-            if report_date is None:
-                continue
-            record["report_date"] = pd.to_datetime(report_date, errors="coerce")
-
-            # 估算真实公告日（ADR-007）：ciccwm API 不透明，用法定窗口差异化 lag
-            if pd.notna(record["report_date"]):
-                lag_days = _lag_by_report_type(record["report_date"])
-                record["announce_date"] = record["report_date"] + pd.Timedelta(
-                    days=lag_days
-                )
-            else:
-                record["announce_date"] = pd.NaT
-
-            # 映射财务字段
-            for cn_field, std_field in CICCWM_FINANCIAL_FIELD_MAP.items():
-                if cn_field in item and item[cn_field] is not None:
-                    try:
-                        record[std_field] = float(item[cn_field])
-                    except (ValueError, TypeError):
-                        record[std_field] = None
-
-            records.append(record)
-
-        # 过滤掉 report_date 或 announce_date 为空的记录
-        return [
-            r
-            for r in records
-            if pd.notna(r.get("report_date")) and pd.notna(r.get("announce_date"))
-        ]
-
-    def _quarterly_to_daily(
-        self,
-        quarterly_df: pd.DataFrame,
-        symbols: list[str],
-        trading_dates: pd.DatetimeIndex,
-        fields: list[str],
-    ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级，基于真实公告日对齐。
-
-        ADR-007：用 announce_date 作为信息可见的起点。
-        ciccwm 的 announce_date 在 _normalize_finance_items 中已用
-        差异化 lag（年报120/半年报65/Q1·Q3 35）估算填充。
-        """
-        panels: list[pd.DataFrame] = []
-        for symbol in symbols:
-            symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
-            if symbol_data.empty:
-                continue
-            symbol_data = symbol_data.sort_values("announce_date")
-            daily = pd.DataFrame(index=trading_dates)
-            daily.index.name = "date"
-            for _, row in symbol_data.iterrows():
-                announce_date = row.get("announce_date")
-                if pd.isna(announce_date):
-                    continue
-                visible_from = pd.to_datetime(announce_date)
-                mask = daily.index >= visible_from
-                for field in fields:
-                    if field in row and pd.notna(row[field]):
-                        daily.loc[mask, field] = float(row[field])
-            daily["symbol"] = symbol
-            daily = daily.reset_index().set_index(["date", "symbol"])
-            panels.append(daily)
-        if not panels:
-            return pd.DataFrame()
-        return pd.concat(panels)
-
     # ── DataProvider Protocol: 合并面板 ──────────────────────────────────
 
     def get_merged_panel(
@@ -358,25 +163,14 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
         start_date: str,
         end_date: str,
         price_fields: list[str] | None = None,
-        financial_fields: list[str] | None = None,
+        financial_fields: list[str] | None = None,  # noqa: ARG002
     ) -> pd.DataFrame:
-        """获取合并面板（行情 + 财务）。"""
-        price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
-        fin_df = self.get_financial_panel(
-            symbols, start_date, end_date, financial_fields
-        )
-        if price_df.empty and fin_df.empty:
-            return pd.DataFrame()
-        if price_df.empty:
-            return fin_df
-        if fin_df.empty:
-            return price_df
-        # 统一 index names
-        if price_df.index.names != fin_df.index.names:
-            fin_df.index.names = price_df.index.names
-        merged = price_df.join(fin_df, how="outer")
-        merged = merged.groupby(level="symbol").ffill()
-        return merged.sort_index()
+        """获取合并面板（行情 + 财务）。
+
+        财务数据已统一到 miniqmt（ADR-007 Phase 3），本 provider 仅返回行情面板。
+        financial_fields 参数保留用于接口兼容，但不再获取财务数据。
+        """
+        return self.get_price_panel(symbols, start_date, end_date, price_fields)
 
     def get_merged_panel_as_polars(
         self,

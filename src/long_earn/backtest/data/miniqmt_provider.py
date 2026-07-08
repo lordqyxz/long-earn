@@ -50,15 +50,32 @@ BOARD_NAME_MAP = {
     "sse_main": "沪市主板",
 }
 
-# 财务字段映射：xtquant 字段 -> 标准字段名
+# 财务字段映射：标准字段名清单（get_financial_panel 默认返回这些列）
+# 原始字段提取在 _fetch_financials 中按表（Income/Balance/CashFlow/Pershareindex）进行
 FINANCIAL_FIELD_MAP = {
-    "net_profit_yoy": "net_profit_yoy",
-    "roe": "roe",
-    "revenue_yoy": "revenue_yoy",
-    "gross_profit_margin": "gross_margin",
+    # 利润表（Income）原始字段
+    "revenue": "revenue",
     "net_profit": "net_profit",
-    "operating_revenue": "revenue",
     "eps": "eps",
+    "research_expenses": "research_expenses",
+    # 资产负债表（Balance）原始字段
+    "total_equity": "total_equity",
+    "total_assets": "total_assets",
+    "total_liabilities": "total_liabilities",
+    # 现金流量表（CashFlow）原始字段
+    "ocf": "ocf",
+    "capex": "capex",
+    # 每股指标/主要指标表（Pershareindex）预计算字段
+    "bps": "bps",
+    "ocf_per_share": "ocf_per_share",
+    "debt_to_assets": "debt_to_assets",
+    "net_profit_margin": "net_profit_margin",
+    "roe_weighted": "roe_weighted",
+    # 衍生指标（Pershareindex 预计算优先，_compute_derived_financials 手算兜底）
+    "net_profit_yoy": "net_profit_yoy",
+    "revenue_yoy": "revenue_yoy",
+    "roe": "roe",
+    "gross_margin": "gross_margin",
 }
 
 
@@ -610,112 +627,100 @@ class MiniQmtDataProvider:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame | None:
-        """从 miniqmt 下载财务数据（Income + Balance 表合并，自行计算衍生指标）。"""
+        """从 miniqmt 下载财务数据（Income + Balance + CashFlow + Pershareindex 四表合并）。
+
+        ADR-007 Phase 3：全量字段提取。
+        - Income：营业收入/净利润/每股收益/研发费用/营业总成本
+        - Balance：所有者权益/总资产/总负债
+        - CashFlow：经营现金流净额/资本支出
+        - Pershareindex：每股净资产/每股经营现金流/资产负债率/净利率/加权ROE/
+          YoY增长率/毛利率（预计算值，优先于手算）
+        """
         try:
             start_fmt = start_date.replace("-", "")
             end_fmt = end_date.replace("-", "")
 
-            # 获取 Income 表（原始利润表数据）
+            # 四张表并行获取
             income_df = self.client.get_financial(
-                stock_list=symbols,
-                start_time=start_fmt,
-                end_time=end_fmt,
+                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
                 table="Income",
             )
-
-            # 获取 Balance 表（资产负债表，用于计算 ROE）
             balance_df = self.client.get_financial(
-                stock_list=symbols,
-                start_time=start_fmt,
-                end_time=end_fmt,
+                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
                 table="Balance",
             )
+            cashflow_df = self.client.get_financial(
+                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
+                table="CashFlow",
+            )
+            pershare_df = self.client.get_financial(
+                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
+                table="Pershareindex",
+            )
 
-            if income_df.empty and balance_df.empty:
+            if (
+                income_df.empty
+                and balance_df.empty
+                and cashflow_df.empty
+                and pershare_df.empty
+            ):
                 return None
 
-            # 以 Income 表为基础构建结果
-            if not income_df.empty:
-                result_df = pd.DataFrame()
-                if "symbol" in income_df.columns:
-                    result_df["symbol"] = income_df["symbol"]
-                else:
-                    result_df["symbol"] = symbols[0] if len(symbols) == 1 else None
-                result_df["report_date"] = income_df.get("report_date", pd.NaT)
+            # 以 Income 表为基础（含 report_date / announce_date）
+            base_df = income_df if not income_df.empty else balance_df
+            if base_df.empty:
+                base_df = cashflow_df if not cashflow_df.empty else pershare_df
 
-                # Income 表字段映射
-                income_field_map = {
-                    "revenue_inc": "revenue",
-                    "revenue": "revenue",
-                    "net_profit_incl_min_int_inc": "net_profit",
-                    "s_fa_eps_basic": "eps",
-                    "total_operating_cost": "total_operating_cost",
-                }
-                for xt_col, std_col in income_field_map.items():
-                    if xt_col in income_df.columns and std_col not in result_df.columns:
-                        result_df[std_col] = income_df[xt_col]
+            result_df = pd.DataFrame()
+            result_df["symbol"] = base_df.get("symbol")
+            if len(symbols) == 1 and (result_df["symbol"].isna().all() or result_df.empty):
+                result_df["symbol"] = symbols[0]
+            result_df["report_date"] = base_df.get("report_date", pd.NaT)
+            # announce_date 优先从基础表取（get_financial 已统一提取 m_anntime）
+            if "announce_date" in base_df.columns:
+                result_df["announce_date"] = base_df["announce_date"]
             else:
-                result_df = pd.DataFrame()
-                if "symbol" in balance_df.columns:
-                    result_df["symbol"] = balance_df["symbol"]
-                else:
-                    result_df["symbol"] = symbols[0] if len(symbols) == 1 else None
-                result_df["report_date"] = balance_df.get("report_date", pd.NaT)
+                result_df["announce_date"] = pd.NaT
 
-            # 合并 Balance 表的股东权益数据（用于计算 ROE）
-            if not balance_df.empty and "symbol" in balance_df.columns:
-                balance_cols = ["symbol", "report_date"]
-                equity_fields = {
-                    "total_equity": "total_equity",
-                    "tot_shrhldr_eqy_excl_min_int": "total_equity",
-                    "total_hldr_eqy_exc_min_int": "total_equity",
-                    "total_hldr_eqy_incl_min_int": "total_equity",
-                    "s_fa_total_hldr_eqy_exc_min_int": "total_equity",
-                }
-                for xt_col, _std_col in equity_fields.items():
-                    if xt_col in balance_df.columns:
-                        balance_cols.append(xt_col)
-                        break
+            # ── Income 表字段提取 ──
+            self._extract_income_fields(result_df, income_df)
 
-                if len(balance_cols) > 2:
-                    balance_subset = balance_df[balance_cols].copy()
-                    rename_map = {
-                        xt_col: std_col
-                        for xt_col, std_col in equity_fields.items()
-                        if xt_col in balance_subset.columns
-                    }
-                    balance_subset = balance_subset.rename(columns=rename_map)
+            # ── Balance 表字段提取（含多字段兜底映射） ──
+            self._extract_balance_fields(result_df, balance_df)
 
-                    if not result_df.empty and "report_date" in result_df.columns:
-                        result_df["_merge_date"] = pd.to_datetime(
-                            result_df["report_date"], errors="coerce"
-                        )
-                        balance_subset["_merge_date"] = pd.to_datetime(
-                            balance_subset["report_date"], errors="coerce"
-                        )
-                        merge_cols = ["symbol", "_merge_date"]
-                        new_cols = [
-                            c
-                            for c in balance_subset.columns
-                            if c not in result_df.columns and c not in merge_cols
-                        ]
-                        if new_cols:
-                            merge_df = balance_subset[merge_cols + new_cols]
-                            result_df = result_df.merge(
-                                merge_df, on=merge_cols, how="left"
-                            )
-                        result_df = result_df.drop(
-                            columns=["_merge_date"], errors="ignore"
-                        )
+            # ── CashFlow 表字段提取 ──
+            self._extract_table_fields(
+                result_df, cashflow_df,
+                {"net_cash_flows_oper_act": "ocf", "cash_pay_acq_const_fiolta": "capex"},
+            )
 
-            # 确保 report_date 为 datetime 并过滤无效行
-            if "report_date" in result_df.columns:
-                result_df["report_date"] = pd.to_datetime(
-                    result_df["report_date"], errors="coerce"
-                )
-                result_df = result_df.dropna(subset=["report_date"])
+            # ── Pershareindex 表字段提取（预计算值，优先于手算） ──
+            self._extract_table_fields(
+                result_df, pershare_df,
+                {
+                    "s_fa_bps": "bps",
+                    "s_fa_ocfps": "ocf_per_share",
+                    "gear_ratio": "debt_to_assets",
+                    "net_profit": "net_profit_margin",
+                    "equity_roe": "roe_weighted",
+                    # 预计算衍生指标（优先值，_compute_derived_financials 只在缺失时手算兜底）
+                    "du_return_on_equity": "roe",
+                    "gross_profit": "gross_margin",
+                    "du_profit_rate": "net_profit_yoy",
+                    "inc_revenue_rate": "revenue_yoy",
+                },
+            )
 
-            # 计算衍生指标
+            # 确保 report_date / announce_date 为 datetime 并过滤无效行
+            result_df["report_date"] = pd.to_datetime(
+                result_df["report_date"], errors="coerce"
+            )
+            result_df["announce_date"] = pd.to_datetime(
+                result_df["announce_date"], errors="coerce"
+            )
+            result_df = result_df.dropna(subset=["report_date", "announce_date"])
+
+            # 衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）
             result_df = self._compute_derived_financials(result_df)
 
             logger.info(
@@ -727,20 +732,103 @@ class MiniQmtDataProvider:
             logger.warning(f"miniqmt 财务数据下载失败: {e}")
             return None
 
+    @staticmethod
+    def _merge_by_symbol_date(
+        base_df: pd.DataFrame, extra_df: pd.DataFrame, xt_col: str
+    ) -> pd.Series:
+        """按 (symbol, report_date) 对齐，从 extra_df 取一列回 base_df 行顺序。
+
+        用于把 Balance/CashFlow/Pershareindex 的字段对齐到 Income 表的行顺序。
+        """
+        if xt_col not in extra_df.columns:
+            return pd.Series([float("nan")] * len(base_df))
+        key_cols = ["symbol", "report_date"]
+        if not all(c in extra_df.columns for c in key_cols):
+            return pd.Series([float("nan")] * len(base_df))
+        extra = extra_df[[*key_cols, xt_col]].copy()
+        extra["report_date"] = pd.to_datetime(extra["report_date"], errors="coerce")
+        base = base_df[["symbol", "report_date"]].copy()
+        base["report_date"] = pd.to_datetime(base["report_date"], errors="coerce")
+        merged = base.merge(extra, on=key_cols, how="left")
+        return merged[xt_col]
+
+    def _extract_income_fields(
+        self, result_df: pd.DataFrame, income_df: pd.DataFrame
+    ) -> None:
+        """从 Income 表提取字段（行对齐，直接取值）。"""
+        if income_df.empty:
+            return
+        income_field_map = {
+            "revenue_inc": "revenue",
+            "revenue": "revenue",
+            "net_profit_incl_min_int_inc": "net_profit",
+            "s_fa_eps_basic": "eps",
+            "research_expenses": "research_expenses",
+            "total_operating_cost": "total_operating_cost",
+        }
+        for xt_col, std_col in income_field_map.items():
+            if xt_col in income_df.columns and std_col not in result_df.columns:
+                result_df[std_col] = income_df[xt_col].values
+
+    def _extract_balance_fields(
+        self, result_df: pd.DataFrame, balance_df: pd.DataFrame
+    ) -> None:
+        """从 Balance 表提取字段（含多字段兜底映射，按 symbol+date 对齐）。"""
+        if balance_df.empty or "symbol" not in balance_df.columns:
+            return
+        balance_extract = {
+            "total_equity": [
+                "total_equity", "tot_shrhldr_eqy_excl_min_int",
+                "total_hldr_eqy_exc_min_int",
+                "total_hldr_eqy_incl_min_int",
+                "s_fa_total_hldr_eqy_exc_min_int",
+            ],
+            "total_assets": ["tot_assets"],
+            "total_liabilities": ["tot_liab"],
+        }
+        for std_col, xt_candidates in balance_extract.items():
+            if std_col in result_df.columns:
+                continue
+            for xt_col in xt_candidates:
+                if xt_col in balance_df.columns:
+                    result_df[std_col] = self._merge_by_symbol_date(
+                        result_df, balance_df, xt_col
+                    )
+                    break
+
+    def _extract_table_fields(
+        self,
+        result_df: pd.DataFrame,
+        table_df: pd.DataFrame,
+        field_map: dict[str, str],
+    ) -> None:
+        """通用表字段提取（按 symbol+date 对齐，xt_col → std_col 一对一映射）。"""
+        if table_df.empty or "symbol" not in table_df.columns:
+            return
+        for xt_col, std_col in field_map.items():
+            if xt_col in table_df.columns and std_col not in result_df.columns:
+                result_df[std_col] = self._merge_by_symbol_date(
+                    result_df, table_df, xt_col
+                )
+
     def _compute_derived_financials(self, df: pd.DataFrame) -> pd.DataFrame:
-        """从原始财务数据计算衍生指标（YoY、ROE、毛利率）。
+        """衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）。
+
+        ADR-007 Phase 3：优先使用 Pershareindex 表的预计算值（roe/gross_margin/
+        net_profit_yoy/revenue_yoy），仅在预计算值缺失（NaN）时用手算兜底。
 
         Args:
             df: 包含 symbol, report_date, revenue, net_profit, total_equity,
-                total_operating_cost 等列的 DataFrame
+                total_operating_cost 等列的 DataFrame；可能已含 Pershareindex
+                预计算的 roe/gross_margin/yoy 列
 
         Returns:
-            添加了 net_profit_yoy, revenue_yoy, roe, gross_margin 列的 DataFrame
+            补全了 net_profit_yoy, revenue_yoy, roe, gross_margin 列的 DataFrame
         """
         if df.empty or "symbol" not in df.columns or "report_date" not in df.columns:
             return df
 
-        # 初始化衍生指标列
+        # 确保衍生指标列存在（Pershareindex 预计算值可能已填充部分）
         for col in ["net_profit_yoy", "revenue_yoy", "roe", "gross_margin"]:
             if col not in df.columns:
                 df[col] = float("nan")
@@ -748,74 +836,95 @@ class MiniQmtDataProvider:
         for symbol in df["symbol"].unique():
             mask = df["symbol"] == symbol
             symbol_data = df[mask].copy().sort_values("report_date")
-
             if symbol_data.empty:
                 continue
-
-            # 计算毛利率 = (revenue - total_operating_cost) / revenue
-            if (
-                "revenue" in symbol_data.columns
-                and "total_operating_cost" in symbol_data.columns
-            ):
-                rev = symbol_data["revenue"].astype(float)
-                cost = symbol_data["total_operating_cost"].astype(float)
-                valid = (rev != 0) & rev.notna() & cost.notna()
-                symbol_data.loc[valid, "gross_margin"] = (
-                    rev[valid] - cost[valid]
-                ) / rev[valid]
-
-            # 计算 YoY 增长率：与去年同期比较
-            symbol_data["_quarter"] = symbol_data["report_date"].dt.quarter
-            symbol_data["_year"] = symbol_data["report_date"].dt.year
-
-            for field, yoy_field in [
-                ("net_profit", "net_profit_yoy"),
-                ("revenue", "revenue_yoy"),
-            ]:
-                if field not in symbol_data.columns:
-                    continue
-                for idx, row in symbol_data.iterrows():
-                    if pd.isna(row.get(field)) or row[field] == 0:
-                        continue
-                    # 找去年同期数据
-                    last_year_mask = (symbol_data["_year"] == row["_year"] - 1) & (
-                        symbol_data["_quarter"] == row["_quarter"]
-                    )
-                    last_year_data = symbol_data.loc[last_year_mask, field]
-                    if not last_year_data.empty and last_year_data.iloc[0] != 0:
-                        last_year_val = float(last_year_data.iloc[0])
-                        current_val = float(row[field])
-                        symbol_data.loc[idx, yoy_field] = (
-                            current_val - last_year_val
-                        ) / abs(last_year_val)
-
-            # 计算 ROE = net_profit / total_equity
-            if (
-                "net_profit" in symbol_data.columns
-                and "total_equity" in symbol_data.columns
-            ):
-                np_val = symbol_data["net_profit"].astype(float)
-                eq_val = symbol_data["total_equity"].astype(float)
-                valid = eq_val.notna() & (eq_val != 0) & np_val.notna()
-                # 年化 ROE：Q1*4, Q2*2, H1*2, Q3*4/3, Q3*2, FY*1
-                quarter = symbol_data["_quarter"]
-                annualize_factor = quarter.map({1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0})
-                symbol_data.loc[valid, "roe"] = (
-                    np_val[valid] / eq_val[valid]
-                ) * annualize_factor[valid]
-
-            # 清理临时列
-            symbol_data = symbol_data.drop(
-                columns=["_quarter", "_year"], errors="ignore"
-            )
-
+            self._compute_symbol_derived(symbol_data)
             # 更新回主 DataFrame
-            update_cols = ["net_profit_yoy", "revenue_yoy", "roe", "gross_margin"]
-            for col in update_cols:
+            for col in ["net_profit_yoy", "revenue_yoy", "roe", "gross_margin"]:
                 if col in symbol_data.columns:
                     df.loc[mask, col] = symbol_data[col].values
 
         return df
+
+    def _compute_symbol_derived(self, symbol_data: pd.DataFrame) -> None:
+        """单只股票的衍生指标手算兜底（原地修改 symbol_data）。
+
+        仅对 Pershareindex 预计算值为 NaN 的行计算，不覆盖预计算值。
+        """
+        symbol_data["_quarter"] = symbol_data["report_date"].dt.quarter
+        symbol_data["_year"] = symbol_data["report_date"].dt.year
+
+        self._fill_gross_margin(symbol_data)
+        self._fill_yoy_growth(symbol_data, "net_profit", "net_profit_yoy")
+        self._fill_yoy_growth(symbol_data, "revenue", "revenue_yoy")
+        self._fill_roe(symbol_data)
+
+        symbol_data.drop(columns=["_quarter", "_year"], errors="ignore", inplace=True)
+
+    @staticmethod
+    def _fill_gross_margin(symbol_data: pd.DataFrame) -> None:
+        """毛利率手算兜底：(revenue - total_operating_cost) / revenue。"""
+        if "gross_margin" not in symbol_data.columns:
+            return
+        need = symbol_data["gross_margin"].isna()
+        if (
+            not need.any()
+            or "revenue" not in symbol_data.columns
+            or "total_operating_cost" not in symbol_data.columns
+        ):
+            return
+        rev = symbol_data.loc[need, "revenue"].astype(float)
+        cost = symbol_data.loc[need, "total_operating_cost"].astype(float)
+        valid = (rev != 0) & rev.notna() & cost.notna()
+        symbol_data.loc[need & valid, "gross_margin"] = (
+            rev[valid] - cost[valid]
+        ) / rev[valid]
+
+    @staticmethod
+    def _fill_yoy_growth(
+        symbol_data: pd.DataFrame, field: str, yoy_field: str
+    ) -> None:
+        """YoY 增长率手算兜底：(本期 - 上年同期) / |上年同期|。"""
+        if field not in symbol_data.columns or yoy_field not in symbol_data.columns:
+            return
+        need = symbol_data[yoy_field].isna()
+        if not need.any():
+            return
+        for idx in symbol_data.index[need]:
+            row = symbol_data.loc[idx]
+            if pd.isna(row.get(field)) or row[field] == 0:
+                continue
+            last_year_mask = (symbol_data["_year"] == row["_year"] - 1) & (
+                symbol_data["_quarter"] == row["_quarter"]
+            )
+            last_year_data = symbol_data.loc[last_year_mask, field]
+            if not last_year_data.empty and last_year_data.iloc[0] != 0:
+                last_year_val = float(last_year_data.iloc[0])
+                current_val = float(row[field])
+                symbol_data.loc[idx, yoy_field] = (
+                    current_val - last_year_val
+                ) / abs(last_year_val)
+
+    @staticmethod
+    def _fill_roe(symbol_data: pd.DataFrame) -> None:
+        """ROE 手算兜底：(net_profit / total_equity) × 季度年化系数。"""
+        if "roe" not in symbol_data.columns:
+            return
+        need = symbol_data["roe"].isna()
+        if (
+            not need.any()
+            or "net_profit" not in symbol_data.columns
+            or "total_equity" not in symbol_data.columns
+        ):
+            return
+        np_val = symbol_data.loc[need, "net_profit"].astype(float)
+        eq_val = symbol_data.loc[need, "total_equity"].astype(float)
+        valid = eq_val.notna() & (eq_val != 0) & np_val.notna()
+        quarter = symbol_data.loc[need, "_quarter"]
+        annualize_factor = quarter.map({1: 4.0, 2: 2.0, 3: 4.0 / 3.0, 4: 1.0})
+        symbol_data.loc[need & valid, "roe"] = (
+            np_val[valid] / eq_val[valid]
+        ) * annualize_factor[valid]
 
     def _quarterly_to_daily(
         self,
