@@ -5,8 +5,8 @@ akshare 通过 HTTP 请求获取公开市场数据，无需本地客户端。
 
 数据获取后会自动写入 DuckDB 缓存，后续查询直接走缓存。
 
-PIT 契约：财务数据通过 _quarterly_to_daily 应用 60 天披露延迟，
-与 miniqmt/ciccwm 路径对齐，避免用未公布财报做决策（未来函数）。
+PIT 契约（ADR-007）：财务数据使用真实财报发布日期（announce_date，
+对应 akshare 返回的"公告日期"列）作为可见起点，杜绝未来函数。
 """
 
 from __future__ import annotations
@@ -20,11 +20,6 @@ from loguru import logger
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 from long_earn.backtest.data.symbol import ak_to_xt, xt_to_ak
-
-# A 股法定披露窗口：年报次年 4-30、Q1 4-30、半年报 8-31、Q3 10-31。
-# 60 天是保守覆盖（Q1 实际 30 天，年报实际 120 天）。
-# 与 miniqmt_provider / ciccwm_provider 保持一致，避免 PIT 泄漏。
-DEFAULT_PUBLICATION_LAG_DAYS = 60
 
 # akshare 中文列名 → 标准英文列名
 KLINE_COLUMN_MAP = {
@@ -127,13 +122,13 @@ class AkshareFallbackProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """通过 akshare 获取财务数据面板（日频，已应用 60 天披露延迟）。
+        """通过 akshare 获取财务数据面板（日频，基于真实公告日 PIT 对齐）。
 
         获取后自动写入 DuckDB 缓存（季频原始数据），
-        返回时通过 _quarterly_to_daily 转为日频并应用 PIT 延迟。
+        返回时通过 _quarterly_to_daily 转为日频并基于 announce_date 对齐。
 
-        PIT 契约：返回的日频面板中，timestamp=T 的行只含
-        visible_from <= T 的最新报告值，杜绝未来函数。
+        PIT 契约（ADR-007）：返回的日频面板中，timestamp=T 的行只含
+        announce_date <= T 的最新报告值，杜绝未来函数。
         """
         if not symbols or not self.is_available:
             return pd.DataFrame()
@@ -156,6 +151,11 @@ class AkshareFallbackProvider:
                     result_df["report_date"] = pd.to_datetime(
                         df["报告日"].values, format="%Y%m%d", errors="coerce"
                     )
+                # 真实财报发布日期（ADR-007）：akshare 返回"公告日期"列
+                if "公告日期" in df.columns:
+                    result_df["announce_date"] = pd.to_datetime(
+                        df["公告日期"].values, format="%Y%m%d", errors="coerce"
+                    )
                 if "营业收入" in df.columns:
                     result_df["revenue"] = pd.to_numeric(
                         df["营业收入"].values, errors="coerce"
@@ -165,7 +165,7 @@ class AkshareFallbackProvider:
                         df["净利润"].values, errors="coerce"
                     )
 
-                result_df = result_df.dropna(subset=["report_date"])
+                result_df = result_df.dropna(subset=["report_date", "announce_date"])
                 if not result_df.empty:
                     all_dfs.append(result_df)
             except Exception as e:
@@ -184,7 +184,7 @@ class AkshareFallbackProvider:
                 f"{result['symbol'].nunique()} 只股票，已写入缓存"
             )
 
-        # PIT 对齐：季频 → 日频，应用 60 天披露延迟
+        # PIT 对齐：季频 → 日频，基于 announce_date
         fields = fields or ["revenue", "net_profit"]
         trading_dates = pd.date_range(start=start_date, end=end_date, freq="B")
         return self._quarterly_to_daily(
@@ -197,30 +197,26 @@ class AkshareFallbackProvider:
         symbols: list[str],
         trading_dates: pd.DatetimeIndex,
         fields: list[str],
-        publication_lag_days: int = DEFAULT_PUBLICATION_LAG_DAYS,
     ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级，应用披露延迟。
+        """将季度财务数据前向填充到日级，基于真实公告日对齐。
 
-        与 miniqmt_provider._quarterly_to_daily 逻辑一致：
-        用 report_date + publication_lag 作为信息可见的起点，
-        避免在报告期截止日次日就把未公布数据当作已知信息泄漏给策略。
+        ADR-007：用 announce_date（真实财报发布日期）作为信息可见的起点，
+        不再用 report_date + 固定 lag。timestamp=T 的行只含
+        announce_date <= T 的最新报告值，杜绝未来函数。
         """
-        publication_lag = pd.Timedelta(days=publication_lag_days)
         panels: list[pd.DataFrame] = []
         for symbol in symbols:
             symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
             if symbol_data.empty:
                 continue
-            symbol_data = symbol_data.sort_values("report_date")
+            symbol_data = symbol_data.sort_values("announce_date")
             daily = pd.DataFrame(index=trading_dates)
             daily.index.name = "date"
             for _, row in symbol_data.iterrows():
-                report_date = row["report_date"]
-                if pd.isna(report_date):
+                announce_date = row.get("announce_date")
+                if pd.isna(announce_date):
                     continue
-                # 用"披露日"作为信息可见的起点：避免在截止日次日就把未公布数据
-                # 当作已知信息泄漏给策略，违反 ADR-005 的金融级可信承诺。
-                visible_from = pd.to_datetime(report_date) + publication_lag
+                visible_from = pd.to_datetime(announce_date)
                 mask = daily.index >= visible_from
                 for field in fields:
                     if field in row and pd.notna(row[field]):

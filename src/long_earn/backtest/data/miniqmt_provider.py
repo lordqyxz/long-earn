@@ -329,12 +329,23 @@ class MiniQmtClient:
                         )
                     else:
                         tmp["report_date"] = pd.NaT
+                    # 真实财报发布日期（ADR-007）：miniqmt 返回 m_anntime 字段
+                    if "m_anntime" in tmp.columns:
+                        tmp["announce_date"] = pd.to_datetime(
+                            tmp["m_anntime"], unit="s", errors="coerce"
+                        )
+                    else:
+                        tmp["announce_date"] = pd.NaT
                     rows.extend(tmp.to_dict("records"))
 
         result = pd.DataFrame(rows)
         if not result.empty and "report_date" in result.columns:
             result["report_date"] = pd.to_datetime(
                 result["report_date"], errors="coerce"
+            )
+        if not result.empty and "announce_date" in result.columns:
+            result["announce_date"] = pd.to_datetime(
+                result["announce_date"], errors="coerce"
             )
         return result
 
@@ -812,31 +823,25 @@ class MiniQmtDataProvider:
         symbols: list[str],
         trading_dates: pd.DatetimeIndex,
         fields: list[str],
-        publication_lag_days: int = 60,
     ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级。
+        """将季度财务数据前向填充到日级，基于真实公告日对齐。
 
-        关键：使用"披露日"而非"报告期截止日"作为可见日期，避免未来函数。
-        中国 A 股法定披露窗口：年报次年 4-30 前、Q1 4-30 前、半年报 8-31 前、Q3 10-31 前。
-        默认 publication_lag_days=60 天为保守覆盖（覆盖大部分披露场景）。
-        若用户已知精确披露日，可在更上游用真实 announce_date 替代 report_date。
+        ADR-007：用 announce_date（miniqmt 返回的 m_anntime 字段）作为
+        信息可见的起点，不再用 report_date + 固定 lag。
         """
-        publication_lag = pd.Timedelta(days=publication_lag_days)
         panels: list[pd.DataFrame] = []
         for symbol in symbols:
             symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
             if symbol_data.empty:
                 continue
-            symbol_data = symbol_data.sort_values("report_date")
+            symbol_data = symbol_data.sort_values("announce_date")
             daily = pd.DataFrame(index=trading_dates)
             daily.index.name = "date"
             for _, row in symbol_data.iterrows():
-                report_date = row["report_date"]
-                if pd.isna(report_date):
+                announce_date = row.get("announce_date")
+                if pd.isna(announce_date):
                     continue
-                # 用"披露日"作为信息可见的起点：避免在截止日次日就把未公布数据
-                # 当作已知信息泄漏给策略，违反 ADR-005 的金融级可信承诺。
-                visible_from = pd.to_datetime(report_date) + publication_lag
+                visible_from = pd.to_datetime(announce_date)
                 mask = daily.index >= visible_from
                 for field in fields:
                     if field in row and pd.notna(row[field]):

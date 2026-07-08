@@ -1,4 +1,4 @@
-﻿"""中金财富 (ciccwm) 数据提供者。
+"""中金财富 (ciccwm) 数据提供者。
 
 实现 ``DataProvider`` Protocol（行情/财务），并提供 ciccwm 独占的扩展能力
 （资金流向 / 涨跌幅排行 / 关联板块 / 热榜资讯）。
@@ -48,14 +48,27 @@ CICCWM_FINANCIAL_FIELD_MAP: dict[str, str] = {
     "营业收入同比增长": "revenue_yoy",
 }
 
-# 财务默认披露延迟（天）：与 miniqmt provider 保持一致，避免未来函数
-DEFAULT_PUBLICATION_LAG_DAYS = 60
-
 # 排行最大条数（ciccwm 接口硬限制）
 RANKING_MAX_LIMIT = 80
 
 # 历史行情默认天数
 HISTORY_DEFAULT_DAYS = 5
+
+
+def _lag_by_report_type(report_date: pd.Timestamp) -> int:
+    """按报告期类型返回法定披露最小 lag（天）。
+
+    ciccwm API 未返回真实公告日，用法定披露窗口估算（ADR-007）：
+      - 年报(Q4, 12-31) → 次年 4-30，需 120 天
+      - 半年报(Q2, 06-30) → 8-31，需 65 天
+      - Q1 (03-31) / Q3 (09-30) → 4-30 / 10-31，需 35 天
+    """
+    month = report_date.month
+    if month == 12:
+        return 120
+    if month == 6:
+        return 65
+    return 35
 
 
 class CiccwmDataProvider(MarketIntelligenceProvider):
@@ -256,6 +269,9 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
 
         ciccwm 财务接口返回的字段名是中文缩写，需要映射到标准字段名。
         报告期日期字段名不统一（可能是 ``报告期`` / ``截止日期`` / ``date`` 等）。
+
+        ADR-007：ciccwm API 不返回真实公告日，用差异化 lag 估算填充
+        announce_date 字段（年报+120/半年报+65/Q1·Q3+35）。
         """
         records: list[dict[str, Any]] = []
         for item in items:
@@ -271,6 +287,15 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
                 continue
             record["report_date"] = pd.to_datetime(report_date, errors="coerce")
 
+            # 估算真实公告日（ADR-007）：ciccwm API 不透明，用法定窗口差异化 lag
+            if pd.notna(record["report_date"]):
+                lag_days = _lag_by_report_type(record["report_date"])
+                record["announce_date"] = record["report_date"] + pd.Timedelta(
+                    days=lag_days
+                )
+            else:
+                record["announce_date"] = pd.NaT
+
             # 映射财务字段
             for cn_field, std_field in CICCWM_FINANCIAL_FIELD_MAP.items():
                 if cn_field in item and item[cn_field] is not None:
@@ -281,8 +306,12 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
 
             records.append(record)
 
-        # 过滤掉 report_date 为空的记录
-        return [r for r in records if pd.notna(r.get("report_date"))]
+        # 过滤掉 report_date 或 announce_date 为空的记录
+        return [
+            r
+            for r in records
+            if pd.notna(r.get("report_date")) and pd.notna(r.get("announce_date"))
+        ]
 
     def _quarterly_to_daily(
         self,
@@ -290,27 +319,26 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
         symbols: list[str],
         trading_dates: pd.DatetimeIndex,
         fields: list[str],
-        publication_lag_days: int = DEFAULT_PUBLICATION_LAG_DAYS,
     ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级。
+        """将季度财务数据前向填充到日级，基于真实公告日对齐。
 
-        使用"披露日"而非"报告期截止日"作为可见日期，避免未来函数。
-        与 ``MiniQmtDataProvider._quarterly_to_daily`` 逻辑一致。
+        ADR-007：用 announce_date 作为信息可见的起点。
+        ciccwm 的 announce_date 在 _normalize_finance_items 中已用
+        差异化 lag（年报120/半年报65/Q1·Q3 35）估算填充。
         """
-        publication_lag = pd.Timedelta(days=publication_lag_days)
         panels: list[pd.DataFrame] = []
         for symbol in symbols:
             symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
             if symbol_data.empty:
                 continue
-            symbol_data = symbol_data.sort_values("report_date")
+            symbol_data = symbol_data.sort_values("announce_date")
             daily = pd.DataFrame(index=trading_dates)
             daily.index.name = "date"
             for _, row in symbol_data.iterrows():
-                report_date = row["report_date"]
-                if pd.isna(report_date):
+                announce_date = row.get("announce_date")
+                if pd.isna(announce_date):
                     continue
-                visible_from = pd.to_datetime(report_date) + publication_lag
+                visible_from = pd.to_datetime(announce_date)
                 mask = daily.index >= visible_from
                 for field in fields:
                     if field in row and pd.notna(row[field]):

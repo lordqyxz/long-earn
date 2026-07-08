@@ -67,10 +67,14 @@ class DataCache:
         """)
 
         # 季度财务数据
+        # announce_date = 真实财报发布日期（PIT 契约核心，ADR-007）
+        # 旧表无该列时直接 DROP + CREATE（不兼容旧数据，缓存全量重建）
+        conn.execute("DROP TABLE IF EXISTS financial_quarterly")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS financial_quarterly (
                 symbol VARCHAR NOT NULL,
                 report_date DATE NOT NULL,
+                announce_date DATE NOT NULL,
                 net_profit_yoy DOUBLE,
                 revenue_yoy DOUBLE,
                 roe DOUBLE,
@@ -195,7 +199,7 @@ class DataCache:
         placeholders = ", ".join(["?"] * len(symbols))
 
         query = f"""
-            SELECT symbol, report_date, {select_fields}
+            SELECT symbol, report_date, announce_date, {select_fields}
             FROM financial_quarterly
             WHERE symbol IN ({placeholders})
             ORDER BY report_date, symbol
@@ -207,6 +211,7 @@ class DataCache:
                 logger.debug(f"缓存未命中 financials: {len(symbols)} 只股票")
                 return None
             df["report_date"] = pd.to_datetime(df["report_date"])
+            df["announce_date"] = pd.to_datetime(df["announce_date"])
             logger.debug(
                 f"缓存命中 financials: {len(df)} 行, {df['symbol'].nunique()} 只股票"
             )
@@ -224,11 +229,14 @@ class DataCache:
         df = df.copy()
         if df["report_date"].dtype == "object":
             df["report_date"] = pd.to_datetime(df["report_date"])
+        if "announce_date" in df.columns and df["announce_date"].dtype == "object":
+            df["announce_date"] = pd.to_datetime(df["announce_date"])
 
         # 只选择缓存表中存在的列，缺失列用 NULL 填充
         cache_columns = [
             "symbol",
             "report_date",
+            "announce_date",
             "net_profit_yoy",
             "revenue_yoy",
             "roe",
@@ -241,8 +249,8 @@ class DataCache:
             if col not in df.columns:
                 df[col] = None
 
-        # 过滤掉 symbol 或 report_date 为空的行（NOT NULL 约束）
-        df = df.dropna(subset=["symbol", "report_date"])
+        # 过滤掉 NOT NULL 列为空的行（symbol/report_date/announce_date）
+        df = df.dropna(subset=["symbol", "report_date", "announce_date"])
 
         if df.empty:
             return
