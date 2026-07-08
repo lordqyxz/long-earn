@@ -180,6 +180,9 @@ def download(
     batch_size: int = typer.Option(
         50, "--batch-size", help="分批下载每批数量"
     ),
+    max_workers: int = typer.Option(
+        4, "--max-workers", help="并发下载子进程数（1-8，默认4）"
+    ),
 ) -> None:
     """下载行情与财务数据到 DuckDB 缓存。"""
     from long_earn.services.data_ingestion_service import DataIngestionService
@@ -191,6 +194,7 @@ def download(
         end_date=end,
         skip_financial=skip_financial,
         batch_size=batch_size,
+        max_workers=max_workers,
     )
 
     if result.get("status") != "ok":
