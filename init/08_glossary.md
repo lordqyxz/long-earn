@@ -381,6 +381,8 @@
 
 ### 常用数据字段 (YAML DSL)
 
+行情字段（日频）：
+
 | 字段 | 说明 |
 |------|------|
 | close | 收盘价 |
@@ -388,13 +390,29 @@
 | high | 最高价 |
 | low | 最低价 |
 | volume | 成交量 |
-| net_profit_yoy | 净利润同比增长率 |
-| revenue_yoy | 营业总收入同比增长率 |
-| roe | 净资产收益率 |
-| gross_margin | 销售毛利率 |
-| eps | 每股收益 |
-| net_profit | 净利润 |
-| revenue | 营业总收入 |
+
+财务字段（季度，已前向填充到日频，基于真实公告日 PIT 对齐，详见 `09_financial_fields.md`）：
+
+| 字段 | 说明 | 来源表 |
+|------|------|--------|
+| revenue | 营业总收入 | Income |
+| net_profit | 净利润 | Income |
+| eps | 每股收益 | Income |
+| research_expenses | 研发费用 | Income |
+| total_equity | 所有者权益合计 | Balance |
+| total_assets | 总资产 | Balance |
+| total_liabilities | 总负债 | Balance |
+| ocf | 经营活动现金流净额 | CashFlow |
+| capex | 资本支出 | CashFlow |
+| bps | 每股净资产 | Pershareindex |
+| ocf_per_share | 每股经营现金流 | Pershareindex |
+| debt_to_assets | 资产负债率 | Pershareindex |
+| net_profit_margin | 净利率 | Pershareindex |
+| roe_weighted | 加权净资产收益率 | Pershareindex |
+| net_profit_yoy | 净利润同比增长率 | 衍生（预计算优先） |
+| revenue_yoy | 营业总收入同比增长率 | 衍生（预计算优先） |
+| roe | 净资产收益率 | 衍生（预计算优先） |
+| gross_margin | 销售毛利率 | 衍生（预计算优先） |
 
 ### 常用股票池
 
