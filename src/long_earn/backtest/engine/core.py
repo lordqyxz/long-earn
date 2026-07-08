@@ -4,6 +4,7 @@
 """
 
 import contextlib
+import time
 import uuid
 from typing import Any
 
@@ -79,6 +80,10 @@ class EventDrivenBacktestEngine:
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
         self.max_positions = max_positions
+        # 当前回测 run_id / db_audit：存为实例变量让内部方法（风控/结果构建等）
+        # 无需透传即可写审计日志。每次 run() 开头重置。
+        self._current_run_id: str = ""
+        self._db_audit: Any = None
 
     # ── 主入口 ────────────────────────────────────────────────
 
@@ -101,6 +106,35 @@ class EventDrivenBacktestEngine:
             benchmark_symbol: 基准指数代码（如 "000300"），用于计算 Alpha/Beta 等
             full_data: 预加载的完整数据面板；传入则跳过 _prepare_data()，适合并行回测
         """
+        # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
+        run_id = str(uuid.uuid4())
+        self._current_run_id = run_id
+        self.audit_logger.trail.clear()
+        self._db_audit = self._init_db_audit(run_id)
+        db_audit = self._db_audit
+        run_start_ts = time.perf_counter()
+
+        # RUN_START：记录回测配置，让审计日志能独立重建本次回测的输入参数
+        self._log_audit(
+            "RUN_START",
+            run_id,
+            None,
+            "Engine",
+            "SUCCESS",
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "symbols_count": len(symbols),
+                "benchmark_symbol": benchmark_symbol,
+                "stop_loss": self.stop_loss,
+                "max_drawdown_limit": self.max_drawdown_limit,
+                "max_position_pct": self.max_position_pct,
+                "max_positions": self.max_positions,
+                "strategy_id": getattr(strategy, "strategy_id", ""),
+            },
+            db_audit,
+        )
+
         try:
             if full_data is None:
                 full_data = self._prepare_data(symbols, start_date, end_date)
@@ -113,6 +147,16 @@ class EventDrivenBacktestEngine:
                     (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
                 )
             if full_data.is_empty():
+                # G6: 数据为空必须审计，否则失败路径链路断裂
+                self._log_audit(
+                    "DATA_EMPTY",
+                    str(uuid.uuid4()),
+                    run_id,
+                    "Engine",
+                    "FAILED",
+                    {"message": "加载数据为空", "symbols_count": len(symbols)},
+                    db_audit,
+                )
                 return BacktestResult(success=False, message="加载数据为空")
 
             guard = VisibilityGuard(full_data)
@@ -120,10 +164,6 @@ class EventDrivenBacktestEngine:
             broker = Broker(self.cost_config)
             broker.reset()
             strategy.init()
-
-            run_id = str(uuid.uuid4())
-            self.audit_logger.trail.clear()
-            db_audit = self._init_db_audit(run_id)
 
             timestamps = self._get_timestamps(full_data)
 
@@ -133,15 +173,50 @@ class EventDrivenBacktestEngine:
                 )
 
             self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
-            return self._build_result(
+            result = self._build_result(
                 portfolio,
                 len(timestamps),
                 full_data,
                 benchmark_symbol,
             )
 
+            # RUN_END：记录回测结果摘要（成功/失败都要记）
+            self._log_audit(
+                "RUN_END",
+                str(uuid.uuid4()),
+                run_id,
+                "Engine",
+                "SUCCESS" if result.success else "FAILED",
+                {
+                    "success": result.success,
+                    "total_return": result.total_return,
+                    "sharpe_ratio": result.sharpe_ratio,
+                    "max_drawdown": result.max_drawdown,
+                    "trade_count": result.trade_count,
+                    "trading_days": result.trading_days,
+                    "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
+                },
+                db_audit,
+                latency_ms=(time.perf_counter() - run_start_ts) * 1000,
+            )
+            return result
+
         except Exception as e:
             logger.exception("回测引擎执行失败")
+            # G4: 异常必须审计，记录异常类型和消息，让审计链不断裂
+            self._log_audit(
+                "RUN_ERROR",
+                str(uuid.uuid4()),
+                run_id,
+                "Engine",
+                "FAILED",
+                {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
+                },
+                db_audit,
+            )
             return BacktestResult(
                 success=False, message=str(e), error_category="engine_error"
             )
@@ -258,6 +333,17 @@ class EventDrivenBacktestEngine:
                     db_audit,
                 )
                 self._execute_signals(signal_event, portfolio, slab, broker, db_audit)
+        else:
+            # G13: 风控触发时策略被跳过，记录"本应产生信号但被风控抑制"
+            self._log_audit(
+                "SIGNAL_SKIPPED_BY_RISK",
+                str(uuid.uuid4()),
+                mkt_event.trace_id,
+                "Engine",
+                "SKIPPED",
+                {"timestamp": str(ts), "reason": "risk_triggered"},
+                db_audit,
+            )
 
         # Bar 末尾：记录净值曲线（反映所有交易和市值变动后的终值）
         portfolio.update_market_values(slab)
@@ -311,6 +397,27 @@ class EventDrivenBacktestEngine:
                 max(stop_threshold, check_price) if check_price else stop_threshold
             )
             if ref_price > 0:
+                # G2: 风控触发独立审计——记录触发原因/持仓详情/触发价格，
+                # 让"为什么产生这个 SELL"可追溯
+                self._log_audit(
+                    "RISK_TRIGGER",
+                    str(uuid.uuid4()),
+                    None,
+                    "RiskControl",
+                    "WARNING",
+                    {
+                        "risk_type": "stop_loss",
+                        "symbol": symbol,
+                        "avg_cost": pos.avg_cost,
+                        "check_price": check_price,
+                        "pnl_pct": pnl_pct,
+                        "stop_loss_threshold": self.stop_loss,
+                        "ref_price": ref_price,
+                        "quantity": pos.shares,
+                        "timestamp": str(ts),
+                    },
+                    self._db_audit,
+                )
                 order = OrderEvent(
                     timestamp=ts,
                     trace_id=str(uuid.uuid4()),
@@ -343,6 +450,24 @@ class EventDrivenBacktestEngine:
         threshold = -abs(self.max_drawdown_limit)
         if dd > threshold:
             return False
+
+        # G2: 最大回撤触发独立审计——记录触发时的回撤值/峰值/当前净值
+        self._log_audit(
+            "RISK_TRIGGER",
+            str(uuid.uuid4()),
+            None,
+            "RiskControl",
+            "WARNING",
+            {
+                "risk_type": "max_drawdown",
+                "drawdown": dd,
+                "peak_value": peak_value,
+                "total_value": portfolio.total_value,
+                "max_drawdown_limit": self.max_drawdown_limit,
+                "timestamp": str(ts),
+            },
+            self._db_audit,
+        )
 
         for symbol, pos in list(portfolio.positions.items()):
             price = self._lookup_price(slab, symbol)
@@ -403,6 +528,21 @@ class EventDrivenBacktestEngine:
 
             price = self._lookup_price(slab, order.symbol)
             if price is None:
+                # G3: 订单因找不到价格被静默跳过，必须审计
+                self._log_audit(
+                    "ORDER_SKIPPED",
+                    str(uuid.uuid4()),
+                    order.trace_id,
+                    "Engine",
+                    "SKIPPED",
+                    {
+                        "symbol": order.symbol,
+                        "order_type": order.order_type,
+                        "quantity": order.quantity,
+                        "reason": "price_not_found_in_slab",
+                    },
+                    db_audit,
+                )
                 continue
 
             fill = broker.execute_order(order, price)
@@ -435,24 +575,35 @@ class EventDrivenBacktestEngine:
         status: str,
         payload: dict[str, Any],
         db_audit: Any,
+        latency_ms: float | None = None,
     ) -> None:
+        """记录审计事件。
+
+        审计要求（docs/research/agent-framework-selection-2026.md:40）：
+        "每一步状态必须可追溯、可重放"。因此 run_id / latency_ms 也写入
+        InMemoryAuditTrail，保证内存审计与 DuckDB 审计字段一致。
+        """
+        run_id = self._current_run_id
         entry = {
+            "run_id": run_id,
             "event_type": event_type,
             "trace_id": trace_id,
             "parent_id": parent_id,
             "component": component,
             "status": status,
             "payload": payload,
+            "latency_ms": latency_ms,
         }
         self.audit_logger.log_transition(**entry)
         if db_audit:
             db_audit.log_transition(
                 event_type=event_type,
                 trace_id=trace_id,
-                parent_id=parent_id,
                 component=component,
                 status=status,
                 payload=payload,
+                parent_id=parent_id,
+                latency_ms=latency_ms,
             )
 
     # ── 最终处理 ──────────────────────────────────────────────
@@ -481,6 +632,20 @@ class EventDrivenBacktestEngine:
         # 防止把"全程持仓未变 → 零收益"误标为成功的回测结果。
         equity_len = len(portfolio.equity_curve)
         if trading_days < self.MIN_TRADING_DAYS or equity_len < self.MIN_TRADING_DAYS:
+            # G5: 样本不足失败必须审计，让上层能从审计日志追溯失败原因
+            self._log_audit(
+                "INSUFFICIENT_DATA",
+                str(uuid.uuid4()),
+                self._current_run_id,
+                "Engine",
+                "FAILED",
+                {
+                    "trading_days": trading_days,
+                    "equity_points": equity_len,
+                    "min_required": self.MIN_TRADING_DAYS,
+                },
+                self._db_audit,
+            )
             return BacktestResult(
                 success=False,
                 message=(

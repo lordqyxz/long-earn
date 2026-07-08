@@ -84,7 +84,7 @@ class Broker:
         self._register_oco(order)
 
         if self._is_cancelled_by_oco(order):
-            logger.debug("OCO 订单 %s 已被同组其他订单取消", order.order_id)
+            logger.debug(f"OCO 订单 {order.order_id} 已被同组其他订单取消")
             return []
 
         order_type = order.exec_type or ExecType.MARKET

@@ -78,12 +78,8 @@ class PandasToPolarsProvider:
             start_date,
             end_date,
             price_fields=["open", "high", "low", "close", "volume"],
-            financial_fields=[
-                "net_profit_yoy",
-                "roe",
-                "revenue_yoy",
-                "gross_margin",
-            ],
+            # financial_fields=None：provider 默认返回全量财务字段
+            # （FINANCIAL_FIELD_MAP 中定义的 18 个字段，ADR-007 Phase 3）
         )
         return to_polars_panel(df)
 

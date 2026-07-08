@@ -2,9 +2,10 @@
 
 ## 数据源架构
 
-系统使用 miniqmt (xtquant) 作为主数据源，DuckDB 作为本地缓存，akshare 作为降级备选。
+系统使用 miniqmt (xtquant) 作为主数据源，DuckDB 作为本地缓存。
+财务数据已统一到 miniqmt（ADR-007 Phase 3），akshare/ciccwm 降级分支已屏蔽。
 
-数据获取优先级：DuckDB 缓存 → miniqmt → akshare
+数据获取优先级：DuckDB 缓存 → miniqmt
 
 ## 股票池类型
 
@@ -32,17 +33,31 @@
 | close | 收盘价 | float |
 | volume | 成交量 | float |
 
-### 财务数据（季度，已前向填充到日级别）
+### 财务数据（季度，已前向填充到日级别，基于真实公告日 PIT 对齐）
 
-| 字段名 | 说明 | 类型 |
-|--------|------|------|
-| net_profit_yoy | 净利润同比增长率 | float |
-| revenue_yoy | 营业总收入同比增长率 | float |
-| roe | 净资产收益率 | float |
-| gross_margin | 销售毛利率 | float |
-| eps | 每股收益 | float |
-| net_profit | 净利润 | float |
-| revenue | 营业总收入 | float |
+数据来自 miniqmt 四张财务表合并提取（ADR-007 Phase 3），共 18 个字段。
+详细背景说明见 `09_financial_fields.md`。
+
+| 字段名 | 说明 | 来源表 | 类型 |
+|--------|------|--------|------|
+| revenue | 营业总收入 | Income | float |
+| net_profit | 净利润 | Income | float |
+| eps | 每股收益 | Income | float |
+| research_expenses | 研发费用 | Income | float |
+| total_equity | 所有者权益合计 | Balance | float |
+| total_assets | 总资产 | Balance | float |
+| total_liabilities | 总负债 | Balance | float |
+| ocf | 经营活动现金流净额 | CashFlow | float |
+| capex | 资本支出 | CashFlow | float |
+| bps | 每股净资产 | Pershareindex | float |
+| ocf_per_share | 每股经营现金流 | Pershareindex | float |
+| debt_to_assets | 资产负债率 | Pershareindex | float |
+| net_profit_margin | 净利率 | Pershareindex | float |
+| roe_weighted | 加权净资产收益率 | Pershareindex | float |
+| net_profit_yoy | 净利润同比增长率 | 衍生（预计算优先） | float |
+| revenue_yoy | 营业总收入同比增长率 | 衍生（预计算优先） | float |
+| roe | 净资产收益率 | 衍生（预计算优先） | float |
+| gross_margin | 销售毛利率 | 衍生（预计算优先） | float |
 
 ## 数据获取最佳实践
 

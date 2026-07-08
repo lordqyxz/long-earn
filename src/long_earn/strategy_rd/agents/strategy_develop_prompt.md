@@ -1,4 +1,4 @@
-﻿# 策略开发提示词
+# 策略开发提示词
 
 ## 任务描述
 
@@ -46,17 +46,53 @@ strategy:
 
 ### 可用字段
 
-行情数据：
+行情数据（日频，单位：价格元 / 成交量股）：
 - `open`, `high`, `low`, `close`, `volume`
 
-财务数据（季度，已前向填充到日级别）：
-- `net_profit_yoy`: 净利润同比增长率
-- `revenue_yoy`: 营业总收入同比增长率
-- `roe`: 净资产收益率
-- `gross_margin`: 销售毛利率
-- `eps`: 每股收益
-- `net_profit`: 净利润
-- `revenue`: 营业总收入
+财务数据（季度，已前向填充到日级别，基于真实公告日 PIT 对齐，杜绝未来函数）。
+所有财务字段已按真实公告日对齐，**直接读取即可，无需关心披露延迟**。
+字段详细背景见知识库 `09_financial_fields.md`。
+
+#### 利润表（Income）—— 反映经营成果
+- `revenue`: 营业总收入（元，绝对值；蓝筹数百亿~数千亿，中小盘数亿~数十亿）
+- `net_profit`: 净利润（元，绝对值；含少数股东损益）
+- `eps`: 每股收益（元/股；常见 0.1~3.0，>1.0 视为盈利较强；估值 PE 的分母）
+- `research_expenses`: 研发费用（元，绝对值；研发强度=研发费用/revenue 是科技/医药核心指标）
+
+#### 资产负债表（Balance）—— 反映财务状况
+- `total_equity`: 所有者权益合计（元，即净资产；ROE 计算的分母）
+- `total_assets`: 总资产（元；= 流动资产 + 非流动资产）
+- `total_liabilities`: 总负债（元；= 流动负债 + 非流动负债）
+
+#### 现金流量表（CashFlow）—— 反映现金流转
+- `ocf`: 经营活动现金流净额（元；= 净利润 + 折旧摊销 ± 营运资本变动；
+  OCF 持续 > 净利润代表利润质量高，反之需警惕）
+- `capex`: 资本支出（元，购建固定资产等；自由现金流 FCF = OCF - capex 是价值创造核心指标）
+
+#### 主要指标表（Pershareindex，交易所预计算值，监管口径）
+- `bps`: 每股净资产（元/股；常见 3~15；PB 估值基础）
+- `ocf_per_share`: 每股经营现金流（元/股；与 eps 对比可判断利润含金量）
+- `debt_to_assets`: 资产负债率（比率 0~1；常见 0.3~0.6，>0.7 需警惕；银行/地产偏高）
+- `net_profit_margin`: 净利率（比率 0~1；常见 0.05~0.2，>0.2 为高盈利行业）
+- `roe_weighted`: 加权净资产收益率（比率 0~1；证监会第9号规则加权，监管口径；
+  常见 0.08~0.20，>0.15 视为优质企业，巴菲特标准；**优先于 roe 使用**）
+
+#### 衍生指标（Pershareindex 预计算优先，手算兜底）
+- `net_profit_yoy`: 净利润同比增长率（比率，可负；常见 -0.2~+0.5，>0.3 视为高成长；
+  注意分母为负时口径失真）
+- `revenue_yoy`: 营业收入同比增长率（比率；常见 -0.15~+0.4；应与 net_profit_yoy 匹配）
+- `roe`: 净资产收益率（比率 0~1；预计算缺失时手算兜底，年化系数粗糙：
+  Q1×4 / Q2×2 / Q3×4÷3 / Q4×1；优先用 `roe_weighted`）
+- `gross_margin`: 销售毛利率（比率 0~1；行业差异大：软件/医药>0.7，制造业 0.2~0.4，
+  零售<0.2；稳定或提升代表定价权）
+
+#### 字段使用要点
+- **绝对值 vs 比率**：revenue/net_profit/total_* 等是绝对值（元），不适合直接跨股票比较；
+  用比率字段（roe/gross_margin/debt_to_assets/*_yoy）做横截面筛选更合理
+- **成长性筛选**：`revenue_yoy > 0.2 and net_profit_yoy > 0.2`（增收又增利）
+- **质量筛选**：`ocf > net_profit`（利润有现金支撑）或 `ocf_per_share > eps`
+- **估值锚定**：ROE 持续 > 0.15 + 毛利率稳定是优质企业特征
+- **规避风险**：`debt_to_assets < 0.7`（财务稳健）
 
 ### 表达式语法
 
@@ -187,7 +223,7 @@ strategy:
 ## 关键约束（必须遵守）
 
 1. **使用 YAML 格式**：不要输出 Python 代码，只输出 YAML 策略描述
-2. **字段名必须来自可用字段列表**：只能使用 open/high/low/close/volume/net_profit_yoy/revenue_yoy/roe/gross_margin/eps/net_profit/revenue
+2. **字段名必须来自可用字段列表**：只能使用 open/high/low/close/volume/revenue/net_profit/eps/research_expenses/total_equity/total_assets/total_liabilities/ocf/capex/bps/ocf_per_share/debt_to_assets/net_profit_margin/roe_weighted/net_profit_yoy/revenue_yoy/roe/gross_margin
 3. **表达式必须可执行**：使用标准 Python 运算符和 shift 函数
 4. **日期格式**：YYYY-MM-DD
 5. **股票池必须有效**：从可用类型中选择
