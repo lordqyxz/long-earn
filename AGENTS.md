@@ -14,6 +14,7 @@ uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
 uv run lint-imports                        # 架构依赖校验
 uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 DuckDB 缓存（需 miniQMT 连接）
+uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
 
 > **缓存保护约定**：`~/.long_earn/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。
@@ -105,7 +106,7 @@ RuntimeContext(dataclass)
 
 | 接口 | 职责 | 降级链 | 实现者 |
 |------|------|--------|--------|
-| `DataProvider` | 历史面板（行情/财务） | DuckDB→miniqmt→ciccwm→akshare | miniqmt/ciccwm/akshare/Composite |
+| `DataProvider` | 历史面板（行情/财务） | DuckDB→miniqmt→ciccwm→akshare（行情）/ 仅 miniqmt（财务） | miniqmt/ciccwm/akshare/Composite |
 | `MarketIntelligenceProvider` | 市场情报（资金流向/排行/板块/资讯） | 无降级，ciccwm 独占 | ciccwm |
 | `RealtimeDataProvider` | 实时行情（快照/订阅） | miniqmt→ciccwm | miniqmt/ciccwm/Composite |
 
@@ -167,7 +168,8 @@ prompt = prompt_template.format(query=query)
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
 - **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已删除。
 - **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
-- **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。
+- **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
+- **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。**财务接口统一到 miniqmt**（ADR-007 Phase 2/3）：akshare/ciccwm 的财务方法已删除，仅 `MiniQmtDataProvider.get_financial_panel` 实现；四表合并全量 18 字段（Income + Balance + CashFlow + Pershareindex），Pershareindex 预计算值优先（roe/gross_margin/yoy），手算仅兜底。缓存表 `financial_quarterly` 22 列（DROP + CREATE，`announce_date` NOT NULL）。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
 - **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)。算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)）以 `prove_causality` 因果性数学证明替代表达式白名单，作为新策略的主执行路径；旧表达式路径向后兼容保留。
 - **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
@@ -455,7 +457,7 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 
 ## 开发待办 (TODO)
 
-> 最后更新：2026-07-01
+> 最后更新：2026-07-09
 
 ### 已完成 (Completed)
 
@@ -470,14 +472,16 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 - [x] **数据层架构整理**：两组接口分离（行情/财务）+ 降级链对齐 + DI 注入 + 符号转换统一（commit `9a89e5a`）。
 - [x] **量化数据分割规范**：训练/测试/验证三段式 + AppConfig 6 个日期字段。
 - [x] **ADR-007 Phase 2：新闻事件推理引擎**：多源采集器（Kimi 联网搜索 / ciccwm 热榜 / ciccwm 专题资讯）+ 事件推理子图（collect → extract → propagate → conflict → save）+ 主图路由扩展（event_inference 关键词触发）+ `MemoryService.save_events` 落库 EVENT/RELATION 物质 + 冲突组检测（同标的相反情绪归组）。
+- [x] **ADR-007 Phase 3：财务接口统一到 miniqmt + 四表合并全量字段**（commit `67c80d1` + `107a891` + `c97d40b`）：(1) PIT 修复 — `_quarterly_to_daily` 用 `m_anntime` 真实财报发布日替代 `report_date + 60天固定延迟`；(2) 财务方法从 akshare/ciccwm 删除，仅 `MiniQmtDataProvider.get_financial_panel` 实现；(3) `FINANCIAL_FIELD_MAP` 7→18 字段（Income + Balance + CashFlow + Pershareindex 四表合并，Pershareindex 预计算值优先）；(4) 缓存表 `financial_quarterly` 10→22 列（DROP + CREATE，`announce_date` NOT NULL）。PIT 修复经实盘回测验证通过（commit `16b1d8d`）。
+- [x] **数据下载并发能力**（commit `ae6475a`）：`DataIngestionService` + CLI `--max-workers`（默认 4，范围 1-8）。`subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件 + 主进程串行写入 DuckDB 避免锁冲突。
 
 ### 待开发 (Pending, 按优先级排序)
 
-#### P0 — ADR-007 Phase 3：事件推理子图集成
+#### P0 — 事件推理子图集成（Dashboard + 上下文注入）
 
-Phase 2 已完成（多源采集器 + 事件推理子图 + 主图路由）。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
+ADR-007 Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数据层（财务字段全量提取 + PIT 修复）均已完成。详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
 
-- [ ] **Phase 3：子图集成 + Dashboard**
+- [ ] **子图集成 + Dashboard**
   - stock_analysis / strategy_rd 调 `store.activate()` 注入事件上下文
   - Dashboard 事件流可视化
 
@@ -511,10 +515,11 @@ Phase 2 已完成（多源采集器 + 事件推理子图 + 主图路由）。详
 
 #### 数据层
 
-- [ ] **AUDIT-P0-01** 60天披露延迟对年报不足（实际需120天）
+- [x] **AUDIT-P0-01** 60天披露延迟对年报不足（实际需120天）— 已修复（commit `c97d40b`）
   - 位置：`src/long_earn/backtest/data/akshare_provider.py:24-27`、`ciccwm_provider.py:52`、`miniqmt_provider.py:815`
   - 问题：年报 report_date=12-31，法定披露截止次年 4-30（120天），但代码用 60 天延迟，导致 3-01 至 4-29 约 40 个交易日的未来函数泄漏。注释自相矛盾（声称"保守"却承认年报实际 120 天）。
   - 修复方案：按报告期类型差异化（年报≥120天、H1≥65天、Q1/Q3≥35天），或接入真实 `announce_date` 字段替代 `report_date + lag`。需补年报 120 天场景 PIT 测试。
+  - **实际修复**：ADR-007 改用 miniqmt `m_anntime` 字段作为 `announce_date`（真实财报发布日），`_quarterly_to_daily` 以 `announce_date` 作为信息可见起点，不再用 `report_date + 固定延迟`。财务接口统一到 miniqmt 后，akshare/ciccwm 财务方法已删除（commit `67c80d1`）。PIT 修复经实盘回测验证通过（commit `16b1d8d`，`scripts/test_pit_fix_e2e.py`）。
 
 - [ ] **AUDIT-P0-02** CompositeDataProvider ffill-before-sort（未来函数潜在泄漏）
   - 位置：`src/long_earn/backtest/data/provider.py:494-495`、`ciccwm_provider.py:350`、`akshare_provider.py:266`

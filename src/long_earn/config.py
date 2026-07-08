@@ -133,7 +133,7 @@ class AppConfig:
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
-    # 量化数据分割（CLAUDE.md「量化数据分割规范」）
+    # 量化数据分割（AGENTS.md「量化数据分割规范」）
     train_start_date: str = "2022-01-01"
     train_end_date: str = "2024-12-31"
     test_start_date: str = "2025-01-01"

@@ -1,6 +1,6 @@
 """运动层测试 — activate 推理引擎核心链路 + decay / conflict / compress。
 
-遵循 CLAUDE.md 测试原则：仅覆盖核心信任路径，不穷举边界变体。
+遵循 AGENTS.md 测试原则：仅覆盖核心信任路径，不穷举边界变体。
 """
 
 from datetime import datetime, timedelta
