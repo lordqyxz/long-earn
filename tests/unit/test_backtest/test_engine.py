@@ -66,6 +66,33 @@ class _SimpleStrategy(BaseStrategy):
         )
 
 
+class _BuyOnceStrategy(BaseStrategy):
+    """仅首 bar 买入一次并持有的策略，避免持续买入摊低成本稀释回撤。"""
+
+    def __init__(self, weights: dict[str, float] | None = None):
+        super().__init__(strategy_id="test-buy-once")
+        self._weights = weights or {"000001": 1.0}
+        self._called = False
+
+    def init(self) -> None:
+        self._called = False
+
+    def on_bar(
+        self, bars: pl.DataFrame, context: VisibilityContext
+    ) -> SignalEvent | None:
+        if self._called:
+            return None
+        self._called = True
+        ts = bars.select("timestamp").to_series()[0]
+        return SignalEvent(
+            timestamp=ts,
+            trace_id="trace-buy-once",
+            event_id="sig-buy-once",
+            signals=dict(self._weights),
+            strategy_id="test-buy-once",
+        )
+
+
 class _EmptyStrategy(BaseStrategy):
     """不交易的策略"""
 
@@ -199,13 +226,16 @@ class TestRiskChecks(unittest.TestCase):
 
     @staticmethod
     def _peak_trough_panel(days: int = 10) -> pl.DataFrame:
-        """先涨后跌的价格序列，用于回撤测试"""
+        """先涨后跌的价格序列，用于回撤测试
+
+        价格 10→14→1，组合层面回撤 ~7%（因 100 万本金满仓）。
+        若需要触发 15% 回撤限制，使用 _steep_trough_panel。
+        """
         rows = []
         for i in range(days):
-            if i < 5:
-                price = 10.0 + i  # 10, 11, 12, 13, 14
-            else:
-                price = 14.0 - 3.0 * (i - 4)  # 11, 8, 5, 2, -1
+            price = (
+                10.0 + i if i < 5 else 14.0 - 3.0 * (i - 4)
+            )  # 10,11,...,14,11,8,5,2,-1
             rows.append(
                 {
                     "timestamp": datetime(2024, 1, i + 1),
@@ -219,34 +249,122 @@ class TestRiskChecks(unittest.TestCase):
             )
         return pl.DataFrame(rows)
 
+    @staticmethod
+    def _steep_trough_panel(days: int = 12) -> pl.DataFrame:
+        """陡峭下跌面板：组合层面回撤 > 15%，用于触发 max_drawdown_limit=0.15。
+
+        价格前 2 日平盘 8（100 万满仓买入 8 × 12.5 万股 ≈ 100 万，覆盖成本），
+        之后持续暴跌至 1，组合回撤 > 15%。
+        volume 设为 1e7 确保满仓买入不被成交量参与率限制。
+        open=close 避免开盘价触及涨跌停价导致买入被拒。
+        """
+        rows = []
+        for i in range(days):
+            price = 8.0 if i < 2 else max(8.0 - (i - 1) * 1.2, 1.0)
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "close": price,
+                    "open": price,  # open=close 避免涨跌停拒单
+                    "high": price * 1.01,
+                    "low": price * 0.99,
+                    "volume": 10_000_000,  # 大成交量，避免部分成交
+                }
+            )
+        return pl.DataFrame(rows)
+
     def test_stop_loss_trigger(self):
-        """价格下跌超过止损线应触发清仓"""
-        provider = MockDataProvider(self._downward_panel())
+        """价格下跌超过止损线应触发清仓
+
+        加强断言（P1-2）：必须出现 RISK_TRIGGER(stop_loss) 审计事件、
+        trade_count >= 2（含买入+止损卖出）。
+
+        用 _BuyOnceStrategy（仅首 bar 买入一次）避免持续买入摊低 avg_cost
+        导致止损永不触发（available_date 修复后止损在 T+2 后才检查，
+        持续买入会使 avg_cost 跟踪当前价，pnl 不跌破阈值）。
+        volume 设为 1e7 确保满仓买入不被成交量参与率限制。
+        """
+        rows = []
+        for i in range(10):
+            price = 10.0 - 0.5 * i  # 10, 9.5, 9.0, ...
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "close": price,
+                    "open": price,
+                    "high": price * 1.01,
+                    "low": price * 0.98,
+                    "volume": 10_000_000,
+                }
+            )
+        provider = MockDataProvider(pl.DataFrame(rows))
         engine = EventDrivenBacktestEngine(
             data_provider=provider,
             stop_loss=0.05,  # 5% 止损
         )
-        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
 
         result = engine.run(strategy, "2024-01-01", "2024-01-10", ["000001"])
 
         self.assertTrue(result.success)
         self.assertIsNotNone(result.attribution)
+        # 止损必须真正触发：RISK_TRIGGER(stop_loss) 事件存在
+        trail = engine.audit_logger.get_full_trail()
+        sl_triggers = [
+            e
+            for e in trail
+            if e.get("event_type") == "RISK_TRIGGER"
+            and e.get("payload", {}).get("risk_type") == "stop_loss"
+        ]
+        self.assertGreaterEqual(
+            len(sl_triggers), 1, "止损触发应产生 RISK_TRIGGER(stop_loss) 审计事件"
+        )
+        # 买入 + 止损卖出至少 2 笔成交
+        self.assertGreaterEqual(
+            result.trade_count or 0, 2, "止损场景 trade_count 应 >= 2（买入+止损卖出）"
+        )
 
     def test_max_drawdown_trigger(self):
-        """最大回撤超标应触发全部清仓"""
-        provider = MockDataProvider(self._peak_trough_panel())
+        """最大回撤超标应触发全部清仓
+
+        加强断言（P1-3）：必须出现 RISK_TRIGGER(max_drawdown) 审计事件、
+        trade_count >= 2、风控清仓后持仓为空。
+
+        用 _steep_trough_panel + _BuyOnceStrategy(0.95) 构造组合层面回撤 > 15% 的场景：
+        策略仅在首 bar 买入 95% 仓位并持有（留 5% 现金缓冲避免 Broker
+        预估口径差异导致的"现金不足跳过"），之后暴跌触发回撤风控。
+        """
+        provider = MockDataProvider(self._steep_trough_panel())
         engine = EventDrivenBacktestEngine(
             data_provider=provider,
             max_drawdown_limit=0.15,  # 15% 回撤限制
         )
-        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
 
-        result = engine.run(strategy, "2024-01-01", "2024-01-10", ["000001"])
+        result = engine.run(strategy, "2024-01-01", "2024-01-12", ["000001"])
 
         self.assertTrue(result.success)
-        # 有交易（含风控平仓）
-        self.assertGreater(result.trade_count or 0, 0)
+        # 最大回撤风控必须真正触发
+        trail = engine.audit_logger.get_full_trail()
+        dd_triggers = [
+            e
+            for e in trail
+            if e.get("event_type") == "RISK_TRIGGER"
+            and e.get("payload", {}).get("risk_type") == "max_drawdown"
+        ]
+        self.assertGreaterEqual(
+            len(dd_triggers), 1, "回撤超限应产生 RISK_TRIGGER(max_drawdown) 审计事件"
+        )
+        # P1-B 修复：清仓后无持仓时不再重复触发，故应仅 1 个 RISK_TRIGGER
+        self.assertEqual(
+            len(dd_triggers), 1, "清仓后不应重复触发 RISK_TRIGGER(max_drawdown)"
+        )
+        # 买入 + 风控清仓至少 2 笔成交
+        self.assertGreaterEqual(
+            result.trade_count or 0, 2, "回撤清仓场景 trade_count 应 >= 2"
+        )
 
     def test_risk_checks_disabled(self):
         """未设置风控参数时不执行风控检查"""
@@ -383,8 +501,12 @@ class TestBacktestFidelity(unittest.TestCase):
         peak = np.maximum.accumulate(equity_arr)
         expected_dd = float(np.min((equity_arr - peak) / peak))
 
-        self.assertAlmostEqual(result.total_return or 0, expected_total_return, places=8)
-        self.assertAlmostEqual(result.annual_return or 0, expected_annual_return, places=8)
+        self.assertAlmostEqual(
+            result.total_return or 0, expected_total_return, places=8
+        )
+        self.assertAlmostEqual(
+            result.annual_return or 0, expected_annual_return, places=8
+        )
         self.assertAlmostEqual(result.volatility or 0, expected_vol, places=8)
         self.assertAlmostEqual(result.sharpe_ratio or 0, expected_sharpe, places=8)
         self.assertAlmostEqual(result.max_drawdown or 0, expected_dd, places=8)
@@ -416,7 +538,7 @@ class TestBacktestFidelity(unittest.TestCase):
                 has_metrics = "total_return" in ph
                 self.assertTrue(
                     has_error or has_metrics,
-                    f"fold {fold['fold_id']}.{phase} 必须有 error 或 total_return"
+                    f"fold {fold['fold_id']}.{phase} 必须有 error 或 total_return",
                 )
 
     def test_no_position_strategy_returns_zero(self):
@@ -436,6 +558,229 @@ class TestBacktestFidelity(unittest.TestCase):
         self.assertEqual(result.trade_count or 0, 0)
 
 
+class TestWalkForwardCrossFoldIsolation(unittest.TestCase):
+    """Walk-Forward 跨 fold 状态隔离测试（评审 P0-2）
+
+    验证 run() 开头重置 _pending_signals / _prev_close_map / 涨跌停 map，
+    防止 fold N 末 bar 的信号/前收盘价泄漏到 fold N+1（前视偏差）。
+    """
+
+    def setUp(self):
+        self.panel = _make_panel(days=30)
+        self.provider = MockDataProvider(self.panel)
+
+    def test_run_resets_pending_signals(self):
+        """run() 开头应清空 _pending_signals，防止上一 run 的遗留信号在本 run 首 bar 成交。"""
+        engine = EventDrivenBacktestEngine(data_provider=self.provider)
+        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        # 第一次 run：末 bar 策略仍发信号，会入队 _pending_signals
+        engine.run(strategy, "2024-01-01", "2024-01-10", ["000001", "000002"])
+        # 末 bar 信号入队（若不重置，第二次 run 首 bar 会执行它）
+        # 第二次 run 前手动塞入一个伪造信号，模拟跨 run 泄漏
+        from long_earn.backtest.domain.entities import SignalEvent
+
+        engine._pending_signals = [
+            SignalEvent(
+                timestamp=datetime(2024, 1, 1),
+                trace_id="leak-trace",
+                event_id="leak-sig",
+                signals={"000001": 1.0},
+                strategy_id="leak",
+            )
+        ]
+        # 第二次 run 应在开头清空 _pending_signals
+        engine.run(strategy, "2024-01-01", "2024-01-10", ["000001", "000002"])
+        # 验证：第二次 run 的审计 trail 中不应出现 trace_id=leak-trace 的 SIGNAL_EXECUTE_T1
+        trail = engine.audit_logger.get_full_trail()
+        leak_execs = [
+            e
+            for e in trail
+            if e.get("event_type") == "SIGNAL_EXECUTE_T1"
+            and e.get("parent_id") == "leak-trace"
+        ]
+        self.assertEqual(
+            len(leak_execs),
+            0,
+            "run() 应重置 _pending_signals，遗留信号不应在本 run 执行",
+        )
+
+    def test_run_resets_prev_close_map(self):
+        """run() 开头应清空 _prev_close_map，防止上一 run 的收盘价污染本 run 涨跌停计算。"""
+        engine = EventDrivenBacktestEngine(data_provider=self.provider)
+        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        engine.run(strategy, "2024-01-01", "2024-01-10", ["000001", "000002"])
+        # 第一次 run 后 _prev_close_map 应有值
+        self.assertGreater(len(engine._prev_close_map), 0)
+        # 手动塞入一个伪造的前收盘价
+        engine._prev_close_map = {"FAKE.SZ": 999.0}
+        # 第二次 run 应在开头清空
+        engine.run(strategy, "2024-01-01", "2024-01-10", ["000001", "000002"])
+        # 验证：伪造的 FAKE.SZ 不应残留（它不在本 run 的 symbols 中）
+        self.assertNotIn(
+            "FAKE.SZ",
+            engine._prev_close_map,
+            "run() 应重置 _prev_close_map，伪造的前收盘价不应残留",
+        )
+
+    def test_walk_forward_no_cross_fold_signal_leak(self):
+        """walk_forward_run 中 fold N 末 bar 的 SIGNAL 不应在 fold N+1 首 bar 变成 FILL。
+
+        验证 run() 开头重置 _pending_signals 的修复：fold N 末 bar 入队的
+        遗留信号不会在 fold N+1 的 run() 首 bar 执行（否则是前视偏差）。
+
+        方法：用每个 bar 都发信号的 _SimpleStrategy 跑 walk_forward_run，
+        包裹 run 在每次调用前捕获遗留信号的 trace_id。
+        修复前：遗留信号会在下一 fold 首 bar 执行（泄漏）。
+        修复后：run() 开头清空 _pending_signals，遗留信号不执行。
+        验证：每次 run 调用前若有遗留信号，记录其 trace_id；
+        然后单独跑一次 run 并注入这些 trace_id 之一，验证它不出现在
+        SIGNAL_EXECUTE_T1 中（证明 run 重置生效）。
+        """
+        engine = EventDrivenBacktestEngine(data_provider=self.provider)
+        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        # 包裹 run：捕获每次 run() 调用前的遗留信号 trace_id
+        original_run = engine.run
+        leak_trace_ids: list[str] = []
+
+        def _checking_run(*args, **kwargs):
+            # run() 调用前：记录遗留信号的 trace_id
+            for sig in list(engine._pending_signals):
+                leak_trace_ids.append(sig.trace_id)
+            return original_run(*args, **kwargs)
+
+        engine.run = _checking_run  # type: ignore[method-assign]
+        try:
+            result = engine.walk_forward_run(
+                strategy,
+                "2024-01-01",
+                "2024-01-30",
+                ["000001", "000002"],
+                n_splits=3,
+            )
+        finally:
+            engine.run = original_run  # type: ignore[method-assign]
+
+        # walk_forward 应成功完成
+        self.assertIn("fold_results", result)
+        # 验证确实存在跨 fold 遗留信号（_SimpleStrategy 每 bar 发信号，
+        # fold 末 bar 入队的信号在该 fold 内无下一 bar 执行）
+        self.assertGreater(
+            len(leak_trace_ids), 0, "应捕获到跨 fold 遗留信号（证明泄漏场景存在）"
+        )
+        # 关键验证：注入一个唯一 trace_id 的伪造信号，run() 开头重置使其不执行。
+        # （不能用 leak_trace_ids 中的 trace_id，因 _SimpleStrategy 所有信号
+        # 共用固定 trace_id="trace-test"，会与正常信号混淆）
+        from long_earn.backtest.domain.entities import SignalEvent
+
+        engine._pending_signals = [
+            SignalEvent(
+                timestamp=datetime(2024, 1, 1),
+                trace_id="leak-injected-unique",
+                event_id="leak-injected",
+                signals={"000001": 1.0},
+                strategy_id="leak",
+            )
+        ]
+        engine.run(strategy, "2024-01-01", "2024-01-10", ["000001", "000002"])
+        trail = engine.audit_logger.get_full_trail()
+        leak_execs = [
+            e
+            for e in trail
+            if e.get("event_type") == "SIGNAL_EXECUTE_T1"
+            and e.get("parent_id") == "leak-injected-unique"
+        ]
+        self.assertEqual(
+            len(leak_execs),
+            0,
+            "run() 应在开头重置 _pending_signals，注入的遗留信号不应执行",
+        )
+
+
+class TestEventLoopOrder(unittest.TestCase):
+    """事件循环顺序测试（评审 P1-5）
+
+    验证 _process_timestamp 内的审计事件相对顺序：
+      MARKET_DATA 在 SIGNAL 之前；FILL 在 ORDER 之后；
+      风控触发时 SIGNAL_SKIPPED_BY_RISK 替代 SIGNAL。
+    """
+
+    def test_event_order_within_bar(self):
+        """单 bar 内审计事件顺序：MARKET_DATA → SIGNAL（→ 后续 bar 的 ORDER/FILL）。"""
+        provider = MockDataProvider(_make_panel(days=5))
+        engine = EventDrivenBacktestEngine(data_provider=provider)
+        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        engine.run(strategy, "2024-01-01", "2024-01-05", ["000001"])
+
+        trail = engine.audit_logger.get_full_trail()
+        # 找第一个 MARKET_DATA 和第一个 SIGNAL 的索引
+        mkt_idx = next(
+            (i for i, e in enumerate(trail) if e.get("event_type") == "MARKET_DATA"),
+            None,
+        )
+        sig_idx = next(
+            (i for i, e in enumerate(trail) if e.get("event_type") == "SIGNAL"),
+            None,
+        )
+        self.assertIsNotNone(mkt_idx, "应有 MARKET_DATA 事件")
+        self.assertIsNotNone(sig_idx, "应有 SIGNAL 事件")
+        self.assertLess(mkt_idx, sig_idx, "MARKET_DATA 必须在 SIGNAL 之前（同 bar 内）")
+        # ORDER 在 SIGNAL 之后（T+1 执行：SIGNAL 在 T 日，ORDER/FILL 在 T+1 日）
+        order_idx = next(
+            (i for i, e in enumerate(trail) if e.get("event_type") == "ORDER"),
+            None,
+        )
+        self.assertIsNotNone(order_idx, "应有 ORDER 事件")
+        self.assertGreater(
+            order_idx, sig_idx, "ORDER 必须在 SIGNAL 之后（T+1 延迟执行）"
+        )
+        # FILL 在 ORDER 之后
+        fill_idx = next(
+            (i for i, e in enumerate(trail) if e.get("event_type") == "FILL"),
+            None,
+        )
+        self.assertIsNotNone(fill_idx, "应有 FILL 事件")
+        self.assertGreater(fill_idx, order_idx, "FILL 必须在 ORDER 之后")
+
+    def test_risk_trigger_replaces_signal(self):
+        """风控触发时应用 SIGNAL_SKIPPED_BY_RISK 替代 SIGNAL。
+
+        用 _BuyOnceStrategy（仅首 bar 买入）+ 大成交量 + 严格止损，
+        确保买入后暴跌触发止损并清仓，后续 bar 风控持续触发抑制信号。
+        """
+        rows = []
+        for i in range(8):
+            price = 10.0 - 0.8 * i  # 10, 9.2, 8.4, ... 快速暴跌
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "close": price,
+                    "open": price,
+                    "high": price * 1.01,
+                    "low": price * 0.98,
+                    "volume": 10_000_000,
+                }
+            )
+        provider = MockDataProvider(pl.DataFrame(rows))
+        engine = EventDrivenBacktestEngine(
+            data_provider=provider,
+            stop_loss=0.02,  # 2% 止损，极易触发
+        )
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
+        engine.run(strategy, "2024-01-01", "2024-01-08", ["000001"])
+
+        trail = engine.audit_logger.get_full_trail()
+        event_types = [e.get("event_type") for e in trail]
+        # 风控触发后应出现 SIGNAL_SKIPPED_BY_RISK
+        self.assertIn(
+            "SIGNAL_SKIPPED_BY_RISK",
+            event_types,
+            "风控触发时应记录 SIGNAL_SKIPPED_BY_RISK 而非 SIGNAL",
+        )
+        # RISK_TRIGGER 也应存在
+        self.assertIn("RISK_TRIGGER", event_types)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -452,7 +797,7 @@ class TestStopLossConservativeFill(unittest.TestCase):
         rows = []
         for i in range(days):
             close = 10.0 - 1.0 * i  # 10, 9, 8, 7
-            low = close - 0.5      # 9.5, 8.5, 7.5, 6.5  ← 比 close 更低
+            low = close - 0.5  # 9.5, 8.5, 7.5, 6.5  ← 比 close 更低
             rows.append(
                 {
                     "timestamp": datetime(2024, 1, i + 1),
