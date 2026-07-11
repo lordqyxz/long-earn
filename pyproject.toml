@@ -83,17 +83,27 @@ combine-as-imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=long_earn --cov-report=term --cov-report=html --cov-fail-under=0"
+addopts = "--cov=long_earn --cov-report=term --cov-report=html --cov-fail-under=60"
 python_files = ["test_*.py"]
+markers = [
+    "regression: 回归测试（防回退，验证已修复的缺陷不再复现）",
+]
 
 [tool.coverage.run]
 source = ["src/long_earn"]
 omit = ["tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]
-fail_under = 0
+fail_under = 60
 show_missing = true
 skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
 
 [tool.importlinter]
 root_package = "long_earn"

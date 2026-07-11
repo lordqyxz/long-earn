@@ -431,6 +431,10 @@ class CompositeDataProvider:
         f[idx_cols[0]] = pd.to_datetime(f[idx_cols[0]])
         merged = pd.merge(p, f, on=idx_cols, how="outer")
         merged = merged.set_index(idx_cols)
+        # 关键：ffill 前必须按 (date, symbol) 升序排序，否则 outer merge 后行序混乱，
+        # groupby.ffill 会用"原始行序"填充——可能拿未来值填到过去，构成数据层
+        # 未来函数泄漏点（对齐 MiniQmtDataProvider.get_merged_panel 修复模式）。
+        merged = merged.sort_index()
         merged = merged.groupby(level=idx_cols[1]).ffill()
         return merged.sort_index()
 

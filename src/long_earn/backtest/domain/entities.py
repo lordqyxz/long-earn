@@ -161,6 +161,7 @@ class FillEvent(Event):
     commission: float
     slippage: float
     stamp_duty: float
+    partial_fill: bool = False  # P0-04：是否部分成交（受成交量限制）
 
 
 # ── 持仓与交易实体 ──────────────────────────────────────────────────────
@@ -175,6 +176,7 @@ class Position:
     avg_cost: float = 0.0
     market_value: float = 0.0
     current_price: float = 0.0
+    available_date: datetime | None = None  # T+1：该持仓可卖出的最早日期
 
     def update_market_value(self, current_price: float):
         self.market_value = self.shares * current_price

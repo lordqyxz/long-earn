@@ -2,28 +2,70 @@
 
 财务数据 _quarterly_to_daily 必须用"披露日"而非"报告期截止日"作为可见日期，
 否则回测会在截止日次日就用上未公布数据 → 经典未来函数泄漏，违反 ADR-005 金融级可信。
+
+get_merged_panel ffill 前必须先 sort_index，否则 outer merge 后行序乱，
+groupby.ffill 会用"原始行序"填充——可能拿未来值填到过去，又一处隐蔽未来函数泄漏。
 """
 
-import pandas as pd
+from __future__ import annotations
 
+from typing import Any
+
+import pandas as pd
+import pytest
+
+from long_earn.backtest.data.ciccwm_provider import CiccwmDataProvider
 from long_earn.backtest.data.miniqmt_provider import MiniQmtDataProvider
+from long_earn.backtest.data.provider import CompositeDataProvider
+
+# ── 测试桩 ───────────────────────────────────────────────────────────────
 
 
 class _StubCache:
-    """测试用空 cache 桩（_quarterly_to_daily 不依赖 cache）"""
+    """测试用空 cache 桩（_quarterly_to_daily 不依赖 cache）。"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
 
-class TestMergedPanelFfillSorted:
-    """get_merged_panel ffill 前必须先 sort_index，否则 outer merge 后行序乱，
-    ffill 会用未来值填到过去——典型的隐蔽未来函数泄漏。
+class _StubMqProvider:
+    """注入 CompositeDataProvider 的桩 miniqmt 后端。
+
+    返回构造好的 price/fin 面板，验证 Composite 的 merge+ffill 排序契约。
     """
 
-    def _make_provider(
-        self, price_df: pd.DataFrame, fin_df: pd.DataFrame
-    ) -> MiniQmtDataProvider:
+    def __init__(self, price_df: pd.DataFrame, fin_df: pd.DataFrame) -> None:
+        self._price = price_df
+        self._fin = fin_df
+
+    def get_price_panel(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        return self._price
+
+    def get_financial_panel(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        return self._fin
+
+
+# ── 参数化：实现 merge + groupby.ffill 的 provider ────────────────────
+
+# 仅 MiniQmtDataProvider 与 CompositeDataProvider 在 get_merged_panel 中
+# 执行 merge + groupby(symbol).ffill 逻辑；ciccwm/akshare 的 get_merged_panel
+# 仅委托 get_price_panel（ADR-007 Phase 3 财务统一到 miniqmt，无 ffill），
+# ffill 排序契约对它们 N/A，见 TestMergedPanelDelegationContract。
+FFILL_PROVIDERS = ["miniqmt", "composite"]
+
+
+def _make_ffill_provider(
+    kind: str, price_df: pd.DataFrame, fin_df: pd.DataFrame
+) -> Any:
+    """构造一个 provider 实例，get_merged_panel 内 merge+ffill 数据可控。
+
+    Args:
+        kind: ``"miniqmt"`` 直接 monkey-patch 取数器；
+              ``"composite"`` 注入桩 miniqmt 后端到 CompositeDataProvider。
+        price_df: get_price_panel 返回的行情面板
+        fin_df: get_financial_panel 返回的财务面板
+    """
+    if kind == "miniqmt":
         provider = MiniQmtDataProvider.__new__(MiniQmtDataProvider)
         # monkey-patch 底层取数器，强行返回测试数据
         provider.cache = _StubCache()  # type: ignore[assignment]
@@ -35,8 +77,28 @@ class TestMergedPanelFfillSorted:
             lambda *_a, **_k: fin_df
         )
         return provider
+    if kind == "composite":
+        stub_mq = _StubMqProvider(price_df, fin_df)
+        return CompositeDataProvider(  # type: ignore[arg-type]
+            cache=_StubCache(), miniqmt_provider=stub_mq
+        )
+    raise ValueError(f"未知 provider kind: {kind}")
 
-    def test_ffill_does_not_pull_future_into_past(self):
+
+# ── ffill 排序契约：merge + groupby.ffill 的 provider ─────────────────
+
+
+class TestMergedPanelFfillSorted:
+    """get_merged_panel ffill 前必须先 sort_index，否则 outer merge 后行序乱，
+    ffill 会用未来值填到过去——典型的隐蔽未来函数泄漏。
+
+    参数化覆盖实现了 merge + groupby.ffill 的两个 provider：
+      - miniqmt: MiniQmtDataProvider
+      - composite: CompositeDataProvider
+    """
+
+    @pytest.mark.parametrize("kind", FFILL_PROVIDERS)
+    def test_ffill_does_not_pull_future_into_past(self, kind: str):
         """构造场景：财务数据只有 2023-06-01 的 ROE=0.2，
         若 ffill 在 sort 之前跑，可能把 0.2 填进 2023-04-01。"""
         # price_df：包含 4 月、5 月、6 月，ROE 列没有
@@ -59,7 +121,7 @@ class TestMergedPanelFfillSorted:
             ),
         )
 
-        provider = self._make_provider(price_df, fin_df)
+        provider = _make_ffill_provider(kind, price_df, fin_df)
         result = provider.get_merged_panel(
             symbols=["000001"],
             start_date="2023-04-01",
@@ -73,8 +135,9 @@ class TestMergedPanelFfillSorted:
         # 6-01: ROE 应是 0.2
         assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.2
 
-    def test_ffill_propagates_old_value_forward(self):
-        """合法场景：4-01 的 ROE=0.1 应被前向填充到 5-01 / 6-01"""
+    @pytest.mark.parametrize("kind", FFILL_PROVIDERS)
+    def test_ffill_propagates_old_value_forward(self, kind: str):
+        """合法场景：4-01 的 ROE=0.1 应被前向填充到 5-01 / 6-01。"""
         price_dates = pd.to_datetime(["2023-04-01", "2023-05-01", "2023-06-01"])
         price_df = pd.DataFrame(
             {"close": [10.0, 11.0, 12.0]},
@@ -89,7 +152,7 @@ class TestMergedPanelFfillSorted:
             ),
         )
 
-        provider = self._make_provider(price_df, fin_df)
+        provider = _make_ffill_provider(kind, price_df, fin_df)
         result = provider.get_merged_panel(
             symbols=["000001"],
             start_date="2023-04-01",
@@ -101,3 +164,91 @@ class TestMergedPanelFfillSorted:
         assert sym.loc[pd.Timestamp("2023-04-01"), "roe"] == 0.1
         assert sym.loc[pd.Timestamp("2023-05-01"), "roe"] == 0.1
         assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.1
+
+    @pytest.mark.parametrize("kind", FFILL_PROVIDERS)
+    def test_unsorted_price_does_not_leak_future(self, kind: str):
+        """关键回归测试：构造乱序行情面板（未来日期在前，过去日期在后），
+        outer merge 后行序为 [6-01(roe=0.2), 4-01(NaN)]。
+        若 ffill 在 sort_index 之前跑，6-01 的 0.2 会填进 4-01 → 未来函数泄漏。
+        修复后（sort_index 在 ffill 前）4-01 保持 NaN。"""
+        # price_df：行序倒序（6-01 在 4-01 之前）——模拟 outer merge 乱序场景
+        price_df = pd.DataFrame(
+            {"close": [12.5, 10.5]},
+            index=pd.MultiIndex.from_tuples(
+                [
+                    (pd.Timestamp("2023-06-01"), "000001"),
+                    (pd.Timestamp("2023-04-01"), "000001"),
+                ],
+                names=["date", "symbol"],
+            ),
+        )
+        # fin_df：仅 6-01 有 ROE=0.2
+        fin_df = pd.DataFrame(
+            {"roe": [0.2]},
+            index=pd.MultiIndex.from_tuples(
+                [(pd.Timestamp("2023-06-01"), "000001")], names=["date", "symbol"]
+            ),
+        )
+
+        provider = _make_ffill_provider(kind, price_df, fin_df)
+        result = provider.get_merged_panel(
+            symbols=["000001"],
+            start_date="2023-04-01",
+            end_date="2023-06-30",
+        )
+
+        sym = result.xs("000001", level="symbol")
+        # 4-01: ROE 必须是 NaN（6-01 的未来值不能填到过去）
+        assert pd.isna(sym.loc[pd.Timestamp("2023-04-01"), "roe"]), (
+            f"{kind}: ffill 前未 sort_index 导致 6-01 的 ROE=0.2 泄漏到 4-01"
+        )
+        # 6-01: ROE 应是 0.2
+        assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.2
+
+
+# ── 委托契约：ciccwm/akshare 的 get_merged_panel（无 ffill） ──────────
+
+
+class TestMergedPanelDelegationContract:
+    """ciccwm/akshare 的 get_merged_panel 委托 get_price_panel（无 merge+ffill）。
+
+    ADR-007 Phase 3 财务数据统一到 miniqmt 后，这两个 provider 的
+    get_merged_panel 仅返回行情面板，不执行 groupby.ffill，因此
+    ffill 排序契约对它们 N/A。此处验证委托契约：get_merged_panel
+    返回 get_price_panel 的结果，且索引已排序。
+    """
+
+    @pytest.mark.parametrize("kind", ["ciccwm", "akshare"])
+    def test_merged_panel_delegates_to_price_panel(self, kind: str):
+        """get_merged_panel 应返回 get_price_panel 的结果（无 ffill，直接委托）。"""
+        price_dates = pd.to_datetime(["2023-04-01", "2023-05-01", "2023-06-01"])
+        price_df = pd.DataFrame(
+            {"close": [10.0, 11.0, 12.0]},
+            index=pd.MultiIndex.from_product(
+                [price_dates, ["000001"]], names=["date", "symbol"]
+            ),
+        )
+
+        if kind == "ciccwm":
+            provider: Any = CiccwmDataProvider.__new__(CiccwmDataProvider)
+        else:
+            from long_earn.backtest.data.akshare_provider import (
+                AkshareFallbackProvider,
+            )
+
+            provider = AkshareFallbackProvider.__new__(AkshareFallbackProvider)
+
+        provider.get_price_panel = (  # type: ignore[method-assign]
+            lambda *_a, **_k: price_df
+        )
+
+        result = provider.get_merged_panel(
+            symbols=["000001"],
+            start_date="2023-04-01",
+            end_date="2023-06-30",
+        )
+
+        # 委托契约：返回的就是 get_price_panel 的结果
+        pd.testing.assert_frame_equal(result, price_df)
+        # 索引已排序（由 get_price_panel 保证）
+        assert result.index.is_monotonic_increasing

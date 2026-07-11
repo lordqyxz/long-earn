@@ -43,6 +43,16 @@ class BacktestResult(BaseModel):
         default=None, description="每只股票的 P&L 归因"
     )
 
+    # 可信度标志
+    metrics_unreliable: bool = Field(
+        default=False,
+        description=(
+            "指标不可信标志。为 True 时表示回测虽成功但指标不可信，"
+            "典型原因：过滤算子全量筛选导致无信号、成交量限制导致大量部分成交、"
+            "风控频繁触发等。上层（GridResult.best / Walk-Forward）应据此过滤。"
+        ),
+    )
+
 
 class WalkForwardResult(BaseModel):
     """Walk-Forward OOS 验证结果（ADR-010 Phase 3）。"""

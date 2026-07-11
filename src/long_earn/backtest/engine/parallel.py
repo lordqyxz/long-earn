@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -46,6 +47,7 @@ class BacktestTask:
     max_positions: int = 0
     task_id: str = ""
     param_desc: str = ""
+    audit_db_path: str = ""
 
 
 @dataclass(slots=True)
@@ -66,6 +68,12 @@ class BacktestOutcome:
     error: str = ""
     error_category: str = ""
     param_desc: str = ""
+    metrics_unreliable: bool = False
+
+
+def _worker_db_path(base: Path, task_id: str) -> Path:
+    """派生 worker 专属 DuckDB 路径，避免多进程共享连接写冲突。"""
+    return base.parent / f"{base.stem}_{task_id}{base.suffix}"
 
 
 def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
@@ -79,6 +87,16 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
 
         dsl = parse_strategy_yaml(task.strategy_yaml)
 
+        # 注入 DuckDBAuditProvider：每个 worker 使用独立的 db 文件，
+        # 避免 DuckDB 连接跨进程共享（非线程安全）。
+        audit_provider = None
+        if task.audit_db_path:
+            from long_earn.backtest.engine.audit import (  # noqa: PLC0415
+                DuckDBAuditProvider,
+            )
+
+            audit_provider = DuckDBAuditProvider(db_path=Path(task.audit_db_path))
+
         engine = EventDrivenBacktestEngine(
             cost_config=dsl.trading_cost.to_broker_config(),
             stop_loss=task.stop_loss,
@@ -86,6 +104,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
             max_position_pct=task.max_position_pct,
             max_positions=task.max_positions,
             audit_logger=InMemoryAuditTrail(),
+            audit_provider=audit_provider,
         )
         engine.data_provider = None
 
@@ -116,6 +135,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
                 calmar_ratio=result.calmar_ratio,
                 sortino_ratio=result.sortino_ratio,
                 param_desc=task.param_desc,
+                metrics_unreliable=result.metrics_unreliable or False,
             )
         return BacktestOutcome(
             task_id=task.task_id,
@@ -142,19 +162,30 @@ class GridResult:
 
     @property
     def best(self) -> BacktestOutcome | None:
-        """按 sharpe_ratio 降序排序的最优结果。"""
-        successful = [o for o in self.outcomes if o.success]
-        if not successful:
-            return None
-        return max(successful, key=lambda o: o.sharpe_ratio)
+        """按 sharpe_ratio 降序排序的最优结果。
+
+        P0-03：过滤 metrics_unreliable=True 的结果，防止退化策略混入最优解。
+        """
+        reliable = [o for o in self.outcomes if o.success and not o.metrics_unreliable]
+        if not reliable:
+            # 降级：无可信结果时退回全部成功结果（向前兼容）
+            reliable = [o for o in self.outcomes if o.success]
+            if not reliable:
+                return None
+        return max(reliable, key=lambda o: o.sharpe_ratio)
 
     @property
     def best_by_return(self) -> BacktestOutcome | None:
-        """按 total_return 降序排序的最优结果。"""
-        successful = [o for o in self.outcomes if o.success]
-        if not successful:
-            return None
-        return max(successful, key=lambda o: o.total_return)
+        """按 total_return 降序排序的最优结果。
+
+        P0-03：过滤 metrics_unreliable=True 的结果。
+        """
+        reliable = [o for o in self.outcomes if o.success and not o.metrics_unreliable]
+        if not reliable:
+            reliable = [o for o in self.outcomes if o.success]
+            if not reliable:
+                return None
+        return max(reliable, key=lambda o: o.total_return)
 
     @property
     def success_count(self) -> int:
@@ -225,6 +256,7 @@ class ParallelRunner:
         benchmark_symbol: str = "",
         max_positions: int = 0,
         allow_large_grid: bool = False,
+        audit_db_path: Path | str | None = None,
     ) -> GridResult:
         """参数网格并行回测。"""
         combos = param_grid.expand_all()
@@ -276,6 +308,7 @@ class ParallelRunner:
             )
 
         # 构造 BacktestTask 列表
+        audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
             shm_token, shm_size, pickle_data = ctx.get_worker_args()
 
@@ -295,6 +328,9 @@ class ParallelRunner:
                     max_positions=max_positions,
                     task_id=str(idx),
                     param_desc=param_desc,
+                    audit_db_path=str(_worker_db_path(audit_base, str(idx)))
+                    if audit_base
+                    else "",
                 )
                 for idx, (yaml_str, param_desc) in enumerate(tasks_data)
             ]
@@ -316,6 +352,7 @@ class ParallelRunner:
         symbols: list[str],
         n_splits: int = 3,
         benchmark_symbol: str = "",
+        audit_db_path: Path | str | None = None,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
         from long_earn.backtest.engine.ml_strategy import (  # noqa: PLC0415
@@ -341,6 +378,7 @@ class ParallelRunner:
         splitter = TimeSeriesSplit(n_splits=n_splits)
         splits = splitter.split(timestamps)
 
+        audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
             shm_token, shm_size, pickle_data = ctx.get_worker_args()
 
@@ -352,6 +390,8 @@ class ParallelRunner:
                 test_start = str(test_ts[0]) if test_ts else train_end
                 test_end = str(test_ts[-1]) if test_ts else train_end
 
+                train_task_id = f"{fold_idx}_train"
+                test_task_id = f"{fold_idx}_test"
                 tasks.append(
                     BacktestTask(
                         strategy_yaml=strategy_yaml,
@@ -365,8 +405,11 @@ class ParallelRunner:
                         stop_loss=stop_loss,
                         max_drawdown_limit=max_drawdown_limit,
                         max_position_pct=max_position_pct,
-                        task_id=f"{fold_idx}_train",
+                        task_id=train_task_id,
                         param_desc=f"fold {fold_idx} train",
+                        audit_db_path=str(_worker_db_path(audit_base, train_task_id))
+                        if audit_base
+                        else "",
                     )
                 )
                 tasks.append(
@@ -382,8 +425,11 @@ class ParallelRunner:
                         stop_loss=stop_loss,
                         max_drawdown_limit=max_drawdown_limit,
                         max_position_pct=max_position_pct,
-                        task_id=f"{fold_idx}_test",
+                        task_id=test_task_id,
                         param_desc=f"fold {fold_idx} test",
+                        audit_db_path=str(_worker_db_path(audit_base, test_task_id))
+                        if audit_base
+                        else "",
                     )
                 )
 

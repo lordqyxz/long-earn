@@ -27,16 +27,37 @@ class TradingCostConfig:
     - 佣金万三起步，**最低 5 元/单**（券商行规）——小订单 <16667 元会触发最低佣金
     - 印花税仅卖出收，2023-08 起从万十减半到万五
     - 滑点按 bps 计：2bps = 0.02% 接近实际中等流动性股票成交磨损
+    - 成交量参与率：单笔订单不超过当日成交量的 10%（P0-04 修复）
+    - 冲击成本：平方根模型 k * sqrt(order_amount / daily_volume)
     """
 
     commission_rate: float = 0.0003  # 万三
     stamp_duty: float = 0.0005  # 万五 (仅卖出，2023-08 后减半)
     slippage_bps: float = 2.0  # 2bps
     min_commission: float = 5.0  # 最低 5 元/单（A 股券商行规）
+    max_volume_participation: float = 0.1  # 单笔不超过日成交量的 10%（P0-04）
+    impact_cost_k: float = 0.01  # 平方根冲击模型系数
 
     @property
     def slippage_rate(self) -> float:
         return self.slippage_bps * 0.0001
+
+    def compute_impact_bps(self, order_amount: float, daily_volume: float) -> float:
+        """平方根冲击模型：impact_bps = k * sqrt(order_amount / daily_volume)
+
+        Args:
+            order_amount: 订单金额（元）
+            daily_volume: 当日成交量（元，price * volume）
+
+        Returns:
+            冲击成本（bps 单位），额外加到 slippage_bps 上
+        """
+        if daily_volume <= 0 or order_amount <= 0:
+            return 0.0
+        participation = order_amount / daily_volume
+        if participation <= 0:
+            return 0.0
+        return self.impact_cost_k * (participation ** 0.5) * 10000  # 转为 bps
 
     def compute_commission(self, amount: float) -> float:
         """计算佣金：max(rate * amount, min_commission)
@@ -69,7 +90,7 @@ class Broker:
 
     # ── 主入口 ──────────────────────────────────────────────────
 
-    def submit_order(self, order: OrderEvent, current_price: float) -> list[FillEvent]:
+    def submit_order(self, order: OrderEvent, current_price: float, daily_volume: float = 0.0) -> list[FillEvent]:
         """
         提交订单并尝试撮合
 
@@ -90,7 +111,7 @@ class Broker:
         order_type = order.exec_type or ExecType.MARKET
 
         if order_type == ExecType.MARKET:
-            return [self._fill_market(order, current_price)]
+            return [self._fill_market(order, current_price, daily_volume)]
 
         fills: list[FillEvent] = []
 
@@ -107,7 +128,7 @@ class Broker:
             triggered = self._check_stop_trigger(order, current_price)
             if triggered:
                 if order_type == ExecType.STOP:
-                    fills.append(self._fill_market(order, current_price))
+                    fills.append(self._fill_market(order, current_price, daily_volume))
                 else:
                     # STOP_LIMIT: 触发后转为限价待成交
                     self._pend_order(order)
@@ -187,12 +208,36 @@ class Broker:
 
     # ── 订单撮合方法 ────────────────────────────────────────────
 
-    def _fill_market(self, order: OrderEvent, current_price: float) -> FillEvent:
-        """市价单立即成交（含滑点 + 最低佣金保护）"""
-        slip_dir = 1 if order.order_type == "BUY" else -1
-        fill_price = current_price * (1 + slip_dir * self.cost_config.slippage_rate)
+    def _fill_market(
+        self,
+        order: OrderEvent,
+        current_price: float,
+        daily_volume: float = 0.0,
+    ) -> FillEvent:
+        """市价单立即成交（含滑点 + 最低佣金保护 + 成交量限制 + 冲击成本）。
 
-        amount = order.quantity * fill_price
+        P0-04 修复：
+        - 成交量参与率限制：fill_quantity = min(order.quantity, volume * participation)
+        - 平方根冲击模型：额外滑点 = k * sqrt(order_amount / daily_volume)
+        """
+        slip_dir = 1 if order.order_type == "BUY" else -1
+
+        # 成交量参与率限制
+        fill_qty = order.quantity
+        if daily_volume > 0 and self.cost_config.max_volume_participation > 0:
+            max_qty = daily_volume * self.cost_config.max_volume_participation
+            fill_qty = min(order.quantity, max_qty)
+
+        partial_fill = fill_qty < order.quantity
+
+        # 平方根冲击模型：额外滑点
+        amount = fill_qty * current_price
+        impact_bps = self.cost_config.compute_impact_bps(amount, daily_volume)
+        total_slip_bps = self.cost_config.slippage_bps + impact_bps
+        total_slip_rate = total_slip_bps * 0.0001
+
+        fill_price = current_price * (1 + slip_dir * total_slip_rate)
+        amount = fill_qty * fill_price
         commission = self.cost_config.compute_commission(amount)
         stamp_duty = 0.0
         if order.order_type == "SELL":
@@ -206,10 +251,11 @@ class Broker:
             symbol=order.symbol,
             order_type=order.order_type,
             fill_price=fill_price,
-            fill_quantity=order.quantity,
+            fill_quantity=fill_qty,
             commission=commission,
-            slippage=abs(fill_price - current_price) * order.quantity,
+            slippage=abs(fill_price - current_price) * fill_qty,
             stamp_duty=stamp_duty,
+            partial_fill=partial_fill,
         )
 
         self._cancel_oco_siblings(order)
@@ -324,14 +370,14 @@ class Broker:
 
     # ── 向后兼容 ────────────────────────────────────────────────
 
-    def execute_order(self, order: OrderEvent, current_price: float) -> FillEvent:
+    def execute_order(self, order: OrderEvent, current_price: float, daily_volume: float = 0.0) -> FillEvent:
         """
         [向后兼容] 市价单立即成交
 
         旧接口：直接返回单个 FillEvent（仅支持市价单）。
         新代码请使用 submit_order()。
         """
-        fills = self.submit_order(order, current_price)
+        fills = self.submit_order(order, current_price, daily_volume)
         if not fills:
             raise OrderExecutionError(f"订单 {order.order_id} 无法作为市价单成交")
         return fills[-1]

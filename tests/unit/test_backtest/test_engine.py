@@ -315,6 +315,20 @@ class TestAuditTrail(unittest.TestCase):
         self.assertIn("MARKET_DATA", event_types)
         self.assertIn("SIGNAL", event_types)
 
+    def test_audit_trail_entries_include_timestamp(self):
+        """审计 entry 必须包含 timestamp 字段，保证内存审计与 DuckDB 字段一致"""
+        provider = MockDataProvider(_make_panel(days=3))
+        engine = EventDrivenBacktestEngine(data_provider=provider)
+        strategy = _SimpleStrategy()
+
+        engine.run(strategy, "2024-01-01", "2024-01-03", ["000001"])
+
+        trail = engine.audit_logger.get_full_trail()
+        self.assertGreater(len(trail), 0)
+        for entry in trail:
+            self.assertIn("timestamp", entry, "审计 entry 缺少 timestamp 字段")
+            self.assertIsInstance(entry["timestamp"], datetime)
+
 
 class TestBacktestFidelity(unittest.TestCase):
     """回测可信度测试

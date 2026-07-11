@@ -58,6 +58,8 @@ class Portfolio:
         # 交易成本配置：用于在生成订单时预估佣金（含最低佣金保护），使现金约束
         # 与 Broker 实际成交成本一致，避免"预估够、实际不足"的现金断裂。
         self.cost_config = cost_config
+        # T+1 跳过记录：供引擎审计日志读取（P0-06 修复）
+        self._last_skipped_orders: list[dict] = []
 
     def _estimate_commission(self, amount: float) -> float:
         """预估佣金，与 Broker.compute_commission 保持一致。
@@ -128,6 +130,7 @@ class Portfolio:
         current_prices: pl.DataFrame,
         max_positions: int = 0,
         max_position_pct: float = 1.0,
+        price_field: str = "close",
     ) -> list[OrderEvent]:
         """将信号转换为订单
 
@@ -158,8 +161,9 @@ class Portfolio:
         target_weights = self._apply_position_limits(target_weights, max_positions)
 
         order_infos = self._compute_order_infos(
-            target_weights, current_prices, max_position_pct
+            target_weights, current_prices, max_position_pct, price_field=price_field
         )
+        self._last_skipped_orders = [o for o in order_infos if o.get("skipped")]
 
         return self._generate_orders(order_infos, event)
 
@@ -190,11 +194,15 @@ class Portfolio:
         target_weights: dict[str, float],
         current_prices: pl.DataFrame,
         max_position_pct: float,
+        price_field: str = "close",
     ) -> list[dict]:
         """计算每个标的的目标订单信息（方向、金额、价格）
 
         target_weight=0 + 当前持仓 → 全部卖出（rebalancing 语义）。
         target_weight=0 + 无持仓 → 跳过（什么都不做）。
+
+        T+1 约束（P0-06）：持仓的 available_date > 当前日期时禁止卖出，
+        违反该约束的订单被跳过并记录 ORDER_SKIPPED 原因。
         """
         order_infos: list[dict] = []
         for symbol, raw_weight in target_weights.items():
@@ -209,22 +217,42 @@ class Portfolio:
             price_rows = current_prices.filter(pl.col("symbol") == symbol)
             if price_rows.is_empty():
                 continue
-            price = price_rows.select("close").to_series()[0]
+            if price_field not in price_rows.columns:
+                continue
+            price = price_rows.select(price_field).to_series()[0]
             if price is None or price <= 0:
                 continue
 
-            target_val = self.total_value * target_weight
+            # T+1 约束（P0-06）：检查当前持仓是否可卖出
+            order_type = None
             current_val = current_pos.market_value if current_pos else 0.0
-            diff_val = target_val - current_val
+            diff_val = (self.total_value * target_weight) - current_val
+            if diff_val > 0:
+                order_type = "BUY"
+            elif diff_val < 0 and current_pos is not None and current_pos.available_date is not None:
+                # 卖出前检查 T+1 约束
+                ts = price_rows.select("timestamp").to_series()[0]
+                if ts is not None and ts < current_pos.available_date:
+                        # 记录跳过原因，不生成卖出订单
+                        order_infos.append({
+                            "symbol": symbol,
+                            "order_type": "SELL",
+                            "diff_val": diff_val,
+                            "price": price,
+                            "skipped": True,
+                            "skip_reason": f"T+1 锁定：{symbol} 在 {current_pos.available_date.date()} 前不可卖出（当前 {ts.date()}）",
+                        })
+                        continue
 
             if abs(diff_val) < 1.0:
                 continue
 
-            order_type = "BUY" if diff_val > 0 else "SELL"
+            order_type = order_type or ("BUY" if diff_val > 0 else "SELL")
 
             # 买入时限制单个持仓不超过 max_position_pct
             if order_type == "BUY" and max_position_pct < 1.0:
                 max_val = self.total_value * max_position_pct
+                target_val = self.total_value * target_weight
                 if target_val > max_val:
                     target_val = max_val
                     diff_val = target_val - current_val
@@ -251,12 +279,21 @@ class Portfolio:
     ) -> list[OrderEvent]:
         """根据订单信息生成 OrderEvent，处理现金约束"""
         orders: list[OrderEvent] = []
+        skipped_reasons: list[dict] = []
         remaining_cash = self.cash
         for info in order_infos:
             symbol = info["symbol"]
             order_type = info["order_type"]
             diff_val = info["diff_val"]
             price = info["price"]
+
+            # T+1 跳过标记：卖出订单因 T+1 锁定被跳过，记录原因供审计
+            if info.get("skipped"):
+                skipped_reasons.append({
+                    "symbol": symbol,
+                    "reason": info.get("skip_reason", "T+1 locked"),
+                })
+                continue
 
             if order_type == "SELL":
                 # 卖出回笼资金计入可用现金（扣减滑点 + 佣金 + 印花税）
@@ -297,10 +334,13 @@ class Portfolio:
 
         if fill.order_type == "BUY":
             if cost > self.cash + 1e-6:
-                raise ValueError(
-                    f"现金不足: 买入 {fill.symbol} 需要 {cost:.2f}，"
-                    f"可用 {self.cash:.2f}（实际成交成本超出预估）"
+                # P2-02 + P0-04：现金不足时跳过该笔交易而非抛异常终止回测。
+                # 记录跳过并返回，引擎会记 ORDER_SKIPPED 审计事件。
+                logger.warning(
+                    f"现金不足跳过买入 {symbol}: 需要 {cost:.2f}，可用 {self.cash:.2f}"
                 )
+                self.trade_count -= 1  # 回滚 trade_count 递增
+                return
             self.cash -= cost
             pos = self.positions.setdefault(symbol, Position(symbol=symbol))
             total_cost = (
@@ -308,6 +348,10 @@ class Portfolio:
             )
             pos.shares += fill.fill_quantity
             pos.avg_cost = total_cost / pos.shares if pos.shares > 0 else 0.0
+            # T+1 设置可用日期（买入次日方可卖出，P0-06 修复）
+            if hasattr(fill, "timestamp") and fill.timestamp is not None:
+                from datetime import timedelta  # noqa: PLC0415
+                pos.available_date = fill.timestamp + timedelta(days=1)
         else:
             proceeds = fill.fill_price * fill.fill_quantity
             net_proceeds = proceeds - fill.commission - fill.stamp_duty

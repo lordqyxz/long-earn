@@ -4,8 +4,10 @@
 """
 
 import contextlib
+import math
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -16,6 +18,7 @@ from long_earn.backtest.domain.entities import (
     MarketDataEvent,
     OrderEvent,
     PerformanceMetrics,
+    SignalEvent,
 )
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.ml_strategy import TimeSeriesSplit
@@ -84,6 +87,78 @@ class EventDrivenBacktestEngine:
         # 无需透传即可写审计日志。每次 run() 开头重置。
         self._current_run_id: str = ""
         self._db_audit: Any = None
+        # T+1 信号队列：策略在 T 日产生的信号在 T+1 日以 open 价执行，
+        # 消除 T 日 close 决策 + close 成交的前视偏差（P0-05 修复）。
+        self._pending_signals: list[SignalEvent] = []
+        # 涨跌停板追踪：记录上一 bar 的 close，用于计算本 bar 的涨跌停价格（P0-07 修复）。
+        self._prev_close_map: dict[str, float] = {}
+        self._current_limit_up_map: dict[str, float] = {}
+        self._current_limit_down_map: dict[str, float] = {}
+        # metrics_unreliable 检测（P0-03）：跟踪回测过程中的退化信号
+        self._total_orders: int = 0
+        self._total_skipped: int = 0
+        self._total_partial_fills: int = 0
+
+    @staticmethod
+    def _compute_price_limits(
+        prev_close: float,
+    ) -> tuple[float, float]:
+        """计算 A 股涨跌停价格（10% 涨跌幅限制）。
+
+        Args:
+            prev_close: 前收盘价
+
+        Returns:
+            (limit_up, limit_down) 涨停价和跌停价
+        """
+        if prev_close <= 0:
+            return float("inf"), 0.0
+        return round(prev_close * 1.1, 2), round(prev_close * 0.9, 2)
+
+    def _pre_trade_check(
+        self,
+        order: Any,
+        price: float,
+        signal_trace_id: str,  # noqa: ARG002
+        db_audit: Any,  # noqa: ARG002
+    ) -> str | None:
+        """Pre-trade 单笔风控门（P0-08）：聚合多项合规检查。
+
+        在撮合前执行，返回 None 表示通过，返回字符串表示跳过原因。
+        覆盖检查项：
+          - 涨跌停板（P0-07）：涨停拒买、跌停拒卖
+          - 价格有效性：NaN / Inf / 非正数
+
+        T+1 约束（P0-06）在 Portfolio._compute_order_infos 中完成，
+        成交量限制（P0-04）在 Broker._fill_market 中完成。
+        """
+        if price is None or price <= 0 or not math.isfinite(price):
+            return f"pre_trade_price_invalid:{order.symbol} price={price}"
+
+        limit_reason = self._check_limit_up_down(
+            order.symbol, order.order_type, price
+        )
+        if limit_reason is not None:
+            return limit_reason
+
+        return None
+
+    def _check_limit_up_down(
+        self,
+        symbol: str,
+        order_type: str,
+        price: float,
+    ) -> str | None:
+        """检查涨跌停板约束。返回 None 表示通过，返回字符串表示跳过原因。"""
+        if symbol not in self._current_limit_up_map:
+            return None
+        limit_up = self._current_limit_up_map.get(symbol, float("inf"))
+        limit_down = self._current_limit_down_map.get(symbol, 0.0)
+        if order_type == "BUY" and price >= limit_up:
+            return f"涨停拒买:{symbol} price={price:.2f} >= limit_up={limit_up:.2f}"
+        if order_type == "SELL" and price <= limit_down:
+            return f"跌停拒卖:{symbol} price={price:.2f} <= limit_down={limit_down:.2f}"
+        return None
 
     # ── 主入口 ────────────────────────────────────────────────
 
@@ -113,6 +188,10 @@ class EventDrivenBacktestEngine:
         self._db_audit = self._init_db_audit(run_id)
         db_audit = self._db_audit
         run_start_ts = time.perf_counter()
+        # 重置可信度追踪计数器（P0-03）
+        self._total_orders = 0
+        self._total_skipped = 0
+        self._total_partial_fills = 0
 
         # RUN_START：记录回测配置，让审计日志能独立重建本次回测的输入参数
         self._log_audit(
@@ -173,11 +252,21 @@ class EventDrivenBacktestEngine:
                 )
 
             self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
+
+            # P0-03：判断指标是否可信
+            # 条件：订单大量被跳过（>50%）或大量部分成交，说明回测状态异常
+            metrics_unreliable = False
+            if self._total_orders > 0:
+                skip_ratio = self._total_skipped / self._total_orders
+                if skip_ratio > 0.5 or self._total_partial_fills > self._total_orders * 0.5:  # noqa: PLR2004
+                    metrics_unreliable = True
+
             result = self._build_result(
                 portfolio,
                 len(timestamps),
                 full_data,
                 benchmark_symbol,
+                metrics_unreliable=metrics_unreliable,
             )
 
             # RUN_END：记录回测结果摘要（成功/失败都要记）
@@ -268,10 +357,45 @@ class EventDrivenBacktestEngine:
 
         portfolio.update_market_values(slab)
 
+        # 更新涨跌停价格（P0-07）：基于前收盘价计算当日涨跌停限价
+        self._current_limit_up_map.clear()
+        self._current_limit_down_map.clear()
+        for row in slab.iter_rows(named=True):
+            sym = row.get("symbol", "")
+            close = row.get("close", None)
+            if sym and close is not None:
+                prev_close = self._prev_close_map.get(sym, close)
+                up, down = self._compute_price_limits(prev_close)
+                self._current_limit_up_map[sym] = up
+                self._current_limit_down_map[sym] = down
+
+        # ── T+1 信号执行：执行前一 bar 产生的 pending 信号，以当日 open 成交 ──
+        # P0-05 修复：策略基于 T 日 close 产生的信号不会在当日 close 成交，
+        # 而是进入 pending 队列，在 T+1 日以 open 价撮合，消除前视偏差。
+        if self._pending_signals:
+            pending = self._pending_signals
+            self._pending_signals = []  # 清空，防止重复执行
+            for sig in pending:
+                self._log_audit(
+                    "SIGNAL_EXECUTE_T1",
+                    str(uuid.uuid4()),
+                    sig.trace_id,
+                    "Engine",
+                    "SUCCESS",
+                    {
+                        "strategy_id": sig.strategy_id,
+                        "signals": str(sig.signals),
+                        "execute_timestamp": str(ts),
+                        "price_field": "open",
+                    },
+                    db_audit,
+                )
+                self._execute_signals(sig, portfolio, slab, broker, db_audit, price_field="open")
+
         # 检查待成交订单（限价/止损单）
         price_lookup = {}
         for sym, price in zip(
-            slab.select("symbol").to_series().to_list(),
+            slab.select("close").to_series().to_list(),
             slab.select("close").to_series().to_list(),
             strict=True,
         ):
@@ -332,7 +456,8 @@ class EventDrivenBacktestEngine:
                     },
                     db_audit,
                 )
-                self._execute_signals(signal_event, portfolio, slab, broker, db_audit)
+                # P0-05 修复：信号不立即执行，入队等待 T+1 日以 open 价撮合
+                self._pending_signals.append(signal_event)
         else:
             # G13: 风控触发时策略被跳过，记录"本应产生信号但被风控抑制"
             self._log_audit(
@@ -348,6 +473,13 @@ class EventDrivenBacktestEngine:
         # Bar 末尾：记录净值曲线（反映所有交易和市值变动后的终值）
         portfolio.update_market_values(slab)
         portfolio._sync_equity_curve()
+
+        # 更新前收盘价（P0-07），供下一 bar 计算涨跌停限价
+        for row in slab.iter_rows(named=True):
+            sym = row.get("symbol", "")
+            close = row.get("close", None)
+            if sym and close is not None:
+                self._prev_close_map[sym] = float(close)
 
     # ── 风控检查 ──────────────────────────────────────────────
 
@@ -500,18 +632,41 @@ class EventDrivenBacktestEngine:
 
     # ── 信号执行 ──────────────────────────────────────────────
 
-    def _execute_signals(
+    def _execute_signals(  # noqa: PLR0913
         self,
         signal_event: Any,
         portfolio: Portfolio,
         slab: pl.DataFrame,
         broker: Broker,
         db_audit: Any,
+        price_field: str = "close",
     ) -> None:
         orders = portfolio.process_signal(
-            signal_event, slab, self.max_positions, self.max_position_pct
+            signal_event,
+            slab,
+            self.max_positions,
+            self.max_position_pct,
+            price_field=price_field,
         )
+        # T+1 跳过订单记录：portfolio 将 T+1 锁定的卖出订单标记为 skipped，
+        # 由引擎统一记 ORDER_SKIPPED 审计事件（P0-06 修复）。
+        for skipped in portfolio._last_skipped_orders:
+            self._total_skipped += 1
+            self._log_audit(
+                "ORDER_SKIPPED",
+                str(uuid.uuid4()),
+                signal_event.trace_id,
+                "Portfolio",
+                "SKIPPED",
+                {
+                    "symbol": skipped["symbol"],
+                    "reason": skipped.get("skip_reason", "T+1 locked"),
+                },
+                db_audit,
+            )
+        portfolio._last_skipped_orders = []
         for order in orders:
+            self._total_orders += 1
             self._log_audit(
                 "ORDER",
                 order.trace_id,
@@ -526,8 +681,9 @@ class EventDrivenBacktestEngine:
                 db_audit,
             )
 
-            price = self._lookup_price(slab, order.symbol)
+            price = self._lookup_price(slab, order.symbol, field=price_field)
             if price is None:
+                self._total_skipped += 1
                 # G3: 订单因找不到价格被静默跳过，必须审计
                 self._log_audit(
                     "ORDER_SKIPPED",
@@ -545,8 +701,35 @@ class EventDrivenBacktestEngine:
                 )
                 continue
 
-            fill = broker.execute_order(order, price)
+            # Pre-trade 单笔风控（P0-08）：聚合涨跌停板、价格有效性等检查
+            pre_trade_reason = self._pre_trade_check(
+                order, price, signal_event.trace_id, db_audit
+            )
+            if pre_trade_reason is not None:
+                self._total_skipped += 1
+                self._log_audit(
+                    "ORDER_SKIPPED",
+                    str(uuid.uuid4()),
+                    order.trace_id,
+                    "Engine",
+                    "SKIPPED",
+                    {
+                        "symbol": order.symbol,
+                        "order_type": order.order_type,
+                        "quantity": order.quantity,
+                        "reason": pre_trade_reason,
+                    },
+                    db_audit,
+                )
+                continue
+
+            # 获取当日成交量（用于成交量参与率限制，P0-04）
+            daily_volume = self._lookup_price(slab, order.symbol, field="volume") or 0.0
+
+            fill = broker.execute_order(order, price, daily_volume=daily_volume)
             portfolio.update_from_fill(fill)
+            if fill.partial_fill:
+                self._total_partial_fills += 1
 
             self._log_audit(
                 "FILL",
@@ -559,6 +742,7 @@ class EventDrivenBacktestEngine:
                     "type": fill.order_type,
                     "price": fill.fill_price,
                     "quantity": fill.fill_quantity,
+                    "partial_fill": fill.partial_fill,
                     "portfolio_value": portfolio.total_value,
                 },
                 db_audit,
@@ -576,16 +760,19 @@ class EventDrivenBacktestEngine:
         payload: dict[str, Any],
         db_audit: Any,
         latency_ms: float | None = None,
+        timestamp: datetime | None = None,
     ) -> None:
         """记录审计事件。
 
         审计要求（docs/research/agent-framework-selection-2026.md:40）：
-        "每一步状态必须可追溯、可重放"。因此 run_id / latency_ms 也写入
+        "每一步状态必须可追溯、可重放"。因此 run_id / latency_ms / timestamp 也写入
         InMemoryAuditTrail，保证内存审计与 DuckDB 审计字段一致。
         """
         run_id = self._current_run_id
+        ts = timestamp or datetime.now()
         entry = {
             "run_id": run_id,
+            "timestamp": ts,
             "event_type": event_type,
             "trace_id": trace_id,
             "parent_id": parent_id,
@@ -603,6 +790,7 @@ class EventDrivenBacktestEngine:
                 status=status,
                 payload=payload,
                 parent_id=parent_id,
+                timestamp=ts,
                 latency_ms=latency_ms,
             )
 
@@ -627,6 +815,7 @@ class EventDrivenBacktestEngine:
         trading_days: int,
         full_data: pl.DataFrame | None = None,
         benchmark_symbol: str = "",
+        metrics_unreliable: bool = False,
     ) -> BacktestResult:
         # 数据可信度门槛：交易日数 / equity_curve 长度不足时拒绝输出指标，
         # 防止把"全程持仓未变 → 零收益"误标为成功的回测结果。
@@ -687,6 +876,7 @@ class EventDrivenBacktestEngine:
             ],
             trade_count=portfolio.trade_count,
             attribution=dict(portfolio.pnl_by_symbol),
+            metrics_unreliable=metrics_unreliable,
         )
 
     @staticmethod
