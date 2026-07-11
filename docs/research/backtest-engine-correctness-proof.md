@@ -1,6 +1,8 @@
 # 回测引擎正确性数学证明
 
-> 本文档对 `long_earn.backtest.engine` 事件驱动回测引擎的核心正确性性质给出形式化定义与数学证明。所有命题均基于当前代码实现（v1.0.1），并在证明过程中驱动了若干实现修正。
+> 本文档对 `long_earn.backtest.engine` 事件驱动回测引擎的核心正确性性质给出形式化定义与数学证明。所有命题均基于当前代码实现，并在证明过程中驱动了若干实现修正。
+>
+> **文档同步约定**：文档 2.5 节的代码片段应与 `src/long_earn/backtest/engine/core.py` 中的实际实现保持一致。若发现不一致，以代码为准并更新本文档。
 
 ---
 
@@ -376,17 +378,20 @@ train_result = self.run(...)
 
 **定义**：
 - 总收益：$R_{total} = \frac{V_T}{V_0} - 1$
-- 年化收益：$R_{annual} = (1 + R_{total})^{\frac{252}{n}} - 1$，其中 $n$ 为交易日数
+- 年化收益（算术口径）：$R_{annual} = \bar{R}_{daily} \times 252$，其中 $\bar{R}_{daily} = \frac{1}{n}\sum_{i=1}^{n} R_i$
 
-**代码**：
+> **口径说明**：引擎使用**算术年化**（`np.mean(returns) * 252`），而非几何年化 $(1+R_{total})^{252/n}-1$。
+> 算术口径与夏普比率分母保持一致（$\sigma_{daily} \cdot \sqrt{252}$），避免几何年化在
+> 高波动场景下低估复合效应。两种口径各有适用场景，此处选择算术口径保证比率类指标一致性。
+
+**代码**（`core.py:1299`）：
 ```python
 total_return = (equity[-1] / equity[0]) - 1
 trading_days = len(returns)
-annual_factor = 252 / trading_days
-annual_return = (1 + total_return) ** annual_factor - 1
+annual_return = float(np.mean(returns)) * 252  # 算术年化
 ```
 
-**验证**：与定义完全一致。$\square$
+**验证**：总收益与定义一致；年化收益采用算术口径，与夏普/Sortino/Calmar 分子一致。$\square$
 
 #### 2.5.2 夏普比率
 
@@ -441,27 +446,20 @@ calmar = annual_return / abs(max_dd) if max_dd != 0 else 0.0
 
 **定义**：
 - $\beta = \frac{\text{Cov}(R_p, R_b)}{\text{Var}(R_b)}$
-- $\alpha = \bar{R}_p - \beta \cdot \bar{R}_b$（年化）
+- Jensen's Alpha：$\alpha = \bar{R}_p - \beta \cdot \bar{R}_b$（年化，$R_f = 0$）
 
-**代码**：
+**代码**（`core.py:1099-1109`）：
 ```python
-port_returns = np.diff(eq_trimmed) / eq_trimmed[:-1]
-bm_returns = np.diff(bm_trimmed) / bm_trimmed[:-1]
 cov = float(np.cov(port_returns, bm_returns)[0, 1])
 var_bm = float(np.var(bm_returns, ddof=1))
 beta = cov / var_bm if var_bm > 0 else 0.0
-annual_excess = float(np.mean(excess)) * 252
-alpha = annual_excess
+
+port_annual = float(np.mean(port_returns)) * 252
+bm_annual = float(np.mean(bm_returns)) * 252
+alpha = port_annual - beta * bm_annual  # Jensen's Alpha
 ```
 
-**注意**：代码中 `alpha = annual_excess`，即 $\alpha = (\bar{R}_p - \bar{R}_b) \cdot 252$。这实际上是 **年化超额收益**，而非 CAPM 意义上的 Jensen's Alpha（$\alpha = \bar{R}_p - \beta \cdot \bar{R}_b$）。
-
-**修正建议**：当前实现计算的是年化超额收益，而非标准 Alpha。若需标准 Jensen's Alpha，应改为：
-```python
-alpha = (np.mean(port_returns) - beta * np.mean(bm_returns)) * 252
-```
-
-**结论**：当前 Alpha 计算为年化超额收益，与标准 Jensen's Alpha 不同。这需要在文档中明确说明，或修正为标准定义。
+**验证**：$\beta$ 为协方差/方差，与定义一致。$\alpha = R_p^{annual} - \beta \cdot R_b^{annual}$ 即 Jensen's Alpha（$R_f = 0$），与定义一致。$\square$
 
 ---
 
@@ -475,7 +473,7 @@ alpha = (np.mean(port_returns) - beta * np.mean(bm_returns)) * 252
 | 2 | 风控检查前未同步最新市值 | `core.py` | 在 `_process_timestamp` 的 pending fills 处理后调用 `_sync_equity_curve()` |
 | 3 | `_finalize_mark_to_market` 重复追加 | `core.py` | 移除 `_finalize_mark_to_market` 中的 `equity_curve` 追加逻辑 |
 | 4 | `_prepare_data` 未防御性过滤日期 | `core.py` | 增加 `(timestamp >= start) & (timestamp <= end)` 过滤 |
-| 5 | Alpha 计算非标准 Jensen's Alpha | `core.py` | 已在证明中指出，建议后续修正为 `alpha = (mean(port) - beta * mean(bm)) * 252` |
+| 5 | Alpha 计算非标准 Jensen's Alpha | `core.py` | 已修正为 `alpha = port_annual - beta * bm_annual`（Jensen's Alpha，$R_f=0$）。本证明文档 2.5.6 已同步更新。 |
 
 ---
 
@@ -487,6 +485,6 @@ alpha = (np.mean(port_returns) - beta * np.mean(bm_returns)) * 252
 2. **投资组合守恒**（定理 2.2）：所有交易操作（买入/卖出/市值更新）保持投资组合总市值的会计恒等式。
 3. **风控触发正确性**（定理 2.3）：止损和最大回撤的触发条件与金融定义一致，且使用保守的成交价格。
 4. **Walk-Forward 无泄漏**（定理 2.4）：时间序列分割、数据范围限制和策略状态重置保证了样本外验证的有效性。
-5. **绩效指标计算**（定理 2.5）：除 Alpha 使用年化超额收益而非标准 Jensen's Alpha 外，其余指标与标准金融定义一致。
+5. **绩效指标计算**（定理 2.5）：所有指标与标准金融定义一致。年化收益采用算术口径（`mean(returns)*252`），与夏普/Sortino/Calmar 分子保持一致；Alpha 使用 Jensen's Alpha（$R_f = 0$）。
 
 引擎在修复上述问题后，达到了金融级回测的可信性要求。

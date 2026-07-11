@@ -186,11 +186,9 @@
 
 ### 引擎
 
-- [~] **AUDIT-P1-19** 正确性证明文档与代码脱节 — 部分完成
+- [x] **AUDIT-P1-19** 正确性证明文档与代码脱节 — 已修复
   - 位置：`docs/research/backtest-engine-correctness-proof.md`
-  - 已完成：文档存在，头部声明"基于当前代码实现（v1.0.1）"。
-  - 未完成：(1) 文档 2.5.1 写 `annual_return = (1 + total_return) ** annual_factor - 1`（几何年化），而代码 `core.py:1283 annual_return = float(np.mean(returns)) * 252`（算术年化）— **直接矛盾**；(2) 文档 2.5.6 自承"Alpha 计算非标准 Jensen's Alpha"，代码 `core.py:1093 alpha = port_annual - beta * bm_annual` 未修正；(3) 无 commit hash 校验机制，无 CI 校验文档代码片段与源码一致。
-  - 修复：同步文档与代码；CI 校验文档代码片段与源码一致，或文档顶部声明对应 commit hash。
+  - 修复：(1) 2.5.1 年化口径从几何年化 `(1+R)^{252/n}-1` 修正为算术年化 `mean(returns)*252`，与代码 `core.py:1299` 一致；(2) 2.5.6 Alpha 从"年化超额收益"修正为 Jensen's Alpha `port_annual - beta*bm_annual`，与代码 `core.py:1109` 一致；(3) 顶部新增文档同步约定声明。
 
 ---
 
