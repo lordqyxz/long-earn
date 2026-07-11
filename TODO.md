@@ -262,13 +262,13 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
   - 位置：`causality.py:54-58` 仅置 NaN
   - 修复：补充极端值（1e308）、负数、随机大数扰动，检测 `fill_null(0)` 类隐藏泄漏。
 
-- [ ] **AUDIT-P2-13** query_events 的 key 拼接存在 SQL 注入风险
-  - 位置：`audit.py:86-88`
-  - 修复：对 `filters` 的 key 做白名单校验。
+- [x] **AUDIT-P2-13** query_events 的 key 拼接存在 SQL 注入风险 — 已修复
+  - 位置：`src/long_earn/backtest/engine/audit.py`（`_QUERY_FILTER_WHITELIST` 白名单 + ValueError 拒绝非白名单 key）
+  - 修复：对 `filters` 的 key 做白名单校验（event_type/trace_id/parent_id/component/status/latency_ms）。测试：`test_duckdb_audit.py`。
 
-- [ ] **AUDIT-P2-14** DuckDB 单连接非线程安全
-  - 位置：`audit.py:19`
-  - 修复：并行/异步场景使用连接池或每线程独立连接。
+- [x] **AUDIT-P2-14** DuckDB 单连接非线程安全 — 已修复
+  - 位置：`src/long_earn/backtest/engine/audit.py`（`threading.Lock` 保护所有 DuckDB 连接访问）
+  - 修复：所有 DuckDB 连接访问（`_init_db`/`log_event`/`query_events`/`get_causal_chain`/`close`）通过 `self._lock` 串行化。测试：`test_duckdb_audit.py`（4 线程并发写 20 条 + 并发读写）。
 
 - [ ] **AUDIT-P2-15** 使用真实交易日历替代 freq="B"
   - 修复：使用 `exchange_calendars` 的 XSHG 日历。
