@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -152,4 +151,4 @@ def test_filter_all_rejected_marks_metrics_unreliable(mock_data_provider):
     engine = EventDrivenBacktestEngine(data_provider=provider, cost_config=cost)
     result = engine.run(_SimpleBuyStrategy(), "2024-01-01", "2024-01-22", ["A.SZ"])
     assert result.success
-    # 不抛异常即可；metrics_unreliable 标记由上层决策
+    assert result.metrics_unreliable, "成交量限制导致大量部分成交时应标记 metrics_unreliable=True"

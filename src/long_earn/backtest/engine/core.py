@@ -406,7 +406,7 @@ class EventDrivenBacktestEngine:
         # 检查待成交订单（限价/止损单）
         price_lookup = {}
         for sym, price in zip(
-            slab.select("close").to_series().to_list(),
+            slab.select("symbol").to_series().to_list(),
             slab.select("close").to_series().to_list(),
             strict=True,
         ):
@@ -522,6 +522,9 @@ class EventDrivenBacktestEngine:
         assert self.take_profit is not None
         triggered = False
         for symbol, pos in list(portfolio.positions.items()):
+            # T+1 锁定：当日买入不可被风控卖出（P0-06）
+            if pos.available_date is not None and ts < pos.available_date:
+                continue
             high_price = self._lookup_price(slab, symbol, field="high")
             close_price = self._lookup_price(slab, symbol, field="close")
             check_price = high_price if (high_price and high_price > 0) else close_price
@@ -576,6 +579,9 @@ class EventDrivenBacktestEngine:
         assert self.stop_loss is not None
         triggered = False
         for symbol, pos in list(portfolio.positions.items()):
+            # T+1 锁定：当日买入不可被风控卖出（P0-06）
+            if pos.available_date is not None and ts < pos.available_date:
+                continue
             # 触发判断：用日内最低价确认是否触及止损线（真实止损单监控盘中价格）
             low_price = self._lookup_price(slab, symbol, field="low")
             close_price = self._lookup_price(slab, symbol, field="close")
@@ -670,6 +676,9 @@ class EventDrivenBacktestEngine:
         )
 
         for symbol, pos in list(portfolio.positions.items()):
+            # T+1 锁定：当日买入不可被风控卖出（P0-06）
+            if pos.available_date is not None and ts < pos.available_date:
+                continue
             price = self._lookup_price(slab, symbol)
             if price is not None:
                 order = OrderEvent(

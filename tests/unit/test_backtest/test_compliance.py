@@ -16,12 +16,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import polars as pl
-import pytest
 
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
-from long_earn.backtest.engine.portfolio import Portfolio
-from long_earn.backtest.domain.entities import FillEvent
 
 
 def _trending_panel(
@@ -171,40 +168,43 @@ def _limit_panel(days: int = 10) -> pl.DataFrame:
 
 
 def test_limit_up_blocks_buy(mock_data_provider):
-    """涨停板：涨停日买入订单被 ORDER_SKIPPED。"""
-    panel = _limit_panel(days=10)
-    provider = mock_data_provider(panel)
+    """涨停板：涨停日买入订单被 ORDER_SKIPPED。
 
-    class _BuyAtLimitUp:
-        def __init__(self):
-            self._state: dict = {}
-            self._step = 0
-            self.strategy_id = "limit_test"
+    直接测试 _check_limit_up_down 逻辑，绕过 T+1 延迟影响。
+    """
+    from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 
-        def init(self):
-            self._step = 0
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    # 手动设置涨跌停限价
+    engine._current_limit_up_map["A.SZ"] = 10.5
+    engine._current_limit_down_map["A.SZ"] = 8.5
 
-        def on_bar(self, bars, context=None):
-            from long_earn.backtest.domain.entities import SignalEvent
+    # 价格 11.0 >= 涨停价 10.5，应拒绝
+    reason = engine._check_limit_up_down("A.SZ", "BUY", 11.0)
+    assert reason is not None, "涨停价之上买入应被拒绝"
+    assert "涨停" in reason, f"拒绝原因应包含'涨停': {reason}"
 
-            self._step += 1
-            if self._step == 3:
-                return SignalEvent(
-                    timestamp=bars["timestamp"][0],
-                    trace_id="trace-buy-limit",
-                    event_id="sig-buy-limit",
-                    signals={"A.SZ": 1.0},
-                    strategy_id="limit_test",
-                )
-            return None
+    # 价格 10.0 < 涨停价 10.5，应通过
+    reason2 = engine._check_limit_up_down("A.SZ", "BUY", 10.0)
+    assert reason2 is None, "涨停价之下买入应通过"
 
-    engine = EventDrivenBacktestEngine(data_provider=provider)
-    result = engine.run(_BuyAtLimitUp(), "2024-01-01", "2024-01-10", ["A.SZ"])
 
-    trail = engine.audit_logger.get_full_trail()
-    skipped = [e for e in trail if e.get("event_type") == "ORDER_SKIPPED"]
-    limit_skipped = [e for e in skipped if "涨停" in str(e.get("payload", {}))]
-    assert len(limit_skipped) >= 0
+def test_limit_down_blocks_sell(mock_data_provider):
+    """跌停板：跌停日卖出订单被 ORDER_SKIPPED。"""
+    from long_earn.backtest.engine.core import EventDrivenBacktestEngine
+
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    engine._current_limit_up_map["A.SZ"] = 11.0
+    engine._current_limit_down_map["A.SZ"] = 9.0
+
+    # 价格 8.5 <= 跌停价 9.0，应拒绝
+    reason = engine._check_limit_up_down("A.SZ", "SELL", 8.5)
+    assert reason is not None, "跌停价之下卖出应被拒绝"
+    assert "跌停" in reason, f"拒绝原因应包含'跌停': {reason}"
+
+    # 价格 9.5 > 跌停价 9.0，应通过
+    reason2 = engine._check_limit_up_down("A.SZ", "SELL", 9.5)
+    assert reason2 is None, "跌停价之上卖出应通过"
 
 
 # ── 过户费（P1-03）─────────────────────────────────────────────
@@ -268,11 +268,11 @@ def test_transfer_fee_both_sides():
 
 
 def test_volume_participation_limit(mock_data_provider):
-    """成交量限制：大单应被限制为日成交量的 10%。"""
+    """成交量限制：大单应被限制为日成交量的 5%。"""
     panel = _trending_panel(days=5)
     provider = mock_data_provider(panel)
 
-    # 设置低成交量参与率
+    # 设置低成交量参与率 5%
     cost = TradingCostConfig(max_volume_participation=0.05)
     engine = EventDrivenBacktestEngine(data_provider=provider, cost_config=cost)
 
@@ -305,9 +305,13 @@ def test_volume_participation_limit(mock_data_provider):
     # 验证成交量限制后的部分成交记录
     trail = engine.audit_logger.get_full_trail()
     fills = [e for e in trail if e.get("event_type") == "FILL"]
+    assert len(fills) >= 1, "至少有一次成交"
+
+    # 大资金(100万) * 100% 仓位买入，volume=100000, price≈10,
+    # max_qty = 100000 * 0.05 = 5000, order_qty = 1000000/10 = 100000
+    # fill_qty = min(100000, 5000) = 5000 → partial_fill=True
     partial_fills = [f for f in fills if f.get("payload", {}).get("partial_fill")]
-    # 至少有一次成交，部分成交可能发生也可能不发生（取决于 total_value 与 volume 的关系）
-    assert len(fills) >= 0
+    assert len(partial_fills) >= 1, "大单应被部分成交"
 
 
 # ── 止盈（P1-05）─────────────────────────────────────────────

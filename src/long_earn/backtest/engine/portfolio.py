@@ -124,7 +124,7 @@ class Portfolio:
         candidate = min(rate_branch, min_branch)
         return max(0.0, candidate)
 
-    def process_signal(
+    def process_signal(  # noqa: PLR0913
         self,
         event: SignalEvent,
         current_prices: pl.DataFrame,
@@ -170,7 +170,7 @@ class Portfolio:
 
         # 换手率限制（P1-06）：计算 sum(|diff_val|) / total_value，超过时等比缩放
         if max_turnover is not None and max_turnover > 0 and order_infos:
-            total_turnover_val = sum(abs(o.get("diff_val", 0.0)) for o in order_infos)
+            total_turnover_val = sum(abs(o.get("diff_val", 0.0)) for o in order_infos if not o.get("skipped"))
             if total_turnover_val > 0:
                 turnover_rate = total_turnover_val / self.total_value
                 if turnover_rate > max_turnover:
@@ -194,7 +194,8 @@ class Portfolio:
         new_symbols = [s for s in target_weights if s not in self.positions]
         available = max_positions - current_count
         if available <= 0:
-            return {}  # 已满仓，不开新仓
+            # 已满仓：保留已有持仓的目标权重（允许卖出/调仓），仅阻止新标的
+            return {s: w for s, w in target_weights.items() if s in self.positions}
         if len(new_symbols) > available:
             new_sorted = sorted(
                 new_symbols, key=lambda s: target_weights.get(s, 0), reverse=True
@@ -368,7 +369,7 @@ class Portfolio:
                 pos.available_date = fill.timestamp + timedelta(days=1)
         else:
             proceeds = fill.fill_price * fill.fill_quantity
-            net_proceeds = proceeds - fill.commission - fill.stamp_duty
+            net_proceeds = proceeds - fill.commission - fill.stamp_duty - getattr(fill, "transfer_fee", 0.0)
             self.cash += net_proceeds
             if symbol in self.positions:
                 pos = self.positions[symbol]
