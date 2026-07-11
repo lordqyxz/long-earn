@@ -329,7 +329,7 @@ class Portfolio:
     def update_from_fill(self, fill: FillEvent) -> None:
         """根据成交记录更新持仓和现金"""
         symbol = fill.symbol
-        cost = fill.fill_price * fill.fill_quantity + fill.commission + fill.stamp_duty
+        cost = fill.fill_price * fill.fill_quantity + fill.commission + fill.stamp_duty + getattr(fill, "transfer_fee", 0.0)
         self.trade_count += 1
 
         if fill.order_type == "BUY":

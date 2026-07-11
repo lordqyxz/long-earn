@@ -69,6 +69,7 @@ class EventDrivenBacktestEngine:
         cost_config: TradingCostConfig | None = None,
         audit_provider: Any = None,
         stop_loss: float | None = None,
+        take_profit: float | None = None,
         max_drawdown_limit: float | None = None,
         max_position_pct: float = 1.0,
         max_positions: int = 0,
@@ -80,6 +81,7 @@ class EventDrivenBacktestEngine:
         self.audit_provider = audit_provider
         self.audit_logger = audit_logger or InMemoryAuditTrail()
         self.stop_loss = stop_loss
+        self.take_profit = take_profit
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
         self.max_positions = max_positions
@@ -121,6 +123,7 @@ class EventDrivenBacktestEngine:
         price: float,
         signal_trace_id: str,  # noqa: ARG002
         db_audit: Any,  # noqa: ARG002
+        slab: pl.DataFrame | None = None,
     ) -> str | None:
         """Pre-trade 单笔风控门（P0-08）：聚合多项合规检查。
 
@@ -128,6 +131,7 @@ class EventDrivenBacktestEngine:
         覆盖检查项：
           - 涨跌停板（P0-07）：涨停拒买、跌停拒卖
           - 价格有效性：NaN / Inf / 非正数
+          - 停牌检查（P1-09）：成交量为 0 时视为停牌，禁止交易
 
         T+1 约束（P0-06）在 Portfolio._compute_order_infos 中完成，
         成交量限制（P0-04）在 Broker._fill_market 中完成。
@@ -140,6 +144,12 @@ class EventDrivenBacktestEngine:
         )
         if limit_reason is not None:
             return limit_reason
+
+        # 停牌检查（P1-09）：成交量 = 0 时视为停牌
+        if slab is not None:
+            volume = self._lookup_price(slab, order.symbol, field="volume")
+            if volume is not None and volume == 0:
+                return f"停牌拒单:{order.symbol} 当日成交量为 0（疑似停牌）"
 
         return None
 
@@ -490,12 +500,69 @@ class EventDrivenBacktestEngine:
         ts: Any,
         broker: Broker,
     ) -> bool:
-        """执行止损 + 最大回撤检查，返回是否触发风控"""
+        """执行止损 + 止盈 + 最大回撤检查，返回是否触发风控"""
         triggered = False
         if self.stop_loss is not None:
             triggered = self._check_stop_loss(portfolio, slab, ts, broker)
+        if self.take_profit is not None and not triggered:
+            triggered = self._check_take_profit(portfolio, slab, ts, broker)
         if self.max_drawdown_limit is not None and not triggered:
             triggered = self._check_max_drawdown(portfolio, slab, ts, broker)
+        return triggered
+
+    def _check_take_profit(
+        self,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        ts: Any,
+        broker: Broker,
+    ) -> bool:
+        """止盈检查（P1-05）：持仓盈利超过 take_profit 阈值时强制卖出。"""
+        assert self.take_profit is not None
+        triggered = False
+        for symbol, pos in list(portfolio.positions.items()):
+            high_price = self._lookup_price(slab, symbol, field="high")
+            close_price = self._lookup_price(slab, symbol, field="close")
+            check_price = high_price if (high_price and high_price > 0) else close_price
+            if check_price is None or check_price <= 0:
+                continue
+
+            pnl_pct = (
+                (check_price - pos.avg_cost) / pos.avg_cost if pos.avg_cost > 0 else 0.0
+            )
+            if pnl_pct < self.take_profit:
+                continue
+
+            self._log_audit(
+                "RISK_TRIGGER",
+                str(uuid.uuid4()),
+                None,
+                "RiskControl",
+                "WARNING",
+                {
+                    "risk_type": "take_profit",
+                    "symbol": symbol,
+                    "avg_cost": pos.avg_cost,
+                    "check_price": check_price,
+                    "pnl_pct": pnl_pct,
+                    "take_profit_threshold": self.take_profit,
+                    "quantity": pos.shares,
+                    "timestamp": str(ts),
+                },
+                self._db_audit,
+            )
+            order = OrderEvent(
+                timestamp=ts,
+                trace_id=str(uuid.uuid4()),
+                event_id=f"tp_{ts.isoformat()}_{symbol}",
+                symbol=symbol,
+                order_type="SELL",
+                quantity=pos.shares,
+                price=check_price,
+            )
+            fill = broker.execute_order(order, check_price)
+            portfolio.update_from_fill(fill)
+            triggered = True
         return triggered
 
     def _check_stop_loss(
@@ -703,7 +770,7 @@ class EventDrivenBacktestEngine:
 
             # Pre-trade 单笔风控（P0-08）：聚合涨跌停板、价格有效性等检查
             pre_trade_reason = self._pre_trade_check(
-                order, price, signal_event.trace_id, db_audit
+                order, price, signal_event.trace_id, db_audit, slab=slab
             )
             if pre_trade_reason is not None:
                 self._total_skipped += 1
@@ -781,18 +848,24 @@ class EventDrivenBacktestEngine:
             "payload": payload,
             "latency_ms": latency_ms,
         }
-        self.audit_logger.log_transition(**entry)
+        try:
+            self.audit_logger.log_transition(**entry)
+        except Exception:
+            logger.warning("InMemoryAuditTrail 写入失败，已降级（审计不阻断主流程）")
         if db_audit:
-            db_audit.log_transition(
-                event_type=event_type,
-                trace_id=trace_id,
-                component=component,
-                status=status,
-                payload=payload,
-                parent_id=parent_id,
-                timestamp=ts,
-                latency_ms=latency_ms,
-            )
+            try:
+                db_audit.log_transition(
+                    event_type=event_type,
+                    trace_id=trace_id,
+                    component=component,
+                    status=status,
+                    payload=payload,
+                    parent_id=parent_id,
+                    timestamp=ts,
+                    latency_ms=latency_ms,
+                )
+            except Exception:
+                logger.warning("DuckDB 审计写入失败，已降级（审计不阻断主流程）")
 
     # ── 最终处理 ──────────────────────────────────────────────
 

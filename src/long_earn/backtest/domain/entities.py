@@ -162,6 +162,7 @@ class FillEvent(Event):
     slippage: float
     stamp_duty: float
     partial_fill: bool = False  # P0-04：是否部分成交（受成交量限制）
+    transfer_fee: float = 0.0  # P1-03：过户费（沪市双向万分之 0.1）
 
 
 # ── 持仓与交易实体 ──────────────────────────────────────────────────────

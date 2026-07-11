@@ -37,6 +37,7 @@ class TradingCostConfig:
     min_commission: float = 5.0  # 最低 5 元/单（A 股券商行规）
     max_volume_participation: float = 0.1  # 单笔不超过日成交量的 10%（P0-04）
     impact_cost_k: float = 0.01  # 平方根冲击模型系数
+    transfer_fee_rate: float = 0.00001  # 过户费（沪市双向万分之 0.1，P1-03）
 
     @property
     def slippage_rate(self) -> float:
@@ -243,6 +244,11 @@ class Broker:
         if order.order_type == "SELL":
             stamp_duty = amount * self.cost_config.stamp_duty
 
+        # 过户费（P1-03）：沪市（.SH）双向征收，深市不收
+        transfer_fee = 0.0
+        if order.symbol.upper().endswith(".SH"):
+            transfer_fee = amount * self.cost_config.transfer_fee_rate
+
         fill = FillEvent(
             timestamp=order.timestamp,
             trace_id=str(uuid.uuid4()),
@@ -256,6 +262,7 @@ class Broker:
             slippage=abs(fill_price - current_price) * fill_qty,
             stamp_duty=stamp_duty,
             partial_fill=partial_fill,
+            transfer_fee=transfer_fee,
         )
 
         self._cancel_oco_siblings(order)
@@ -302,6 +309,11 @@ class Broker:
         if order.order_type == "SELL":
             stamp_duty = amount * self.cost_config.stamp_duty
 
+        # 过户费（P1-03）：沪市双向征收
+        transfer_fee = 0.0
+        if order.symbol.upper().endswith(".SH"):
+            transfer_fee = amount * self.cost_config.transfer_fee_rate
+
         return FillEvent(
             timestamp=order.timestamp,
             trace_id=str(uuid.uuid4()),
@@ -314,6 +326,7 @@ class Broker:
             commission=commission,
             slippage=abs(fill_price - current_price) * order.quantity,
             stamp_duty=stamp_duty,
+            transfer_fee=transfer_fee,
         )
 
     @staticmethod
