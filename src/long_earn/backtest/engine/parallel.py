@@ -465,6 +465,7 @@ class ParallelRunner:
         fold_results: list[dict[str, Any]] = []
         all_train_metrics: list[dict[str, float]] = []
         all_test_metrics: list[dict[str, float]] = []
+        failed_folds: list[dict[str, Any]] = []
 
         outcome_map = {o.task_id: o for o in outcomes}
         for fold_idx in range(n_splits):
@@ -480,6 +481,16 @@ class ParallelRunner:
                     "max_drawdown": train_o.max_drawdown,
                 }
                 all_train_metrics.append(train_metrics)
+            else:
+                # P2-05：记录失败 fold，与 core.py:walk_forward_run 对齐
+                failed_folds.append(
+                    {
+                        "fold_id": fold_idx,
+                        "phase": "train",
+                        "error_category": (train_o.error_category if train_o else "missing"),
+                        "message": (train_o.error if train_o else "worker 未返回结果"),
+                    }
+                )
             if test_o and test_o.success:
                 test_metrics = {
                     "total_return": test_o.total_return,
@@ -487,6 +498,15 @@ class ParallelRunner:
                     "max_drawdown": test_o.max_drawdown,
                 }
                 all_test_metrics.append(test_metrics)
+            else:
+                failed_folds.append(
+                    {
+                        "fold_id": fold_idx,
+                        "phase": "test",
+                        "error_category": (test_o.error_category if test_o else "missing"),
+                        "message": (test_o.error if test_o else "worker 未返回结果"),
+                    }
+                )
 
             fold_results.append(
                 {
@@ -510,6 +530,7 @@ class ParallelRunner:
                 "test": _avg(all_test_metrics),
             },
             "n_splits": n_splits,
+            "failed_folds": failed_folds,
         }
 
     def _execute_tasks(self, tasks: list[BacktestTask]) -> list[BacktestOutcome]:

@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.operators import get_operator
 from long_earn.backtest.operators.base import Operator, OperatorParams
@@ -96,8 +97,13 @@ class OperatorStrategyExecutor:
         self.signal_specs = signal_specs
 
     def execute(self, panel: pl.DataFrame, current_timestamp: datetime) -> list[str]:
-        """执行算子链，返回当前时刻选中的 symbol 列表。"""
+        """执行算子链，返回当前时刻选中的 symbol 列表。
+
+        P2-01：filter 结果使 selected_df 变为 0 时记录 failure 日志，
+        与表达式路径对齐（服务层 _equal_weights 也会记 step_failures）。
+        """
         if panel.height == 0:
+            logger.debug("OperatorStrategyExecutor: 输入面板为空，无选中标的")
             return []
 
         enriched = panel
@@ -113,11 +119,19 @@ class OperatorStrategyExecutor:
             selected_df = _apply_signal_result(selected_df, result)
 
         if selected_df.height == 0:
+            logger.warning(
+                "OperatorStrategyExecutor: signal 算子过滤后 selected_df 为空"
+                f"（timestamp={current_timestamp}），记录 failure"
+            )
             return []
 
         # 3) 取当前时刻截面 → 选中标的
         cross = selected_df.filter(pl.col("timestamp") == current_timestamp)
         if cross.height == 0:
+            logger.warning(
+                "OperatorStrategyExecutor: 当前时刻截面无选中标的"
+                f"（timestamp={current_timestamp}），可能数据未覆盖该时刻"
+            )
             return []
         return cross["symbol"].unique().to_list()
 

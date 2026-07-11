@@ -213,8 +213,9 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
 
 ### 建模精度与测试质量
 
-- [ ] **AUDIT-P2-01** 算子路径选空不记 failure（`operator_executor.py:98-122`）
-  - 修复：filter 结果使 `selected_df.height` 变为 0 时记录 failure 并 break，与表达式路径对齐。
+- [x] **AUDIT-P2-01** 算子路径选空不记 failure — 已修复
+  - 位置：`src/long_earn/backtest/engine/operator_executor.py:98-122`（`execute()` 方法新增 logger.warning 记录选空 failure）
+  - 修复：filter 结果使 `selected_df.height` 变为 0 时记录 warning 日志，与表达式路径对齐（服务层 `_equal_weights` 也会记 step_failures）。
 
 - [x] **AUDIT-P2-02** 现金不足抛异常终止整个回测 — 已修复（commit `a0de9ad`）
   - 位置：`src/long_earn/backtest/engine/portfolio.py:376-380`（`if cost > self.cash + 1e-6:` 分支 `logger.warning(f"现金不足跳过买入 {symbol}")` 并记录跳过返回，注释 "P2-02 + P0-04：现金不足时跳过该笔交易而非抛异常终止回测"）
@@ -230,9 +231,9 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
   - 位置：`core.py:320-346`
   - 修复：将"风控清仓"与"策略信号生成"解耦，风控清仓后仍允许策略生成新信号。
 
-- [ ] **AUDIT-P2-05** Walk-Forward 并行版无 failed_folds 追踪
-  - 位置：`parallel.py:run_walk_forward_parallel`
-  - 修复：与 `core.py:walk_forward_run` 对齐，增加 failed_folds 与退化检测。
+- [x] **AUDIT-P2-05** Walk-Forward 并行版无 failed_folds 追踪 — 已修复
+  - 位置：`src/long_earn/backtest/engine/parallel.py:run_walk_forward_parallel`（新增 `failed_folds` 列表 + 返回字典含 `failed_folds` 字段）
+  - 修复：与 `core.py:walk_forward_run` 对齐，增加 `failed_folds`（含 fold_id/phase/error_category/message）与退化检测。
 
 - [x] **AUDIT-P2-06** max_workers<=1 时环境变量泄漏 — 已修复
   - 位置：`src/long_earn/backtest/engine/parallel.py`（`_disable_xtquant_env` contextmanager 包裹 `LONG_EARN_DISABLE_XTQUANT`，退出后恢复原值）
