@@ -64,3 +64,42 @@ class TestParallelRunnerSerial:
 
         runner = ParallelRunner(max_workers=1)
         assert runner is not None
+
+
+class TestDisableXtquantEnvContext:
+    """P2-06：环境变量用 contextmanager 包裹，退出后自动清理不泄漏。"""
+
+    def test_env_restored_after_context_exit(self):
+        """上下文退出后环境变量恢复原值，不污染主进程"""
+        import os
+
+        from long_earn.backtest.engine.parallel import _disable_xtquant_env
+
+        key = "LONG_EARN_DISABLE_XTQUANT"
+        # 确保进入前不存在
+        had_before = key in os.environ
+        old_before = os.environ.get(key)
+
+        with _disable_xtquant_env():
+            assert os.environ.get(key) == "1"
+
+        # 退出后恢复
+        if had_before:
+            assert os.environ.get(key) == old_before
+        else:
+            assert key not in os.environ, "环境变量泄漏到主进程"
+
+    def test_env_not_leaked_when_already_set(self):
+        """若环境变量已有值，退出后恢复原值而非删除"""
+        import os
+
+        from long_earn.backtest.engine.parallel import _disable_xtquant_env
+
+        key = "LONG_EARN_DISABLE_XTQUANT"
+        os.environ[key] = "original"
+        try:
+            with _disable_xtquant_env():
+                assert os.environ.get(key) == "1"
+            assert os.environ.get(key) == "original"
+        finally:
+            del os.environ[key]

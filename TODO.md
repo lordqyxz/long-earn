@@ -234,9 +234,9 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
   - 位置：`parallel.py:run_walk_forward_parallel`
   - 修复：与 `core.py:walk_forward_run` 对齐，增加 failed_folds 与退化检测。
 
-- [ ] **AUDIT-P2-06** max_workers<=1 时环境变量泄漏
-  - 位置：`parallel.py:73`
-  - 修复：子函数内用 `os.environ` 上下文管理器包裹。
+- [x] **AUDIT-P2-06** max_workers<=1 时环境变量泄漏 — 已修复
+  - 位置：`src/long_earn/backtest/engine/parallel.py`（`_disable_xtquant_env` contextmanager 包裹 `LONG_EARN_DISABLE_XTQUANT`，退出后恢复原值）
+  - 修复：子函数内用 `os.environ` 上下文管理器包裹，`max_workers<=1` 顺序执行时不污染主进程环境。测试：`test_parallel.py::TestDisableXtquantEnvContext`。
 
 - [ ] **AUDIT-P2-07** 复权一致性未校验
   - 修复：provider 基类强制声明 `adjust` 策略，`get_merged_panel` 校验所有 provider 复权方式一致。

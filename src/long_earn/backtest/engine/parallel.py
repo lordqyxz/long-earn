@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,10 +77,33 @@ def _worker_db_path(base: Path, task_id: str) -> Path:
     return base.parent / f"{base.stem}_{task_id}{base.suffix}"
 
 
-def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
-    """worker 入口：独立构造引擎 + 策略，执行单次回测。"""
-    os.environ["LONG_EARN_DISABLE_XTQUANT"] = "1"  # 强制禁用 xtquant
+@contextmanager
+def _disable_xtquant_env():
+    """临时禁用 xtquant 的环境变量上下文管理器（P2-06）。
 
+    max_workers<=1 顺序执行时，_run_one_backtest 在主进程内运行，
+    直接 os.environ[...] = "1" 会污染主进程环境。用上下文管理器包裹，
+    退出后恢复原值（或删除新增的键）。
+    """
+    key = "LONG_EARN_DISABLE_XTQUANT"
+    had_key = key in os.environ
+    old_val = os.environ.get(key)
+    os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        if had_key:
+            os.environ[key] = old_val  # type: ignore[assignment]
+        else:
+            os.environ.pop(key, None)
+
+
+def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
+    """worker 入口：独立构造引擎 + 策略，执行单次回测。
+
+    P2-06：环境变量用 contextmanager 包裹，函数退出后自动清理，
+    避免 max_workers<=1 顺序执行时污染主进程环境。
+    """
     try:
         full_data = SharedDataContext.attach(
             task.shm_token, task.shm_size, task.pickle_data
@@ -112,14 +136,16 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
 
         strategy = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
 
-        result = engine.run(
-            strategy,
-            task.start_date,
-            task.end_date,
-            task.symbols,
-            task.benchmark_symbol,
-            full_data=full_data,
-        )
+        # P2-06：环境变量用上下文管理器包裹，退出后自动恢复
+        with _disable_xtquant_env():
+            result = engine.run(
+                strategy,
+                task.start_date,
+                task.end_date,
+                task.symbols,
+                task.benchmark_symbol,
+                full_data=full_data,
+            )
 
         if result.success:
             return BacktestOutcome(
