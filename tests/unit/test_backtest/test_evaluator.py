@@ -18,7 +18,8 @@ def _make_df() -> pd.DataFrame:
     data = pd.DataFrame(
         {
             "close": [10.0, 20.0, 10.5, 21.0, 11.0, 19.5, 10.8, 20.5, 11.2, 22.0],
-            "volume": np.random.rand(10) * 1e6,
+            # 固定 seed 的确定性成交量，避免 flaky（P2-1）
+            "volume": np.linspace(1e5, 1e6, 10),
             "roe": [0.15, 0.10, 0.15, 0.10, 0.15, 0.10, 0.15, 0.10, 0.15, 0.10],
         },
         index=idx,
@@ -74,3 +75,59 @@ class TestSafeExpressionEvaluator:
         evaluator = SafeExpressionEvaluator(df)
         with pytest.raises(SafeExpressionError, match="禁止的比较运算符"):
             evaluator.evaluate("close is None")
+
+    # ── 属性访问安全边界（P1-7）──────────────────────────────────
+
+    def test_safe_attribute_access_allowed(self):
+        """白名单属性（values/shape/index）应允许访问。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        # values 在白名单，应返回 numpy 数组
+        result = evaluator.evaluate("close.values")
+        assert isinstance(result, (pd.Series, object)) and hasattr(result, "shape"), (
+            "close.values 应返回数组-like 对象"
+        )
+
+    def test_unsafe_attribute_blocked(self):
+        """非白名单属性应抛 SafeExpressionError（防止 close.os.system 链式攻击）。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        with pytest.raises(SafeExpressionError, match="禁止访问属性"):
+            evaluator.evaluate("close.os")
+
+    def test_attribute_method_call_blocked(self):
+        """非白名单属性上的方法调用应被拒。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        with pytest.raises(SafeExpressionError, match="禁止通过属性调用方法"):
+            evaluator.evaluate("close.foo()")
+
+    # ── 一元运算符安全边界（P1-7）──────────────────────────────
+
+    def test_unary_not_allowed(self):
+        """一元 not（ast.Not）在白名单，应正常求值。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        result = evaluator.evaluate("not (close > 10)")
+        assert isinstance(result, pd.Series)
+
+    def test_unary_usub_allowed(self):
+        """一元负号（ast.USub）应正常求值。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        result = evaluator.evaluate("-close")
+        expected = -df["close"]
+        pd.testing.assert_series_equal(result, expected, check_names=False)
+
+    # ── 安全函数白名单覆盖（P1-7）──────────────────────────────
+
+    def test_safe_functions_available(self):
+        """白名单函数 sign/round/ceil/floor/abs 应可用。"""
+        df = _make_df()
+        evaluator = SafeExpressionEvaluator(df)
+        # sign 函数
+        result = evaluator.evaluate("sign(close - 15)")
+        assert isinstance(result, pd.Series)
+        # abs 函数
+        result2 = evaluator.evaluate("abs(close - 15)")
+        assert isinstance(result2, pd.Series)

@@ -140,9 +140,7 @@ class EventDrivenBacktestEngine:
         if price is None or price <= 0 or not math.isfinite(price):
             return f"pre_trade_price_invalid:{order.symbol} price={price}"
 
-        limit_reason = self._check_limit_up_down(
-            order.symbol, order.order_type, price
-        )
+        limit_reason = self._check_limit_up_down(order.symbol, order.order_type, price)
         if limit_reason is not None:
             return limit_reason
 
@@ -203,6 +201,14 @@ class EventDrivenBacktestEngine:
         self._total_orders = 0
         self._total_skipped = 0
         self._total_partial_fills = 0
+        # 重置跨 run 的瞬态状态（Walk-Forward 跨 fold 隔离）：
+        # _pending_signals / _prev_close_map / 涨跌停 map 仅在 __init__ 初始化，
+        # 若 run() 不重置，fold N 末 bar 的信号/前收盘价会泄漏到 fold N+1，
+        # 造成训练期信号在测试期成交的前视偏差（评审 P0-2 修复）。
+        self._pending_signals = []
+        self._prev_close_map = {}
+        self._current_limit_up_map = {}
+        self._current_limit_down_map = {}
 
         # RUN_START：记录回测配置，让审计日志能独立重建本次回测的输入参数
         self._log_audit(
@@ -269,7 +275,11 @@ class EventDrivenBacktestEngine:
             metrics_unreliable = False
             if self._total_orders > 0:
                 skip_ratio = self._total_skipped / self._total_orders
-                if skip_ratio > 0.5 or self._total_partial_fills > self._total_orders * 0.5:  # noqa: PLR2004
+                skip_threshold = 0.5  # 订单跳过率阈值（50%）
+                if (
+                    skip_ratio > skip_threshold
+                    or self._total_partial_fills > self._total_orders * skip_threshold
+                ):
                     metrics_unreliable = True
 
             result = self._build_result(
@@ -383,6 +393,8 @@ class EventDrivenBacktestEngine:
         # ── T+1 信号执行：执行前一 bar 产生的 pending 信号，以当日 open 成交 ──
         # P0-05 修复：策略基于 T 日 close 产生的信号不会在当日 close 成交，
         # 而是进入 pending 队列，在 T+1 日以 open 价撮合，消除前视偏差。
+        # P0-06 补丁：传入 execution_ts=T+1 日使 OrderEvent/FillEvent.timestamp
+        # 反映真实成交日，available_date = T+1+1 = T+2，T+1 当日卖出才被锁定。
         if self._pending_signals:
             pending = self._pending_signals
             self._pending_signals = []  # 清空，防止重复执行
@@ -401,7 +413,15 @@ class EventDrivenBacktestEngine:
                     },
                     db_audit,
                 )
-                self._execute_signals(sig, portfolio, slab, broker, db_audit, price_field="open")
+                self._execute_signals(
+                    sig,
+                    portfolio,
+                    slab,
+                    broker,
+                    db_audit,
+                    price_field="open",
+                    execution_ts=ts,
+                )
 
         # 检查待成交订单（限价/止损单）
         price_lookup = {}
@@ -657,6 +677,24 @@ class EventDrivenBacktestEngine:
         if dd > threshold:
             return False
 
+        # 无持仓可清仓时不触发风控（避免清仓后持续重复触发 RISK_TRIGGER
+        # 和抑制信号——评审 P1-B 修复）。
+        # 注：stop_loss/take_profit 基于 per-position 循环，空仓时自然空迭代返回 False，
+        # 无需此显式防护；max_drawdown 不基于单持仓循环，故需显式检查。
+        if not portfolio.positions:
+            return False
+
+        # 持仓全部 T+1 锁定（无可用卖单）时不触发：避免记录虚假 RISK_TRIGGER
+        # 并抑制信号（评审 P1-NEW-1 修复，与 stop_loss/take_profit 的 per-position
+        # T+1 跳过行为一致——后者靠循环内 continue 天然跳过锁定持仓）。
+        sellable = [
+            pos
+            for pos in portfolio.positions.values()
+            if pos.available_date is None or ts >= pos.available_date
+        ]
+        if not sellable:
+            return False
+
         # G2: 最大回撤触发独立审计——记录触发时的回撤值/峰值/当前净值
         self._log_audit(
             "RISK_TRIGGER",
@@ -717,6 +755,7 @@ class EventDrivenBacktestEngine:
         broker: Broker,
         db_audit: Any,
         price_field: str = "close",
+        execution_ts: Any = None,
     ) -> None:
         orders = portfolio.process_signal(
             signal_event,
@@ -725,6 +764,7 @@ class EventDrivenBacktestEngine:
             self.max_position_pct,
             price_field=price_field,
             max_turnover=getattr(self, "_max_turnover", None),
+            execution_ts=execution_ts,
         )
         # T+1 跳过订单记录：portfolio 将 T+1 锁定的卖出订单标记为 skipped，
         # 由引擎统一记 ORDER_SKIPPED 审计事件（P0-06 修复）。

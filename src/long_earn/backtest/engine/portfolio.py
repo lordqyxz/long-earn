@@ -5,7 +5,7 @@
 
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 from loguru import logger
@@ -132,6 +132,7 @@ class Portfolio:
         max_position_pct: float = 1.0,
         price_field: str = "close",
         max_turnover: float | None = None,
+        execution_ts: Any = None,
     ) -> list[OrderEvent]:
         """将信号转换为订单
 
@@ -148,8 +149,13 @@ class Portfolio:
             max_position_pct: 单只股票最大仓位比例
             price_field: 用于定价的字段（默认 close，T+1 执行时用 open）
             max_turnover: 最大换手率限制（P1-06），单次调仓总换手率不超过该值
+            execution_ts: 实际成交时间戳（T+1 延迟执行时为执行日 ts），
+                用于 OrderEvent.timestamp，使 available_date = 成交日 + 1。
+                默认 None 时回退到 event.timestamp（保持向后兼容）。
         """
         target_weights = event.signals
+        # OrderEvent.timestamp 优先用实际成交日，使 T+1 available_date 正确
+        order_ts = execution_ts if execution_ts is not None else event.timestamp
 
         if not isinstance(target_weights, dict):
             logger.error("Portfolio 目前仅支持 dict 格式的信号权重")
@@ -170,7 +176,9 @@ class Portfolio:
 
         # 换手率限制（P1-06）：计算 sum(|diff_val|) / total_value，超过时等比缩放
         if max_turnover is not None and max_turnover > 0 and order_infos:
-            total_turnover_val = sum(abs(o.get("diff_val", 0.0)) for o in order_infos if not o.get("skipped"))
+            total_turnover_val = sum(
+                abs(o.get("diff_val", 0.0)) for o in order_infos if not o.get("skipped")
+            )
             if total_turnover_val > 0:
                 turnover_rate = total_turnover_val / self.total_value
                 if turnover_rate > max_turnover:
@@ -179,7 +187,7 @@ class Portfolio:
                         if "diff_val" in o:
                             o["diff_val"] = o["diff_val"] * scale
 
-        return self._generate_orders(order_infos, event)
+        return self._generate_orders(order_infos, event, order_ts=order_ts)
 
     def _apply_position_limits(
         self,
@@ -244,20 +252,26 @@ class Portfolio:
             diff_val = (self.total_value * target_weight) - current_val
             if diff_val > 0:
                 order_type = "BUY"
-            elif diff_val < 0 and current_pos is not None and current_pos.available_date is not None:
+            elif (
+                diff_val < 0
+                and current_pos is not None
+                and current_pos.available_date is not None
+            ):
                 # 卖出前检查 T+1 约束
                 ts = price_rows.select("timestamp").to_series()[0]
                 if ts is not None and ts < current_pos.available_date:
-                        # 记录跳过原因，不生成卖出订单
-                        order_infos.append({
+                    # 记录跳过原因，不生成卖出订单
+                    order_infos.append(
+                        {
                             "symbol": symbol,
                             "order_type": "SELL",
                             "diff_val": diff_val,
                             "price": price,
                             "skipped": True,
                             "skip_reason": f"T+1 锁定：{symbol} 在 {current_pos.available_date.date()} 前不可卖出（当前 {ts.date()}）",
-                        })
-                        continue
+                        }
+                    )
+                    continue
 
             if abs(diff_val) < 1.0:
                 continue
@@ -291,8 +305,12 @@ class Portfolio:
         self,
         order_infos: list[dict],
         event: SignalEvent,
+        order_ts: Any = None,
     ) -> list[OrderEvent]:
-        """根据订单信息生成 OrderEvent，处理现金约束"""
+        """根据订单信息生成 OrderEvent，处理现金约束
+
+        order_ts: 实际成交时间戳（T+1 执行时为执行日），默认 None 回退 event.timestamp。
+        """
         orders: list[OrderEvent] = []
         skipped_reasons: list[dict] = []
         remaining_cash = self.cash
@@ -304,10 +322,12 @@ class Portfolio:
 
             # T+1 跳过标记：卖出订单因 T+1 锁定被跳过，记录原因供审计
             if info.get("skipped"):
-                skipped_reasons.append({
-                    "symbol": symbol,
-                    "reason": info.get("skip_reason", "T+1 locked"),
-                })
+                skipped_reasons.append(
+                    {
+                        "symbol": symbol,
+                        "reason": info.get("skip_reason", "T+1 locked"),
+                    }
+                )
                 continue
 
             if order_type == "SELL":
@@ -328,7 +348,7 @@ class Portfolio:
 
             orders.append(
                 OrderEvent(
-                    timestamp=event.timestamp,
+                    timestamp=order_ts if order_ts is not None else event.timestamp,
                     trace_id=str(uuid.uuid4()),
                     event_id=f"ord_{event.event_id}_{symbol}",
                     symbol=symbol,
@@ -344,7 +364,12 @@ class Portfolio:
     def update_from_fill(self, fill: FillEvent) -> None:
         """根据成交记录更新持仓和现金"""
         symbol = fill.symbol
-        cost = fill.fill_price * fill.fill_quantity + fill.commission + fill.stamp_duty + getattr(fill, "transfer_fee", 0.0)
+        cost = (
+            fill.fill_price * fill.fill_quantity
+            + fill.commission
+            + fill.stamp_duty
+            + getattr(fill, "transfer_fee", 0.0)
+        )
         self.trade_count += 1
 
         if fill.order_type == "BUY":
@@ -366,10 +391,16 @@ class Portfolio:
             # T+1 设置可用日期（买入次日方可卖出，P0-06 修复）
             if hasattr(fill, "timestamp") and fill.timestamp is not None:
                 from datetime import timedelta  # noqa: PLC0415
+
                 pos.available_date = fill.timestamp + timedelta(days=1)
         else:
             proceeds = fill.fill_price * fill.fill_quantity
-            net_proceeds = proceeds - fill.commission - fill.stamp_duty - getattr(fill, "transfer_fee", 0.0)
+            net_proceeds = (
+                proceeds
+                - fill.commission
+                - fill.stamp_duty
+                - getattr(fill, "transfer_fee", 0.0)
+            )
             self.cash += net_proceeds
             if symbol in self.positions:
                 pos = self.positions[symbol]

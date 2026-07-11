@@ -21,15 +21,17 @@ def _simple_panel(days: int = 20) -> pl.DataFrame:
     for i in range(days):
         ts = base + timedelta(days=i)
         close = round(100.0 * (1.005**i), 4)
-        rows.append({
-            "timestamp": ts,
-            "symbol": "A.SZ",
-            "open": close * 0.99,
-            "high": close * 1.01,
-            "low": close * 0.98,
-            "close": close,
-            "volume": 100000.0,
-        })
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "A.SZ",
+                "open": close * 0.99,
+                "high": close * 1.01,
+                "low": close * 0.98,
+                "close": close,
+                "volume": 100000.0,
+            }
+        )
     return pl.DataFrame(rows)
 
 
@@ -139,8 +141,14 @@ def test_total_return_matches_numpy(mock_data_provider):
 # ── C5: metrics_unreliable 过滤 ─────────────────────────────────
 
 
-def test_filter_all_rejected_marks_metrics_unreliable(mock_data_provider):
-    """C5：成交量限制导致全部部分成交时 metrics_unreliable=True。"""
+def test_volume_limit_marks_metrics_unreliable(mock_data_provider):
+    """C5：成交量限制导致部分成交时 metrics_unreliable=True。
+
+    极低成交量参与率（0.0001）使首笔买入订单部分成交（partial_fill=True），
+    _total_partial_fills/_total_orders > 0.5 触发 metrics_unreliable。
+    _SimpleBuyStrategy 仅首 bar 发一次信号，故仅 1 笔订单。
+    （原命名 test_filter_all_rejected_marks_metrics_unreliable 误导，已修正。）
+    """
     panel = _simple_panel(days=20)
     provider = mock_data_provider(panel)
 
@@ -151,4 +159,77 @@ def test_filter_all_rejected_marks_metrics_unreliable(mock_data_provider):
     engine = EventDrivenBacktestEngine(data_provider=provider, cost_config=cost)
     result = engine.run(_SimpleBuyStrategy(), "2024-01-01", "2024-01-22", ["A.SZ"])
     assert result.success
-    assert result.metrics_unreliable, "成交量限制导致大量部分成交时应标记 metrics_unreliable=True"
+    assert result.metrics_unreliable, (
+        "成交量限制导致大量部分成交时应标记 metrics_unreliable=True"
+    )
+
+
+def test_high_skip_ratio_marks_metrics_unreliable(mock_data_provider):
+    """C5：订单大量被跳过（skip_ratio > 0.5）时 metrics_unreliable=True。
+
+    构造场景：连续涨停日，买入订单被涨跌停板拒单（ORDER_SKIPPED），
+    使 _total_skipped / _total_orders > 0.5。
+    """
+    # 构造连续涨停面板：从第 2 日开始每日 close 涨 15%（> 10% 涨停）
+    rows = []
+    base = datetime(2024, 1, 1)
+    for i in range(20):
+        ts = base + timedelta(days=i)
+        close = 10.0 if i == 0 else round(10.0 * (1.15**i), 2)  # 每日涨停
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "A.SZ",
+                "open": close,  # open = close，确保 open 也 >= 涨停价
+                "high": close * 1.01,
+                "low": close * 0.98,
+                "close": close,
+                "volume": 100000.0,
+            }
+        )
+    panel = pl.DataFrame(rows)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+
+    # 策略：每日都发出买入信号（待 T+1 执行）
+    class _AlwaysBuy:
+        def __init__(self):
+            self._state: dict = {}
+            self.strategy_id = "skip_ratio_test"
+
+        def init(self):
+            self._state = {}
+
+        def on_bar(self, bars, context=None):
+            from long_earn.backtest.domain.entities import SignalEvent
+
+            return SignalEvent(
+                timestamp=bars["timestamp"][0],
+                trace_id="trace-skip",
+                event_id="sig-skip",
+                signals={"A.SZ": 1.0},
+                strategy_id="skip_ratio_test",
+            )
+
+    result = engine.run(_AlwaysBuy(), "2024-01-01", "2024-01-22", ["A.SZ"])
+    assert result.success
+    # 连续涨停，绝大多数买入订单应被拒，skip_ratio > 0.5
+    assert result.metrics_unreliable, (
+        "连续涨停导致大量订单被跳过时应标记 metrics_unreliable=True，"
+        f"实际 metrics_unreliable={result.metrics_unreliable}，"
+        f"trade_count={result.trade_count}"
+    )
+    # P2-B 加强：验证跳过原因确实是涨跌停，且跳过比例较高
+    trail = engine.audit_logger.get_full_trail()
+    skipped = [e for e in trail if e.get("event_type") == "ORDER_SKIPPED"]
+    limit_skips = [
+        e for e in skipped if "涨停" in e.get("payload", {}).get("reason", "")
+    ]
+    assert len(limit_skips) > 0, "应存在涨跌停拒单的 ORDER_SKIPPED 事件"
+    orders = [e for e in trail if e.get("event_type") == "ORDER"]
+    total = len(orders) + len(skipped)
+    assert total > 0, "应有订单（含跳过）"
+    # skip_ratio 应较高（连续涨停几乎全部拒单），>= 0.5
+    assert len(skipped) / total >= 0.5, (
+        f"skip_ratio 应 >= 0.5，实际 {len(skipped)}/{total}"
+    )
