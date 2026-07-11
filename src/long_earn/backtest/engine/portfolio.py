@@ -131,6 +131,7 @@ class Portfolio:
         max_positions: int = 0,
         max_position_pct: float = 1.0,
         price_field: str = "close",
+        max_turnover: float | None = None,
     ) -> list[OrderEvent]:
         """将信号转换为订单
 
@@ -145,6 +146,8 @@ class Portfolio:
             current_prices: 当前时刻所有股票的价格 Slab
             max_positions: 最大持仓数（0 表示不限制）
             max_position_pct: 单只股票最大仓位比例
+            price_field: 用于定价的字段（默认 close，T+1 执行时用 open）
+            max_turnover: 最大换手率限制（P1-06），单次调仓总换手率不超过该值
         """
         target_weights = event.signals
 
@@ -164,6 +167,17 @@ class Portfolio:
             target_weights, current_prices, max_position_pct, price_field=price_field
         )
         self._last_skipped_orders = [o for o in order_infos if o.get("skipped")]
+
+        # 换手率限制（P1-06）：计算 sum(|diff_val|) / total_value，超过时等比缩放
+        if max_turnover is not None and max_turnover > 0 and order_infos:
+            total_turnover_val = sum(abs(o.get("diff_val", 0.0)) for o in order_infos)
+            if total_turnover_val > 0:
+                turnover_rate = total_turnover_val / self.total_value
+                if turnover_rate > max_turnover:
+                    scale = max_turnover / turnover_rate
+                    for o in order_infos:
+                        if "diff_val" in o:
+                            o["diff_val"] = o["diff_val"] * scale
 
         return self._generate_orders(order_infos, event)
 

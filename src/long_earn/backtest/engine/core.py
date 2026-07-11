@@ -85,6 +85,7 @@ class EventDrivenBacktestEngine:
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
         self.max_positions = max_positions
+        self._max_turnover: float | None = None
         # 当前回测 run_id / db_audit：存为实例变量让内部方法（风控/结果构建等）
         # 无需透传即可写审计日志。每次 run() 开头重置。
         self._current_run_id: str = ""
@@ -714,6 +715,7 @@ class EventDrivenBacktestEngine:
             self.max_positions,
             self.max_position_pct,
             price_field=price_field,
+            max_turnover=getattr(self, "_max_turnover", None),
         )
         # T+1 跳过订单记录：portfolio 将 T+1 锁定的卖出订单标记为 skipped，
         # 由引擎统一记 ORDER_SKIPPED 审计事件（P0-06 修复）。
