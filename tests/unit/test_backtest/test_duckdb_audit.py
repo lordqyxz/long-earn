@@ -3,6 +3,7 @@
 覆盖：
 - P2-13：query_events key 白名单校验（防 SQL 注入）
 - P2-14：DuckDB 单连接线程安全（并发写不崩溃）
+- P1-10：seq 自增序列号保证单调排序（墙钟回退不破坏因果链）
 """
 
 import threading
@@ -153,6 +154,66 @@ class TestDuckDBThreadSafety(unittest.TestCase):
 
             provider.close()
             self.assertEqual(errors, [], f"并发读写产生异常: {errors}")
+        finally:
+            self._tmp.cleanup()
+
+
+class TestSeqMonotonicity(unittest.TestCase):
+    """P1-10：seq 自增序列号保证因果排序（墙钟回退不破坏因果链）"""
+
+    def test_causal_chain_ordered_by_seq_not_timestamp(self) -> None:
+        """get_causal_chain 应按 seq 排序，而非 timestamp（墙钟回退场景）"""
+        self._tmp = TemporaryDirectory()
+        try:
+            db_path = Path(self._tmp.name) / "audit.duckdb"
+            provider = DuckDBAuditProvider(db_path=db_path)
+
+            # 模拟墙钟回退：第 2 条记录的 timestamp 早于第 1 条
+            base = datetime(2026, 1, 1, 10, 0, 0)
+            records = [
+                _make_record(trace_id="chain-1", event_type="MARKET_DATA"),
+                _make_record(trace_id="chain-1", event_type="SIGNAL"),
+                _make_record(trace_id="chain-1", event_type="ORDER"),
+            ]
+            # 手动设置 timestamp 模拟回退
+            records[0].timestamp = base
+            records[1].timestamp = base  # 同时刻
+            records[2].timestamp = datetime(2025, 12, 31, 9, 0, 0)  # 回退！
+
+            for r in records:
+                provider.log_event(r)
+
+            chain = provider.get_causal_chain("chain-1")
+            provider.close()
+
+            # 按 seq 排序应为写入顺序：MARKET_DATA → SIGNAL → ORDER
+            self.assertEqual(len(chain), 3)
+            self.assertEqual(chain[0].event_type, "MARKET_DATA")
+            self.assertEqual(chain[1].event_type, "SIGNAL")
+            self.assertEqual(chain[2].event_type, "ORDER")
+        finally:
+            self._tmp.cleanup()
+
+    def test_duplicate_timestamp_does_not_clobber(self) -> None:
+        """相同 timestamp 的两条记录不应因主键冲突而互相覆盖（seq 区分）"""
+        self._tmp = TemporaryDirectory()
+        try:
+            db_path = Path(self._tmp.name) / "audit.duckdb"
+            provider = DuckDBAuditProvider(db_path=db_path)
+
+            ts = datetime(2026, 1, 1, 10, 0, 0)
+            r1 = _make_record(trace_id="dup-1", event_type="MARKET_DATA")
+            r1.timestamp = ts
+            r2 = _make_record(trace_id="dup-1", event_type="SIGNAL")
+            r2.timestamp = ts  # 相同 timestamp，相同 trace_id
+
+            provider.log_event(r1)
+            provider.log_event(r2)
+
+            chain = provider.get_causal_chain("dup-1")
+            provider.close()
+
+            self.assertEqual(len(chain), 2, "相同 timestamp 记录不应被覆盖")
         finally:
             self._tmp.cleanup()
 

@@ -171,7 +171,7 @@ class EventDrivenBacktestEngine:
 
     # ── 主入口 ────────────────────────────────────────────────
 
-    def run(  # noqa: PLR0913
+    def run(  # noqa: PLR0913, PLR0915
         self,
         strategy: BaseStrategy,
         start_date: str,
@@ -330,6 +330,22 @@ class EventDrivenBacktestEngine:
             return BacktestResult(
                 success=False, message=str(e), error_category="engine_error"
             )
+        except (KeyboardInterrupt, SystemExit):
+            # P1-11：捕获用户中断/系统退出，记录审计后重新抛出，
+            # 不返回虚假的 BacktestResult（success=False 会被误认为正常失败）
+            self._log_audit(
+                "RUN_ERROR",
+                str(uuid.uuid4()),
+                run_id,
+                "Engine",
+                "INTERRUPTED",
+                {
+                    "error_type": "KeyboardInterrupt",
+                    "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
+                },
+                db_audit,
+            )
+            raise
         finally:
             # 释放审计存储连接（DuckDB 连接需显式关闭，避免句柄泄漏）
             close = getattr(self.audit_provider, "close", None)

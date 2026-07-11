@@ -201,6 +201,18 @@ class TestEngineRun(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("策略执行异常", result.message)
 
+    def test_run_keyboard_interrupt_not_swallowed(self):
+        """P1-11：策略抛 KeyboardInterrupt 应向上传播，不返回虚假结果"""
+        engine = EventDrivenBacktestEngine(data_provider=self.provider)
+
+        class _InterruptStrategy(_SimpleStrategy):
+            def on_bar(self, current_data: dict, current_ts: datetime):
+                raise KeyboardInterrupt
+
+        strategy = _InterruptStrategy()
+        with self.assertRaises(KeyboardInterrupt):
+            engine.run(strategy, "2024-01-01", "2024-01-03", ["000001"])
+
 
 class TestRiskChecks(unittest.TestCase):
     """风控检查"""

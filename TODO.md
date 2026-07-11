@@ -138,13 +138,13 @@
 
 ### 审计日志
 
-- [ ] **AUDIT-P1-10** DuckDB 使用非单调墙钟
-  - 位置：`audit.py:165` `datetime.now()`
-  - 修复：使用 `time.monotonic()` 或 `datetime.utcnow()` + 序列号；主键改为 `(run_id, trace_id, event_type)` 或添加自增序列号。
+- [x] **AUDIT-P1-10** DuckDB 使用非单调墙钟 — 已修复
+  - 位置：`src/long_earn/backtest/engine/audit.py`（`_seq` 自增序列号 + `seq` 列 + 主键改为 `(run_id, trace_id, seq)`）
+  - 修复：新增 `seq BIGINT` 自增列，主键从 `(run_id, trace_id, timestamp)` 改为 `(run_id, trace_id, seq)`，`get_causal_chain` 按 `seq` 排序；旧表自动迁移 `ALTER TABLE ADD COLUMN seq`。测试：`test_duckdb_audit.py::TestSeqMonotonicity`（墙钟回退 + 重复 timestamp 不覆盖）。
 
-- [ ] **AUDIT-P1-11** 异常路径未捕获 KeyboardInterrupt/SystemExit
-  - 位置：`core.py:204` `except Exception`
-  - 修复：改用 `except BaseException` 或额外捕获 `KeyboardInterrupt`/`SystemExit`。
+- [x] **AUDIT-P1-11** 异常路径未捕获 KeyboardInterrupt/SystemExit — 已修复
+  - 位置：`src/long_earn/backtest/engine/core.py`（`except (KeyboardInterrupt, SystemExit):` 记录 `RUN_ERROR(status=INTERRUPTED)` 后 `raise`）
+  - 修复：捕获用户中断/系统退出，记录审计后重新抛出，不返回虚假的 `BacktestResult(success=False)`。测试：`test_engine.py::test_run_keyboard_interrupt_not_swallowed`。
 
 - [x] **AUDIT-P1-12** `_log_audit` 自身异常未保护 — 已修复（commit `45ab884`）
   - 位置：`src/long_earn/backtest/engine/core.py:902-905`（`try: self.audit_logger.log_transition(**entry) except Exception: logger.warning("InMemoryAuditTrail 写入失败，已降级")`）、`907-919`（`db_audit` 路径同样 `try/except` 包裹）

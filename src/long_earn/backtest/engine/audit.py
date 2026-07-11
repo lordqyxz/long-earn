@@ -22,12 +22,16 @@ class DuckDBAuditProvider(AuditProvider):
 
     线程安全：所有 DuckDB 连接访问通过 ``_lock`` 串行化，避免多线程并发写
     导致 DuckDB 单连接非线程安全问题（P2-14）。
+
+    单调序列号：``seq`` 列确保即使墙钟回退（``datetime.now()`` 非单调）也能
+    保证主键唯一性与因果排序（P1-10）。
     """
 
     def __init__(self, db_path: Path = DEFAULT_CACHE_PATH):
         self.db_path = db_path
         self._conn: duckdb.DuckDBPyConnection | None = None
         self._lock = threading.Lock()
+        self._seq = 0
         self._init_db()
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
@@ -41,10 +45,11 @@ class DuckDBAuditProvider(AuditProvider):
             conn = self._get_conn()
             # 创建审计专用 Schema（使用唯一名称避免与数据库文件名冲突）
             conn.execute('CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
-            # 创建审计日志表
+            # 创建审计日志表 — seq 自增序列号保证单调性（P1-10）
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS "backtest_audit".logs (
                     run_id VARCHAR,
+                    seq BIGINT,
                     timestamp TIMESTAMP,
                     event_type VARCHAR,
                     trace_id VARCHAR,
@@ -53,9 +58,19 @@ class DuckDBAuditProvider(AuditProvider):
                     status VARCHAR,
                     payload JSON,
                     latency_ms DOUBLE,
-                    PRIMARY KEY (run_id, trace_id, timestamp)
+                    PRIMARY KEY (run_id, trace_id, seq)
                 )
             """)
+            # 旧表迁移：若 seq 列不存在则添加（向后兼容已有缓存）
+            cols = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='backtest_audit' AND table_name='logs'"
+            ).fetchall()
+            col_names = {c[0] for c in cols}
+            if "seq" not in col_names and len(col_names) > 0:
+                conn.execute(
+                    'ALTER TABLE "backtest_audit".logs ADD COLUMN seq BIGINT DEFAULT 0'
+                )
         logger.info(f"Audit provider initialized at {self.db_path}")
 
     def log_event(self, record: AuditRecord) -> None:
@@ -70,14 +85,18 @@ class DuckDBAuditProvider(AuditProvider):
         payload_json = json.dumps(record.payload, default=json_serializable)
 
         with self._lock:
+            self._seq += 1
+            seq = self._seq
             conn = self._get_conn()
             conn.execute(
                 """
-                INSERT INTO "backtest_audit".logs (run_id, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO "backtest_audit".logs
+                    (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     record.run_id,
+                    seq,
                     record.timestamp,
                     record.event_type,
                     record.trace_id,
@@ -100,7 +119,11 @@ class DuckDBAuditProvider(AuditProvider):
                 f"允许字段: {sorted(_QUERY_FILTER_WHITELIST)}"
             )
 
-        query = 'SELECT * FROM "backtest_audit".logs WHERE run_id = ?'
+        query = (
+            'SELECT run_id, timestamp, event_type, trace_id, parent_id, '
+            'component, status, payload, latency_ms '
+            'FROM "backtest_audit".logs WHERE run_id = ?'
+        )
         params: list[Any] = [run_id]
 
         for key, value in filters.items():
@@ -129,10 +152,13 @@ class DuckDBAuditProvider(AuditProvider):
         return records
 
     def get_causal_chain(self, trace_id: str) -> Sequence[AuditRecord]:
+        # 按 seq 排序保证因果链单调性（P1-10：timestamp 可能因墙钟回退无序）
         with self._lock:
             conn = self._get_conn()
             res = conn.execute(
-                'SELECT * FROM "backtest_audit".logs WHERE trace_id = ? ORDER BY timestamp ASC',
+                'SELECT run_id, timestamp, event_type, trace_id, parent_id, '
+                'component, status, payload, latency_ms '
+                'FROM "backtest_audit".logs WHERE trace_id = ? ORDER BY seq ASC',
                 [trace_id],
             ).fetchall()
 
