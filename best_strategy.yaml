@@ -1,0 +1,25 @@
+name: Momentum20Strategy
+description: 20日动量选股策略 - 选近20日收益率最高的5只股票等权持仓
+universe:
+  type: csi300
+  rebalance_freq: 20D
+factors:
+  momentum_20: close / shift(close, 20) - 1
+  momentum_5: close / shift(close, 5) - 1
+signals:
+  - type: filter
+    condition: momentum_20 > 0
+  - type: rank
+    by: momentum_20
+    ascending: false
+    top: 5
+weights:
+  method: equal
+risk_control:
+  max_position_per_stock: 0.25
+  stop_loss: 0.1
+  max_drawdown_limit: 0.2
+trading_cost:
+  commission_rate: 0.0003
+  stamp_duty: 0.0005
+  slippage_bps: 2.0

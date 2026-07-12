@@ -1,6 +1,6 @@
 # TODO — 待办清单
 
-> 最后更新：2026-07-12
+> 最后更新：2026-07-13
 >
 > 按「重要性 + 威胁程度」统一排序，合并功能开发待办与合规审计（2026-07-08）。
 > 威胁优先级：金融合规 / 数据正确性 > 功能完整性 > 工程质量。
@@ -275,6 +275,13 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
 
 - [ ] **AUDIT-P2-16** latency_ms 仅 RUN_END/RUN_ERROR 有值
   - 修复：为 MARKET_DATA、SIGNAL、ORDER、FILL、RISK_TRIGGER 等关键事件计算并写入单步延迟。
+
+- [ ] **AUDIT-P2-17** 审计 MARKET_DATA 采样时点 ≠ equity_curve sync 时点
+  - 证据文档：[docs/research/2026-07-13-momentum-backtest-proof.md](docs/research/2026-07-13-momentum-backtest-proof.md) §6.3
+  - 位置：`src/long_earn/backtest/engine/core.py:476`（MARKET_DATA 事件记录 portfolio_value，在 `update_market_values` 之后、策略信号生成之前）vs `core.py:524`（`_sync_equity_curve`，在信号生成与撮合之后）
+  - 问题：MARKET_DATA 事件记录的 `portfolio_value` 是交易前市值，`equity_curve` 追加的是交易后市值。两者时点不同，导致从审计日志重建的 equity_curve 与引擎 equity_curve 存在系统性微小差异（约 0.3%），传导到 sortino 放大到 0.8%（超出 0.5% 对账容差）。
+  - 影响：total_return / max_drawdown 等核心指标对账不受影响（段 A ✅ + 段 B ✅，绝对差 1e-6 级），仅 sortino 等对 equity 末端敏感的指标有残差。不影响回测可信度结论。
+  - 修复：在 `core.py:524` `_sync_equity_curve` 之后追加一次 MARKET_DATA 事件记录（或新增 `EQUITY_SYNC` 事件类型），payload 含 `portfolio_value`，使审计日志能精确重建 equity_curve。
 
 ---
 

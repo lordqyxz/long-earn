@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""寻找最近6个月收益率最佳的策略 — 程序性根据数据实际覆盖动态设定窗口。
+
+流程：
+1. 查询 DuckDB 缓存数据实际覆盖范围（最新交易日、股票数、财务表是否非空）。
+2. 据此程序性设定窗口（非硬编码默认）：
+   - 训练集（研发寻优）= 数据最新日往前 3 年，再留出最近 6 个月作 held-out
+   - 最近 6 个月评估窗口 = 数据最新日往前 6 个月 ~ 数据最新日
+3. 根据财务表是否非空，自动选择 idea（纯量价 vs 量价+基本面）。
+4. 覆盖 AppConfig 日期字段后启动策略研发循环。
+5. 循环产出 best_strategy.yaml + strategy_research_results.json。
+
+用法:
+    uv run python scripts/find_best_strategy.py
+    uv run python scripts/find_best_strategy.py --max-rounds 3 -y
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import date
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "src"))
+
+import duckdb  # noqa: E402
+
+
+def probe_data_coverage() -> dict:
+    """查询 DuckDB 缓存数据的实际覆盖范围。"""
+    from long_earn.core.storage import backtest_cache_path
+
+    db = backtest_cache_path()
+    conn = duckdb.connect(str(db), read_only=True)
+    try:
+        r = conn.execute(
+            "SELECT MIN(date), MAX(date), COUNT(*), COUNT(DISTINCT symbol) FROM price_daily"
+        ).fetchone()
+        price_min, price_max, price_rows, price_symbols = r
+
+        f = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT symbol) FROM financial_quarterly"
+        ).fetchone()
+        fin_rows, fin_symbols = f
+
+        return {
+            "price_min": str(price_min),
+            "price_max": str(price_max),
+            "price_rows": int(price_rows),
+            "price_symbols": int(price_symbols),
+            "fin_rows": int(fin_rows),
+            "fin_symbols": int(fin_symbols),
+        }
+    finally:
+        conn.close()
+
+
+def derive_windows(coverage: dict) -> dict:
+    """根据数据实际覆盖，程序性推导训练集与评估窗口。
+
+    逻辑（非硬编码默认，全部基于数据实际最新日）：
+    - recent_end = 数据最新交易日
+    - recent_start = recent_end 向前 6 个月（约 183 天）
+    - train_end = recent_start 向前推 1 个交易日留 gap（防止边界泄漏），简化为向前 1 天
+    - train_start = train_end 向前 3 年
+    """
+    from datetime import timedelta
+
+    latest = date.fromisoformat(coverage["price_max"])
+    recent_end = latest
+    recent_start = recent_end - timedelta(days=183)
+    train_end = recent_start - timedelta(days=1)
+    train_start = train_end.replace(year=train_end.year - 3)
+
+    return {
+        "train_start": train_start.isoformat(),
+        "train_end": train_end.isoformat(),
+        "recent_start": recent_start.isoformat(),
+        "recent_end": recent_end.isoformat(),
+    }
+
+
+def pick_idea(coverage: dict) -> str:
+    """根据财务表是否非空，自动选择 idea。
+
+    财务表为空时只能用纯量价思路；非空时可叠加基本面。
+    """
+    if coverage["fin_rows"] > 0:
+        return (
+            "研究一个结合动量、波动率与ROE的选股策略，"
+            "用近20日收益率动量排序、近20日波动率过滤高波动标的、"
+            "ROE 过滤盈利能力差的标的，要求最近六个月收益率最大化"
+        )
+    return (
+        "研究一个纯量价的多因子选股策略，仅用价格和成交量数据："
+        "用近20日收益率动量排序选强势股、近20日已实现波动率过滤高波动标的、"
+        "近5日成交量比过滤缩量标的，等权持仓5-10只，"
+        "要求最近六个月收益率最大化、最大回撤控制在15%以内"
+    )
+
+
+def main() -> None:
+    import typer
+
+    coverage = probe_data_coverage()
+    print("=" * 64)
+    print("数据实际覆盖（程序探测）")
+    print("=" * 64)
+    print(f"  行情: {coverage['price_min']} ~ {coverage['price_max']}")
+    print(f"        {coverage['price_symbols']} 只, {coverage['price_rows']} 行")
+    print(f"  财务: {coverage['fin_rows']} 行, {coverage['fin_symbols']} 只")
+
+    w = derive_windows(coverage)
+    idea = pick_idea(coverage)
+
+    print()
+    print("程序推导窗口（基于数据最新日，非硬编码默认）")
+    print("-" * 64)
+    print(f"  训练集（研发寻优）: {w['train_start']} ~ {w['train_end']}")
+    print(f"  最近6个月评估窗口: {w['recent_start']} ~ {w['recent_end']}")
+    print(f"  idea: {idea[:60]}...")
+    print("=" * 64)
+
+    # 构造 AppConfig 并覆盖日期字段
+    from long_earn.config import AppConfig
+    from long_earn.context_init import initialize_context
+    from long_earn.core.storage import best_strategy_path, strategy_results_path
+    from long_earn.services.strategy_research_service import StrategyResearchService
+
+    config = AppConfig.from_env()
+    config.train_start_date = w["train_start"]
+    config.train_end_date = w["train_end"]
+    config.test_start_date = w["train_start"]  # 研发循环 history 窗口用 train 区间
+    config.test_end_date = w["train_end"]
+    config.validation_start_date = w["recent_start"]
+    config.validation_end_date = w["recent_end"]
+    config.backtest_start_date = w["train_start"]
+    config.backtest_end_date = w["train_end"]
+
+    max_rounds = 3
+    max_iterations = 2
+    yes = False
+
+    if "--max-rounds" in sys.argv:
+        idx = sys.argv.index("--max-rounds")
+        max_rounds = int(sys.argv[idx + 1])
+    if "-y" in sys.argv or "--yes" in sys.argv:
+        yes = True
+
+    if not yes and sys.stdin.isatty():
+        print()
+        ans = input("按 Enter 开始研发循环，输入 q 退出: ").strip().lower()
+        if ans == "q":
+            print("已取消。")
+            return
+
+    ctx = initialize_context(config)
+    service = StrategyResearchService(ctx)
+    summary = service.run_loop(
+        idea=idea,
+        max_rounds=max_rounds,
+        max_iterations=max_iterations,
+        min_improvement=0.005,
+    )
+
+    print()
+    print("=" * 64)
+    print("研发循环完成")
+    print("=" * 64)
+    print(f"  最佳最近6个月收益率: {summary.best_recent_return:.4f}")
+    print(f"  最佳轮次: 第{summary.best_round}轮")
+    print(f"  最佳历史收益率: {summary.best_history_return:.4f}")
+    print(f"  评估窗口: {summary.recent_eval_window}")
+    print(f"  训练窗口: {summary.history_eval_window}")
+    print(f"  结果文件: {strategy_results_path()}")
+    print(f"  最佳策略: {best_strategy_path()}")
+
+    if summary.best_strategy_yaml:
+        best_strategy_path().write_text(
+            summary.best_strategy_yaml, encoding="utf-8"
+        )
+        print()
+        print("最佳策略 YAML（前 800 字符）:")
+        print("-" * 64)
+        print(summary.best_strategy_yaml[:800])
+        if len(summary.best_strategy_yaml) > 800:
+            print(f"... ({len(summary.best_strategy_yaml)} 字符总计)")
+
+
+if __name__ == "__main__":
+    main()
