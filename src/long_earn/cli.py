@@ -175,13 +175,18 @@ def download(
         False, "--skip-financial", help="跳过财务数据下载"
     ),
     batch_size: int = typer.Option(
-        50, "--batch-size", help="分批下载每批数量"
+        0, "--batch-size", help="分批下载每批数量（0=自动：行情200/财务100）"
     ),
     max_workers: int = typer.Option(
         4, "--max-workers", help="并发下载子进程数（1-8，默认4）"
     ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="强制全量重下（默认智能增量：只下载缺失/过期的数据）",
+    ),
 ) -> None:
-    """下载行情与财务数据到 DuckDB 缓存。"""
+    """下载行情与财务数据到 DuckDB 缓存。默认智能增量，--full 强制全量。"""
     from long_earn.services.data_ingestion_service import DataIngestionService
 
     service = DataIngestionService(logger=logger)
@@ -192,6 +197,7 @@ def download(
         skip_financial=skip_financial,
         batch_size=batch_size,
         max_workers=max_workers,
+        full=full,
     )
 
     if result.get("status") != "ok":

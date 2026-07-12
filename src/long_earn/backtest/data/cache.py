@@ -13,6 +13,41 @@ from loguru import logger
 
 from long_earn.core.storage import backtest_cache_path
 
+# financial_quarterly schema 版本号：仅在版本不匹配时才 DROP+CREATE，保留已缓存数据
+# 旧版本无条件 DROP 已废弃；增量下载依赖此版本守卫保证数据持久
+_FINANCIAL_SCHEMA_VERSION = 1
+
+# financial_quarterly 列定义（22 列，与 save_financials 的 cache_columns 对齐）
+_FINANCIAL_QUARTERLY_COLUMNS = """
+    symbol VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    announce_date DATE NOT NULL,
+    -- Income 表字段
+    revenue DOUBLE,
+    net_profit DOUBLE,
+    eps DOUBLE,
+    research_expenses DOUBLE,
+    -- Balance 表字段
+    total_equity DOUBLE,
+    total_assets DOUBLE,
+    total_liabilities DOUBLE,
+    -- CashFlow 表字段
+    ocf DOUBLE,
+    capex DOUBLE,
+    -- Pershareindex 表预计算字段
+    bps DOUBLE,
+    ocf_per_share DOUBLE,
+    debt_to_assets DOUBLE,
+    net_profit_margin DOUBLE,
+    roe_weighted DOUBLE,
+    -- 衍生指标（Pershareindex 预计算优先，手算兜底）
+    net_profit_yoy DOUBLE,
+    revenue_yoy DOUBLE,
+    roe DOUBLE,
+    gross_margin DOUBLE,
+    PRIMARY KEY (symbol, report_date)
+"""
+
 
 class DataCache:
     """DuckDB 数据缓存管理器"""
@@ -70,39 +105,28 @@ class DataCache:
         # 季度财务数据
         # announce_date = 真实财报发布日期（PIT 契约核心，ADR-007）
         # ADR-007 Phase 3：全量字段（Income + Balance + CashFlow + Pershareindex 四表合并）
-        # 旧表字段不全时直接 DROP + CREATE（不兼容旧数据，缓存全量重建）
-        conn.execute("DROP TABLE IF EXISTS financial_quarterly")
+        # schema 版本化：仅在版本不匹配时 DROP+CREATE（保留已缓存数据，支撑增量下载），
+        # 版本匹配则 CREATE IF NOT EXISTS 幂等建表，不破坏现有数据。
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS financial_quarterly (
-                symbol VARCHAR NOT NULL,
-                report_date DATE NOT NULL,
-                announce_date DATE NOT NULL,
-                -- Income 表字段
-                revenue DOUBLE,
-                net_profit DOUBLE,
-                eps DOUBLE,
-                research_expenses DOUBLE,
-                -- Balance 表字段
-                total_equity DOUBLE,
-                total_assets DOUBLE,
-                total_liabilities DOUBLE,
-                -- CashFlow 表字段
-                ocf DOUBLE,
-                capex DOUBLE,
-                -- Pershareindex 表预计算字段
-                bps DOUBLE,
-                ocf_per_share DOUBLE,
-                debt_to_assets DOUBLE,
-                net_profit_margin DOUBLE,
-                roe_weighted DOUBLE,
-                -- 衍生指标（Pershareindex 预计算优先，手算兜底）
-                net_profit_yoy DOUBLE,
-                revenue_yoy DOUBLE,
-                roe DOUBLE,
-                gross_margin DOUBLE,
-                PRIMARY KEY (symbol, report_date)
+            CREATE TABLE IF NOT EXISTS _schema_meta (
+                table_name VARCHAR PRIMARY KEY,
+                version INTEGER NOT NULL
             )
         """)
+        current = conn.execute(
+            "SELECT version FROM _schema_meta WHERE table_name = 'financial_quarterly'"
+        ).fetchone()
+        if current and current[0] == _FINANCIAL_SCHEMA_VERSION:
+            # 版本匹配：幂等建表（首次运行建空表，已存在则不动），保留数据
+            conn.execute(f"CREATE TABLE IF NOT EXISTS financial_quarterly ({_FINANCIAL_QUARTERLY_COLUMNS})")
+        else:
+            # 版本缺失或升级：DROP + CREATE + 记录版本
+            conn.execute("DROP TABLE IF EXISTS financial_quarterly")
+            conn.execute(f"CREATE TABLE financial_quarterly ({_FINANCIAL_QUARTERLY_COLUMNS})")
+            conn.execute(
+                "INSERT OR REPLACE INTO _schema_meta VALUES ('financial_quarterly', ?)",
+                [_FINANCIAL_SCHEMA_VERSION],
+            )
 
         # 指数成分股
         conn.execute("""
@@ -130,6 +154,30 @@ class DataCache:
         if result and result[0]:
             return str(result[0]), str(result[1])
         return None
+
+    def get_price_latest_dates(self, symbols: list[str]) -> dict[str, str]:
+        """批量获取多只股票缓存的最新日期。
+
+        用于行情增量判定：比逐股查 get_price_range 快得多（一次 GROUP BY 扫描）。
+        缓存中不存在的 symbol 不会出现在返回 dict 中。
+
+        Returns:
+            {symbol: latest_date_str} ，latest_date_str 格式 YYYY-MM-DD
+        """
+        if not symbols:
+            return {}
+        conn = self._get_conn()
+        placeholders = ", ".join(["?"] * len(symbols))
+        rows = conn.execute(
+            f"""
+            SELECT symbol, MAX(date) as latest
+            FROM price_daily
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            symbols,
+        ).fetchall()
+        return {r[0]: str(r[1]) for r in rows if r[1] is not None}
 
     def get_prices(
         self,
@@ -205,6 +253,44 @@ class DataCache:
         if result and result[0]:
             return str(result[0]), str(result[1])
         return None
+
+    def get_financial_latest_announce(self, symbol: str) -> str | None:
+        """获取某只股票缓存中最新的 announce_date（公告日，PIT 真实可见日）。
+
+        用于增量下载新鲜度判定：公告日距今超阈值即视为需要补齐。
+        """
+        conn = self._get_conn()
+        result = conn.execute(
+            "SELECT MAX(announce_date) FROM financial_quarterly WHERE symbol = ?",
+            [symbol],
+        ).fetchone()
+        if result and result[0]:
+            return str(result[0])
+        return None
+
+    def get_financial_latest_announces(self, symbols: list[str]) -> dict[str, str]:
+        """批量获取多只股票缓存的最新公告日。
+
+        用于财务增量判定：比逐股查 get_financial_latest_announce 快得多（一次 GROUP BY）。
+        缓存中不存在的 symbol 不会出现在返回 dict 中。
+
+        Returns:
+            {symbol: latest_announce_date_str} ，格式 YYYY-MM-DD
+        """
+        if not symbols:
+            return {}
+        conn = self._get_conn()
+        placeholders = ", ".join(["?"] * len(symbols))
+        rows = conn.execute(
+            f"""
+            SELECT symbol, MAX(announce_date) as latest
+            FROM financial_quarterly
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            symbols,
+        ).fetchall()
+        return {r[0]: str(r[1]) for r in rows if r[1] is not None}
 
     def get_financials(
         self,

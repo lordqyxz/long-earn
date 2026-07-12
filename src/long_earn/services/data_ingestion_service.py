@@ -7,18 +7,11 @@
 from __future__ import annotations
 
 import contextlib
-import json
-import os
-import subprocess
-import sys
-import tempfile
-import time
 from datetime import date
-from pathlib import Path
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.miniqmt_provider import (
@@ -30,52 +23,27 @@ from long_earn.backtest.data.miniqmt_provider import (
 if TYPE_CHECKING:
     from long_earn.services import LoggerService
 
-# 分批下载，避免 xtquant 单次请求过大超时
+# 分批下载默认大小（CLI --batch-size 兜底值）
+# 实测 xtquant 接口对 batch size 线性扩展，无大 batch 惩罚（见 _measure_batch_scaling）
+# 行情/财务分别有更优的 per-kind 默认值（下方 _PRICE_BATCH / _FINANCIAL_BATCH）
 BATCH_SIZE = 50
+
+# 行情/财务最优 batch size（实测确定，xtquant 接口线性扩展，约束是单批不超 60s 超时）
+# 行情：200 只/批 ≈ 8s（2.5 个月数据），全历史约 30-40s，留余量
+# 财务：100 只/批 ≈ 17s（全历史四表合并），离 60s 超时有余量
+_PRICE_BATCH = 200
+_FINANCIAL_BATCH = 100
 
 # 全量下载的板块名
 SECTOR_ALL_A = "沪深A股"
 SECTOR_ALL_ETF = "沪深ETF"
 
-# 并发下载子进程数：miniQMT 本地服务，4 并发平衡吞吐与稳定性
-# 太高（>8）易触发 xtquant C++ 端 SIGABRT；subprocess 隔离使单批崩溃不影响整体
+# 保留用于签名兼容（主进程直接调 xtquant，单线程串行，max_workers 实际忽略）
 DEFAULT_MAX_WORKERS = 4
 
-# 子进程下载超时（秒）
-_SUBPROCESS_TIMEOUT = 180
-
-# 项目根目录（供子进程 cwd 使用，确保 src layout 可 import）
-_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-
-# 子进程 worker 脚本：在独立进程中调用 xtquant 下载并输出 DataFrame 到 pickle 文件
-# 用 __new__ 绕过 MiniQmtDataProvider.__init__（避免子进程创建 DuckDB 连接引发并发写锁）
-_SUBPROCESS_WORKER = """
-import os, json, sys
-from long_earn.backtest.data.miniqmt_provider import MiniQmtDataProvider, MiniQmtClient
-
-def main():
-    batch = json.loads(os.environ["BATCH_JSON"])
-    start = os.environ["START_DATE"]
-    end = os.environ["END_DATE"]
-    kind = os.environ["KIND"]
-    out_path = os.environ["OUT_PATH"]
-
-    p = MiniQmtDataProvider.__new__(MiniQmtDataProvider)
-    p.client = MiniQmtClient.get()
-
-    if kind == "price":
-        df = p._fetch_kline(batch, start, end)
-    else:
-        df = p._fetch_financials(batch, start, end)
-
-    if df is not None and not df.empty:
-        df.to_pickle(out_path)
-        print(f"OK {len(df)}")
-    else:
-        print("EMPTY")
-
-main()
-"""
+# 财务数据新鲜度阈值：最新公告日距今超此天数视为需要增量补齐
+# 基于 announce_date（公告日，PIT 真实可见日），而非 report_date（报告期末）
+_FINANCIAL_STALE_DAYS = 120
 
 
 class DataIngestionService:
@@ -146,24 +114,129 @@ class DataIngestionService:
         symbols: list[str],
         start_date: str,
         end_date: str,
-        batch_size: int = BATCH_SIZE,
+        batch_size: int = _PRICE_BATCH,
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> None:
-        """分批并发下载行情数据并写入 DuckDB 缓存。
+        """分批串行下载行情数据并写入 DuckDB 缓存。
 
-        使用 subprocess 隔离每个批次，防止单只股票触发 xtquant C++ SIGABRT
-        导致整个进程崩溃。并发数由 max_workers 控制。
+        主进程直接调 xtquant，单线程串行（无 subprocess 隔离）。
+        若 xtquant SIGABRT 杀死主进程，靠外层守护脚本重启 + 缓存检测断点续传。
         """
         self._download_concurrent(
             symbols, start_date, end_date, "price", batch_size, max_workers
         )
+
+    def _select_prices_to_refresh(
+        self,
+        symbols: list[str],
+        end_date: str,
+        start_date: str = "",
+    ) -> tuple[list[str], list[str], str]:
+        """行情增量预检：按交易日精确判定缺失，分两组返回需下载的股票。
+
+        判定规则（按缓存最新交易日精确比对，缺一天就补一天）：
+        - 缓存为空（无该 symbol 记录）→ full_missing 组，起始日沿用 start_date（空=最早）
+        - 最新交易日 < end_date → stale 组，起始日 = 最新交易日 + 1 天
+        - 最新交易日 >= end_date → 跳过（已齐到目标日）
+
+        分组返回的原因：无缓存股票需要全量历史（起始日可能为空=最早），
+        待补股票只需几天数据；若混用统一起始日会导致待补股票也全量重下，触发超时。
+
+        Args:
+            symbols: 候选股票列表
+            end_date: 目标截止日 YYYY-MM-DD（通常为今天）
+            start_date: 全量缺失股票的回溯起始日（空字符串=最早历史）
+
+        Returns:
+            (full_missing, stale, stale_start)
+            - full_missing: 无缓存的股票列表，需用 start_date 全量下载
+            - stale: 有缓存但缺交易日的股票列表，需从 stale_start 起补齐
+            - stale_start: stale 组的下载起始日（取最早待补起始日）；
+              stale 为空时返回 end_date（无意义，调用方应检查 stale 是否为空）
+        """
+        end_ts = pd.Timestamp(end_date)
+        latest_map = self.cache.get_price_latest_dates(symbols)
+        full_missing: list[str] = []
+        stale: list[str] = []
+        stale_starts: list[str] = []
+        fresh_count = 0
+
+        for sym in symbols:
+            latest = latest_map.get(sym)
+            if latest is None:
+                # 缓存为空：全量下载
+                full_missing.append(sym)
+                continue
+
+            latest_ts = pd.Timestamp(latest)
+            if latest_ts < end_ts:
+                # 缺交易日：从最新交易日次日起补齐到 end_date
+                inc_start = (latest_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                stale.append(sym)
+                stale_starts.append(inc_start)
+            else:
+                fresh_count += 1
+
+        stale_start = min(stale_starts) if stale_starts else end_date
+
+        self._info(
+            f"[行情][增量] 共 {len(symbols)} 只，需刷新 "
+            f"{len(full_missing) + len(stale)} 只"
+            f"（无缓存 {len(full_missing)} / 待补 {len(stale)}），跳过 {fresh_count} 只"
+        )
+        return full_missing, stale, stale_start
+
+    def download_prices_incremental(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        batch_size: int = _PRICE_BATCH,
+        max_workers: int = DEFAULT_MAX_WORKERS,
+    ) -> None:
+        """行情增量下载：按交易日精确判定，缺多少天就补多少天。
+
+        分两阶段下载（避免无缓存股票的全量历史拖累待补股票）：
+        1. stale 组：有缓存但缺交易日的股票，从各自最新交易日次日起补齐到 end_date
+        2. full_missing 组：无缓存的股票，用 start_date 全量下载
+        靠 INSERT OR REPLACE upsert 幂等合并到 DuckDB 缓存。
+        """
+        if not symbols:
+            self._info("[行情] 无标的需要下载")
+            return
+        full_missing, stale, stale_start = self._select_prices_to_refresh(
+            symbols, end_date, start_date
+        )
+        if not full_missing and not stale:
+            self._info(f"[行情][增量] 全部 {len(symbols)} 只行情已齐到 {end_date}，跳过下载")
+            return
+
+        # 阶段1：待补股票（只缺几天，快速）
+        if stale:
+            self._info(
+                f"[行情][增量] 阶段1：{len(stale)} 只待补，"
+                f"起始日 {stale_start} ~ {end_date}"
+            )
+            self._download_concurrent(
+                stale, stale_start, end_date, "price", batch_size, max_workers
+            )
+
+        # 阶段2：无缓存股票（全量历史，耗时）
+        if full_missing:
+            self._info(
+                f"[行情][增量] 阶段2：{len(full_missing)} 只无缓存，"
+                f"起始日 {start_date or '(最早)'} ~ {end_date}"
+            )
+            self._download_concurrent(
+                full_missing, start_date, end_date, "price", batch_size, max_workers
+            )
 
     def download_financials(
         self,
         symbols: list[str],
         start_date: str,
         end_date: str,
-        batch_size: int = BATCH_SIZE,
+        batch_size: int = _FINANCIAL_BATCH,
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> None:
         """分批并发下载财务数据并写入 DuckDB 缓存。"""
@@ -174,6 +247,114 @@ class DataIngestionService:
             symbols, start_date, end_date, "financial", batch_size, max_workers
         )
 
+    def _select_financials_to_refresh(
+        self,
+        symbols: list[str],
+        today: str,
+        start_date: str = "",
+    ) -> tuple[list[str], list[str], str]:
+        """财务增量预检：按公告日阈值判定，分两组返回需下载的股票。
+
+        判定规则（按 announce_date 最新公告日阈值）：
+        - 缓存为空（无该 symbol 记录）→ full_missing 组，起始日沿用 start_date（空=最早）
+        - 最新公告日距今 > _FINANCIAL_STALE_DAYS → stale 组，起始日 = 最新公告日 + 1 天
+        - 最新公告日距今 ≤ 阈值 → 跳过（最近数据已齐）
+
+        分组返回的原因：无缓存股票需要全量历史，过期股票只需补最近；
+        若混用统一起始日会导致过期股票也全量重下，浪费带宽。
+
+        Args:
+            symbols: 候选股票列表
+            today: 今日日期 YYYY-MM-DD
+            start_date: 全量缺失股票的回溯起始日（空字符串=最早历史）
+
+        Returns:
+            (full_missing, stale, stale_start)
+            - full_missing: 无缓存的股票列表，需用 start_date 全量下载
+            - stale: 有缓存但公告日过期的股票列表，需从 stale_start 起补齐
+            - stale_start: stale 组的下载起始日（取最早过期起始日）；
+              stale 为空时返回 today（无意义，调用方应检查 stale 是否为空）
+        """
+        today_ts = pd.Timestamp(today)
+        threshold = timedelta(days=_FINANCIAL_STALE_DAYS)
+        # 批量查最新公告日，避免逐股查 5208 次
+        latest_map = self.cache.get_financial_latest_announces(symbols)
+        full_missing: list[str] = []
+        stale: list[str] = []
+        stale_starts: list[str] = []
+        fresh_count = 0
+
+        for sym in symbols:
+            latest_announce = latest_map.get(sym)
+            if latest_announce is None:
+                # 缓存为空：全量下载
+                full_missing.append(sym)
+                continue
+
+            latest_ts = pd.Timestamp(latest_announce)
+            if (today_ts - latest_ts) > threshold:
+                # 过期：从最新公告日次日起补齐
+                inc_start = (latest_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                stale.append(sym)
+                stale_starts.append(inc_start)
+            else:
+                fresh_count += 1
+
+        stale_start = min(stale_starts) if stale_starts else today
+
+        self._info(
+            f"[财务][增量] 共 {len(symbols)} 只，需刷新 "
+            f"{len(full_missing) + len(stale)} 只"
+            f"（无缓存 {len(full_missing)} / 过期 {len(stale)}），跳过 {fresh_count} 只"
+        )
+        return full_missing, stale, stale_start
+
+    def download_financials_incremental(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        batch_size: int = _FINANCIAL_BATCH,
+        max_workers: int = DEFAULT_MAX_WORKERS,
+    ) -> None:
+        """财务增量下载：按公告日阈值判定，仅下载缺失/过期的股票。
+
+        分两阶段下载（避免无缓存股票的全量历史拖累过期股票）：
+        1. stale 组：公告日过期的股票，从各自最新公告日次日起补齐到 end_date
+        2. full_missing 组：无缓存的股票，用 start_date 全量下载
+        靠 INSERT OR REPLACE upsert 幂等合并到 DuckDB 缓存。
+        """
+        if not symbols:
+            self._info("[财务] 无标的需要下载（ETF 无财务数据）")
+            return
+        today = end_date or date.today().strftime("%Y-%m-%d")
+        full_missing, stale, stale_start = self._select_financials_to_refresh(
+            symbols, today, start_date
+        )
+        if not full_missing and not stale:
+            self._info(f"[财务][增量] 全部 {len(symbols)} 只最近数据已齐，跳过下载")
+            return
+
+        # 阶段1：过期股票（只补最近，快速）
+        if stale:
+            self._info(
+                f"[财务][增量] 阶段1：{len(stale)} 只过期，"
+                f"起始日 {stale_start} ~ {today}"
+            )
+            self._download_concurrent(
+                stale, stale_start, today, "financial", batch_size, max_workers
+            )
+
+        # 阶段2：无缓存股票（全量历史，耗时）
+        if full_missing:
+            self._info(
+                f"[财务][增量] 阶段2：{len(full_missing)} 只无缓存，"
+                f"起始日 {start_date or '(最早)'} ~ {today}"
+            )
+            self._download_concurrent(
+                full_missing, start_date, today, "financial", batch_size, max_workers
+            )
+
     def _download_concurrent(
         self,
         symbols: list[str],
@@ -181,14 +362,15 @@ class DataIngestionService:
         end_date: str,
         kind: str,
         batch_size: int,
-        max_workers: int,
+        max_workers: int,  # noqa: ARG002 保留参数兼容签名，单线程直接调用忽略
     ) -> None:
-        """并发下载通用实现（行情/财务共用）。
+        """单线程串行下载+写入：主进程直接调 xtquant 下载一批 → 写入一批 → 下一批。
 
-        两阶段：
-        1. 并发 subprocess 下载 + 读取，输出 DataFrame 到 pickle 临时文件
-           （subprocess 隔离防 SIGABRT；ThreadPoolExecutor 管理并发）
-        2. 串行读取 pickle 写入 DuckDB（避免多进程并发写锁冲突）
+        xtquant 下载和 DuckDB 写入均单线程串行执行，避免并发触发 xtquant
+        C++ SIGABRT，也避免 DuckDB 单连接的线程安全问题。
+        若 xtquant SIGABRT 杀死主进程，外层守护脚本会重启进程，
+        靠智能模式的缓存检测（get_price_latest_dates / get_financial_latest_announces）
+        跳过已写入的股票，从断点续传。
         """
         total = len(symbols)
         if total == 0:
@@ -198,62 +380,29 @@ class DataIngestionService:
         tag = "行情" if kind == "price" else "财务"
         start_label = start_date or "(最早)"
         self._info(
-            f"[{tag}] 开始下载 {total} 只标的 ({start_label} ~ {end_date}), "
-            f"并发={max_workers}"
+            f"[{tag}] 开始下载 {total} 只标的 ({start_label} ~ {end_date}), 单线程"
         )
 
         batches = [symbols[i : i + batch_size] for i in range(0, total, batch_size)]
         total_batches = len(batches)
 
-        # 阶段1：并发下载到子进程本地 pickle
-        results: list[tuple[bool, str] | None] = [None] * total_batches
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_to_meta: dict[Any, tuple[int, str]] = {}
-            for idx, batch in enumerate(batches):
-                tmp = tempfile.mktemp(suffix=".pkl")
-                fut = pool.submit(
-                    self._run_batch_subprocess,
-                    batch, start_date, end_date, kind, tmp,
-                )
-                future_to_meta[fut] = (idx, tmp)
-
-            done = 0
-            for fut in as_completed(future_to_meta):
-                idx, tmp = future_to_meta[fut]
-                ok = fut.result()
-                results[idx] = (ok, tmp)
-                done += 1
-                if done % 5 == 0 or done == total_batches:
-                    self._info(f"[{tag}] 下载进度 {done}/{total_batches}")
-
-        # 阶段2：串行写入 DuckDB
         ok_count = 0
         failed_count = 0
-        for idx, item in enumerate(results):
+        for idx, batch in enumerate(batches):
             batch_num = idx + 1
-            batch = batches[idx]
-            ok, tmp = item  # type: ignore[misc]
-            if ok and os.path.exists(tmp):
-                try:
-                    df = pd.read_pickle(tmp)
-                    if not df.empty:
-                        if kind == "price":
-                            self.data_provider.cache.save_prices(df)
-                        else:
-                            self.data_provider.cache.save_financials(df)
-                        ok_count += len(batch)
-                except Exception as e:
-                    self._warning(
-                        f"[{tag}] 批次 {batch_num}/{total_batches} 写入失败: {e}"
-                    )
-                    failed_count += len(batch)
+            # 单线程直接调 xtquant 下载一批
+            df = self._fetch_batch(batch, start_date, end_date, kind)
+            # 单线程写入一批
+            wrote_ok = self._write_batch_to_cache(
+                kind, df, batch_num, total_batches
+            )
+            if wrote_ok:
+                ok_count += len(batch)
             else:
                 failed_count += len(batch)
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.unlink(tmp)
             if batch_num % 5 == 0 or batch_num == total_batches:
                 self._info(
-                    f"[{tag}] 写入进度 {batch_num}/{total_batches} "
+                    f"[{tag}] 进度 {batch_num}/{total_batches} "
                     f"({ok_count} 成功, {failed_count} 失败)"
                 )
 
@@ -262,51 +411,51 @@ class DataIngestionService:
             msg += f"，{failed_count} 只失败"
         self._info(msg)
 
-    def _run_batch_subprocess(
+    def _fetch_batch(
         self,
         batch: list[str],
         start_date: str,
         end_date: str,
         kind: str,
-        out_path: str,
-        timeout: int = _SUBPROCESS_TIMEOUT,
-    ) -> bool:
-        """在子进程中下载一个批次，DataFrame 输出到 pickle 文件。
+    ) -> pd.DataFrame | None:
+        """主进程直接调 xtquant 下载一批数据。
 
-        子进程隔离防 SIGABRT：xtquant C++ 端对特定股票触发 abort 时只杀子进程，
-        主进程存活并记录失败批次。
+        若 xtquant C++ 端触发 SIGABRT，主进程会被杀（无 subprocess 隔离），
+        靠外层守护脚本重启 + 智能模式缓存检测实现断点续传。
         """
-        env = {
-            **os.environ,
-            "BATCH_JSON": json.dumps(batch),
-            "START_DATE": start_date,
-            "END_DATE": end_date,
-            "KIND": kind,
-            "OUT_PATH": out_path,
-            "LONG_EARN_DISABLE_XTQUANT": "",  # 子进程清除禁用开关
-        }
         try:
-            r = subprocess.run(
-                [sys.executable, "-c", _SUBPROCESS_WORKER],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-                cwd=str(_PROJECT_ROOT),
-            )
-            if r.returncode != 0:
-                self._warning(
-                    f"[下载] 子进程崩溃 exitcode={r.returncode} "
-                    f"({len(batch)} 只, kind={kind})"
-                )
-                return False
-            # stdout 可能含 xtquant banner，OK/EMPTY 在最后一行
-            last_line = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
-            return last_line.startswith("OK")
-        except subprocess.TimeoutExpired:
-            self._warning(
-                f"[下载] 子进程超时 ({timeout}s, {len(batch)} 只, kind={kind})"
-            )
+            if kind == "price":
+                return self.data_provider._fetch_kline(batch, start_date, end_date)
+            return self.data_provider._fetch_financials(batch, start_date, end_date)
+        except Exception as e:
+            self._warning(f"[下载] 批次下载异常: {e}")
+            return None
+
+    def _write_batch_to_cache(
+        self,
+        kind: str,
+        df: pd.DataFrame | None,
+        batch_num: int,
+        total_batches: int,
+    ) -> bool:
+        """将一批 DataFrame 写入 DuckDB 缓存（单线程串行调用）。
+
+        Returns:
+            True 表示本批写入成功，False 表示失败/空
+        """
+        tag = "行情" if kind == "price" else "财务"
+        if df is None or df.empty:
+            return False
+        try:
+            if kind == "price":
+                self.data_provider.cache.save_prices(df)
+            else:
+                self.data_provider.cache.save_financials(df)
+            if batch_num % 5 == 0 or batch_num == total_batches:
+                self._info(f"[{tag}] 写入进度 {batch_num}/{total_batches}")
+            return True
+        except Exception as e:
+            self._warning(f"[{tag}] 批次 {batch_num}/{total_batches} 写入失败: {e}")
             return False
 
     def run(
@@ -315,31 +464,37 @@ class DataIngestionService:
         start_date: str = "",
         end_date: str = "",
         skip_financial: bool = False,
-        batch_size: int = BATCH_SIZE,
+        batch_size: int = 0,
         max_workers: int = DEFAULT_MAX_WORKERS,
+        full: bool = False,
     ) -> dict[str, Any]:
-        """执行完整下载流程。
+        """执行数据下载流程（默认智能模式：自动分析缺失，只下载缺失/过期的部分）。
+
+        智能模式（默认，full=False）：
+        - 行情：按交易日精确判定，缓存最新交易日 < end_date 的股票从次日起补齐；
+          缓存为空的股票全量下载；已齐到 end_date 的跳过
+        - 财务：按公告日阈值判定，最新公告日距今 > 120 天的股票补齐；
+          缓存为空的股票全量下载；新鲜的跳过
+        强制全量模式（full=True）：忽略缓存，全部股票按 [start_date, end_date] 全量重下
 
         Args:
-            universe: 股票池类型（all/all_a/etf/csi300/csi500/sse50/csi1000）
-            start_date: 起始日期 YYYY-MM-DD，空字符串=最长历史
-            end_date: 结束日期 YYYY-MM-DD，空字符串=今天
-            skip_financial: 跳过财务数据下载
-            batch_size: 分批下载每批数量
-            max_workers: 并发下载子进程数（1-8，默认 4）
+            batch_size: 分批大小；0=自动（行情200/财务100，实测最优），
+                显式指定则覆盖自动值
 
         Returns:
             执行结果摘要 dict
         """
         max_workers = max(1, min(8, max_workers))
         end = end_date or date.today().strftime("%Y-%m-%d")
+        # 0=自动：行情用 _PRICE_BATCH，财务用 _FINANCIAL_BATCH
+        price_batch = batch_size or _PRICE_BATCH
+        financial_batch = batch_size or _FINANCIAL_BATCH
 
         self._info("=" * 60)
-        self._info("全量数据下载")
+        self._info("数据下载" + ("（强制全量）" if full else "（智能增量）"))
         self._info(f"股票池: {universe}")
         self._info(f"日期范围: {start_date or '(最早)'} ~ {end}")
-        self._info(f"批次大小: {batch_size}")
-        self._info(f"并发数: {max_workers}")
+        self._info(f"批次大小: 行情={price_batch} / 财务={financial_batch}")
         self._info("=" * 60)
 
         if not self.is_available:
@@ -357,13 +512,24 @@ class DataIngestionService:
             self._warning("股票池为空，终止")
             return {"status": "error", "reason": "empty_universe"}
 
-        self.download_prices(price_symbols, start_date, end, batch_size, max_workers)
+        # 行情：全量 or 智能增量
+        if full:
+            self.download_prices(price_symbols, start_date, end, price_batch, max_workers)
+        else:
+            self.download_prices_incremental(
+                price_symbols, start_date, end, price_batch, max_workers
+            )
 
+        # 财务：全量 or 智能增量 or 跳过
         if skip_financial:
             self._info("[财务] 已跳过（skip_financial=True）")
-        else:
+        elif full:
             self.download_financials(
-                financial_symbols, start_date, end, batch_size, max_workers
+                financial_symbols, start_date, end, financial_batch, max_workers
+            )
+        else:
+            self.download_financials_incremental(
+                financial_symbols, start_date, end, financial_batch, max_workers
             )
 
         self._info("=" * 60)
@@ -376,6 +542,7 @@ class DataIngestionService:
         return {
             "status": "ok",
             "universe": universe,
+            "mode": "full" if full else "smart",
             "price_symbols": len(price_symbols),
             "financial_symbols": len(financial_symbols),
             "cache_path": str(self.cache.db_path),
