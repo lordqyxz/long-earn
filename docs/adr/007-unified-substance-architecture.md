@@ -125,9 +125,12 @@ class Substance(BaseModel):
 ### 持久化（DuckDB 事务式存储，Phase 4 升级）
 
 ```
-~/.long_earn/substances.duckdb    # DuckDB 列式存储（WAL 崩溃安全 + 主键幂等）
-~/.long_earn/meta.json            # schema_version, substance_count（派生自 COUNT(*)，非独立权威）
+<数据目录>/substances.duckdb    # DuckDB 列式存储（WAL 崩溃安全 + 主键幂等）
+<数据目录>/meta.json             # schema_version, substance_count（派生自 COUNT(*)，非独立权威）
 ```
+
+数据目录由 **`LONG_EARN_DATA_DIR`** 环境变量唯一控制（默认 repo 同级 `long-earn-data`），
+所有生成数据路径由 `core/storage.py` 统一裁决（见「写入路径收敛」）。
 
 **Phase 1-3 用 JSONL 全量重写，Phase 4 改为 DuckDB 单条原子追加**。动机：
 JSONL 实现用 `open("w")` 截断式全量重写 + 每次 `add` 后 `_auto_save` 全量落盘，
@@ -144,8 +147,13 @@ JSONL 实现用 `open("w")` 截断式全量重写 + 每次 `add` 后 `_auto_save
 ADR-004 遗留的 `memory.facts.pkl` / `memory.npz` 不迁移（pickle 不安全，已无代码读取），
 迁移脚本打印可清理清单供人工删除。
 
-写入路径收敛：所有写入方（`MemoryServiceImpl`、`tools/store.py`、`dashboard`）
-统一走 `AppConfig.memory_path`，不再有 `os.getenv` 直读或硬编码绝对路径。
+写入路径收敛：`core/storage.py` 是所有生成数据落盘位置的**唯一裁决者**，
+通过 `LONG_EARN_DATA_DIR` 环境变量派生 `substances_db_path()` / `backtest_cache_path()` /
+`hypothesis_tree_dir()` / `strategy_results_path()` / `best_strategy_path()`。
+`AppConfig.from_env()` 调用 `core.storage.resolve_paths()` 一次性解析全部路径注入配置字段。
+各业务模块（`DataCache`、`DuckDBAuditProvider`、`HypothesisTreeStore`、
+`StrategyResearchService`、`BacktestAnalyzer`）默认从 `core.storage` 取路径，
+不再 `Path.home()` 或硬编码绝对路径。
 
 ### MemoryService Protocol 精简
 

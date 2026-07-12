@@ -1,7 +1,7 @@
 """假设树持久化存储（HTR Phase 1）。
 
 JSON 文件持久化，每次研究 run 一棵树。
-路径：~/.long_earn/hypothesis_trees/{run_id}.json
+路径由 ``core.storage.hypothesis_tree_dir`` 统一裁决（LONG_EARN_DATA_DIR）。
 """
 
 from __future__ import annotations
@@ -11,9 +11,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from long_earn.core.storage import hypothesis_tree_dir as _default_tree_dir
 from long_earn.strategy_rd.hypothesis_tree import HypothesisTree
-
-_DEFAULT_DIR = Path.home() / ".long_earn" / "hypothesis_trees"
 
 
 class HypothesisTreeStore:
@@ -25,7 +24,7 @@ class HypothesisTreeStore:
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
-        self._base_dir = Path(base_dir) if base_dir else _DEFAULT_DIR
+        self._base_dir = Path(base_dir) if base_dir else _default_tree_dir()
 
     def save(self, tree: HypothesisTree) -> Path:
         """持久化假设树，返回文件路径。"""

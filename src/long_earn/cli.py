@@ -76,11 +76,8 @@ def research(
     """策略研究循环 —— 以初始交易思路驱动的多轮研发与回测。"""
     from long_earn.config import AppConfig
     from long_earn.context_init import initialize_context
-    from long_earn.services.strategy_research_service import (
-        BEST_STRATEGY_FILE,
-        RESULTS_FILE,
-        StrategyResearchService,
-    )
+    from long_earn.core.storage import best_strategy_path, strategy_results_path
+    from long_earn.services.strategy_research_service import StrategyResearchService
 
     idea_str = idea or _DEFAULT_IDEA
     config = AppConfig.from_env()
@@ -106,8 +103,8 @@ def research(
         min_improvement=min_improvement,
     )
 
-    typer.echo(f"\n结果文件: {RESULTS_FILE}")
-    typer.echo(f"最佳策略: {BEST_STRATEGY_FILE}")
+    typer.echo(f"\n结果文件: {strategy_results_path()}")
+    typer.echo(f"最佳策略: {best_strategy_path()}")
 
 
 def _print_research_banner(
@@ -117,10 +114,10 @@ def _print_research_banner(
     recent_window: str,
 ) -> None:
     """打印 research 子命令启动横幅。"""
-    from long_earn.services.strategy_research_service import (
-        BEST_STRATEGY_FILE,
-        RESULTS_FILE,
-    )
+    from long_earn.core.storage import best_strategy_path, strategy_results_path
+
+    results_file = strategy_results_path()
+    best_file = best_strategy_path()
 
     width = 64
     idea_display = idea
@@ -137,8 +134,8 @@ def _print_research_banner(
     typer.echo(f"  训练区间 : {history_window}")
     typer.echo(f"  验证区间 : {recent_window}")
     typer.echo("-" * width)
-    typer.echo(f"  结果文件 : {RESULTS_FILE}")
-    typer.echo(f"  最佳策略 : {BEST_STRATEGY_FILE}")
+    typer.echo(f"  结果文件 : {results_file}")
+    typer.echo(f"  最佳策略 : {best_file}")
     typer.echo("=" * width + "\n")
 
 

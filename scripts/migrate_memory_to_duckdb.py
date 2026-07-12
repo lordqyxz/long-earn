@@ -22,6 +22,7 @@ from loguru import logger
 logger.remove()
 logger.add(sys.stderr, format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | {message}")
 
+from long_earn.core.storage import substances_db_path  # noqa: E402
 from long_earn.substance.persistence import load_jsonl, save_many  # noqa: E402
 
 LEGACY_FILES = [
@@ -35,10 +36,14 @@ LEGACY_FILES = [
 ]
 
 
-def migrate(data_dir: Path) -> int:
-    """执行迁移，返回迁移的物质条数。"""
-    target = data_dir / "substances.duckdb"
-    source_jsonl = data_dir / "substances.jsonl"
+def migrate(legacy_dir: Path) -> int:
+    """执行迁移：旧目录 → 统一数据目录（core.storage 裁决）。
+
+    Args:
+        legacy_dir: 旧数据目录（默认 ~/.long_earn，含 substances.jsonl）
+    """
+    target = substances_db_path()
+    source_jsonl = legacy_dir / "substances.jsonl"
 
     if not source_jsonl.exists():
         logger.warning(f"未找到旧 JSONL 文件: {source_jsonl}（可能已迁移或从未创建）")
@@ -55,7 +60,7 @@ def migrate(data_dir: Path) -> int:
     # 列出可清理的遗留文件
     removable: list[Path] = []
     for name in LEGACY_FILES:
-        f = data_dir / name
+        f = legacy_dir / name
         if f.exists():
             removable.append(f)
     if removable:
@@ -68,18 +73,18 @@ def migrate(data_dir: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="迁移旧记忆存储到 DuckDB")
     parser.add_argument(
-        "--data-dir",
+        "--legacy-dir",
         default=str(Path.home() / ".long_earn"),
-        help="数据目录（默认 ~/.long_earn）",
+        help="旧数据目录（默认 ~/.long_earn）",
     )
     args = parser.parse_args()
-    data_dir = Path(args.data_dir).expanduser()
+    legacy_dir = Path(args.legacy_dir).expanduser()
 
-    if not data_dir.exists():
-        logger.error(f"数据目录不存在: {data_dir}")
+    if not legacy_dir.exists():
+        logger.error(f"旧数据目录不存在: {legacy_dir}")
         sys.exit(1)
 
-    n = migrate(data_dir)
+    n = migrate(legacy_dir)
     logger.info(f"迁移结束，共 {n} 条物质")
 
 

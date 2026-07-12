@@ -17,7 +17,7 @@ uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
 
-> **缓存保护约定**：`~/.long_earn/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。
+> **缓存保护约定**：`<数据目录>/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
 
 类型检查用 Serena LSP，见下方「质量门槛」。
 
@@ -46,7 +46,7 @@ long_earn/
 │   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器 + 并行编排 + 参数网格 + 共享数据底座
 │   │   ├── operators/       #   算子框架（factor/filter/rank/compose/technical + 因果检测）
 │   │   └── data/            #   数据提供（当前阶段聚焦 miniqmt 单一数据源：DuckDB 缓存 → miniqmt；ciccwm/akshare 降级分支已屏蔽，ciccwm 情报接口独立保留）
-│   ├── core/                # 核心工具（prompt_loader `{{ var }}` jinja2、ChatPromptTemplate、llm_utils）
+│   ├── core/                # 核心工具（prompt_loader `{{ var }}` jinja2、ChatPromptTemplate、llm_utils、storage 统一存储路径辅助）
 │   ├── substance/           # 物质-运动统一架构（Substance + Motion，ADR-007，已实施）
 │   │   └── indices/         #   RetrievalIndex（keyword+semantic 双通道）+ GraphIndex（邻接表）
 │   ├── operator_dev/        # 算子研发子图（sandbox + backlog + spec + agents）
@@ -166,8 +166,8 @@ prompt = prompt_template.format(query=query)
 ## Gotchas
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
-- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，ADR-007 Phase 4）。旧 `memory/` 模块（ADR-004）已删除。
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，ADR-007 Phase 4）。旧 `memory/` 模块（ADR-004）已删除。
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
 - **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。**财务接口统一到 miniqmt**（ADR-007 Phase 2/3）：akshare/ciccwm 的财务方法已删除，仅 `MiniQmtDataProvider.get_financial_panel` 实现；四表合并全量 18 字段（Income + Balance + CashFlow + Pershareindex），Pershareindex 预计算值优先（roe/gross_margin/yoy），手算仅兜底。缓存表 `financial_quarterly` 22 列（DROP + CREATE，`announce_date` NOT NULL）。
 - **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
@@ -263,7 +263,7 @@ src/long_earn/backtest/
 
 - **状态化策略**：LLM 生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行。
 - **数据隔离**：策略仅能通过 `engine.current_data` 访问当前时刻数据，确保回测真实性。
-- **DuckDB 缓存**：`~/.long_earn/backtest_cache.duckdb`，优化大规模数据的喂入速度。全量下载通过 `uv run python scripts/download_data.py`（默认下载沪深A股+ETF 全历史行情+A股财务数据，需 miniQMT 连接）。
+- **DuckDB 缓存**：`<数据目录>/backtest_cache.duckdb`，优化大规模数据的喂入速度。全量下载通过 `uv run python scripts/download_data.py`（默认下载沪深A股+ETF 全历史行情+A股财务数据，需 miniQMT 连接）。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
 
 ## 记忆系统
 
@@ -284,7 +284,7 @@ src/long_earn/substance/
 - **物质 (Substance)**：统一存在基类，`form` 区分 event/relation/knowledge/strategy/backtest。关系是一等物质（有完整 provenance）。
 - **运动 (motion)**：施加在物质上的运算（activate/decay/conflict/compress），不持久化，只产出新物质。
 - **双索引**：RetrievalIndex（WorldInfo 关键词触发 + TF-IDF/embedding 语义相似度双通道融合）+ GraphIndex（邻接表图遍历）。
-- **持久化**：`~/.long_earn/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，schema 版本号 2，ADR-007 Phase 4）。
+- **持久化**：`<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，schema 版本号 2，ADR-007 Phase 4）。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制。
 - **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见。
 
 ## 量化数据分割规范（必须遵守）
@@ -320,7 +320,7 @@ src/long_earn/substance/
 | LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
 | DASHSCOPE_API_KEY | — | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填）|
 | OPENAI_API_KEY | — | OpenAI API Key（LLM_TYPE=openai 时必填）|
-| MEMORY_PATH | ~/.long\_earn/substances.duckdb | 记忆持久化路径（物质-运动架构，DuckDB） |
+| **LONG_EARN_DATA_DIR** | **D:/dev/long-earn-data** | **统一数据根目录（唯一存储位置控制变量，派生全部生成数据路径）** |
 | INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
 | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
@@ -358,7 +358,8 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 - `context_init.py` 中 `initialize_context()` 会额外调用 `memory.initialize()` 加载记忆
 - `create_runtime_context()` 创建服务实例但不初始化记忆；`initialize_context()` 包含完整初始化
 - 测试中使用 Mock 替代真实服务，无需 API 调用
-- import-linter 合约：`backtest.data` 不依赖上层模块，`services` 不依赖 `tools`
+- import-linter 合约：`backtest.data` 不依赖上层模块，`services` 不依赖 `tools`，`substance` 不依赖上层，`core` 不依赖上层
+- **统一存储位置**：所有生成数据（回测缓存、记忆库、假设树、策略研发产物）的落盘路径由 `core/storage.py` 统一裁决，唯一控制变量为 `LONG_EARN_DATA_DIR` 环境变量（默认 `D:/dev/long-earn-data`，repo 同级 `long-earn-data`）。各模块通过 `backtest_cache_path()` / `substances_db_path()` / `hypothesis_tree_dir()` / `strategy_results_path()` / `best_strategy_path()` 获取路径，不得自行 `Path.home()` 或硬编码。`AppConfig` 的 `data_dir` / `memory_path` / `backtest_cache_path` / `hypothesis_tree_dir` / `strategy_results_path` / `best_strategy_path` 字段从 `core.storage` 派生，供配置注入使用。
 
 ## 关键文件
 
@@ -368,6 +369,7 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 主图 | `src/long_earn/agent.py` |
 | 主图状态 | `src/long_earn/state.py` |
 | 配置 & RuntimeContext | `src/long_earn/config.py` |
+| **统一存储路径辅助（ADR-007 Phase 4）** | `src/long_earn/core/storage.py` |
 | 上下文初始化 | `src/long_earn/context_init.py` |
 | Prompt 加载器 | `src/long_earn/core/prompt_loader.py` |
 | LLM 工具 | `src/long_earn/core/llm_utils.py` |

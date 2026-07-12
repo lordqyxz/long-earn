@@ -6,7 +6,7 @@ import duckdb
 import polars as pl
 from loguru import logger
 
-from long_earn.backtest.data.cache import DEFAULT_CACHE_PATH
+from long_earn.core.storage import backtest_cache_path
 
 
 class BacktestAnalyzer:
@@ -17,8 +17,8 @@ class BacktestAnalyzer:
     并导出可视化所需的结构化 JSON 数据。
     """
 
-    def __init__(self, db_path: Path = DEFAULT_CACHE_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Path | None = None):
+        self.db_path = db_path if db_path is not None else backtest_cache_path()
 
     def _get_conn(self):
         return duckdb.connect(str(self.db_path))

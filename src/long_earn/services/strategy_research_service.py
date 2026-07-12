@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
@@ -21,10 +20,7 @@ if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
     from long_earn.services import BacktestService
 
-# 项目根目录（本文件位于 src/long_earn/services/，向上 4 级）
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-RESULTS_FILE = _PROJECT_ROOT / "strategy_research_results.json"
-BEST_STRATEGY_FILE = _PROJECT_ROOT / "best_strategy.yaml"
+from long_earn.core.storage import best_strategy_path, strategy_results_path
 
 _DEFAULT_IDEA = "研究一个基于净利润增长和ROE的选股策略，要求近三个月收益率最大化"
 
@@ -323,10 +319,11 @@ class StrategyResearchService:
             self.logger.info(
                 f"最佳策略历史收益率: {summary.best_history_return:.4f}"
             )
-            BEST_STRATEGY_FILE.write_text(
+            best_path = best_strategy_path()
+            best_path.write_text(
                 summary.best_strategy_yaml, encoding="utf-8"
             )
-            self.logger.info(f"最佳策略已保存到: {BEST_STRATEGY_FILE}")
+            self.logger.info(f"最佳策略已保存到: {best_path}")
         else:
             self.logger.info("未能生成有效策略")
 
@@ -338,11 +335,12 @@ class StrategyResearchService:
             "history_eval_window": summary.history_eval_window,
             "rounds": summary.rounds,
         }
-        RESULTS_FILE.write_text(
+        results_path = strategy_results_path()
+        results_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
-        self.logger.info(f"详细结果已保存到: {RESULTS_FILE}")
+        self.logger.info(f"详细结果已保存到: {results_path}")
 
     # ── 内部工具 ──────────────────────────────────────────────────
 

@@ -629,8 +629,8 @@ LLM_BASE_URL=http://localhost:11434
 # Moonshot API（用于 Web 搜索）
 MOONSHOT_API_KEY=your_test_api_key
 
-# 记忆系统配置
-MEMORY_PATH=~/.long_earn/substances.duckdb
+# 统一数据目录（唯一存储位置控制变量，默认 repo 同级 long-earn-data）
+LONG_EARN_DATA_DIR=D:/dev/long-earn-data
 
 # 测试专用配置
 TEST_MODE=true

@@ -8,8 +8,8 @@ from typing import Any
 import duckdb
 from loguru import logger
 
-from long_earn.backtest.data.cache import DEFAULT_CACHE_PATH
 from long_earn.backtest.domain.interfaces import AuditProvider, AuditRecord
+from long_earn.core.storage import backtest_cache_path
 
 # query_events 过滤字段白名单 — 防止 key 拼接 SQL 注入（P2-13）
 _QUERY_FILTER_WHITELIST = frozenset(
@@ -27,8 +27,8 @@ class DuckDBAuditProvider(AuditProvider):
     保证主键唯一性与因果排序（P1-10）。
     """
 
-    def __init__(self, db_path: Path = DEFAULT_CACHE_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Path | None = None):
+        self.db_path = db_path if db_path is not None else backtest_cache_path()
         self._conn: duckdb.DuckDBPyConnection | None = None
         self._lock = threading.Lock()
         self._seq = 0

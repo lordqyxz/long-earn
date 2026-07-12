@@ -1,6 +1,7 @@
 """数据缓存模块
 
 使用 DuckDB 作为本地缓存数据库，支持高效的向量化查询。
+路径由 ``core.storage.backtest_cache_path`` 统一裁决（LONG_EARN_DATA_DIR）。
 """
 
 import contextlib
@@ -10,7 +11,7 @@ import duckdb
 import pandas as pd
 from loguru import logger
 
-DEFAULT_CACHE_PATH = Path.home() / ".long_earn" / "backtest_cache.duckdb"
+from long_earn.core.storage import backtest_cache_path
 
 
 class DataCache:
@@ -20,9 +21,9 @@ class DataCache:
         """初始化缓存
 
         Args:
-            db_path: 数据库文件路径，默认 ~/.long_earn/backtest_cache.duckdb
+            db_path: 数据库文件路径，空字符串默认取 core.storage.backtest_cache_path()
         """
-        self.db_path = Path(db_path) if db_path else DEFAULT_CACHE_PATH
+        self.db_path = Path(db_path) if db_path else backtest_cache_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: duckdb.DuckDBPyConnection | None = None
         self._init_tables()

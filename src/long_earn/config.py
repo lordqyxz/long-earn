@@ -6,9 +6,9 @@
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
+from long_earn.core import storage as _storage
 from long_earn.services import (
     BacktestService,
     LLMService,
@@ -26,9 +26,8 @@ if TYPE_CHECKING:
     from long_earn.backtest.data.realtime import RealtimeDataProvider
     from long_earn.operator_dev.backlog import OperatorBacklog
 
-# 项目数据目录
-_project_root = Path(__file__).parent.parent.parent.parent
-PROJECT_DATA_DIR = _project_root / ".data"
+# 项目数据目录 — 统一由 core.storage 裁决（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
+PROJECT_DATA_DIR = _storage.DEFAULT_DATA_DIR
 
 
 @dataclass
@@ -116,8 +115,11 @@ class AppConfig:
         llm_type: LLM 类型，可选值：ollama, dashscope, openai
         llm_model: LLM 模型名称
         llm_base_url: LLM API 基础 URL
+        data_dir: 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
+        memory_path: 记忆持久化路径（DuckDB）
+        backtest_cache_path: 回测缓存 DuckDB 路径
+        hypothesis_tree_dir: 假设树 JSON 存储目录
         init_dir: 知识库初始化目录
-        memory_path: 记忆持久化路径
         max_iterations: 最大迭代次数
         backtest_start_date: 回测开始日期
         backtest_end_date: 回测结束日期
@@ -128,7 +130,17 @@ class AppConfig:
     llm_type: str = "ollama"
     llm_model: str = "deepseek-v4-flash:cloud"
     llm_base_url: str = "http://localhost:11434"
-    memory_path: str = str(PROJECT_DATA_DIR / "substances.duckdb")
+    # 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
+    data_dir: str = str(_storage.DEFAULT_DATA_DIR)
+    # 记忆持久化路径（由 data_dir 派生）
+    memory_path: str = str(_storage.substances_db_path())
+    # 回测缓存 DuckDB 路径（由 data_dir 派生）
+    backtest_cache_path: str = str(_storage.backtest_cache_path())
+    # 假设树存储目录（由 data_dir 派生，ADR-010 HTR）
+    hypothesis_tree_dir: str = str(_storage.hypothesis_tree_dir())
+    # 策略研发产物路径（由 data_dir 派生）
+    strategy_results_path: str = str(_storage.strategy_results_path())
+    best_strategy_path: str = str(_storage.best_strategy_path())
     init_dir: str = "./init"
     max_iterations: int = 3
     backtest_start_date: str = "2020-01-01"
@@ -155,11 +167,19 @@ class AppConfig:
         stock_analysis_env = os.getenv("STOCK_ANALYSIS_KEYWORDS", "股票,分析,公司")
         event_env = os.getenv("EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空")
 
+        # 唯一存储环境变量：LONG_EARN_DATA_DIR → 派生全部数据路径
+        paths = _storage.resolve_paths(os.getenv("LONG_EARN_DATA_DIR"))
+
         return cls(
             llm_type=os.getenv("LLM_TYPE", "ollama"),
             llm_model=os.getenv("LLM_MODEL", "deepseek-v4-flash:cloud"),
             llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
-            memory_path=os.getenv("MEMORY_PATH", str(PROJECT_DATA_DIR / "substances.duckdb")),
+            data_dir=str(paths["data_dir"]),
+            memory_path=str(paths["substances_db_path"]),
+            backtest_cache_path=str(paths["backtest_cache_path"]),
+            hypothesis_tree_dir=str(paths["hypothesis_tree_dir"]),
+            strategy_results_path=str(paths["strategy_results_path"]),
+            best_strategy_path=str(paths["best_strategy_path"]),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
