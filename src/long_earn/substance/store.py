@@ -17,7 +17,13 @@ from loguru import logger
 from long_earn.substance.indices.graph import GraphIndex
 from long_earn.substance.indices.retrieval import RetrievalIndex
 from long_earn.substance.model import Substance, SubstanceForm
-from long_earn.substance.persistence import load_jsonl, save_jsonl
+from long_earn.substance.persistence import (
+    delete_substance,
+    load_all,
+    save_many,
+    save_meta,
+    save_substance,
+)
 
 # ── 默认参数 ─────────────────────────────────────────────────────
 DEFAULT_DECAY_HALF_LIFE = 90.0
@@ -41,11 +47,12 @@ class SubstanceStore:
         self._retrieval = RetrievalIndex(alpha=alpha)
         self._graph = GraphIndex()
         self._dirty = True
+        self._persist_path: str | Path | None = None
 
     # ── 物质管理 ──────────────────────────────────────────────
 
     def add(self, substance: Substance) -> str:
-        """添加物质，返回 sid。"""
+        """添加物质，返回 sid。若已绑定持久化路径，原子追加到 DuckDB。"""
         idx = len(self._substances)
         self._substances.append(substance)
         self._sid_to_index[substance.sid] = idx
@@ -64,6 +71,10 @@ class SubstanceStore:
             )
 
         self._dirty = True
+
+        # 原子追加到 DuckDB（O(log n)），不再全量重写
+        if self._persist_path is not None:
+            save_substance(substance, self._persist_path)
         return substance.sid
 
     def add_knowledge(
@@ -251,24 +262,29 @@ class SubstanceStore:
     # ── 持久化 ────────────────────────────────────────────────
 
     def save(self, path: str | Path) -> None:
-        """保存到 JSONL 文件。"""
-        save_jsonl(self._substances, path)
+        """全量同步到 DuckDB（批量原子写入）。
+
+        适用于初始化导入、compress 批量变更后的落盘。
+        日常 add 已在 ``add()`` 内原子追加，无需调本方法。
+        """
+        save_many(self._substances, path)
+        self._persist_path = path
 
     def load(self, path: str | Path) -> bool:
-        """从 JSONL 文件加载。
+        """从 DuckDB 加载全部物质到内存热存储。
 
         Args:
-            path: JSONL 文件路径
+            path: DuckDB 文件路径
 
         Returns:
             是否成功加载（文件存在且有物质）
         """
-        path = Path(path)
+        path = Path(path).expanduser()
         if not path.exists():
-            logger.warning(f"物质文件不存在: {path}")
+            logger.warning(f"物质数据库不存在: {path}")
             return False
 
-        self._substances = load_jsonl(path)
+        self._substances = load_all(path)
         self._sid_to_index = {s.sid: idx for idx, s in enumerate(self._substances)}
         # 重建图索引
         for s in self._substances:
@@ -280,7 +296,35 @@ class SubstanceStore:
                     weight=s.confidence,
                 )
         self._dirty = True
+        self._persist_path = path
+        # 同步 meta.json（与 DuckDB COUNT 对齐）
+        try:
+            save_meta(path.parent, len(self._substances))
+        except Exception as e:
+            logger.warning(f"meta.json 同步失败: {e}")
         return len(self._substances) > 0
+
+    def bind_persistence(self, path: str | Path) -> None:
+        """绑定持久化路径 — 之后每次 ``add`` 自动原子追加到 DuckDB。"""
+        self._persist_path = Path(path).expanduser()
+
+    def remove(self, sid: str) -> bool:
+        """删除物质（motion.compress 压缩后调用）。
+
+        Returns:
+            是否删除成功
+        """
+        idx = self._sid_to_index.get(sid)
+        if idx is None:
+            return False
+        self._substances.pop(idx)
+        # 重建索引映射（pop 后下标偏移）
+        self._sid_to_index = {sub.sid: i for i, sub in enumerate(self._substances)}
+        self._dirty = True
+        # 同步删除 DuckDB 行
+        if self._persist_path is not None:
+            return delete_substance(sid, self._persist_path)
+        return True
 
     # ── 文档加载（Markdown 标题感知切分）───────────────────────
 

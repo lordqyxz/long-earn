@@ -630,7 +630,7 @@ LLM_BASE_URL=http://localhost:11434
 MOONSHOT_API_KEY=your_test_api_key
 
 # 记忆系统配置
-MEMORY_PATH=~/.long_earn/memory.npz
+MEMORY_PATH=~/.long_earn/substances.duckdb
 
 # 测试专用配置
 TEST_MODE=true

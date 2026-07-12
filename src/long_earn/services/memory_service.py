@@ -27,13 +27,17 @@ class MemoryServiceImpl(MemoryService):
         self.logger = logger
         self._store = SubstanceStore()
         self._initialized = False
+        self._persistent_path: Path | None = None
 
     def initialize(self) -> None:
-        """初始化记忆系统（加载持久化 JSONL 或从 init 目录构建）。"""
+        """初始化记忆系统（加载持久化 DuckDB 或从 init 目录构建）。"""
         if self._initialized:
             return
 
         persistent_path = Path(self.config.memory_path).expanduser()
+        self._persistent_path = persistent_path
+        # 绑定持久化路径：之后每次 add 自动原子追加到 DuckDB
+        self._store.bind_persistence(persistent_path)
         if persistent_path.exists() and self._store.load(persistent_path):
             self._initialized = True
             self.logger.info(f"记忆已加载 ({self._store.count} 条物质)")
@@ -80,10 +84,10 @@ class MemoryServiceImpl(MemoryService):
     # ── 策略经验 ───────────────────────────────────────────────
 
     def save_experience(self, experience: StrategyExperience) -> str:
-        """保存策略经验 — 构造 knowledge 物质，字段存入结构化 metadata（无 markdown）。"""
+        """保存策略经验 — 构造 STRATEGY 形态物质，字段存入结构化 metadata（无 markdown）。"""
         metrics = experience.metrics or {}
         s = Substance(
-            form=SubstanceForm.KNOWLEDGE,
+            form=SubstanceForm.STRATEGY,
             content=experience.rationale or experience.name,
             keys=[experience.name] if experience.name else [],
             metadata={
@@ -100,7 +104,6 @@ class MemoryServiceImpl(MemoryService):
             },
         )
         sid = self._store.add(s)
-        self._auto_save()
         self.logger.debug(f"策略经验已存储: {experience.name} ({sid})")
         return sid
 
@@ -234,7 +237,6 @@ class MemoryServiceImpl(MemoryService):
             },
         )
         sid = self._store.add(s)
-        self._auto_save()
         self.logger.debug(f"假设树摘要已存储: {run_id} ({sid})")
         return sid
 
@@ -333,7 +335,6 @@ class MemoryServiceImpl(MemoryService):
             )
             relation_sids.append(self._store.add(s))
 
-        self._auto_save()
         count = len([s for s in event_sids if s]) + len(relation_sids)
         self.logger.info(
             f"事件推理落库: {len(event_sids)} 事件 + {len(relation_sids)} 关系 ({count} 物质)"
@@ -348,9 +349,10 @@ class MemoryServiceImpl(MemoryService):
     # ── 内部 ───────────────────────────────────────────────────
 
     def _auto_save(self) -> None:
-        """自动持久化记忆到磁盘。"""
+        """[已废弃] 自动持久化 — add 已在绑定时自动追加，保留为未绑定场景兜底。"""
+        if self._persistent_path is None:
+            return
         try:
-            persistent_path = Path(self.config.memory_path).expanduser()
-            self._store.save(persistent_path)
+            self._store.save(self._persistent_path)
         except Exception as e:
             self.logger.warning(f"记忆自动保存失败: {e}")

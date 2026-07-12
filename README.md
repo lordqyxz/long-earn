@@ -85,7 +85,7 @@ uv run lint-imports                        # 架构依赖校验
 | `LLM_BASE_URL` | LLM API 地址 | `http://localhost:11434` |
 | `DASHSCOPE_API_KEY` | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） | — |
 | `OPENAI_API_KEY` | OpenAI API Key（LLM_TYPE=openai 时必填） | — |
-| `MEMORY_PATH` | 记忆持久化路径（物质-运动架构，JSONL） | `~/.long_earn/substances.jsonl` |
+| `MEMORY_PATH` | 记忆持久化路径（物质-运动架构，DuckDB） | `~/.long_earn/substances.duckdb` |
 | `INIT_DIR` | 知识库初始化目录 | `./init` |
 | `BACKTEST_START_DATE` | 回测默认起始日期 | `2020-01-01` |
 | `BACKTEST_END_DATE` | 回测默认结束日期 | `2023-12-31` |
@@ -264,7 +264,7 @@ src/long_earn/substance/
 - **物质 (Substance)**：统一存在基类，`form` 区分 event/relation/knowledge/strategy/backtest
 - **运动 (motion)**：施加在物质上的运算（activate/decay/conflict/compress），不持久化，只产出新物质
 - **双索引**：RetrievalIndex（WorldInfo 关键词触发 + TF-IDF/embedding 语义相似度双通道融合）+ GraphIndex（邻接表图遍历）
-- **持久化**：`~/.long_earn/substances.jsonl`（JSONL，无 pickle，有 schema 版本号）
+- **持久化**：`~/.long_earn/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，schema 版本号 2）
 - **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见
 
 > 旧 `memory/` 模块（ADR-004 v2.0）已删除，详见 [ADR-007](docs/adr/007-unified-substance-architecture.md)。
