@@ -48,7 +48,7 @@ def _make_mock_context(llm_service: MagicMock | None = None) -> RuntimeContext:
     mock_config.llm_type = "ollama"
     mock_config.llm_model = "test"
     mock_config.llm_base_url = "http://localhost"
-    mock_config.memory_path = "~/.long_earn/memory.npz"
+    mock_config.memory_path = "~/.long_earn/substances.duckdb"
     mock_config.init_dir = "./init"
 
     return RuntimeContext(

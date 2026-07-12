@@ -76,7 +76,7 @@ def _make_relation(
 def _make_memory_service(tmp_path) -> MemoryServiceImpl:
     """构造已初始化的 MemoryServiceImpl（不加载 init 目录）。"""
     config = MagicMock()
-    config.memory_path = str(tmp_path / "sub.jsonl")
+    config.memory_path = str(tmp_path / "sub.duckdb")
     config.init_dir = ""
     logger = MagicMock()
     svc = MemoryServiceImpl(config, logger)
@@ -400,14 +400,14 @@ class TestEventAnalyzer:
     def test_load_nonexistent_file(self, tmp_path):
         """加载不存在的文件返回 False。"""
         analyzer = EventAnalyzer()
-        assert not analyzer.load(tmp_path / "nonexistent.jsonl")
+        assert not analyzer.load(tmp_path / "nonexistent.duckdb")
         assert not analyzer.is_ready
 
     def test_load_valid_file(self, tmp_path):
-        """JSONL 文件加载往返。"""
+        """DuckDB 文件加载往返。"""
         store = SubstanceStore()
         _populate_store(store)
-        path = tmp_path / "events.jsonl"
+        path = tmp_path / "events.duckdb"
         store.save(path)
 
         analyzer = EventAnalyzer()

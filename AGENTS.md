@@ -166,7 +166,7 @@ prompt = prompt_template.format(query=query)
 ## Gotchas
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
-- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.jsonl`（JSONL，无 pickle）。旧 `memory/` 模块（ADR-004）已删除。
+- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `~/.long_earn/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，ADR-007 Phase 4）。旧 `memory/` 模块（ADR-004）已删除。
 - **数据缓存**：回测引擎使用 DuckDB 本地缓存（`~/.long_earn/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
 - **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。**财务接口统一到 miniqmt**（ADR-007 Phase 2/3）：akshare/ciccwm 的财务方法已删除，仅 `MiniQmtDataProvider.get_financial_panel` 实现；四表合并全量 18 字段（Income + Balance + CashFlow + Pershareindex），Pershareindex 预计算值优先（roe/gross_margin/yoy），手算仅兜底。缓存表 `financial_quarterly` 22 列（DROP + CREATE，`announce_date` NOT NULL）。
@@ -284,7 +284,7 @@ src/long_earn/substance/
 - **物质 (Substance)**：统一存在基类，`form` 区分 event/relation/knowledge/strategy/backtest。关系是一等物质（有完整 provenance）。
 - **运动 (motion)**：施加在物质上的运算（activate/decay/conflict/compress），不持久化，只产出新物质。
 - **双索引**：RetrievalIndex（WorldInfo 关键词触发 + TF-IDF/embedding 语义相似度双通道融合）+ GraphIndex（邻接表图遍历）。
-- **持久化**：`~/.long_earn/substances.jsonl`（JSONL，无 pickle，有 schema 版本号）。
+- **持久化**：`~/.long_earn/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，schema 版本号 2，ADR-007 Phase 4）。
 - **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见。
 
 ## 量化数据分割规范（必须遵守）
@@ -320,7 +320,7 @@ src/long_earn/substance/
 | LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
 | DASHSCOPE_API_KEY | — | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填）|
 | OPENAI_API_KEY | — | OpenAI API Key（LLM_TYPE=openai 时必填）|
-| MEMORY_PATH | ~/.long\_earn/substances.jsonl | 记忆持久化路径（物质-运动架构，JSONL） |
+| MEMORY_PATH | ~/.long\_earn/substances.duckdb | 记忆持久化路径（物质-运动架构，DuckDB） |
 | INIT_DIR | ./init | 知识库初始化目录 |
 | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
 | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |

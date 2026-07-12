@@ -454,10 +454,17 @@ def serve_visualization(
         host: 监听地址
         port: 监听端口
         db_path: DuckDB 审计数据库路径
-        substances_path: SubstanceStore JSONL 路径（事件流端点，ADR-007 Phase 3）
+        substances_path: SubstanceStore DuckDB 路径（事件流端点，ADR-007 Phase 4）；
+            空字符串时自动取 ``AppConfig.memory_path``
     """
     if db_path:
         VisualizationServer.analyzer = BacktestAnalyzer(Path(db_path))
+
+    # 收敛到 AppConfig.memory_path（单一数据源）
+    if not substances_path:
+        from long_earn.config import AppConfig  # noqa: PLC0415
+
+        substances_path = AppConfig.from_env().memory_path
 
     if substances_path:
         event_analyzer = EventAnalyzer()
@@ -510,7 +517,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--substances",
         default="",
-        help="SubstanceStore JSONL 路径（事件流端点）",
+        help="SubstanceStore DuckDB 路径（事件流端点，默认取 AppConfig.memory_path）",
     )
     args = parser.parse_args()
 

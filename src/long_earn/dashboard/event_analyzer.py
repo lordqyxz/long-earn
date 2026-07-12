@@ -28,7 +28,7 @@ class EventAnalyzer:
     Usage::
 
         analyzer = EventAnalyzer()
-        analyzer.load("~/.long_earn/substances.jsonl")
+        analyzer.load(AppConfig.from_env().memory_path)
         events = analyzer.list_events(limit=50, symbol="600519")
     """
 
@@ -39,10 +39,10 @@ class EventAnalyzer:
     # ── 加载 ──────────────────────────────────────────────────
 
     def load(self, path: str | Path) -> bool:
-        """从 JSONL 文件加载物质。"""
+        """从 DuckDB 文件加载物质（路径应来自 AppConfig.memory_path）。"""
         path = Path(path).expanduser()
         if not path.exists():
-            logger.warning(f"物质文件不存在: {path}")
+            logger.warning(f"物质数据库不存在: {path}")
             return False
         ok = self._store.load(path)
         self._loaded = ok

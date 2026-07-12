@@ -1,7 +1,7 @@
 # ADR-007: 物质-运动统一架构（Substance-Motion）
 
 日期: 2026-06
-状态: Accepted, Implemented (Phase 1-3)
+状态: Accepted, Implemented (Phase 1-4)
 
 ## 背景
 
@@ -122,17 +122,30 @@ class Substance(BaseModel):
 - `detect_conflicts(store, substance)` — 可配置词库（不再硬编码 16 词）
 - `compress(store, min_similarity=0.6)` — 修复聚类算法（re-center 或传递闭包）
 
-### 持久化（安全 + 版本化）
+### 持久化（DuckDB 事务式存储，Phase 4 升级）
 
 ```
-~/.long_earn/substances.jsonl      # 每行一个 Substance JSON（Pydantic 序列化）
-~/.long_earn/vectors.npy            # 向量矩阵（numpy save，无 pickle）
-~/.long_earn/meta.json              # schema_version, substance_count, last_decay_run
+~/.long_earn/substances.duckdb    # DuckDB 列式存储（WAL 崩溃安全 + 主键幂等）
+~/.long_earn/meta.json            # schema_version, substance_count（派生自 COUNT(*)，非独立权威）
 ```
 
-- 无 `allow_pickle`，无反序列化安全风险
-- `schema_version` 支持迁移
-- 索引从 JSONL 重建，不持久化
+**Phase 1-3 用 JSONL 全量重写，Phase 4 改为 DuckDB 单条原子追加**。动机：
+JSONL 实现用 `open("w")` 截断式全量重写 + 每次 `add` 后 `_auto_save` 全量落盘，
+既不原子（崩溃截断丢失全部数据）也不可扩展（O(n²) 写放大）。DuckDB 方案：
+
+- **原子追加**：`add()` 内 `INSERT OR REPLACE` 单条 O(log n)，WAL 保证崩溃安全
+- **幂等**：主键 `sid` 约束，重复追加自动替换而非重复行
+- **列式检索**：`visible_from`/`form`/`created_at` 建索引，时间过滤与形态过滤走 SQL 谓词下推
+- **meta 与数据对齐**：`save_meta` 在 `load()` 后以 `SELECT COUNT(*)` 派生，消灭元数据撒谎
+- **索引仍内存重建**：TF-IDF / Graph 索引不持久化，启动时从 DuckDB 全量加载到内存热存储
+
+向后兼容：`load_jsonl` / `save_jsonl` 保留为迁移入口；一次性脚本
+`scripts/migrate_memory_to_duckdb.py` 把旧 `substances.jsonl` 导入 DuckDB。
+ADR-004 遗留的 `memory.facts.pkl` / `memory.npz` 不迁移（pickle 不安全，已无代码读取），
+迁移脚本打印可清理清单供人工删除。
+
+写入路径收敛：所有写入方（`MemoryServiceImpl`、`tools/store.py`、`dashboard`）
+统一走 `AppConfig.memory_path`，不再有 `os.getenv` 直读或硬编码绝对路径。
 
 ### MemoryService Protocol 精简
 
@@ -254,6 +267,22 @@ Serena LSP 诊断：每个修改文件 `Error` 级别诊断为空。
 - `stock_analysis` / `strategy_rd` 调 `store.activate()` 注入事件上下文（helper 函数，非独立模块）
 - Dashboard 事件流可视化
 
+### Phase 4：DuckDB 持久化 + 写入路径收敛（已实施）
+
+Phase 1-3 的 JSONL 全量重写暴露 7 处工程缺陷，Phase 4 一次性修复：
+
+| 缺陷 | 修复 |
+|---|---|
+| `open("w")` 截断重写，崩溃丢数据 | DuckDB `INSERT OR REPLACE` 原子追加 + WAL |
+| 每次 `add` 全量重写 O(n²) | `add()` 内单条 O(log n) 追加，`_auto_save` 删除 |
+| `meta.json` 与数据脱钩（曾出现 156 条但文件缺失） | `save_meta` 从 `SELECT COUNT(*)` 派生 |
+| `tools/store.py` 直读 `os.getenv` 绕过配置 | 收敛到 `AppConfig.memory_path` |
+| `dashboard/event_analyzer.py` 硬编码路径 | `serve_visualization` 默认取 `AppConfig.memory_path` |
+| `SubstanceForm.STRATEGY/BACKTEST` 从未使用 | `save_experience` 改用 `STRATEGY` 形态 |
+| ADR-004 `memory.facts.pkl`/`memory.npz` 残留 | 迁移脚本打印清理清单，不自动删 |
+
+**验证门槛**：`uv run pytest tests/unit/ -v`（637 passed）、`uv run ruff check`、`uv run lint-imports`（3 contracts KEPT）。
+
 ## 理由
 
 1. **哲学-实现统一**：物质（Substance）与运动（motion 函数）是代码中的一等概念，不是 ADR 注释。减少认知分裂。
@@ -262,18 +291,20 @@ Serena LSP 诊断：每个修改文件 `Error` 级别诊断为空。
 4. **修复全部已知缺陷**：TF-IDF 特征选择、中文分词、线性扫描、400MB 预分配、pickle 安全、embedding 缓存脆弱——一次性解决。
 5. **Pydantic 一致性**：与项目 `BacktestResult`、`StrategyDSL` 技术栈统一，persistence 从 ~100 行缩到 ~20 行。
 6. **邻接表简化**：dict 邻接表比 numpy 矩阵更简单、更可测、内存高效，BFS 性能在小规模下等同。
+7. **DuckDB 持久化（Phase 4）**：与项目已有 `backtest_cache.duckdb` 技术栈收敛，追加写 O(log n) + WAL 崩溃安全 + 列式谓词下推，彻底消除 JSONL 全量重写的工程缺陷。
 
 ## 后果
 
 - 删除 `src/long_earn/memory/`（5 文件 ~1500 行）+ 旧测试（4 单元 + 1 集成）
 - 新增 `jieba>=0.42.1` 依赖
-- `AppConfig.memory_path` 默认值 `.data/memory.npz` → `.data/substances.jsonl`
-- 旧数据文件备份到 `$TEMP/opencode/`，一次性迁移脚本 `scripts/migrate_memory.py`
+- `AppConfig.memory_path` 默认值：`.data/memory.npz` → `.data/substances.jsonl`（Phase 1）→ `.data/substances.duckdb`（Phase 4）
+- 旧数据文件迁移：`scripts/migrate_memory_to_duckdb.py`（JSONL → DuckDB）；ADR-004 `pkl/npz` 不迁移
 - import-linter 新增 `substance_independent` 合约
 - `MemoryService` Protocol 8 → 4 方法（破坏性收窄），5 消费点机械迁移
 - ADR-004 状态改为 Superseded by ADR-007
 - Phase 2/3 完成后新闻事件推理引擎上线
+- Phase 4：`SubstanceForm.STRATEGY` 启用（`save_experience`）；`_auto_save` 全量重写删除；写入路径单一数据源
 
 ## 对 CLAUDE.md TODO 的影响
 
-CLAUDE.md "记忆系统" 4 项 TODO（语义增强检索/记忆压缩/记忆衰减/冲突检测）在 TODO.md 标记为"v2.0 完成"，但正是被替换的旧实现。Phase 1 完成后重新标记为"v3.0 物质-运动架构重构"。
+CLAUDE.md "记忆系统" 4 项 TODO（语义增强检索/记忆压缩/记忆衰减/冲突检测）在 TODO.md 标记为"v2.0 完成"，但正是被替换的旧实现。Phase 1 完成后重新标记为"v3.0 物质-运动架构重构"。Phase 4 持久化升级不新增 TODO 项。

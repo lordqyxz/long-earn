@@ -24,12 +24,12 @@ def test_search_with_metadata_filter():
 
 
 def test_persistence_roundtrip(tmp_path: Path):
-    """JSONL 保存→加载往返一致性（含 relation）。"""
+    """DuckDB 保存→加载往返一致性（含 relation）。"""
     store = SubstanceStore()
     store.add_knowledge("持久化测试", metadata={"key": "value"})
     store.add_relation("A", "B", weight=0.5)
 
-    path = tmp_path / "test.jsonl"
+    path = tmp_path / "test.duckdb"
     store.save(path)
 
     store2 = SubstanceStore()

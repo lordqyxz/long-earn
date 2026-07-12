@@ -349,14 +349,10 @@ def _merge_cluster(store: SubstanceStore, indices: list[int]) -> int:
     keep.metadata["merged_count"] = len(indices)
     keep.metadata.pop("decayed", None)
 
-    # 移除其余物质（从后往前删以避免索引偏移）
+    # 移除其余物质（通过公共 remove API 同步 DuckDB 删除）
     removed = 0
     for idx in sorted(indices[1:], reverse=True):
-        s = store._substances.pop(idx)
-        store._sid_to_index.pop(s.sid, None)
-        removed += 1
-
-    # 重建 sid 索引
-    store._sid_to_index = {s.sid: idx for idx, s in enumerate(store._substances)}
-    store._dirty = True
+        s = substances[idx]
+        if store.remove(s.sid):
+            removed += 1
     return removed
