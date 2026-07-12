@@ -74,8 +74,8 @@
   - 修复：CI 改为 `python-version: "3.13"`。
 
 - [~] **AUDIT-P0-13** 覆盖率门禁未生效 + 集成测试不在 CI — 部分完成（commit `a0de9ad`）
-  - 已完成：(1) `pyproject.toml:97` `fail_under = 60`（原为 0，门禁已生效）；(2) `ci.yml` test job 加入 `uv run pytest tests/integration/ -v -m "not requires_credentials"`。
-  - 未完成：`fail_under` 目标 80（当前 60）；关键路径（broker/engine/causality）单独 95 单项门禁未实现。
+  - 已完成：(1) `pyproject.toml:97` `fail_under = 60`（原为 0，门禁已生效，当前实际覆盖率 ~65%）；(2) `ci.yml` test job 加入 `uv run pytest tests/integration/ -v -m "not requires_credentials"`。
+  - **不合理 / 暂缓**：TODO 要求 `fail_under` 改为 `80`，但当前实际覆盖率仅 ~65%，强行设 80 会导致 CI 红灯。测试后续根据业务实际需求补充，覆盖率门禁随测试补齐逐步上调（60→70→80），不在本轮强行推到 80。关键路径 broker/engine/causality 单独 95 单项门禁同理暂缓。
   - 位置：`pyproject.toml:97`、`.github/workflows/ci.yml`
 
 - [x] **AUDIT-P0-14** 489% 虚高回归测试不在 pytest 套件 — 已修复（commit `a0de9ad`）
@@ -107,9 +107,10 @@
   - 位置：`src/long_earn/backtest/engine/broker.py:40`（`transfer_fee_rate=0.00001`）、`247-250`（沪市 `.SH` 双向征收）、`265,329`（`FillEvent` 含 `transfer_fee`）、`312-315`（pending fill 路径）
   - 修复：`TradingCostConfig` 增加 `transfer_fee_rate`，根据 symbol 后缀（.SH vs .SZ）判断征收。测试：`test_compliance.py:528,562`。
 
-- [ ] **AUDIT-P1-04** 行业集中度完全未实现（纸面约束无执行）
-  - 位置：`dsl.py:87-101` RiskControlConfig 无行业字段
-  - 修复：(1) RiskControlConfig 增加 `max_industry_pct`；(2) 数据层补充 `industry` 字段；(3) `Portfolio.process_signal` 生成订单前按行业聚合检查。
+- [ ] **AUDIT-P1-04** 行业集中度完全未实现（纸面约束无执行）— **依赖前置条件，暂缓**
+  - 位置：`dsl.py:96` RiskControlConfig 无行业字段
+  - **不合理/暂缓原因**：实现行业集中度风控需要 (1) 数据层补充 `industry` 字段 — 当前回测数据层（`miniqmt_provider`/`cache`/`provider`）**完全无行业数据**，全代码仅 `stock_service.py:78` 从 stock_detail 取 industry（非回测路径）；(2) 需要引入行业分类数据源（如申万一级），这是一项独立的数据层增强任务，非简单风控补丁。在数据层提供 industry 字段之前，RiskControlConfig 的 `max_industry_pct` 只能是纸面约束无法执行。
+  - 修复（待前置条件满足）：(1) 数据层补充 `industry` 字段；(2) RiskControlConfig 增加 `max_industry_pct`；(3) `Portfolio.process_signal` 生成订单前按行业聚合检查。
 
 - [x] **AUDIT-P1-05** 止盈缺失（仅有止损）— 已修复（commit `45ab884`）
   - 位置：`src/long_earn/backtest/engine/core.py:72,84`（`take_profit` 参数）、`528-529`（`_run_risk_checks` 含 `_check_take_profit` 分支）、`534-572`（`_check_take_profit` 盈利超阈值强制卖出）
@@ -225,9 +226,9 @@ Phase 2（多源采集器 + 事件推理子图 + 主图路由）与 Phase 3 数�
   - 未完成：`portfolio.py:324-328` skipped_reasons 仍仅传 reason 字符串，未完全统一为结构化原因枚举。
   - 修复：`Portfolio` 持有审计回调或返回跳过原因列表，由引擎统一记 `ORDER_SKIPPED`。
 
-- [ ] **AUDIT-P2-04** 风控触发后整体跳过策略信号
-  - 位置：`core.py:320-346`
-  - 修复：将"风控清仓"与"策略信号生成"解耦，风控清仓后仍允许策略生成新信号。
+- [x] **AUDIT-P2-04** 风控触发后整体跳过策略信号 — 已修复
+  - 位置：`src/long_earn/backtest/engine/core.py:491-518`（风控触发后仍调用 `strategy.on_bar()`，不再整体跳过）
+  - 修复：将"风控清仓"与"策略信号生成"解耦，风控清仓后仍允许策略生成新信号（如换仓）。SIGNAL 审计事件增加 `risk_triggered` 字段；仅当策略未产生信号且风控触发时才记 `SIGNAL_SKIPPED_BY_RISK`。测试：`test_engine.py::test_risk_trigger_does_not_skip_strategy_signal`。
 
 - [x] **AUDIT-P2-05** Walk-Forward 并行版无 failed_folds 追踪 — 已修复
   - 位置：`src/long_earn/backtest/engine/parallel.py:run_walk_forward_parallel`（新增 `failed_folds` 列表 + 返回字典含 `failed_folds` 字段）

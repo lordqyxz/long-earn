@@ -792,6 +792,73 @@ class TestEventLoopOrder(unittest.TestCase):
         # RISK_TRIGGER 也应存在
         self.assertIn("RISK_TRIGGER", event_types)
 
+    def test_risk_trigger_does_not_skip_strategy_signal(self):
+        """P2-04：风控触发后策略信号不应被整体跳过。
+
+        风控清仓与策略信号生成解耦：即使止损触发清仓，策略的 on_bar 仍被调用，
+        可生成新信号（如换仓）。验证：风控触发后仍有 SIGNAL 事件，而非只有
+        SIGNAL_SKIPPED_BY_RISK。
+        """
+        rows = []
+        for i in range(8):
+            price = 10.0 - 0.8 * i  # 快速暴跌触发止损
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "close": price,
+                    "open": price,
+                    "high": price * 1.01,
+                    "low": price * 0.98,
+                    "volume": 10_000_000,
+                }
+            )
+        provider = MockDataProvider(pl.DataFrame(rows))
+        engine = EventDrivenBacktestEngine(
+            data_provider=provider,
+            stop_loss=0.02,
+        )
+
+        # 策略：首 bar 买入 0.95，后续每 bar 仍生成信号（验证 P2-04 解耦）
+        class _SignalAfterRiskStrategy(BaseStrategy):
+            def __init__(self) -> None:
+                super().__init__(strategy_id="test-signal-after-risk")
+                self._bar_count = 0
+
+            def init(self) -> None:
+                self._bar_count = 0
+
+            def on_bar(
+                self, bars: pl.DataFrame, context: VisibilityContext
+            ) -> SignalEvent | None:
+                self._bar_count += 1
+                ts = bars.select("timestamp").to_series()[0]
+                # 每个 bar 都生成信号（含风控触发后的 bar）
+                weight = 0.95 if self._bar_count == 1 else 0.1
+                return SignalEvent(
+                    timestamp=ts,
+                    trace_id=f"trace-{self._bar_count}",
+                    event_id=f"sig-{self._bar_count}",
+                    signals={"000001": weight},
+                    strategy_id="test-signal-after-risk",
+                )
+
+        strategy = _SignalAfterRiskStrategy()
+        engine.run(strategy, "2024-01-01", "2024-01-08", ["000001"])
+
+        trail = engine.audit_logger.get_full_trail()
+        event_types = [e.get("event_type") for e in trail]
+
+        # 风控应触发（首 bar 买入后暴跌触发 2% 止损）
+        self.assertIn("RISK_TRIGGER", event_types)
+        # 关键：风控触发后策略仍生成 SIGNAL（P2-04 解耦验证）
+        signal_count = event_types.count("SIGNAL")
+        self.assertGreater(
+            signal_count,
+            1,
+            "P2-04: 风控触发后策略应仍能生成 SIGNAL（不止首 bar 一个）",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

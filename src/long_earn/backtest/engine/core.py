@@ -488,32 +488,34 @@ class EventDrivenBacktestEngine:
             db_audit,
         )
 
-        if not risk_triggered:
-            signal_event = strategy.on_bar(slab, guard.get_context())
-            if signal_event is not None:
-                self._log_audit(
-                    "SIGNAL",
-                    signal_event.trace_id,
-                    mkt_event.trace_id,
-                    "Strategy",
-                    "SUCCESS",
-                    {
-                        "signals": str(signal_event.signals),
-                        "strategy_id": signal_event.strategy_id,
-                    },
-                    db_audit,
-                )
-                # P0-05 修复：信号不立即执行，入队等待 T+1 日以 open 价撮合
-                self._pending_signals.append(signal_event)
-        else:
-            # G13: 风控触发时策略被跳过，记录"本应产生信号但被风控抑制"
+        # P2-04：风控清仓与策略信号生成解耦。即使风控触发清仓，
+        # 策略仍可生成新信号（如换仓到其他标的），不再整体跳过 on_bar。
+        signal_event = strategy.on_bar(slab, guard.get_context())
+        if signal_event is not None:
+            self._log_audit(
+                "SIGNAL",
+                signal_event.trace_id,
+                mkt_event.trace_id,
+                "Strategy",
+                "SUCCESS",
+                {
+                    "signals": str(signal_event.signals),
+                    "strategy_id": signal_event.strategy_id,
+                    "risk_triggered": risk_triggered,
+                },
+                db_audit,
+            )
+            # P0-05 修复：信号不立即执行，入队等待 T+1 日以 open 价撮合
+            self._pending_signals.append(signal_event)
+        elif risk_triggered:
+            # 风控触发且策略未产生信号，记录风控抑制
             self._log_audit(
                 "SIGNAL_SKIPPED_BY_RISK",
                 str(uuid.uuid4()),
                 mkt_event.trace_id,
                 "Engine",
                 "SKIPPED",
-                {"timestamp": str(ts), "reason": "risk_triggered"},
+                {"timestamp": str(ts), "reason": "risk_triggered_no_signal"},
                 db_audit,
             )
 
