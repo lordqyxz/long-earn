@@ -61,9 +61,34 @@ strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专�
 
 ## 可用数据字段（必须且只能使用以下字段）
 行情：open, high, low, close, volume
-财务：net_profit_yoy, revenue_yoy, roe, gross_margin, eps, net_profit, revenue
-可用函数：shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
+财务：net_profit_yoy, revenue_yoy, roe, gross_margin, eps, net_profit, revenue, roe_weighted, bps, ocf, capex, debt_to_assets, net_profit_margin, total_equity, total_assets, total_liabilities
 可用股票池：csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board
+
+## 策略表达路径（二选一）
+
+### 路径 1：算子路径（推荐，支持滚动窗口与技术指标）
+当策略需要滚动窗口（N 日波动率/均线/最高价）、技术指标（RSI/MACD/布林带）时，
+使用 operator_factors + type: operator signals：
+```yaml
+operator_factors:
+  - op: returns
+    alias: momentum_20
+    params: { field: close, period: 20 }
+  - op: windowed
+    alias: vol_20
+    params: { field: close, window: 20, agg: std }
+signals:
+  - type: operator
+    op: filter_threshold
+    params: { field: momentum_20, op: ">", value: 0 }
+  - type: operator
+    op: rank_top
+    params: { field: momentum_20, ascending: false, top: 10 }
+```
+可用算子：shift(field, periods), returns(field, period), windowed(field, window, agg=mean/std/min/max/median/sum), arithmetic(lhs, rhs, op), filter_threshold(field, op, value), rank_top(field, top, ascending), sma(field, window), ema(field, span), rsi(field, window), macd(field, fast, slow, signal), bollinger(field, window, k)
+
+### 路径 2：表达式路径（仅简单因子）
+factors: 因子别名: 表达式（仅支持 shift(field, n) + 算术运算，不支持滚动窗口）
 
 ## 优化要求
 1. 针对改进建议中的每个问题，给出具体的优化方案
@@ -72,6 +97,10 @@ strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专�
 4. 避免过拟合，考虑样本外表现
 5. factors_used 中的 field 必须来自可用字段列表
 6. backtest_params.universe 必须使用可用股票池类型
+7. **优先使用算子路径**：涉及滚动窗口/技术指标/多因子复合时必须用 operator_factors
+8. **策略家族失效感知**：若历史回测长期亏损而近期盈利，说明当前因子族（如动量）可能已失效，
+   应在 factors_used 中引入异族因子（均值回归/价值/成交量/波动率反转），
+   用算子路径的 windowed 算子表达滚动窗口，而非仅在原因子族内调参
 
 ## 输出格式
 请严格按照以下 JSON 格式返回优化后的策略：

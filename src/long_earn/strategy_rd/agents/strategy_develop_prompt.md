@@ -94,7 +94,7 @@ strategy:
 - **估值锚定**：ROE 持续 > 0.15 + 毛利率稳定是优质企业特征
 - **规避风险**：`debt_to_assets < 0.7`（财务稳健）
 
-### 表达式语法
+### 表达式语法（表达式路径，向后兼容）
 
 支持 Python 风格的算术和比较运算：
 - `net_profit_yoy > 0.3`
@@ -103,6 +103,51 @@ strategy:
 - `abs(close - open) / close > 0.02`
 
 `shift(field, n)` 表示向前偏移 n 个周期。
+
+**限制**：表达式路径不支持滚动窗口（`rolling_std`/`rolling_mean`/`rolling_max` 均不可用），
+`std()` 是整列聚合返回标量，不能用于"N 日波动率"。需要滚动窗口时**必须用算子路径**。
+
+### 算子路径（推荐，支持滚动窗口与多因子模型）
+
+当策略需要滚动窗口（N 日均线/波动率/最高价）、技术指标（RSI/MACD/布林带）、
+或复合运算时，使用 `operator_factors` + `type: operator` signals 替代 `factors` + 表达式 signals。
+
+#### 算子目录（运行时可用算子清单）
+
+{{ operator_catalog }}
+
+#### 算子路径 YAML 结构
+
+```yaml
+strategy:
+  name: 策略名称
+  description: 策略简述
+  universe:
+    type: csi300
+    rebalance_freq: 20D
+  operator_factors:          # 算子因子，按声明顺序计算，结果列名为 alias
+    - op: 算子名
+      alias: 因子别名
+      params: { 算子参数 }
+  signals:                   # 算子信号步骤
+    - type: operator
+      op: filter_threshold   # 过滤算子
+      params: { field: 因子别名, op: ">", value: 0 }
+    - type: operator
+      op: rank_top           # 排名选股算子
+      params: { field: 因子别名, ascending: false, top: 10 }
+  weights:
+    method: equal
+```
+
+#### 算子路径要点
+
+1. `operator_factors` 中每个算子产出一列（alias 指定列名），后续 signals/factors 可引用该列名
+2. `windowed` 算子支持 `agg: mean/std/min/max/median/sum`，是表达滚动窗口的核心算子
+3. `shift` 算子做时序位移，`returns` 算子算区间收益率（动量）
+4. `arithmetic` 算子做两列四则运算（lhs/rhs 可以是列名或数值，op 支持 +-*/）
+5. signals 中 `type: operator` 的步骤按声明顺序执行：先 filter_threshold 过滤，再 rank_top 选股
+6. **优先使用算子路径**：当策略涉及滚动窗口、技术指标、多因子复合时，必须用算子路径
 
 ### 股票池类型
 
@@ -192,6 +237,44 @@ strategy:
     method: equal
 ```
 
+### 示例 4：算子路径多因子策略（动量 + 波动率 + ROE）
+
+```yaml
+strategy:
+  name: MomVolRoeOperatorStrategy
+  description: 动量排序 + 低波动过滤 + ROE 过滤，算子路径实现
+  universe:
+    type: csi300
+    rebalance_freq: 20D
+  start_date: 2022-01-01
+  end_date: 2025-12-31
+  operator_factors:
+    - op: returns
+      alias: momentum_20
+      params: { field: close, period: 20 }
+    - op: windowed
+      alias: vol_20
+      params: { field: close, window: 20, agg: std }
+    - op: windowed
+      alias: vol_20_mean
+      params: { field: vol_20, window: 1, agg: mean }
+  signals:
+    - type: operator
+      op: filter_threshold
+      params: { field: momentum_20, op: ">", value: 0.0 }
+    - type: filter
+      condition: roe_weighted > 0.1
+    - type: operator
+      op: rank_top
+      params: { field: momentum_20, ascending: false, top: 10 }
+  weights:
+    method: equal
+```
+
+> 注意：算子路径与表达式路径可混用——`operator_factors` 声明算子因子列，
+> signals 中 `type: filter`（表达式）和 `type: operator`（算子）可共存。
+> 只要 YAML 含 `operator_factors` 或 `type: operator` signals，回测自动走算子执行路径。
+
 ## 输出格式
 
 请严格按照以下 **JSON Schema** 返回，**直接输出纯 JSON，不要用 markdown 代码块（```）包裹**：
@@ -224,12 +307,14 @@ strategy:
 
 1. **使用 YAML 格式**：不要输出 Python 代码，只输出 YAML 策略描述
 2. **字段名必须来自可用字段列表**：只能使用 open/high/low/close/volume/revenue/net_profit/eps/research_expenses/total_equity/total_assets/total_liabilities/ocf/capex/bps/ocf_per_share/debt_to_assets/net_profit_margin/roe_weighted/net_profit_yoy/revenue_yoy/roe/gross_margin
-3. **表达式必须可执行**：使用标准 Python 运算符和 shift 函数
-4. **日期格式**：YYYY-MM-DD
-5. **股票池必须有效**：从可用类型中选择
-6. **权重方法**：equal（等权重）、signal（按信号值加权）、custom_formula（自定义公式）
-7. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
-8. **T+1 执行**：回测引擎假设信号在 T 日生成，T+1 日执行
+3. **优先使用算子路径**：当策略需要滚动窗口（N 日波动率/均线/最高价）、技术指标（RSI/MACD）、复合运算时，使用 `operator_factors` + `type: operator` signals；表达式路径不支持滚动窗口
+4. **表达式必须可执行**：使用标准 Python 运算符和 shift 函数（仅表达式路径）
+5. **算子参数必须合法**：`operator_factors` 和 `type: operator` signals 的 op 必须来自上方算子目录，params 必须匹配算子的 params_schema（必填参数不可省略）
+6. **日期格式**：YYYY-MM-DD
+7. **股票池必须有效**：从可用类型中选择
+8. **权重方法**：equal（等权重）、signal（按信号值加权）、custom_formula（自定义公式）
+9. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
+10. **T+1 执行**：回测引擎假设信号在 T 日生成，T+1 日执行
 
 ## 思维链引导
 

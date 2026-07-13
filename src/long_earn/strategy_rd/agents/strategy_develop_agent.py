@@ -21,6 +21,39 @@ _DEVELOP_SOURCE_FILES = [
 ]
 
 
+def _format_operator_catalog() -> str:
+    """格式化算子目录为可读清单，供 prompt 注入。
+
+    从 ``list_operators()`` 取全部已注册算子，按 category 分组输出
+    name/params_schema/min_history，引导 LLM 生成合法 ``operator_factors`` YAML。
+    """
+    try:
+        from long_earn.backtest.operators import list_operators  # noqa: PLC0415
+    except Exception:
+        return "（算子目录加载失败，仅用表达式路径）"
+
+    ops = list_operators()
+    if not ops:
+        return "（算子目录为空，仅用表达式路径）"
+
+    lines: list[str] = []
+    for name in sorted(ops):
+        info = ops[name]
+        category = info.get("category", "?")
+        min_hist = info.get("min_history", 0)
+        schema = info.get("params_schema", {}) or {}
+        props = schema.get("properties", {}) or {}
+        reqs = schema.get("required", []) or []
+        params_str = ", ".join(
+            f'{p}: {s.get("type", "?")}'
+            + (" (必填)" if p in reqs else "")
+            + (f' default={s.get("default")}' if "default" in s else "")
+            for p, s in props.items()
+        )
+        lines.append(f"- {name} ({category}): params={{ {params_str} }} min_history={min_hist}")
+    return "\n".join(lines)
+
+
 class StrategyDevelopAgent(KnowledgeContextMixin):
     """策略开发智能体 — 将策略转化为 YAML DSL
 
@@ -47,7 +80,7 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         if not hasattr(self, "_develop_prompt"):
             self._develop_prompt = MarkdownPromptTemplate(
                 "strategy_develop_prompt.md",
-                ["strategy", "target_market", "backtest_params"],
+                ["strategy", "target_market", "backtest_params", "operator_catalog"],
                 __file__,
             )
 
@@ -58,10 +91,12 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         if knowledge_context:
             knowledge_context = "\n\n## 参考知识库:\n" + knowledge_context
 
+        operator_catalog = _format_operator_catalog()
         prompt = self._develop_prompt.format(
             strategy=strategy_info,
             target_market="A 股",
             backtest_params="默认参数",
+            operator_catalog=operator_catalog,
         )
         if knowledge_context:
             prompt += knowledge_context
@@ -119,7 +154,7 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         if not hasattr(self, "_refine_prompt"):
             self._refine_prompt = MarkdownPromptTemplate(
                 "strategy_develop_refine_prompt.md",
-                ["code", "strategy_description", "error_message"],
+                ["code", "strategy_description", "error_message", "operator_catalog"],
                 __file__,
             )
 
@@ -131,10 +166,12 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         experience_context = self._get_experience_context(strategy_info)
         knowledge_context = self._get_develop_context(error_message)
 
+        operator_catalog = _format_operator_catalog()
         prompt = self._refine_prompt.format(
             code=failed_code,
             strategy_description=strategy_info,
             error_message=error_message,
+            operator_catalog=operator_catalog,
         )
         if experience_context:
             prompt += experience_context

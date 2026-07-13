@@ -34,13 +34,21 @@
 
 ### 3. 表达式语法
 ✅ 正确：`net_profit_yoy > 0.2`, `close / shift(close, 20) - 1`
-❌ 错误：使用未定义的函数或变量
+❌ 错误：使用未定义的函数或变量（表达式路径不支持 `rolling`/`pct_change`/`.std()`）
 
-### 4. 信号步骤
-✅ 正确：filter 必须有 condition，rank 必须有 by
+### 4. 算子路径（operator_factors）
+若策略含 `operator_factors` 或 `type: operator` signals，算子名和参数必须匹配下方算子目录。
+✅ 正确：`operator_factors: [{ op: windowed, alias: vol20, params: { field: close, window: 20, agg: std } }]`
+❌ 错误：op 不在目录中、必填参数缺失、参数类型不匹配
+
+**可用算子目录：**
+{{ operator_catalog }}
+
+### 5. 信号步骤
+✅ 正确：filter 必须有 condition，rank 必须有 by，operator 必须有 op + params
 ❌ 错误：缺少必需的字段
 
-### 5. 股票池
+### 6. 股票池
 ✅ 正确：`csi300`, `csi500`, `all_a`, `main_board`, `gem`, `star_board`
 ❌ 错误：使用不存在的股票池类型
 
