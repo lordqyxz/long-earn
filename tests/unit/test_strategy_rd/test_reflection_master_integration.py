@@ -74,12 +74,13 @@ class _StubResearchAgent:
     def __init__(self):
         self.reflect_calls: list[dict] = []
 
-    def reflect(self, strategy, backtest_result, master_perspectives=None):
+    def reflect(self, strategy, backtest_result, master_perspectives=None, history_return=0.0):
         self.reflect_calls.append(
             {
                 "strategy": strategy,
                 "backtest_result": backtest_result,
                 "master_perspectives": master_perspectives,
+                "history_return": history_return,
             }
         )
         return {
