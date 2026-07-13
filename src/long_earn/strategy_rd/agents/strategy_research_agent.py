@@ -52,6 +52,18 @@ OPTIMIZATION_DIRECTIONS = {
         "typical_improvements": ["因子择时", "策略轮动", "风险平价配置", "自适应参数"],
         "categories": ["四、风险指标类", "五、量化策略类"],
     },
+    "策略家族切换": {
+        "focus": "当前因子族（如动量）在长周期亏损而近期盈利，可能已失效，应转向异族因子",
+        "metrics": ["family_long_term_return"],
+        "typical_improvements": [
+            "换为均值回归因子（RSI 超卖反转）",
+            "引入价值因子（ROE/毛利率筛选）",
+            "成交量加权因子",
+            "波动率反转因子",
+            "用算子路径（operator_factors）表达滚动窗口多因子",
+        ],
+        "categories": ["二、技术分析类", "三、财务分析类", "五、量化策略类"],
+    },
 }
 
 
@@ -307,15 +319,18 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         strategy: dict[str, Any],
         backtest_result: dict[str, Any],
         master_context: str = "",
+        history_return: float = 0.0,
     ) -> str:
         """构建特定方向的反思提示
 
         Args:
-            direction: 反思方向（收益增强/风险控制/收益稳定性）
+            direction: 反思方向（收益增强/风险控制/收益稳定性/策略家族切换）
             strategy: 当前策略字典
             backtest_result: 回测结果字典
             master_context: 大师视角的可读文本段落，非空时作为补充
                 上下文注入 prompt；为空时与原行为完全一致（向后兼容）。
+            history_return: 历史窗口收益率。对"策略家族切换"方向注入
+                "长周期亏损"语义；其他方向仅在 < 0 时附加提示。
         """
         direction_config = OPTIMIZATION_DIRECTIONS.get(
             direction, OPTIMIZATION_DIRECTIONS["收益增强"]
@@ -339,6 +354,30 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             framework_extra = ""
             thinking_master_step = "\n3. 提出具体可执行的改进方案"
 
+        # 家族失效信号注入：历史窗口亏损时提示因子族可能失效
+        history_section = ""
+        if direction == "策略家族切换":
+            history_section = (
+                f"\n\n<family_failure_signal>\n"
+                f"历史窗口收益率: {history_return:.4f}（{'亏损' if history_return < 0 else '盈利'}）\n"
+                f"近期窗口收益见上方回测结果。\n"
+                f"若历史窗口亏损而近期盈利，说明当前因子族（如动量）可能仅在特定市场环境短期有效，"
+                f"长周期不具稳健性。应在改进建议中提出转向异族因子：\n"
+                f"- 均值回归：RSI 超卖反转、偏离均线回归\n"
+                f"- 价值因子：ROE/毛利率/净利润增长筛选\n"
+                f"- 成交量异动：放量突破、缩量洗盘\n"
+                f"- 波动率反转：低波动率因子\n"
+                f"- 多因子复合：用算子路径（operator_factors）的 windowed 算子实现滚动窗口\n"
+                f"</family_failure_signal>"
+            )
+        elif history_return < 0:
+            history_section = (
+                f"\n\n<note>\n"
+                f"注意：历史窗口收益率为 {history_return:.4f}（亏损），"
+                f"当前策略在长周期可能不稳健，反思时应考虑因子族失效可能性。\n"
+                f"</note>"
+            )
+
         prompt = f"""<role>
 你是一位资深的量化策略分析师，专注于{direction}方向。你的分析以数据为依据，逻辑严密。
 </role>
@@ -356,7 +395,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
 
 <focus>
 {direction_config["focus"]}
-</focus>{master_section}
+</focus>{master_section}{history_section}
 
 <analysis_framework>
 请从以下维度进行{direction}分析：
@@ -399,6 +438,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         strategy: dict[str, Any],
         backtest_result: dict[str, Any],
         master_context: str = "",
+        history_return: float = 0.0,
     ) -> dict[str, Any]:
         """运行单个方向的反思"""
         if self.logger:
@@ -408,7 +448,11 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             f"策略{direction}方法", node_type="reflection"
         )
         prompt = self._build_reflection_prompt(
-            direction, strategy, backtest_result, master_context=master_context
+            direction,
+            strategy,
+            backtest_result,
+            master_context=master_context,
+            history_return=history_return,
         )
 
         if knowledge_context:
@@ -450,14 +494,23 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         return default
 
     def _evaluate_branches(  # noqa: PLR0912
-        self, branches: list[dict[str, Any]], backtest_result: dict[str, Any]
+        self,
+        branches: list[dict[str, Any]],
+        backtest_result: dict[str, Any],
+        history_return: float = 0.0,
     ) -> list[dict[str, Any]]:
         """评估各分支的改进建议
 
         必须兼容扁平与嵌套两种结构（见 `_read_metric`），否则扁平结构下
         所有分支都得到默认 +5 分（最低档），sorted 稳定排序导致 ToT 永远
         选 OPTIMIZATION_DIRECTIONS 第一个键作为 best_branch——多分支退化为单一分支。
+
+        家族切换打分：当 ``history_return < 0``（长周期亏损）且近期收益为正时，
+        给"策略家族切换"分支加 40 分（高于其他分支 30 分上限），使其优先被选中。
         """
+        recent_return = self._read_metric(
+            backtest_result, "total_return", ("return", "annual_return")
+        )
         for branch in branches:
             score = 0
             direction = branch.get("direction", "")
@@ -493,6 +546,20 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                 else:
                     score += 5
 
+            elif direction == "策略家族切换":
+                # 家族失效检测：历史窗口亏损 + 当前策略退化/亏损
+                # 长周期亏损 + 近期盈利 = 因子族失效信号，最高优先级
+                if history_return < 0 and recent_return > 0:
+                    score += 40
+                elif history_return < 0 and recent_return <= 0:
+                    # 长周期亏损 + 近期也亏损/退化 = 因子族彻底失效，
+                    # 应优先换家族而非在原因子族内调参，得分高于"收益增强"(30)
+                    score += 35
+                elif history_return < 0:
+                    score += 25
+                else:
+                    score += 5
+
             branch["score"] = score
 
         return sorted(branches, key=lambda x: x["score"], reverse=True)
@@ -502,6 +569,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         strategy: dict[str, Any],
         backtest_result: dict[str, Any],
         master_context: str = "",
+        history_return: float = 0.0,
     ) -> dict[str, Any]:
         """使用思维树(ToT)模型进行多分支反思
 
@@ -510,6 +578,8 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             backtest_result: 回测结果字典
             master_context: 大师视角可读文本段落，非空时注入各分支 prompt；
                 为空时与原 ToT 行为完全一致（向后兼容）。
+            history_return: 历史窗口收益率（家族失效检测信号）。
+                < 0 表示当前因子族在长周期亏损，可能已失效。
         """
         branches = []
 
@@ -520,6 +590,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                     strategy,
                     backtest_result,
                     master_context=master_context,
+                    history_return=history_return,
                 )
                 branches.append(
                     {
@@ -540,7 +611,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         if not branches:
             raise ValueError("所有 ToT 分支均失败")
 
-        evaluated_branches = self._evaluate_branches(branches, backtest_result)
+        evaluated_branches = self._evaluate_branches(
+            branches, backtest_result, history_return=history_return
+        )
 
         best_branch = evaluated_branches[0]
 
@@ -692,6 +765,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         strategy: dict[str, Any],
         backtest_result: dict[str, Any],
         master_perspectives: "dict[str, PersonaResult] | None" = None,
+        history_return: float = 0.0,
     ) -> dict[str, Any]:
         """反思 - 分析回测结果并生成改进建议（支持 ToT 模式 + 大师视角）
 
@@ -701,6 +775,8 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             master_perspectives: name -> PersonaResult 映射，由 _reflection_node
                 调用 4 个大师 strategy_review mode 得到。None 或空 dict 时
                 行为与原 reflect 完全一致（向后兼容）。
+            history_return: 历史窗口收益率（家族失效检测信号）。
+                < 0 时 ToT 会优先考虑"策略家族切换"分支。
         """
         master_context = self._format_master_perspectives(master_perspectives)
         if master_context and self.logger:
@@ -711,7 +787,10 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             if self.logger:
                 self.logger.info("开始 ToT 多分支反思")
             return self.reflect_with_tot(
-                strategy, backtest_result, master_context=master_context
+                strategy,
+                backtest_result,
+                master_context=master_context,
+                history_return=history_return,
             )
         except Exception as e:
             if self.logger:

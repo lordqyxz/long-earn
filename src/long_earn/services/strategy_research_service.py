@@ -24,6 +24,18 @@ from long_earn.core.storage import best_strategy_path, strategy_results_path
 
 _DEFAULT_IDEA = "研究一个基于净利润增长和ROE的选股策略，要求近三个月收益率最大化"
 
+# 家族切换：连续无改善轮数达阈值后改写 idea 换策略家族
+_FAMILY_PIVOT_THRESHOLD = 2
+
+# 策略家族 idea 候选池（按动量→均值回归→价值→成交量→多因子顺序）
+_IDEA_FAMILY_POOL = [
+    "研究一个基于20日价格动量的选股策略，选近20日收益率最高的股票，要求近六个月收益率最大化",
+    "研究一个均值回归选股策略，选择近期跌幅过大、偏离20日均线较远但基本面稳健的股票，用 RSI 超卖信号过滤，要求近六个月收益率最大化",
+    "研究一个价值成长选股策略，选择 ROE>0.12 且净利润同比增长>20% 且毛利率稳定的股票，要求近六个月收益率最大化",
+    "研究一个成交量异动选股策略，选择近5日成交量放大且价格突破20日均线、波动率适中的股票，要求近六个月收益率最大化",
+    "研究一个多因子复合选股策略，结合动量、低波动率、高ROE和成交量放大，用算子路径实现滚动窗口因子，要求近六个月收益率最大化",
+]
+
 
 @dataclass
 class RoundResult:
@@ -83,15 +95,33 @@ class StrategyResearchService:
 
     # ── 单轮子图执行 ──────────────────────────────────────────────
 
-    def run_round(self, idea: str, max_iterations: int) -> RoundResult:
-        """运行一轮策略研发子图。"""
+    def run_round(
+        self,
+        idea: str,
+        max_iterations: int,
+        history_return: float = 0.0,
+        round_history: list[dict[str, Any]] | None = None,
+    ) -> RoundResult:
+        """运行一轮策略研发子图。
+
+        Args:
+            idea: 策略思路
+            max_iterations: 子图内部最大迭代次数
+            history_return: 上一轮历史窗口收益率（家族失效检测信号）
+            round_history: 跨轮历史序列（recent_return/history_return 列表）
+        """
         config = self.ctx.config
         config.max_iterations = max_iterations
 
         subgraph = create_strategy_rd_subgraph(self.ctx)
         self.logger.info(f"[循环] 启动策略研发子图，idea='{idea}'")
         t0 = time.time()
-        result = subgraph.invoke({"query": idea})
+        invoke_input: dict[str, Any] = {"query": idea}
+        if history_return != 0.0:
+            invoke_input["history_return"] = history_return
+        if round_history:
+            invoke_input["round_history"] = round_history
+        result = subgraph.invoke(invoke_input)
         elapsed = time.time() - t0
         self.logger.info(f"[循环] 子图完成，耗时 {elapsed:.1f}s")
 
@@ -144,19 +174,34 @@ class StrategyResearchService:
 
     # ── 单轮编排（子图 + 双窗口评估 + 改善判定）──────────────────
 
-    def run_single_round(
+    def run_single_round(  # noqa: PLR0913
         self,
         idea: str,
         max_iterations: int,
         round_num: int,
         best_recent_return: float,
         min_improvement: float,
+        round_history: list[dict[str, Any]] | None = None,
     ) -> tuple[RoundMetrics | None, float, str, dict[str, Any], bool]:
         """运行单轮研究并返回 (metrics, best_return, best_yaml, best_round, should_stop)。
 
         metrics 为 None 表示该轮未生成策略（跳过）。
+        round_history 为前序轮次的 recent/history 收益序列，传给子图供家族失效检测。
         """
-        round_result = self.run_round(idea, max_iterations)
+        # 优先用上一轮的历史收益作为家族失效信号传给子图；
+        # 无历史时默认 0.0（不触发家族切换打分）
+        prev_history_return = (
+            round_history[-1].get("history_return", 0.0)
+            if round_history
+            else 0.0
+        )
+
+        round_result = self.run_round(
+            idea,
+            max_iterations,
+            history_return=prev_history_return,
+            round_history=round_history,
+        )
         strategy_yaml = round_result.strategy_yaml
 
         if not strategy_yaml:
@@ -241,25 +286,34 @@ class StrategyResearchService:
             max_rounds: 最大研究轮次
             max_iterations: 每轮子图内部最大迭代次数
             min_improvement: 近三个月收益率最小改善幅度
+
+        家族切换机制：连续 ``_FAMILY_PIVOT_THRESHOLD`` 轮无改善时，
+        从 ``_IDEA_FAMILY_POOL`` 取下一个家族 idea 继续研发，
+        而非直接停止。池耗尽后才真正停止。
         """
         best_recent_return = -999.0
         best_strategy_yaml = ""
         best_round_info: dict[str, Any] = {}
         all_results: list[dict[str, Any]] = []
+        round_history: list[dict[str, Any]] = []
+        stagnation_count = 0
+        family_idx = 0
+        current_idea = idea
 
         for round_num in range(1, max_rounds + 1):
             self.logger.info("")
             self.logger.info("#" * 60)
-            self.logger.info(f"# 第 {round_num}/{max_rounds} 轮")
+            self.logger.info(f"# 第 {round_num}/{max_rounds} 轮 (家族索引 {family_idx})")
             self.logger.info("#" * 60)
 
             metrics, new_best, best_yaml, best_round, should_stop = (
                 self.run_single_round(
-                    idea=idea,
+                    idea=current_idea,
                     max_iterations=max_iterations,
                     round_num=round_num,
                     best_recent_return=best_recent_return,
                     min_improvement=min_improvement,
+                    round_history=round_history,
                 )
             )
 
@@ -274,17 +328,42 @@ class StrategyResearchService:
                         "elapsed": 0.0,
                     }
                 )
-                continue
+                stagnation_count += 1
+            else:
+                all_results.append(self._metrics_to_dict(metrics))
+                round_history.append(
+                    {
+                        "round": round_num,
+                        "recent_return": metrics.recent_return,
+                        "history_return": metrics.history_return,
+                    }
+                )
 
-            all_results.append(self._metrics_to_dict(metrics))
+                if best_yaml:
+                    best_recent_return = new_best
+                    best_strategy_yaml = best_yaml
+                    best_round_info = best_round
+                    stagnation_count = 0
+                else:
+                    stagnation_count += 1
 
-            if best_yaml:
-                best_recent_return = new_best
-                best_strategy_yaml = best_yaml
-                best_round_info = best_round
-
-            if should_stop:
-                break
+            # 家族切换判定：连续无改善达阈值 → 换家族 idea 继续
+            if should_stop or stagnation_count >= _FAMILY_PIVOT_THRESHOLD:
+                if family_idx + 1 < len(_IDEA_FAMILY_POOL):
+                    family_idx += 1
+                    current_idea = _IDEA_FAMILY_POOL[family_idx]
+                    stagnation_count = 0
+                    self.logger.info("")
+                    self.logger.info("=" * 60)
+                    self.logger.info(
+                        f"[家族切换] 连续 {stagnation_count} 轮无改善，"
+                        f"切换到策略家族 #{family_idx}: {current_idea[:60]}..."
+                    )
+                    self.logger.info("=" * 60)
+                    continue
+                else:
+                    self.logger.info("[循环] 策略家族池已耗尽，停止迭代")
+                    break
 
         summary = ResearchLoopSummary(
             idea=idea,

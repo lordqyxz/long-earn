@@ -45,6 +45,13 @@ class State(TypedDict, total=False):
     experience_saved: bool
     operator_gaps: list[dict[str, str]] | None
 
+    # 算子研发子图产出（ADR-009，operator_dev_node 注册的新算子名）
+    registered_operators: list[str] | None
+
+    # 跨轮数据回流（家族失效检测）
+    history_return: float
+    round_history: list[dict[str, Any]] | None
+
     retrieval_count: int
     max_retrievals: int
     knowledge_context: str

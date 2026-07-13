@@ -1,7 +1,7 @@
 """策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索"""
 
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -404,16 +404,21 @@ def _reflection_node(
         else:
             logger.info("[反思] 开始 ToT 多分支反思...")
 
+    # 跨轮数据回流：历史窗口收益率（家族失效检测信号）
+    history_return = float(state.get("history_return", 0.0) or 0.0)
+
     reflection_result = research_agent.reflect(
         strategy,
         backtest_result,
         master_perspectives=master_perspectives if master_perspectives else None,
+        history_return=history_return,
     )
 
     if logger:
         logger.info(
             f"[反思] 完成, 选定方向: "
             f"{reflection_result.get('selected_direction', '未知')}"
+            f"（history_return={history_return:.4f}）"
         )
 
     return {
@@ -508,6 +513,46 @@ def _gap_detector_node(
 _operator_backlog: "OperatorBacklog | None" = None  # type: ignore[name-defined]
 
 
+def _operator_dev_node(
+    state: State,  # noqa: ARG001
+    context: "RuntimeContext",
+    logger: LoggerService,
+) -> dict:
+    """算子研发节点 — 消费 gap_detector 写入的 backlog，调用算子研发子图开发并注册新算子。
+
+    gap_detector 检测到算子缺口后 submit 到 backlog；本节点调用
+    create_operator_dev_subgraph 消费 backlog，实现 spec→审计→因果证明→注册闭环。
+    新算子内存热注册后，下一轮迭代的 develop agent 即可在 operator_factors 中引用。
+
+    非阻塞降级：backlog 为空或子图执行异常时不阻断主流程。
+    """
+    backlog = context.operator_backlog
+    if backlog is None or backlog.is_empty():
+        return {"registered_operators": []}
+
+    if logger:
+        pending = [s.name for s in backlog.all_specs() if s.status == "pending"]
+        logger.info(f"[算子研发] backlog 有 {len(pending)} 个待开发算子: {pending}")
+
+    try:
+        from long_earn.operator_dev.subgraph import (  # noqa: PLC0415
+            create_operator_dev_subgraph,
+        )
+
+        op_subgraph = create_operator_dev_subgraph(context, backlog=backlog)
+        result = op_subgraph.invoke({})
+        registered = result.get("registered_names", []) or []
+        if logger and registered:
+            logger.info(f"[算子研发] 新注册算子: {registered}")
+        elif logger:
+            logger.info("[算子研发] 本轮无新算子注册（可能因果证明未通过或被 blocked）")
+        return {"registered_operators": registered}
+    except Exception as e:
+        if logger:
+            logger.warning(f"[算子研发] 子图执行失败，跳过: {e}")
+        return {"registered_operators": []}
+
+
 def _optimize_node(
     state: State,
     research_agent: StrategyResearchAgent,
@@ -517,15 +562,45 @@ def _optimize_node(
 
     多轮演进的关键：优先以 **上一轮 optimized_strategy** 作为优化起点，
     而非永远从初始 strategy 开始 —— 否则 N 轮迭代实际只是 N 次独立 v0 优化。
+
+    家族切换：当 ToT 反思选定方向为"策略家族切换"时，不再增量优化当前策略，
+    而是全新生成一个异族策略（均值回归/价值/成交量等），避免在失效因子族内反复调参。
     """
-    base_strategy = state.get("optimized_strategy") or state.get("strategy", {}) or {}
-    backtest_result = state.get("backtest_result", {}) or {}
+    selected_direction = state.get("selected_direction", "") or ""
     improvement_suggestions: list[str] = state.get("improvement_suggestions", []) or []
 
     if isinstance(improvement_suggestions, str):
         improvement_suggestions = [improvement_suggestions]
     # 确保 improvement_suggestions 是 str 列表（LLM 可能返回 dict）
     improvement_suggestions = [str(s) for s in improvement_suggestions]
+
+    # 策略家族切换：全新生成异族策略
+    if selected_direction == "策略家族切换":
+        pivot_idea = (
+            "基于反思建议，研究一个与当前动量策略不同的新策略家族。"
+            "改进建议: " + "; ".join(improvement_suggestions[:3])
+        )
+        if logger:
+            logger.info(
+                f"[优化] 策略家族切换 → 全新生成异族策略, idea={pivot_idea[:80]}..."
+            )
+        try:
+            knowledge_context = research_agent._get_research_context(
+                pivot_idea, node_type="research"
+            )
+            new_strategy = research_agent.research_strategy_with_context(
+                pivot_idea, knowledge_context=knowledge_context
+            )
+            if logger:
+                logger.info("[优化] 异族策略生成完成")
+            return {"optimized_strategy": new_strategy}
+        except Exception as e:
+            if logger:
+                logger.warning(f"[优化] 家族切换生成失败，退回增量优化: {e}")
+
+    # 默认路径：增量优化
+    base_strategy = state.get("optimized_strategy") or state.get("strategy", {}) or {}
+    backtest_result = state.get("backtest_result", {}) or {}
 
     if logger:
         base_label = "上一轮优化版" if state.get("optimized_strategy") else "初始版"
@@ -733,7 +808,12 @@ def _backtest_optimized_cond(state: State) -> str:
     return "reflection" if state.get("code_valid", False) else "refine_optimized"
 
 
-def create_strategy_rd_subgraph(context: "RuntimeContext"):
+def create_strategy_rd_subgraph(
+    context: "RuntimeContext",
+    *,
+    checkpointer: Any = None,
+    interrupt_before: list[str] | None = None,
+):
     """创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索
 
     Args:
@@ -815,6 +895,9 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         "gap_detector", partial(_gap_detector_node, logger=logger)
     )
     workflow.add_node(
+        "operator_dev", partial(_operator_dev_node, context=context, logger=logger)
+    )
+    workflow.add_node(
         "optimize",
         partial(_optimize_node, research_agent=research_agent, logger=logger),
     )
@@ -870,7 +953,8 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
     )
 
     workflow.add_edge("reflection", "gap_detector")
-    workflow.add_edge("gap_detector", "save_experience")
+    workflow.add_edge("gap_detector", "operator_dev")
+    workflow.add_edge("operator_dev", "save_experience")
     workflow.add_edge("save_experience", "supervisor")
 
     workflow.add_conditional_edges(
@@ -894,4 +978,9 @@ def create_strategy_rd_subgraph(context: "RuntimeContext"):
         {"backtest_optimized": "backtest_optimized", "reflection": "reflection"},
     )
 
-    return workflow.compile()
+    compile_kwargs: dict[str, Any] = {}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    if interrupt_before:
+        compile_kwargs["interrupt_before"] = interrupt_before
+    return workflow.compile(**compile_kwargs)
