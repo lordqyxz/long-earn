@@ -120,6 +120,7 @@ RuntimeContext(dataclass)
 
 - Python 3.13 严格版本（`requires-python = "==3.13.*"`）
 - 所有函数和参数必须添加类型注解
+- **尽量避免使用 `Any` 类型**：内部数据结构用 `@dataclass`（`from dataclasses import dataclass`）建模，外部/动态数据用 Pydantic 模型建模；`Any` 仅作为最后兜底（如第三方库返回值、JSON 反序列化中间态），并注释说明原因
 - `str` 类型参数默认值 `""`
 - 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
 - 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见上文「质量门槛」）
