@@ -7,9 +7,12 @@ MemoryService Protocol 4 方法（ADR-007 破坏性收窄）：
 - initialize: 生命周期初始化
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from long_earn.ontology.model import RelationType
 from long_earn.services import LoggerService, MemoryService, StrategyExperience
 from long_earn.substance.model import Substance, SubstanceForm
 from long_earn.substance.motion import activate as activate_substances
@@ -17,17 +20,25 @@ from long_earn.substance.store import SubstanceStore
 
 if TYPE_CHECKING:
     from long_earn.config import AppConfig
+    from long_earn.ontology.graph import OntologyGraph
 
 
 class MemoryServiceImpl(MemoryService):
     """记忆服务 — 委托 SubstanceStore 实现 Protocol 契约。"""
 
-    def __init__(self, config: "AppConfig", logger: LoggerService):
+    def __init__(
+        self,
+        config: AppConfig,
+        logger: LoggerService,
+        ontology_graph: OntologyGraph | None = None,
+    ):
         self.config = config
         self.logger = logger
         self._store = SubstanceStore()
         self._initialized = False
         self._persistent_path: Path | None = None
+        # ADR-014 阶段 D：可选注入 OntologyGraph，motion.activate 走图遍历
+        self._ontology_graph = ontology_graph
 
     def initialize(self) -> None:
         """初始化记忆系统（加载持久化 DuckDB 或从 init 目录构建）。"""
@@ -159,59 +170,99 @@ class MemoryServiceImpl(MemoryService):
     ) -> list[str]:
         """WorldInfo 激活引擎 — 关键词触发事件/关系物质，返回 prompt 注入字符串。
 
-        委托 ``motion.activate`` 做关键词触发 + 递归激活 + conflict_group 互斥，
-        然后把命中的 EVENT/RELATION 物质格式化为带元数据头的字符串。
+        ADR-014 阶段 D：注入 OntologyGraph 时走图遍历激活（替代旧关键词递归），
+        关系补充也用图遍历替代 O(N) store.get_all() 扫描。
         """
         if not query.strip():
             return []
 
-        substances = activate_substances(query, self._store, budget=k * 3 if include_relations else k)
+        substances = activate_substances(
+            query,
+            self._store,
+            budget=k * 3 if include_relations else k,
+            graph=self._ontology_graph,
+        )
 
-        # 关系物质无 keys，motion.activate 不会直接命中；
-        # include_relations=True 时，通过 source_id 关联补充已激活事件的关系
-        extra_relations: list[Substance] = []
-        if include_relations:
-            event_sids = {s.sid for s in substances if s.form == SubstanceForm.EVENT}
-            activated_sids = {s.sid for s in substances}
-            for s in self._store.get_all():
-                if (
-                    s.form is SubstanceForm.RELATION
-                    and s.sid not in activated_sids
-                    and s.source_id in event_sids
-                ):
-                    extra_relations.append(s)
+        extra_relations = (
+            self._collect_extra_relations(substances) if include_relations else []
+        )
 
         output: list[str] = []
         for s in list(substances) + extra_relations:
-            if s.form == SubstanceForm.EVENT:
-                meta = s.metadata
-                sentiment = meta.get("sentiment", "neutral")
-                symbols = meta.get("symbols", []) or []
-                category = meta.get("event_category", "")
-                header = "【事件"
-                if symbols:
-                    header += f" | 标的: {','.join(symbols)}"
-                if sentiment and sentiment != "neutral":
-                    header += f" | 情绪: {sentiment}"
-                if category:
-                    header += f" | 类别: {category}"
-                header += f" | 置信度: {s.confidence:.2f}】"
-                output.append(f"{header}\n{s.content}\n")
-            elif s.form == SubstanceForm.RELATION and include_relations:
-                meta = s.metadata
-                target = meta.get("target", s.target_id or "")
-                direction = meta.get("direction", "neutral")
-                rel_type = s.relation_type or "impacts"
-                header = f"【影响关系 | {rel_type} → {target} | 方向: {direction}"
-                header += f" | 置信度: {s.confidence:.2f}】"
-                output.append(f"{header}\n{s.content}\n")
-
+            formatted = self._format_substance(s, include_relations)
+            if formatted:
+                output.append(formatted)
             if len(output) >= k:
                 break
 
         if output:
             self.logger.debug(f"激活事件上下文: query={query!r} → {len(output)} 条")
         return output
+
+    def _collect_extra_relations(self, substances: list[Substance]) -> list[Substance]:
+        """补充已激活事件的关系物质。
+
+        ADR-014 阶段 D：有 OntologyGraph 时用图遍历（O(图深度)），无则降级 O(N) 扫描。
+        """
+        event_sids = {s.sid for s in substances if s.form == SubstanceForm.EVENT}
+        activated_sids = {s.sid for s in substances}
+        if not event_sids:
+            return []
+
+        extra: list[Substance] = []
+        if self._ontology_graph is not None:
+            for event_sid in event_sids:
+                paths = self._ontology_graph.traverse(
+                    event_sid,
+                    max_depth=1,
+                    min_weight=0.0,
+                    relation_types={RelationType.IMPACTS, RelationType.PROPAGATES_TO},
+                    direction="forward",
+                )
+                for p in paths:
+                    rel_sub = self._store.get_by_sid(p.sid)
+                    if (
+                        rel_sub is not None
+                        and rel_sub.form is SubstanceForm.RELATION
+                        and rel_sub.sid not in activated_sids
+                    ):
+                        extra.append(rel_sub)
+        else:
+            for s in self._store.get_all():
+                if (
+                    s.form is SubstanceForm.RELATION
+                    and s.sid not in activated_sids
+                    and s.source_id in event_sids
+                ):
+                    extra.append(s)
+        return extra
+
+    @staticmethod
+    def _format_substance(s: Substance, include_relations: bool) -> str:
+        """格式化单个物质为 prompt 注入字符串（带元数据头）。"""
+        if s.form == SubstanceForm.EVENT:
+            meta = s.metadata
+            sentiment = meta.get("sentiment", "neutral")
+            symbols = meta.get("symbols", []) or []
+            category = meta.get("event_category", "")
+            header = "【事件"
+            if symbols:
+                header += f" | 标的: {','.join(symbols)}"
+            if sentiment and sentiment != "neutral":
+                header += f" | 情绪: {sentiment}"
+            if category:
+                header += f" | 类别: {category}"
+            header += f" | 置信度: {s.confidence:.2f}】"
+            return f"{header}\n{s.content}\n"
+        if s.form == SubstanceForm.RELATION and include_relations:
+            meta = s.metadata
+            target = meta.get("target", s.target_id or "")
+            direction = meta.get("direction", "neutral")
+            rel_type = s.relation_type or "impacts"
+            header = f"【影响关系 | {rel_type} → {target} | 方向: {direction}"
+            header += f" | 置信度: {s.confidence:.2f}】"
+            return f"{header}\n{s.content}\n"
+        return ""
 
     # ── 假设树摘要（ADR-010 Phase 4）──────────────────────────
 
