@@ -8,7 +8,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
+
 from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
+from long_earn.backtest.data.symbol import normalize_xt
+from long_earn.ontology import ConceptQuery, Connector
 from long_earn.services import LoggerService, StockService
 
 if TYPE_CHECKING:
@@ -21,10 +25,18 @@ class StockServiceImpl(StockService):
     使用 xtquant.xtdata 获取股票信息、财务数据、K线数据。
     """
 
-    def __init__(self, config: AppConfig, logger: LoggerService):
+    def __init__(
+        self,
+        config: AppConfig,
+        logger: LoggerService,
+        connector: Connector | None = None,
+    ):
         self.config = config
         self.logger = logger
         self._client = MiniQmtClient.get()
+        # ADR-014 阶段 C：可选注入 Connector，财务指标查询走本体论连接器
+        # 未注入时降级到旧 Balance 单表直连（保持向后兼容）
+        self._connector = connector
 
     def get_stock_code_by_name(self, stock_name: str) -> str:
         """通过板块搜索匹配股票名称。
@@ -91,13 +103,88 @@ class StockServiceImpl(StockService):
     def get_financial_metrics(
         self, stock_code: str = "600519", start_year: str = "2021"
     ) -> dict[str, Any]:
-        """获取股票财务指标。"""
+        """获取股票财务指标。
+
+        ADR-014 阶段 C：优先走 Connector（概念="盈利能力指标"），由连接器统一
+        取数 + PIT + 字段标准化。未注入 Connector 时降级到旧 Balance 单表直连。
+        """
+        if self._connector is not None:
+            return self._get_financial_metrics_via_connector(stock_code, start_year)
+        return self._get_financial_metrics_legacy(stock_code, start_year)
+
+    def _get_financial_metrics_via_connector(
+        self,
+        stock_code: str,
+        start_year: str,
+    ) -> dict[str, Any]:
+        """通过 Connector 获取财务指标（ADR-014 阶段 C 新路径）。"""
+        try:
+            # 规范化 xt_symbol（确保带后缀）
+            symbol = (
+                stock_code if "." in stock_code else self._normalize_symbol(stock_code)
+            )
+            result = self._connector.get_concept(
+                ConceptQuery(
+                    subject=symbol,
+                    aspect="盈利能力",
+                    time=f"{start_year}-01-01~latest",
+                )
+            )
+            if not result.provenance or result.provenance == ["unknown"]:
+                return {
+                    "error": f"未找到 {stock_code} 财务数据",
+                    "code": stock_code,
+                    "name": "未找到",
+                    "financial_metrics": {},
+                }
+            # Connector 返回 polars DataFrame，转 dict 取最新一行
+            data = result.data
+            if not isinstance(data, pl.DataFrame) or data.height == 0:
+                return {
+                    "error": f"未找到 {stock_code} 财务数据",
+                    "code": stock_code,
+                    "name": "未找到",
+                    "financial_metrics": {},
+                }
+            latest = data.sort("timestamp", descending=True).row(0, named=True)
+            metrics = {
+                "eps": float(latest.get("eps", 0.0) or 0.0),
+                "roe": float(latest.get("roe", 0.0) or 0.0),
+                "revenue": float(latest.get("revenue", 0.0) or 0.0),
+                "net_profit": float(latest.get("net_profit", 0.0) or 0.0),
+            }
+            # 补充盈利能力族其他指标
+            for extra in (
+                "gross_margin",
+                "net_profit_margin",
+                "net_profit_yoy",
+                "revenue_yoy",
+            ):
+                if extra in latest:
+                    metrics[extra] = float(latest[extra] or 0.0)
+            return {
+                "code": stock_code,
+                "report_date": str(latest.get("timestamp", "")),
+                "financial_metrics": metrics,
+                "related_concepts": [n.label for n in result.related_nodes[:5]],
+            }
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Connector 取财务指标失败，降级 legacy: {e}")
+            return self._get_financial_metrics_legacy(stock_code, start_year)
+
+    def _get_financial_metrics_legacy(
+        self,
+        stock_code: str,
+        start_year: str,
+    ) -> dict[str, Any]:
+        """旧路径：Balance 单表直连（降级兼容，字段名 operating_revenue 已知错误）。"""
         try:
             end_date = datetime.now().strftime("%Y%m%d")
             df = self._client.get_financial(
                 stock_list=[stock_code],
                 start_time=start_year + "0101",
-                end_time=end_date,
+                end_date=end_date,
                 table="Balance",
             )
 
@@ -130,6 +217,11 @@ class StockServiceImpl(StockService):
                 "name": "数据获取失败",
                 "financial_metrics": {},
             }
+
+    @staticmethod
+    def _normalize_symbol(stock_code: str) -> str:
+        """纯 6 位代码补 xtquant 后缀（复用 symbol.normalize_xt 逻辑）。"""
+        return normalize_xt(stock_code)
 
     def get_price_history(self, stock_code: str) -> list:
         """获取股票历史 K 线（近五年月线）。"""

@@ -11,6 +11,14 @@
 可依赖 ``ontology``。
 """
 
+from long_earn.ontology.concept_resolver import ConceptResolution, ConceptResolver
+from long_earn.ontology.connector import (
+    ConceptQuery,
+    ConceptResult,
+    Connector,
+    ConnectorDataProvider,
+    ConnectorMemoryProvider,
+)
 from long_earn.ontology.graph import GraphPath, OntologyGraph
 from long_earn.ontology.model import (
     OntologyDomain,
@@ -21,6 +29,13 @@ from long_earn.ontology.model import (
 from long_earn.ontology.registry import OntologyRegistry
 
 __all__ = [
+    "ConceptQuery",
+    "ConceptResolution",
+    "ConceptResolver",
+    "ConceptResult",
+    "Connector",
+    "ConnectorDataProvider",
+    "ConnectorMemoryProvider",
     "GraphPath",
     "OntologyDomain",
     "OntologyEdge",
