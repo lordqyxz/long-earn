@@ -147,15 +147,17 @@ def get_operator(name: str) -> Operator:
 
 
 def list_operators() -> dict[str, dict[str, Any]]:
-    """返回目录清单（name -> {category, inputs, params_schema, min_history}）。
+    """返回目录清单（name -> {category, inputs, field_params, params_schema, min_history}）。
 
-    供 LLM function calling / dashboard 展示 / 策略研发检索。
+    供 LLM function calling / dashboard 展示 / 策略研发检索 / 连接器按需取数。
+    ADR-014 任务3：新增 ``field_params``（params 中承载列名的键）。
     """
 
     return {
         name: {
             "category": type(op).category,
             "inputs": list(type(op).inputs),
+            "field_params": list(type(op).field_params),
             "params_schema": type(op).param_schema(),
             "min_history": type(op).min_history,
         }

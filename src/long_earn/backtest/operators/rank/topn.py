@@ -25,6 +25,8 @@ class RankTop(Operator):
     name: ClassVar[str] = "rank_top"
     category: ClassVar[str] = "rank"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = RankTopParams
     min_history: ClassVar[int] = 0
 

@@ -23,8 +23,10 @@ class Shift(Operator):
 
     name: ClassVar[str] = "shift"
     category: ClassVar[str] = "factor"
-    # 实际依赖字段由 params.field 决定（参数驱动），静态 inputs 留空
+    # 实际依赖字段由 params.field 决定（参数驱动），静态 inputs 留空；
+    # field_params 标注 params 中承载列名的键，连接器据此合并字段需求集
     inputs: ClassVar[list[str]] = []
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = ShiftParams
     min_history: ClassVar[int] = 1
 

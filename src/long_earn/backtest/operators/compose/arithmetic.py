@@ -29,6 +29,8 @@ class Arithmetic(Operator):
     name: ClassVar[str] = "arithmetic"
     category: ClassVar[str] = "compose"
     inputs: ClassVar[list[str]] = []
+    # lhs/rhs 可能是列名或标量；field_params 标注承载列名的 params 键
+    field_params: ClassVar[list[str]] = ["lhs", "rhs"]
     params_cls: ClassVar[type[OperatorParams]] = ArithmeticParams
     min_history: ClassVar[int] = 0
 

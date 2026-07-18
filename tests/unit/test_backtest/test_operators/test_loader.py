@@ -47,9 +47,16 @@ class TestLoader:
 
     def test_list_operators_schema(self):
         entry = list_operators()["shift"]
-        assert set(entry) == {"category", "inputs", "params_schema", "min_history"}
+        assert set(entry) == {
+            "category",
+            "inputs",
+            "field_params",
+            "params_schema",
+            "min_history",
+        }
         assert entry["category"] == "factor"
         assert entry["params_schema"]["type"] == "object"
+        assert entry["field_params"] == ["field"]
 
 
 class TestContractValidation:
