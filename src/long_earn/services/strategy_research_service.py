@@ -14,11 +14,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
+from long_earn.strategy_rd.htr_subgraph import (
+    create_htr_subgraph as create_strategy_rd_subgraph,
+)
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-    from long_earn.services import BacktestService
 
 from long_earn.core.storage import best_strategy_path, strategy_results_path
 
@@ -82,7 +83,7 @@ class StrategyResearchService:
     多轮循环编排与结果落盘能力。无状态：每次 ``run_loop`` 独立。
     """
 
-    def __init__(self, ctx: "RuntimeContext") -> None:
+    def __init__(self, ctx: RuntimeContext) -> None:
         self.ctx = ctx
         self.backtest_service = ctx.require_backtest()
         self.logger = ctx.logger

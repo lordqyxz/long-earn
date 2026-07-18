@@ -18,7 +18,9 @@ from long_earn.event_inference import create_event_inference_subgraph
 from long_earn.services import LLMService, LoggerService, MonitoringService
 from long_earn.state import State
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
-from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
+from long_earn.strategy_rd.htr_subgraph import (
+    create_htr_subgraph as create_strategy_rd_subgraph,
+)
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext

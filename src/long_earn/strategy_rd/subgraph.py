@@ -1,5 +1,12 @@
-"""策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索"""
+"""策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索
 
+[DEPRECATED] ADR-014 任务1：此线性流程已被 HTR 六步循环子图
+（``htr_subgraph.create_htr_subgraph``）取代。主图 ``agent.py`` 和
+``strategy_research_service`` 已切换到 HTR。本文件保留供回滚参考，
+不再被任何主路径引用。下个版本删除。
+"""
+
+import warnings
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -814,11 +821,18 @@ def create_strategy_rd_subgraph(
     checkpointer: Any = None,
     interrupt_before: list[str] | None = None,
 ):
-    """创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索
+    """[DEPRECATED] 创建策略研究子图 - Reflexion 模式 with 代码修复 and 自适应检索
+
+    ADR-014 任务1：此线性流程已废弃，请使用 ``htr_subgraph.create_htr_subgraph``。
 
     Args:
         context: 运行时上下文
     """
+    warnings.warn(
+        "strategy_rd.subgraph 已废弃（ADR-014），请使用 htr_subgraph.create_htr_subgraph",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     research_agent = StrategyResearchAgent(context=context)
     supervisor = StrategyRdSupervisor(context=context)
     develop_agent = StrategyDevelopAgent(context=context)
