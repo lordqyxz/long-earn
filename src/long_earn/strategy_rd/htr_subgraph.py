@@ -24,7 +24,11 @@ from long_earn.strategy_rd.tree_store import HypothesisTreeStore
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
+    from long_earn.ontology import Connector
     from long_earn.services import BacktestService, LoggerService, MemoryService
+
+# ADR-014 任务2：HTR 节点用 ConceptQuery 调 Connector 做图谱关联增强
+from long_earn.ontology import ConceptQuery
 
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
@@ -59,9 +63,14 @@ def _init_tree_node(
 def _observe_node(
     state: State,
     research_agent: StrategyResearchAgent,
+    connector: Connector | None,
     logger: LoggerService,  # noqa: ARG001
 ) -> dict:
-    """观察阶段 — 分析当前研究状态。"""
+    """观察阶段 — 分析当前研究状态。
+
+    ADR-014 任务2：注入 Connector 时，用图谱关联增强观察上下文
+    （当前最佳假设的关联概念/历史失败案例），LLM 拿到结构化图谱视角。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
@@ -73,11 +82,29 @@ def _observe_node(
     pruned_nodes = [n for n in tree.all_nodes() if n.status == NodeStatus.PRUNED]
     pruned_directions = "\n".join(f"- {n.hypothesis}" for n in pruned_nodes) or "无"
 
+    # ADR-014 任务2：图谱关联增强（当前最佳假设的关联概念）
+    related_concepts = "无"
+    if connector is not None and best and best.hypothesis:
+        try:
+
+            result = connector.get_concept(ConceptQuery(
+                subject=best.hypothesis,
+                aspect="研究上下文",
+            ))
+            if result.related_nodes:
+                related_concepts = "\n".join(
+                    f"- {n.label} ({n.domain.value})" for n in result.related_nodes[:5]
+                )
+        except Exception:
+            # 图谱查询失败不阻塞主流程
+            pass
+
     snapshot = {
         "current_best": best.hypothesis if best else "无",
         "frontier": "\n".join(f"- {n.hypothesis}" for n in frontier) or "无",
         "ancestor_insights": (best.insight if best else "") or "无",
         "pruned_directions": pruned_directions,
+        "related_concepts": related_concepts,
     }
 
     observations = research_agent.observe(snapshot)
@@ -88,9 +115,14 @@ def _ideate_node(
     state: State,
     research_agent: StrategyResearchAgent,
     memory: MemoryService,
+    connector: Connector | None,
     logger: LoggerService,
 ) -> dict:
-    """假设生成 — 基于观察结果 + 历史树洞察（hot-start）生成改进假设。"""
+    """假设生成 — 基于观察结果 + 历史树洞察（hot-start）生成改进假设。
+
+    ADR-014 任务2：注入 Connector 时，用图谱按策略族检索相似经验
+    （替代纯文本 TF-IDF），增强 child_insights 的结构化关联。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
@@ -119,6 +151,28 @@ def _ideate_node(
     except Exception as e:
         if logger:
             logger.warning(f"[HTR-ideate] 历史树检索失败: {e}")
+
+    # ADR-014 任务2：图谱按策略族检索相似经验（增强 child_insights）
+    if connector is not None and parent_hypothesis:
+        try:
+
+            exp_result = connector.get_concept(ConceptQuery(
+                subject=parent_hypothesis,
+                aspect="动量族",  # 默认动量族，可根据假设内容扩展
+                constraints={"k": 3},
+            ))
+            if isinstance(exp_result.data, list) and exp_result.data:
+                graph_insights = "\n".join(
+                    f"- [图谱] {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
+                    for e in exp_result.data
+                )
+                if child_insights:
+                    child_insights = f"{child_insights}\n{graph_insights}"
+                else:
+                    child_insights = graph_insights
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-ideate] 图谱经验检索失败: {e}")
 
     hypotheses = research_agent.ideate(
         observations=observations,
@@ -463,12 +517,16 @@ def _decide_node(
     state: State,
     research_agent: StrategyResearchAgent,
     backtest_service: BacktestService,
+    connector: Connector | None,
     logger: LoggerService,
 ) -> dict:
     """决策阶段 — 决定 merge/continue/stop。
 
     Phase 3: 对本轮最佳 dev 候选跑 Walk-Forward OOS，
     oos_score > current_best_oos + threshold → merge。
+
+    ADR-014 任务2：注入 Connector 时，用图谱查相似失败案例注入 tree_state，
+    LLM 决策时能看到"历史上类似假设的失败原因"。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -509,6 +567,24 @@ def _decide_node(
         "cycles_used": iteration,
         "max_cycles": HTR_MAX_CYCLES,
     }
+
+    # ADR-014 任务2：图谱查相似失败案例（注入 tree_state 供 LLM 决策参考）
+    if connector is not None and best and best.hypothesis:
+        try:
+
+            fail_result = connector.get_concept(ConceptQuery(
+                subject=best.hypothesis,
+                aspect="动量族",  # 按策略族查经验（含失败案例）
+                constraints={"k": 2},
+            ))
+            if isinstance(fail_result.data, list) and fail_result.data:
+                tree_state["similar_experiences"] = "\n".join(
+                    f"- {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
+                    for e in fail_result.data
+                )
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-decide] 图谱失败案例查询失败: {e}")
 
     llm_action = research_agent.decide(tree_state)
     # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
@@ -551,17 +627,21 @@ def create_htr_subgraph(context: RuntimeContext):
     logger = context.logger
     backtest_service = context.require_backtest()
     memory = context.require_memory()
+    # ADR-014 任务2：注入 Connector 供 observe/ideate/decide 图谱关联增强
+    connector = context.connector
 
     workflow = StateGraph(State)
 
     workflow.add_node("init_tree", partial(_init_tree_node, logger=logger))
     workflow.add_node(
-        "observe", partial(_observe_node, research_agent=research_agent, logger=logger)
+        "observe", partial(_observe_node, research_agent=research_agent,
+                           connector=connector, logger=logger)
     )
     workflow.add_node(
         "ideate",
         partial(
-            _ideate_node, research_agent=research_agent, memory=memory, logger=logger
+            _ideate_node, research_agent=research_agent, memory=memory,
+            connector=connector, logger=logger
         ),
     )
     workflow.add_node(
@@ -599,6 +679,7 @@ def create_htr_subgraph(context: RuntimeContext):
             _decide_node,
             research_agent=research_agent,
             backtest_service=backtest_service,
+            connector=connector,
             logger=logger,
         ),
     )

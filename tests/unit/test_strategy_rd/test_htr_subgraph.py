@@ -88,7 +88,7 @@ class TestDecideNodeLogic:
             "iteration": 100,  # 超过 HTR_MAX_CYCLES=10
             "executor_results": [],
         }
-        result = _decide_node(state, agent, backtest_service, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(state, agent, backtest_service, connector=None, logger=None)  # type: ignore[arg-type]
         assert result["result"] == "stop"
 
     def test_max_depth_forces_stop(self):
@@ -115,7 +115,7 @@ class TestDecideNodeLogic:
             "iteration": 0,
             "executor_results": [],
         }
-        result = _decide_node(state, agent, backtest_service, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(state, agent, backtest_service, connector=None, logger=None)  # type: ignore[arg-type]
         assert result["result"] == "stop"
 
 
@@ -167,6 +167,7 @@ class TestPhase4MemoryIntegration:
             {"hypothesis_tree": tree.serialize(), "result": "测试观察"},
             research_agent=agent,
             memory=memory,
+            connector=None,
             logger=None,  # type: ignore[arg-type]
         )
 
