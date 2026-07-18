@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         MarketIntelligenceProvider,
     )
     from long_earn.backtest.data.realtime import RealtimeDataProvider
+    from long_earn.ontology import Connector, OntologyRegistry
     from long_earn.operator_dev.backlog import OperatorBacklog
 
 # 项目数据目录 — 统一由 core.storage 裁决（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
@@ -71,6 +72,10 @@ class RuntimeContext:
     realtime_provider: "RealtimeDataProvider | None" = None
     # 算子缺口队列（可选，gap_detector 写入 / operator_dev 消费）
     operator_backlog: "OperatorBacklog | None" = None
+    # 本体论连接器（可选，ADR-014；上层通过概念取数，屏蔽多数据源/PIT/降级链）
+    connector: "Connector | None" = None
+    # 本体论注册表（可选，ADR-014；承载 OntologyGraph 供记忆激活图遍历用）
+    ontology_registry: "OntologyRegistry | None" = None
 
     def require_llm(self) -> LLMService:
         """获取 LLM 服务（非空保证，等价于读 ``self.llm_service``）"""
@@ -154,7 +159,14 @@ class AppConfig:
     validation_end_date: str = "2026-06-25"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
-    event_inference_keywords: tuple[str, ...] = ("新闻", "事件", "热点", "资讯", "利好", "利空")
+    event_inference_keywords: tuple[str, ...] = (
+        "新闻",
+        "事件",
+        "热点",
+        "资讯",
+        "利好",
+        "利空",
+    )
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -165,7 +177,9 @@ class AppConfig:
         """
         strategy_env = os.getenv("STRATEGY_KEYWORDS", "策略,思路,投资策略")
         stock_analysis_env = os.getenv("STOCK_ANALYSIS_KEYWORDS", "股票,分析,公司")
-        event_env = os.getenv("EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空")
+        event_env = os.getenv(
+            "EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空"
+        )
 
         # 唯一存储环境变量：LONG_EARN_DATA_DIR → 派生全部数据路径
         paths = _storage.resolve_paths(os.getenv("LONG_EARN_DATA_DIR"))

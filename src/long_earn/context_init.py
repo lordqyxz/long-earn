@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.provider import CompositeDataProvider as DataProviderImpl
 from long_earn.config import AppConfig, RuntimeContext
+from long_earn.ontology import Connector, OntologyRegistry
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.services.backtest_service import BacktestServiceImpl
 from long_earn.services.llm_service import LLMServiceImpl
@@ -54,6 +55,18 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     # 2b. 算子缺口队列（strategy_rd gap_detector 写入 / operator_dev 消费）
     operator_backlog = OperatorBacklog()
 
+    # 2b-adr014. 本体论注册表 + 连接器（ADR-014 阶段 E）
+    # 装载种子本体（财务指标/实体/策略族/事件类型），构造 Connector 注入 data_provider
+    ontology_registry = OntologyRegistry()
+    try:
+        ontology_registry.seed()
+    except Exception as exc:
+        logger.warning(f"ontology 种子装载失败（非致命）: {exc}")
+    connector = Connector(
+        registry=ontology_registry,
+        data_provider=data_provider,
+    )
+
     # 2c. 市场情报能力（ciccwm 可用时注入；与 data_provider 分离的第二组接口）
     market_intelligence: MarketIntelligenceProvider | None = None
     try:
@@ -80,8 +93,14 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
 
     # 3. 业务服务层 —— 已解耦，直接接 (config, logger) 构造
     llm_service = LLMServiceImpl(config, logger)
-    memory = MemoryServiceImpl(config, logger)
-    stock_service = StockServiceImpl(config, logger)
+    # ADR-014 阶段 D：MemoryServiceImpl 注入 OntologyGraph（motion.activate 走图遍历）
+    memory = MemoryServiceImpl(
+        config,
+        logger,
+        ontology_graph=ontology_registry.graph,
+    )
+    # ADR-014 阶段 C：StockServiceImpl 注入 Connector（get_financial_metrics 走概念查询）
+    stock_service = StockServiceImpl(config, logger, connector=connector)
     backtest_service = BacktestServiceImpl(config, logger, data_provider=data_provider)
 
     return RuntimeContext(
@@ -96,6 +115,8 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         market_intelligence=market_intelligence,
         realtime_provider=realtime_provider,
         operator_backlog=operator_backlog,
+        connector=connector,
+        ontology_registry=ontology_registry,
     )
 
 

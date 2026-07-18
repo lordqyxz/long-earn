@@ -1,4 +1,4 @@
-﻿"""HTR 六步循环子图（ADR-010 Phase 2）。
+"""HTR 六步循环子图（ADR-010 Phase 2）。
 
 Observe → Ideate → Select → Dispatch → Executor → Backpropagate → Decide
 
@@ -69,11 +69,15 @@ def _observe_node(
     best = tree.best_node() or tree.root
     frontier = tree.frontier()
 
+    # ADR-014 阶段 E：查询已剪枝方向（替代旧硬编码 "无"）
+    pruned_nodes = [n for n in tree.all_nodes() if n.status == NodeStatus.PRUNED]
+    pruned_directions = "\n".join(f"- {n.hypothesis}" for n in pruned_nodes) or "无"
+
     snapshot = {
         "current_best": best.hypothesis if best else "无",
         "frontier": "\n".join(f"- {n.hypothesis}" for n in frontier) or "无",
         "ancestor_insights": (best.insight if best else "") or "无",
-        "pruned_directions": "无",  # Phase 2 简化
+        "pruned_directions": pruned_directions,
     }
 
     observations = research_agent.observe(snapshot)
@@ -96,13 +100,17 @@ def _ideate_node(
     # 从 state 获取上一轮的观察结果
     observations_raw = state.get("result", "")
     observations: dict[str, Any] = (
-        {"next_focus": observations_raw} if isinstance(observations_raw, str) else observations_raw
+        {"next_focus": observations_raw}
+        if isinstance(observations_raw, str)
+        else observations_raw
     )
 
     # Hot-start: 检索历史假设树洞察
     child_insights = ""
     try:
-        past_trees = memory.search_hypothesis_trees(query=parent_hypothesis or "策略优化", k=2)
+        past_trees = memory.search_hypothesis_trees(
+            query=parent_hypothesis or "策略优化", k=2
+        )
         if past_trees:
             child_insights = "\n".join(
                 f"- {t.get('best_direction', '')}: {t.get('best_insight', '')[:100]}"
@@ -133,9 +141,7 @@ def _select_node(
 
     # 从 ideate 的结果构造假设列表
     suggestions = state.get("improvement_suggestions", []) or []
-    hypotheses = [
-        {"hypothesis": s, "direction": ""} for s in suggestions
-    ]
+    hypotheses = [{"hypothesis": s, "direction": ""} for s in suggestions]
 
     selected = research_agent.select(hypotheses, max_select=1)
 
@@ -272,26 +278,28 @@ def _executor_node(
                 insight=f"dev sharpe={dev_score:.2f}",
             )
 
-            results.append({
-                "node_id": node_id,
-                "dev_score": dev_score,
-                "backtest_result": backtest_result,
-                "strategy_yaml": strategy_yaml,
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "dev_score": dev_score,
+                    "backtest_result": backtest_result,
+                    "strategy_yaml": strategy_yaml,
+                }
+            )
 
             if logger:
-                logger.info(
-                    f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}"
-                )
+                logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
 
         except Exception as e:
             node.status = NodeStatus.FAILED
             if logger:
                 logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
-            results.append({
-                "node_id": node_id,
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "error": str(e),
+                }
+            )
 
     return {
         "hypothesis_tree": tree.serialize(),
@@ -392,7 +400,11 @@ def _backpropagate_node(
             child_results=results,
         )
 
-        insight_text = insight_result.get("insight", "") if isinstance(insight_result, dict) else ""
+        insight_text = (
+            insight_result.get("insight", "")
+            if isinstance(insight_result, dict)
+            else ""
+        )
         if insight_text:
             node.insight = insight_text
             tree.backpropagate_insight(node_id)
@@ -474,10 +486,19 @@ def _decide_node(
     else:
         best_result = max(results, key=lambda r: r.get("dev_score", 0))
         action = _evaluate_oos_and_merge(
-            tree, best_result, current_best_oos,
-            backtest_service, oos_n_splits, oos_threshold, logger,
+            tree,
+            best_result,
+            current_best_oos,
+            backtest_service,
+            oos_n_splits,
+            oos_threshold,
+            logger,
         )
-        oos_score = tree.get_node(best_result.get("node_id", "")).oos_score if best_result.get("node_id") else None
+        oos_score = (
+            tree.get_node(best_result.get("node_id", "")).oos_score
+            if best_result.get("node_id")
+            else None
+        )
 
     tree_state = {
         "node_count": tree.node_count,
@@ -491,23 +512,11 @@ def _decide_node(
 
     llm_action = research_agent.decide(tree_state)
     # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
-    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
-        action = "stop"
-
-    if logger:
-        logger.info(f"[HTR-决策] action={action}, iteration={iteration}")
-
-    next_iteration = iteration + 1
-    return {
-        "iteration": next_iteration,
-        "result": action,
-        "hypothesis_tree": tree.serialize(),
-    }
-
-    # LLM 决策（可覆盖安全兜底）
-    llm_action = research_agent.decide(tree_state)
-    # 安全兜底：达到最大周期或深度时强制停止
-    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
+    if (
+        iteration >= HTR_MAX_CYCLES
+        or tree_state["max_depth"] >= HTR_MAX_DEPTH
+        or llm_action == "stop"
+    ):
         action = "stop"
 
     if logger:
@@ -546,9 +555,18 @@ def create_htr_subgraph(context: RuntimeContext):
     workflow = StateGraph(State)
 
     workflow.add_node("init_tree", partial(_init_tree_node, logger=logger))
-    workflow.add_node("observe", partial(_observe_node, research_agent=research_agent, logger=logger))
-    workflow.add_node("ideate", partial(_ideate_node, research_agent=research_agent, memory=memory, logger=logger))
-    workflow.add_node("select", partial(_select_node, research_agent=research_agent, logger=logger))
+    workflow.add_node(
+        "observe", partial(_observe_node, research_agent=research_agent, logger=logger)
+    )
+    workflow.add_node(
+        "ideate",
+        partial(
+            _ideate_node, research_agent=research_agent, memory=memory, logger=logger
+        ),
+    )
+    workflow.add_node(
+        "select", partial(_select_node, research_agent=research_agent, logger=logger)
+    )
     workflow.add_node("dispatch", partial(_dispatch_node, logger=logger))
     workflow.add_node(
         "executor",
@@ -584,7 +602,9 @@ def create_htr_subgraph(context: RuntimeContext):
             logger=logger,
         ),
     )
-    workflow.add_node("save_tree", partial(_save_tree_node, memory=memory, logger=logger))
+    workflow.add_node(
+        "save_tree", partial(_save_tree_node, memory=memory, logger=logger)
+    )
 
     workflow.add_edge(START, "init_tree")
     workflow.add_edge("init_tree", "observe")
