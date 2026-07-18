@@ -298,16 +298,28 @@ class TestAnnounceDateExtraction:
         )
 
     def test_cache_table_has_all_financial_columns(self, tmp_path: Any):
-        """C5.2 DuckDB 缓存表包含全部 18 个财务字段列"""
+        """C5.2 DuckDB 缓存 8 张细表包含全部财务字段列（ADR-014 阶段 B）
+
+        旧 financial_quarterly 单一宽表已废弃，改为 8 张细表。
+        验证 4 张旧表对应的细表含原 18 个财务字段。
+        """
         from long_earn.backtest.data.cache import DataCache
+        from long_earn.backtest.data.financial.schemas import (
+            FinancialSchemaRegistry,
+        )
 
         cache = DataCache(db_path=tmp_path / "test_cols.duckdb")
         conn = cache._get_conn()
-        columns = conn.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'financial_quarterly'"
-        ).fetchdf()
-        col_names = set(columns["column_name"].tolist())
+
+        # 收集 4 张标量表（对应旧宽表）的全部字段
+        scalar_tables = FinancialSchemaRegistry.scalar_tables()[:4]
+        all_cols: set[str] = set()
+        for schema in scalar_tables:
+            columns = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{schema.table_name}'"
+            ).fetchdf()
+            all_cols.update(columns["column_name"].tolist())
 
         expected_financial_cols = {
             "revenue", "net_profit", "eps", "research_expenses",
@@ -317,11 +329,15 @@ class TestAnnounceDateExtraction:
             "net_profit_margin", "roe_weighted",
             "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
         }
-        missing = expected_financial_cols - col_names
-        assert not missing, f"缓存表缺失字段: {missing}"
+        missing = expected_financial_cols - all_cols
+        assert not missing, f"8 张细表 collectively 缺失字段: {missing}"
 
     def test_save_and_get_financials_roundtrip(self, tmp_path: Any):
-        """C5.3 save_financials → get_financials 全字段往返一致"""
+        """C5.3 save_financials → get_financials 全字段往返一致（ADR-014 阶段 B）
+
+        旧 save_financials 现为兼容包装，内部拆分写入 4 张标量表；
+        get_financials union 4 表返回扁平宽表。验证往返一致。
+        """
         from long_earn.backtest.data.cache import DataCache
 
         cache = DataCache(db_path=tmp_path / "test_rt.duckdb")
@@ -351,11 +367,11 @@ class TestAnnounceDateExtraction:
         })
         cache.save_financials(test_df)
 
-        # 读取（不指定 fields，返回全量）
+        # 读取（不指定 fields，返回全量 union）
         result = cache.get_financials(["600519.SH"])
         assert result is not None
         assert not result.empty
-        # 验证所有 18 个字段都有值
+        # 验证所有 18 个字段都有值（union 后跨表合并）
         for col in [
             "revenue", "net_profit", "eps", "research_expenses",
             "total_equity", "total_assets", "total_liabilities",

@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
+from functools import reduce
 from typing import Any
 
 import pandas as pd
@@ -26,6 +27,10 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.financial.schemas import (
+    FinancialSchemaRegistry,
+    FinancialTableSchema,
+)
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 
 # 缓存数据过期阈值（天）：超过此天数视为过期，需从 miniqmt 更新
@@ -627,110 +632,160 @@ class MiniQmtDataProvider:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame | None:
-        """从 miniqmt 下载财务数据（Income + Balance + CashFlow + Pershareindex 四表合并）。
+        """[兼容包装] 从 miniqmt 下载财务数据 — 按表分别取数后合并返回扁平宽表。
 
-        ADR-007 Phase 3：全量字段提取。
-        - Income：营业收入/净利润/每股收益/研发费用/营业总成本
-        - Balance：所有者权益/总资产/总负债
-        - CashFlow：经营现金流净额/资本支出
-        - Pershareindex：每股净资产/每股经营现金流/资产负债率/净利率/加权ROE/
-          YoY增长率/毛利率（预计算值，优先于手算）
+        ADR-014 阶段 B：内部调 ``_fetch_financials_by_table`` 按 8 张表 schema 分别
+        取数并写入各自细表，再 union 4 张旧表返回扁平宽表（保持旧调用方契约）。
+        新代码应直接用 ``_fetch_financials_by_table`` 获取 dict 结果。
+        """
+        table_dfs = self._fetch_financials_by_table(symbols, start_date, end_date)
+        if not table_dfs:
+            return None
+        # union 4 张旧标量表为扁平宽表（与旧 _fetch_financials 返回格式一致）
+        scalar_old = FinancialSchemaRegistry.scalar_tables()[:4]
+        parts: list[pd.DataFrame] = []
+        for schema in scalar_old:
+            df = table_dfs.get(schema.table_name)
+            if df is not None and not df.empty:
+                parts.append(df)
+        if not parts:
+            return None
+        # 按 (symbol, report_date) outer merge 4 表
+
+        def _merge_two(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
+            return pd.merge(
+                a, b, on=["symbol", "report_date"], how="outer", suffixes=("", "_dup")
+            )
+
+        merged = reduce(_merge_two, parts)
+        # 合并 announce_date 重复列（取非空）
+        if "announce_date_dup" in merged.columns:
+            merged["announce_date"] = merged["announce_date"].fillna(
+                merged["announce_date_dup"]
+            )
+            merged = merged.drop(columns=["announce_date_dup"])
+        # dropna NOT NULL
+        merged = merged.dropna(subset=["symbol", "report_date", "announce_date"])
+        # 衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）
+        merged = self._compute_derived_financials(merged)
+        logger.info(
+            f"miniqmt 获取 {len(merged)} 条财务数据（union 4 表），"
+            f"{merged['symbol'].nunique()} 只股票"
+        )
+        return merged
+
+    def _fetch_financials_by_table(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, pd.DataFrame]:
+        """ADR-014 阶段 B：按 8 张表 schema 分别从 miniqmt 取数。
+
+        每张表用 ``_extract_by_schema`` 从 xtquant 原始字段按 schema.xt_fields
+        候选顺序提取标准字段名，写入各自 DuckDB 细表。
+
+        Returns:
+            {table_name: DataFrame}，只含成功取数的表
         """
         try:
             start_fmt = start_date.replace("-", "")
             end_fmt = end_date.replace("-", "")
+            result: dict[str, pd.DataFrame] = {}
 
-            # 四张表并行获取
-            income_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Income",
-            )
-            balance_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Balance",
-            )
-            cashflow_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="CashFlow",
-            )
-            pershare_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Pershareindex",
-            )
+            for schema in FinancialSchemaRegistry.TABLES:
+                df = self._fetch_financial_table(schema, symbols, start_fmt, end_fmt)
+                if df is not None and not df.empty:
+                    # 写入对应细表
+                    self.cache.save_financial_table(schema.table_name, df)
+                    result[schema.table_name] = df
 
-            if (
-                income_df.empty
-                and balance_df.empty
-                and cashflow_df.empty
-                and pershare_df.empty
-            ):
-                return None
-
-            # 以 Income 表为基础（含 report_date / announce_date）
-            base_df = income_df if not income_df.empty else balance_df
-            if base_df.empty:
-                base_df = cashflow_df if not cashflow_df.empty else pershare_df
-
-            result_df = pd.DataFrame()
-            result_df["symbol"] = base_df.get("symbol")
-            if len(symbols) == 1 and (result_df["symbol"].isna().all() or result_df.empty):
-                result_df["symbol"] = symbols[0]
-            result_df["report_date"] = base_df.get("report_date", pd.NaT)
-            # announce_date 优先从基础表取（get_financial 已统一提取 m_anntime）
-            if "announce_date" in base_df.columns:
-                result_df["announce_date"] = base_df["announce_date"]
-            else:
-                result_df["announce_date"] = pd.NaT
-
-            # ── Income 表字段提取 ──
-            self._extract_income_fields(result_df, income_df)
-
-            # ── Balance 表字段提取（含多字段兜底映射） ──
-            self._extract_balance_fields(result_df, balance_df)
-
-            # ── CashFlow 表字段提取 ──
-            self._extract_table_fields(
-                result_df, cashflow_df,
-                {"net_cash_flows_oper_act": "ocf", "cash_pay_acq_const_fiolta": "capex"},
-            )
-
-            # ── Pershareindex 表字段提取（预计算值，优先于手算） ──
-            self._extract_table_fields(
-                result_df, pershare_df,
-                {
-                    "s_fa_bps": "bps",
-                    "s_fa_ocfps": "ocf_per_share",
-                    "gear_ratio": "debt_to_assets",
-                    "net_profit": "net_profit_margin",
-                    "equity_roe": "roe_weighted",
-                    # 预计算衍生指标（优先值，_compute_derived_financials 只在缺失时手算兜底）
-                    "du_return_on_equity": "roe",
-                    "gross_profit": "gross_margin",
-                    "du_profit_rate": "net_profit_yoy",
-                    "inc_revenue_rate": "revenue_yoy",
-                },
-            )
-
-            # 确保 report_date / announce_date 为 datetime 并过滤无效行
-            result_df["report_date"] = pd.to_datetime(
-                result_df["report_date"], errors="coerce"
-            )
-            result_df["announce_date"] = pd.to_datetime(
-                result_df["announce_date"], errors="coerce"
-            )
-            result_df = result_df.dropna(subset=["report_date", "announce_date"])
-
-            # 衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）
-            result_df = self._compute_derived_financials(result_df)
-
-            logger.info(
-                f"miniqmt 获取 {len(result_df)} 条财务数据，"
-                f"{result_df['symbol'].nunique()} 只股票"
-            )
-            return result_df
+            if result:
+                total_rows = sum(len(df) for df in result.values())
+                logger.info(
+                    f"miniqmt 按表取数完成: {len(result)}/{len(FinancialSchemaRegistry.TABLES)} 表，"
+                    f"共 {total_rows} 行"
+                )
+            return result
         except Exception as e:
-            logger.warning(f"miniqmt 财务数据下载失败: {e}")
+            logger.warning(f"miniqmt 按表财务数据下载失败: {e}")
+            return {}
+
+    def _fetch_financial_table(
+        self,
+        schema: FinancialTableSchema,
+        symbols: list[str],
+        start_fmt: str,
+        end_fmt: str,
+    ) -> pd.DataFrame | None:
+        """按单张表 schema 从 miniqmt 取数 + 字段提取。
+
+        Args:
+            schema: FinancialTableSchema（含 xt_table + columns + xt_fields 候选）
+            symbols: 股票代码列表
+            start_fmt / end_fmt: YYYYMMDD 格式时间
+        """
+        try:
+            raw = self.client.get_financial(
+                stock_list=symbols,
+                start_time=start_fmt,
+                end_time=end_fmt,
+                table=schema.xt_table,
+            )
+            if raw.empty:
+                return None
+            return self._extract_by_schema(schema, raw, symbols)
+        except Exception as e:
+            logger.warning(f"miniqmt 取 {schema.xt_table} 失败: {e}")
             return None
+
+    def _extract_by_schema(
+        self,
+        schema: FinancialTableSchema,
+        raw: pd.DataFrame,
+        symbols: list[str],
+    ) -> pd.DataFrame:
+        """通用字段提取：按 schema.columns 的 xt_fields 候选顺序提取标准字段名。
+
+        替代旧 _extract_income_fields / _extract_balance_fields / _extract_table_fields
+        三个硬编码提取器，改为 schema 驱动的通用逻辑。
+        """
+        result = pd.DataFrame()
+        # 主键 + announce_date 从 raw 统一取（client 已提取 m_timetag/m_anntime）
+        result["symbol"] = raw.get("symbol")
+        if len(symbols) == 1 and (result["symbol"].isna().all() or result.empty):
+            result["symbol"] = symbols[0]
+        result["report_date"] = raw.get("report_date", pd.NaT)
+        if "announce_date" in raw.columns:
+            result["announce_date"] = raw["announce_date"]
+        else:
+            result["announce_date"] = pd.NaT
+
+        # Top10 长表额外取 rank（xtquant Top10holder 有 rank 列）
+        if not schema.is_scalar and "rank" in raw.columns:
+            result["rank"] = raw["rank"]
+
+        # 按 schema.columns 的 xt_fields 候选顺序提取
+        for col in schema.data_columns:
+            if col.name in ("announce_date", "rank"):
+                continue  # 已处理
+            if not col.xt_fields:
+                continue
+            # 按候选顺序找第一个存在的原始列
+            for xt_col in col.xt_fields:
+                if xt_col in raw.columns:
+                    result[col.name] = raw[xt_col].values
+                    break
+            else:
+                result[col.name] = None
+
+        # 日期列转 datetime + 过滤无效行
+        result["report_date"] = pd.to_datetime(result["report_date"], errors="coerce")
+        result["announce_date"] = pd.to_datetime(
+            result["announce_date"], errors="coerce"
+        )
+        result = result.dropna(subset=["symbol", "report_date", "announce_date"])
+        return result
 
     @staticmethod
     def _merge_by_symbol_date(
@@ -778,7 +833,8 @@ class MiniQmtDataProvider:
             return
         balance_extract = {
             "total_equity": [
-                "total_equity", "tot_shrhldr_eqy_excl_min_int",
+                "total_equity",
+                "tot_shrhldr_eqy_excl_min_int",
                 "total_hldr_eqy_exc_min_int",
                 "total_hldr_eqy_incl_min_int",
                 "s_fa_total_hldr_eqy_exc_min_int",
@@ -881,9 +937,7 @@ class MiniQmtDataProvider:
         ) / rev[valid]
 
     @staticmethod
-    def _fill_yoy_growth(
-        symbol_data: pd.DataFrame, field: str, yoy_field: str
-    ) -> None:
+    def _fill_yoy_growth(symbol_data: pd.DataFrame, field: str, yoy_field: str) -> None:
         """YoY 增长率手算兜底：(本期 - 上年同期) / |上年同期|。"""
         if field not in symbol_data.columns or yoy_field not in symbol_data.columns:
             return
@@ -901,9 +955,9 @@ class MiniQmtDataProvider:
             if not last_year_data.empty and last_year_data.iloc[0] != 0:
                 last_year_val = float(last_year_data.iloc[0])
                 current_val = float(row[field])
-                symbol_data.loc[idx, yoy_field] = (
-                    current_val - last_year_val
-                ) / abs(last_year_val)
+                symbol_data.loc[idx, yoy_field] = (current_val - last_year_val) / abs(
+                    last_year_val
+                )
 
     @staticmethod
     def _fill_roe(symbol_data: pd.DataFrame) -> None:

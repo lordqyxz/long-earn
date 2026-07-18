@@ -44,7 +44,10 @@ def _save_financial_rows(
     announce_dates: list[str],
     report_dates: list[str] | None = None,
 ) -> None:
-    """向 financial_quarterly 写入若干行。
+    """向 income_stmt（财务代表表）写入若干行。
+
+    ADR-014 阶段 B：旧 financial_quarterly 已废弃，增量判定改为查 income_stmt。
+    此夹具直接写 income_stmt 表（含一个占位 revenue 字段避免空行被过滤）。
 
     Args:
         symbol: 股票代码
@@ -68,9 +71,10 @@ def _save_financial_rows(
             "symbol": [symbol] * len(announce_dates),
             "report_date": report_dates,
             "announce_date": announce_dates,
+            "revenue": [100.0] * len(announce_dates),  # 占位字段，避免空行被过滤
         }
     )
-    cache.save_financials(df)
+    cache.save_financial_table("income_stmt", df)
 
 
 def _save_price_rows(
@@ -116,25 +120,29 @@ class TestSchemaVersioning:
         assert "2024-04-30" in str(latest)
 
     def test_version_mismatch_drops_table(self, tmp_path):
-        """版本号不匹配时 DROP 重建，原数据被清空"""
+        """ADR-014 阶段 B：新架构 8 张细表用 CREATE IF NOT EXISTS 幂等建表，
+        不再 DROP 重建。篡改版本号后重新实例化，数据保留（schema 稳定），
+        版本号被刷回当前版本。"""
         cache = _make_cache(tmp_path)
         _save_financial_rows(cache, "000001.SZ", ["2024-01-01"])
 
-        # 篡改版本号为旧版本，模拟 schema 升级场景
+        # 篡改 income_stmt 版本号为旧版本
         conn = cache._get_conn()
         conn.execute(
-            "UPDATE _schema_meta SET version = 0 WHERE table_name = 'financial_quarterly'"
+            "UPDATE _schema_meta SET version = 0 WHERE table_name = 'income_stmt'"
         )
         cache.close()
 
-        # 重新实例化 → 版本不匹配 → DROP 重建
+        # 重新实例化 → CREATE IF NOT EXISTS 幂等，数据保留
         cache2 = _make_cache(tmp_path)
         latest = cache2.get_financial_latest_announce("000001.SZ")
-        assert latest is None  # 数据已被清空
+        # 新架构不 DROP，数据保留
+        assert latest is not None
+        assert "2024-01-01" in str(latest)
 
-        # 版本号已更新为当前版本
+        # 版本号已刷回当前版本
         ver = cache2._get_conn().execute(
-            "SELECT version FROM _schema_meta WHERE table_name = 'financial_quarterly'"
+            "SELECT version FROM _schema_meta WHERE table_name = 'income_stmt'"
         ).fetchone()
         assert ver is not None
         assert ver[0] >= 1
