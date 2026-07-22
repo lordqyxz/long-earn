@@ -1342,6 +1342,16 @@ class MiniQmtUniverseProvider:
         cached = self.cache.get_universe(index_name, date)
         if cached:
             return cached
+        # PIT 查询无果（缓存中无早于 date 的快照）但缓存有更晚的快照：
+        # 成分股半年度调整，变化缓慢，用最新快照近似（标注 warning）
+        if date:
+            fallback = self.cache.get_universe(index_name, "")
+            if fallback:
+                logger.warning(
+                    f"{index_name} 缓存无早于 {date} 的快照，"
+                    f"用最新快照近似（{len(fallback)} 只，成分股近似）"
+                )
+                return fallback
         if self.client.is_available:
             result = self.client.get_sector_stocks(index_name)
             if result:
