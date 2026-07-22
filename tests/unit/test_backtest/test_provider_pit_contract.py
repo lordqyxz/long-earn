@@ -271,11 +271,15 @@ class TestAnnounceDateExtraction:
     """
 
     def test_financial_field_map_has_18_fields(self):
-        """C5.1 FINANCIAL_FIELD_MAP 包含 18 个标准字段（四表合并）"""
+        """C5.1 FINANCIAL_FIELD_MAP 包含 20 个标准字段（五表合并）
+
+        ADR-014 任务7：纳入 Capital 表 total_shares/float_shares 两字段，
+        从 18 → 20。
+        """
         from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 
-        assert len(FINANCIAL_FIELD_MAP) == 18, (
-            f"FINANCIAL_FIELD_MAP 应有 18 个字段（四表合并），"
+        assert len(FINANCIAL_FIELD_MAP) == 20, (
+            f"FINANCIAL_FIELD_MAP 应有 20 个字段（五表合并），"
             f"实际 {len(FINANCIAL_FIELD_MAP)} 个"
         )
         # 验证各表字段存在
@@ -291,6 +295,8 @@ class TestAnnounceDateExtraction:
             "net_profit_margin", "roe_weighted",
             # 衍生指标
             "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+            # Capital（ADR-014 任务7）
+            "total_shares", "float_shares",
         }
         assert set(FINANCIAL_FIELD_MAP.keys()) == expected_fields, (
             f"FINANCIAL_FIELD_MAP 字段不匹配，"

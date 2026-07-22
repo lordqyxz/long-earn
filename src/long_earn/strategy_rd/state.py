@@ -67,7 +67,6 @@ class State(TypedDict, total=False):
     run_id: str | None
     oos_threshold: float
     oos_n_splits: int
-    operator_gaps: list[dict[str, str]] | None
 
 
 StrategyResearchState = State

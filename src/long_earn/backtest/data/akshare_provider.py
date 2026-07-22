@@ -121,7 +121,7 @@ class AkshareFallbackProvider:
         start_date: str,
         end_date: str,
         price_fields: list[str] | None = None,
-        financial_fields: list[str] | None = None,  # noqa: ARG002
+        financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并面板（行情 + 财务）。
 
@@ -193,4 +193,50 @@ class AkshareFallbackProvider:
         except Exception as e:
             logger.warning(f"[akshare 降级] 获取 {universe_type} 成分股失败: {e}")
         return []
+
+    # ── DataConnector 扩展能力桩（akshare 不支持，返回空数据） ──────────
+    # ADR-014 阶段 F：miniqmt 全能力接入后，DataConnector 新增 6 个方法，
+    # akshare 不具备这些能力（行业指数/成分股/板块分类/交易日历/标的基础
+    # 信息/实时快照），返回空数据并提示调用方走降级链。
+
+    def get_industry_index_panel(
+        self,
+        industry: str,
+        start_date: str,
+        end_date: str,
+        fields: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """akshare 不支持行业指数 K 线。返回空 DataFrame。"""
+        logger.debug("akshare 不支持 get_industry_index_panel，返回空")
+        return pd.DataFrame()
+
+    def get_industry_constituents(self, industry: str) -> list[str]:
+        """akshare 不支持行业成分股。返回空列表。"""
+        logger.debug("akshare 不支持 get_industry_constituents，返回空")
+        return []
+
+    def get_sector_classifications(self) -> list[str]:
+        """akshare 不支持板块分类树。返回空列表。"""
+        logger.debug("akshare 不支持 get_sector_classifications，返回空")
+        return []
+
+    def get_trading_dates(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        market: str = "SSE",
+    ) -> list[str]:
+        """akshare 不支持交易日历。返回空列表。"""
+        logger.debug("akshare 不支持 get_trading_dates，返回空")
+        return []
+
+    def get_instrument_detail(self, stock_code: str) -> dict[str, Any]:
+        """akshare 不支持标的基础信息。返回空 dict。"""
+        logger.debug("akshare 不支持 get_instrument_detail，返回空")
+        return {}
+
+    def get_full_tick(self, code_list: list[str]) -> dict[str, Any]:
+        """akshare 不支持实时快照。返回空 dict。"""
+        logger.debug("akshare 不支持 get_full_tick，返回空")
+        return {}
 

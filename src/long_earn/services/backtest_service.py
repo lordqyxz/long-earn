@@ -12,6 +12,7 @@ from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
 from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
+    StrategyDSL,
     parse_strategy_yaml,
 )
 from long_earn.backtest.engine.evaluator import SafeExpressionEvaluator
@@ -19,7 +20,7 @@ from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.services import BacktestService, LoggerService
 
 if TYPE_CHECKING:
-    from long_earn.backtest.data.provider import DataProvider
+    from long_earn.backtest.data.connector import DataConnector
     from long_earn.config import AppConfig
 
 
@@ -327,6 +328,30 @@ class DSLStrategy(BaseStrategy):
         return {s: max(0.0, df.loc[s, field]) / total for s in selected}
 
 
+def _compute_warmup_days(dsl: "StrategyDSL") -> int:
+    """从 DSL 算子参数推断所需预热期（日历日）。
+
+    扫描 ``operator_factors`` 取最大 period/window（``returns`` / ``windowed`` /
+    ``shift`` 等时序算子的回溯窗口），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
+    0 表示无时序算子，不需要 warmup。
+
+    关键 bug 修复背景：原引擎 ``_prepare_data`` 按 [start, end] 取数，导致近6个月
+    回测时 ``returns(period=120)`` 在前 60-90 天全 NaN，``rank_top(momentum_120)``
+    选不出股票，整轮回测 trade_count=0。
+    """
+    max_period = 0
+    for factor in dsl.operator_factors:
+        params = factor.get("params") or {}
+        period = params.get("period", 0) or 0
+        window = params.get("window", 0) or 0
+        span = params.get("span", 0) or 0
+        max_period = max(max_period, period, window, span)
+    if max_period <= 0:
+        return 0
+    # 交易日 → 日历日：约 7/5 倍；加 30 天 buffer 防节假日
+    return int(max_period * 1.5 + 30)
+
+
 class BacktestServiceImpl(BacktestService):
     """回测服务实现（直接调用事件驱动引擎）
 
@@ -340,7 +365,7 @@ class BacktestServiceImpl(BacktestService):
         self,
         config: "AppConfig",
         logger: LoggerService,
-        data_provider: "DataProvider | None" = None,
+        data_provider: "DataConnector | None" = None,
     ):
         self.config = config
         self.logger = logger
@@ -423,10 +448,10 @@ class BacktestServiceImpl(BacktestService):
             return None
 
     def _get_universe_symbols(self, universe_type: str, date: str) -> list[str]:
-        """获取股票池（优先走 data_provider 降级链，退回 MiniQmtUniverseProvider）。
+        """获取股票池（优先走 data_connector 降级链，退回 MiniQmtUniverseProvider）。
 
         将 universe 获取纳入 DI 容器管理：注入了 ``data_provider``（如
-        ``CompositeDataProvider``）时走降级链（miniqmt→ciccwm→akshare），
+        ``CompositeDataConnector``）时走降级链（DuckDB→miniqmt），
         xtquant 不可用时不再断链；未注入时退回直接构造 ``MiniQmtUniverseProvider``。
         """
         if self.data_provider is not None:
@@ -490,23 +515,29 @@ class BacktestServiceImpl(BacktestService):
 
             data_provider = self.data_provider
             if data_provider is not None:
-                # DataProvider Protocol 已定义 get_merged_panel_as_polars；
-                # 直接注入让引擎经统一接口消费（CompositeDataProvider 等已实现）。
+                # DataConnector Protocol 已定义 get_merged_panel_as_polars；
+                # 直接注入让引擎经统一接口消费（CompositeDataConnector 等已实现）。
                 engine.data_provider = data_provider
 
             strategy_obj = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
 
             # 根据 DSL 配置获取股票池（优先走 data_provider 降级链）
-            universe_type = dsl.universe.type or "csi300"
+            # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
+            universe_type = dsl.universe.type or "main_board+gem"
             start_date_str = start_date.replace("-", "")
             universe_symbols = self._get_universe_symbols(universe_type, start_date_str)
 
-            # 降级：如果指定股票池为空，尝试 csi300
-            if not universe_symbols and universe_type != "csi300":
+            # 降级：如果指定股票池为空，尝试 main_board+gem（系统默认池）
+            default_universe = "main_board+gem"
+            if not universe_symbols and universe_type != default_universe:
                 if self.logger:
-                    self.logger.warning(f"股票池 '{universe_type}' 为空，降级到 csi300")
-                universe_type = "csi300"
-                universe_symbols = self._get_universe_symbols("csi300", start_date_str)
+                    self.logger.warning(
+                        f"股票池 '{universe_type}' 为空，降级到 {default_universe}"
+                    )
+                universe_type = default_universe
+                universe_symbols = self._get_universe_symbols(
+                    default_universe, start_date_str
+                )
 
             if not universe_symbols:
                 return {
@@ -528,6 +559,7 @@ class BacktestServiceImpl(BacktestService):
                 start_date,
                 end_date,
                 formatted_symbols,
+                warmup_days=_compute_warmup_days(dsl),
             )
 
             if self.logger:
@@ -582,7 +614,7 @@ class BacktestServiceImpl(BacktestService):
         param_grid: Any,
         start_date: str = "",
         end_date: str = "",
-        universe_type: str = "csi300",
+        universe_type: str = "main_board+gem",
         benchmark_symbol: str = "",
         allow_large_grid: bool = False,
     ) -> dict[str, Any]:
@@ -640,7 +672,7 @@ class BacktestServiceImpl(BacktestService):
         start_date: str = "",
         end_date: str = "",
         n_splits: int = 3,
-        universe_type: str = "csi300",
+        universe_type: str = "main_board+gem",
         benchmark_symbol: str = "",
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
@@ -670,7 +702,7 @@ class BacktestServiceImpl(BacktestService):
 
         return result
 
-    def run_oos(
+    def run_oos(  # noqa: PLR0912
         self,
         strategy_yaml: str,
         start_date: str = "",
@@ -705,11 +737,77 @@ class BacktestServiceImpl(BacktestService):
             )
 
         try:
-            wf_result = self._engine.walk_forward_run(
-                strategy_yaml=strategy_yaml,
+            dsl = parse_strategy_yaml(strategy_yaml)
+        except ValueError as e:
+            return {
+                "n_splits": n_splits,
+                "fold_results": [],
+                "average_test_metrics": {},
+                "failed_folds": list(range(n_splits)),
+                "oos_sharpe": None,
+                "error": f"策略解析失败: {e}",
+            }
+
+        try:
+            audit_provider = self._create_audit_provider()
+            engine = EventDrivenBacktestEngine(
+                cost_config=dsl.trading_cost.to_broker_config(),
+                stop_loss=dsl.risk_control.stop_loss,
+                max_drawdown_limit=dsl.risk_control.max_drawdown_limit,
+                max_position_pct=dsl.risk_control.max_position_per_stock,
+                audit_provider=audit_provider,
+            )
+
+            data_provider = self.data_provider
+            if data_provider is not None:
+                engine.data_provider = data_provider
+
+            strategy_obj = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
+
+            universe_type = dsl.universe.type or "main_board+gem"
+            start_date_str = start_date.replace("-", "")
+            universe_symbols = self._get_universe_symbols(
+                universe_type, start_date_str
+            )
+
+            default_universe = "main_board+gem"
+            if not universe_symbols and universe_type != default_universe:
+                if self.logger:
+                    self.logger.warning(
+                        f"股票池 '{universe_type}' 为空，降级到 {default_universe}"
+                    )
+                universe_type = default_universe
+                universe_symbols = self._get_universe_symbols(
+                    default_universe, start_date_str
+                )
+
+            if not universe_symbols:
+                return {
+                    "n_splits": n_splits,
+                    "fold_results": [],
+                    "average_test_metrics": {},
+                    "failed_folds": list(range(n_splits)),
+                    "oos_sharpe": None,
+                    "error": f"股票池 '{universe_type}' 为空，数据源不可用",
+                }
+
+            formatted_symbols = PandasToPolarsProvider.format_symbols(
+                universe_symbols
+            )
+
+            if self.logger:
+                self.logger.info(
+                    f"[OOS] 股票池: {universe_type}, "
+                    f"{len(formatted_symbols)} 只股票"
+                )
+
+            wf_result = engine.walk_forward_run(
+                strategy=strategy_obj,
                 start_date=start_date,
                 end_date=end_date,
+                symbols=formatted_symbols,
                 n_splits=n_splits,
+                warmup_days=_compute_warmup_days(dsl),
             )
         except Exception as e:
             if self.logger:
@@ -723,9 +821,26 @@ class BacktestServiceImpl(BacktestService):
                 "error": str(e),
             }
 
-        fold_results = wf_result.get("folds", [])
+        if isinstance(wf_result, dict) and wf_result.get("error"):
+            # 引擎返回错误（如加载数据为空）
+            return {
+                "n_splits": n_splits,
+                "fold_results": [],
+                "average_test_metrics": {},
+                "failed_folds": list(range(n_splits)),
+                "oos_sharpe": None,
+                "error": wf_result["error"],
+            }
+
+        fold_results = wf_result.get("folds", []) or wf_result.get(
+            "fold_results", []
+        )
+        # 兼容 engine/core.py 与 engine/parallel.py 的两种键名：
+        # - core.py 用 "test"（当前实现）
+        # - 早期文档/测试用 "test_metrics"
         test_metrics = [
-            f.get("test_metrics", {}) or {} for f in fold_results
+            f.get("test", {}) or f.get("test_metrics", {}) or {}
+            for f in fold_results
         ]
         failed_folds = [
             i for i, f in enumerate(fold_results) if f.get("error")

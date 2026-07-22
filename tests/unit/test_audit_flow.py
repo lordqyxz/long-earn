@@ -100,10 +100,14 @@ def test_audit_records_events():
         )
 
         full_data = pl.DataFrame(
-            {"timestamp": [datetime.now()], "symbol": ["AAPL"], "close": [150.0]}
+            {
+                "timestamp": [datetime(2023, 1, 1)],
+                "symbol": ["AAPL"],
+                "close": [150.0],
+            }
         )
 
-        engine._prepare_data = lambda s, start, end: full_data
+        engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
         strategy = MockStrategy(strategy_id="test_strat")
         engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])

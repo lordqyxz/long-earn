@@ -7,7 +7,7 @@ import contextlib
 import math
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -179,16 +179,21 @@ class EventDrivenBacktestEngine:
         symbols: list[str],
         benchmark_symbol: str = "",
         full_data: pl.DataFrame | None = None,
+        warmup_days: int = 0,
     ) -> BacktestResult:
         """执行回测
 
         Args:
             strategy: 策略实例
-            start_date: 起始日期
+            start_date: 起始日期（产生交易的时间范围起点）
             end_date: 结束日期
             symbols: 候选股票列表
             benchmark_symbol: 基准指数代码（如 "000300"），用于计算 Alpha/Beta 等
             full_data: 预加载的完整数据面板；传入则跳过 _prepare_data()，适合并行回测
+            warmup_days: 预热期天数（日历日）。取数时把 start_date 提前 warmup_days
+                天，让时序因子（如 returns(period=120)）在 start_date 当天就有非 NaN
+                值；交易时间戳仍按 [start_date, end_date] 过滤，不会在 warmup 期产生
+                交易。
         """
         # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
         run_id = str(uuid.uuid4())
@@ -233,12 +238,24 @@ class EventDrivenBacktestEngine:
 
         try:
             if full_data is None:
-                full_data = self._prepare_data(symbols, start_date, end_date)
+                full_data = self._prepare_data(
+                    symbols, start_date, end_date, warmup_days=warmup_days
+                )
             else:
-                # 防御性日期过滤：即使外部传入 full_data，也确保只取 [start_date, end_date] 范围
+                # 防御性日期过滤：外部传入的 full_data 可能含 warmup 期数据，
+                # 这里按 [start - warmup, end] 保留，避免扔掉预热期历史。
+                # ``start_date`` 可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
+                # （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符做日期解析。
                 date_col = "timestamp" if "timestamp" in full_data.columns else "date"
-                start_dt = pl.lit(start_date).str.to_datetime()
-                end_dt = pl.lit(end_date).str.to_datetime()
+                end_dt = pl.lit(end_date[:10]).str.to_datetime()
+                if warmup_days > 0:
+                    data_start = (
+                        datetime.strptime(start_date[:10], "%Y-%m-%d")
+                        - timedelta(days=warmup_days)
+                    ).strftime("%Y-%m-%d")
+                else:
+                    data_start = start_date[:10]
+                start_dt = pl.lit(data_start).str.to_datetime()
                 full_data = full_data.filter(
                     (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
                 )
@@ -261,7 +278,11 @@ class EventDrivenBacktestEngine:
             broker.reset()
             strategy.init()
 
-            timestamps = self._get_timestamps(full_data)
+            # warmup_days > 0 时 full_data 含预热期数据；交易时间戳仍按
+            # [start_date, end_date] 过滤，避免在 warmup 期产生交易。
+            timestamps = self._get_timestamps(
+                full_data, start_date=start_date, end_date=end_date
+            )
 
             for _bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
@@ -363,14 +384,26 @@ class EventDrivenBacktestEngine:
         return AuditLogger(self.audit_provider, run_id)
 
     @staticmethod
-    def _get_timestamps(full_data: pl.DataFrame) -> list[Any]:
-        return (
-            full_data.select("timestamp")
-            .unique()
-            .sort("timestamp")
-            .to_series()
-            .to_list()
-        )
+    def _get_timestamps(
+        full_data: pl.DataFrame,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[Any]:
+        """从 full_data 提取交易时间戳列表。
+
+        ``start_date`` / ``end_date`` 同时给定时，仅返回该范围内的 timestamps，
+        用于在 warmup_days > 0 时把预热期数据排除在交易循环外。
+        输入可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
+        （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符。
+        """
+        df = full_data.select("timestamp").unique()
+        if start_date and end_date:
+            start_dt = pl.lit(start_date[:10]).str.to_datetime()
+            end_dt = pl.lit(end_date[:10]).str.to_datetime()
+            df = df.filter(
+                (pl.col("timestamp") >= start_dt) & (pl.col("timestamp") <= end_dt)
+            )
+        return df.sort("timestamp").to_series().to_list()
 
     # ── 单时间戳处理 ──────────────────────────────────────────
 
@@ -1134,6 +1167,7 @@ class EventDrivenBacktestEngine:
         symbols: list[str],
         n_splits: int = 3,
         benchmark_symbol: str = "",
+        warmup_days: int = 0,
     ) -> dict[str, Any]:
         """执行 Walk-Forward 滚动回测（自动样本外验证）
 
@@ -1144,6 +1178,10 @@ class EventDrivenBacktestEngine:
             symbols: 候选股票列表
             n_splits: 时间窗折叠数
             benchmark_symbol: 基准指数代码
+            warmup_days: 预热期日历日数。时序因子（如 ``returns(period=120)``）
+                在 fold 训练期初会全 NaN，需把取数窗口向前推 warmup 天，
+                让 fold 训练期首个 timestamp 就有非 NaN 因子值。
+                交易时间戳仍按 fold 的 [train_start, train_end] / [test_start, test_end] 过滤。
 
         Returns:
             {
@@ -1157,11 +1195,17 @@ class EventDrivenBacktestEngine:
         不进入 average_metrics 计算，避免把失败的 0 当作平均业绩的一部分。
         """
 
-        full_data = self._prepare_data(symbols, start_date, end_date)
+        full_data = self._prepare_data(
+            symbols, start_date, end_date, warmup_days=warmup_days
+        )
         if full_data.is_empty():
             return {"error": "加载数据为空"}
 
-        timestamps = self._get_timestamps(full_data)
+        # Walk-Forward 内部 fold 的时间戳过滤仍按 [start_date, end_date]，
+        # warmup 期数据只用于算子因子的历史窗口，不进入交易循环。
+        timestamps = self._get_timestamps(
+            full_data, start_date=start_date, end_date=end_date
+        )
         splitter = TimeSeriesSplit(n_splits=n_splits)
         splits = splitter.split(timestamps)
 
@@ -1180,6 +1224,8 @@ class EventDrivenBacktestEngine:
             test_end = str(test_ts[-1]) if test_ts else train_end
 
             # 训练期回测（每个 fold 使用独立的审计日志）
+            # warmup_days 透传：fold 训练期初的时序因子需要预热数据，
+            # full_data 已含 warmup 期，run() 内部会按 [train_start - warmup, train_end] 保留。
             self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
@@ -1189,6 +1235,7 @@ class EventDrivenBacktestEngine:
                 symbols,
                 benchmark_symbol,
                 full_data=full_data,
+                warmup_days=warmup_days,
             )
             if train_result.success:
                 train_metrics = {
@@ -1210,6 +1257,7 @@ class EventDrivenBacktestEngine:
                 )
 
             # 测试期回测（重置策略状态和审计日志，防止训练期信息泄漏）
+            # warmup_days 透传：测试期初同样需要预热数据填充时序因子。
             self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
@@ -1219,6 +1267,7 @@ class EventDrivenBacktestEngine:
                 symbols,
                 benchmark_symbol,
                 full_data=full_data,
+                warmup_days=warmup_days,
             )
             if test_result.success:
                 test_metrics = {
@@ -1269,14 +1318,34 @@ class EventDrivenBacktestEngine:
 
     # ── 数据与指标 ────────────────────────────────────────────
 
-    def _prepare_data(self, symbols: list[str], start: str, end: str) -> pl.DataFrame:
-        """准备 Polars 格式的数据面板（引擎层防御性过滤日期范围）"""
+    def _prepare_data(
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
+        warmup_days: int = 0,
+    ) -> pl.DataFrame:
+        """准备 Polars 格式的数据面板（引擎层防御性过滤日期范围）。
+
+        ``warmup_days > 0`` 时把取数起点提前 ``warmup_days`` 天（日历日），
+        让时序因子（如 ``returns(period=120)``）在 ``start`` 当天就有非 NaN 值。
+        交易时间戳过滤在 :meth:`_get_timestamps` 中完成，不会在 warmup 期产生交易。
+        """
         if self.data_provider is not None:
-            df = self.data_provider.get_merged_panel_as_polars(symbols, start, end)
+            if warmup_days > 0:
+                data_start = (
+                    datetime.strptime(start[:10], "%Y-%m-%d")
+                    - timedelta(days=warmup_days)
+                ).strftime("%Y-%m-%d")
+            else:
+                data_start = start[:10]
+            df = self.data_provider.get_merged_panel_as_polars(
+                symbols, data_start, end[:10]
+            )
             if df is not None and not df.is_empty():
-                # 防御性过滤：确保数据不超出请求的日期范围，防止 Walk-Forward 等场景下的数据泄漏
+                # 防御性过滤：确保数据不超出 [data_start, end] 范围
                 if "timestamp" in df.columns:
-                    start_dt = pl.lit(start).str.to_datetime()
+                    start_dt = pl.lit(data_start).str.to_datetime()
                     end_dt = pl.lit(end).str.to_datetime()
                     df = df.filter(
                         (pl.col("timestamp") >= start_dt)

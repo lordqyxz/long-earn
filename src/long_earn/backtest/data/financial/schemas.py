@@ -17,6 +17,19 @@ Capital/Holdernum/Top10holder/Top10flowholder）：
 | Holdernum | holdernum | 标量宽表 | (symbol, report_date) |
 | Top10holder | top10_holders | 长表 | (symbol, report_date, rank) |
 | Top10flowholder | top10_flow_holders | 长表 | (symbol, report_date, rank) |
+
+**实施数据可用性**（ADR-014 阶段 B 验证结果）：
+
+- 前 5 张表（Income/Balance/CashFlow/Pershareindex/Capital）通过
+  ``xtdata.get_financial_data`` 可正常取数，缓存表已填充。
+- 后 3 张表（Holdernum/Top10holder/Top10flowholder）在标准 miniQMT 终端
+  配置下 ``get_financial_data`` 返回空。可能原因：
+  1. miniQMT 终端未开启这 3 张表的下载权限
+  2. 这 3 张表需要不同的 xtquant API（如 ``get_holder_data``）
+  3. 数据量过大，终端默认不下载
+
+  这 3 张表的 schema 保留供未来扩展，但 ``Connector`` 当前不查询它们，
+  避免误导。待 miniQMT 终端配置或找到正确 API 后再启用。
 """
 
 from __future__ import annotations
@@ -190,9 +203,24 @@ CAPITAL_SCHEMA = FinancialTableSchema(
         _SYMBOL_COL,
         _REPORT_DATE_COL,
         _ANNOUNCE_DATE_COL,
-        # xtquant Capital 表字段（股本变动）
-        FinancialColumn("total_shares", "DOUBLE", ("total_share", "total_shr")),
-        FinancialColumn("float_shares", "DOUBLE", ("float_share", "float_shr")),
+        # xtquant Capital 表实际字段（经 _debug_capital.py 验证 2026-07-19）：
+        # total_capital=总股本, circulating_capital=流通股本,
+        # restrict_circulating_capital=限售流通股本, freeFloatCapital=自由流通股本
+        FinancialColumn(
+            "total_shares",
+            "DOUBLE",
+            ("total_capital", "total_share", "total_shr"),
+        ),
+        FinancialColumn(
+            "float_shares",
+            "DOUBLE",
+            (
+                "circulating_capital",
+                "float_share",
+                "float_shr",
+                "freeFloatCapital",
+            ),
+        ),
         FinancialColumn("change_reason", "VARCHAR", ("change_reason",)),
     ),
 )

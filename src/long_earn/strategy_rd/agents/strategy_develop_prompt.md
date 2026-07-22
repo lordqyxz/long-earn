@@ -123,7 +123,7 @@ strategy:
   name: 策略名称
   description: 策略简述
   universe:
-    type: csi300
+    type: <universe_type>     # 见下方"股票池类型"，按 idea 与市场环境选择，无默认推荐
     rebalance_freq: 20D
   operator_factors:          # 算子因子，按声明顺序计算，结果列名为 alias
     - op: 算子名
@@ -151,17 +151,25 @@ strategy:
 
 ### 股票池类型
 
-- `csi300`: 沪深300（**推荐**，数据完整、回测快速）
-- `csi500`: 中证500
-- `csi1000`: 中证1000
-- `sse50`: 上证50
-- `all_a`: 全A股（数据量大、回测慢，部分股票可能缺数据）
-- `main_board`: 沪深主板
-- `gem`: 创业板
-- `star_board`: 科创板
-- `main_board+star_board`: 主板+科创板
+| 类型 | 说明 | 适用场景 |
+|------|------|---------|
+| `csi300` | 沪深300成分股 | 大盘蓝筹，流动性好 |
+| `csi500` | 中证500成分股 | 中盘股，成长性较高 |
+| `csi1000` | 中证1000成分股 | 小盘股，波动较大 |
+| `sse50` | 上证50成分股 | 超大盘蓝筹 |
+| `all_a` | 全A股 | 最广覆盖，但回测慢 |
+| `main_board` | 沪深主板 | 主板全市场 |
+| `gem` | 创业板 | 创业板全市场 |
+| `star_board` | 科创板 | 科创板全市场 |
+| `main_board+star_board` | 主板+科创板 | 主板+科创板 |
 
-**优先使用 csi300 或 csi500**，避免使用 all_a 导致回测缓慢和数据缺失。
+**选择原则**：根据 idea 与市场环境选择股票池，**不要默认使用任何一种**。
+- 大盘蓝筹风格 → `csi300` / `sse50`
+- 中盘成长风格 → `csi500`
+- 小盘高波动 → `csi1000` / `gem`
+- 全市场扫描 → `main_board` / `all_a`
+- 科技主题 → `star_board`
+- `all_a` 数据量大、回测慢，仅在确有需要时使用
 
 ## Few-Shot 示例
 
@@ -170,9 +178,9 @@ strategy:
 ```yaml
 strategy:
   name: ProfitGrowthStrategy
-  description: 选择净利润同比增长率超过 20% 的沪深300股票，按增长率排序选取前 10
+  description: 选择净利润同比增长率超过 20% 的中证500股票，按增长率排序选取前 10
   universe:
-    type: csi300
+    type: csi500
     rebalance_freq: 20D
   start_date: 2020-01-01
   end_date: 2023-12-31
@@ -194,9 +202,9 @@ strategy:
 ```yaml
 strategy:
   name: MomentumStrategy
-  description: 买入近期涨幅较大的股票
+  description: 买入近期涨幅较大的创业板股票
   universe:
-    type: csi300
+    type: gem
     rebalance_freq: 20D
   start_date: 2020-01-01
   end_date: 2023-12-31
@@ -218,9 +226,9 @@ strategy:
 ```yaml
 strategy:
   name: LowValueStrategy
-  description: 选择 ROE 较高且毛利率稳定的股票
+  description: 选择 ROE 较高且毛利率稳定的沪深主板股票
   universe:
-    type: csi300
+    type: main_board
     rebalance_freq: 20D
   start_date: 2020-01-01
   end_date: 2023-12-31
@@ -242,9 +250,9 @@ strategy:
 ```yaml
 strategy:
   name: MomVolRoeOperatorStrategy
-  description: 动量排序 + 低波动过滤 + ROE 过滤，算子路径实现
+  description: 动量排序 + 低波动过滤 + ROE 过滤，算子路径实现，小盘高波动场景
   universe:
-    type: csi300
+    type: csi1000
     rebalance_freq: 20D
   start_date: 2022-01-01
   end_date: 2025-12-31
@@ -298,8 +306,8 @@ strategy:
 {
     "strategy_name": "ProfitGrowthStrategy",
     "description": "净利润同比增长率选股策略",
-    "strategy_yaml": "strategy:\\n  name: ProfitGrowthStrategy\\n  description: 选择净利润同比增长率超过20%的股票\\n  universe:\\n    type: csi300\\n  start_date: 2020-01-01\\n  end_date: 2023-12-31\\n  signals:\\n    - type: filter\\n      condition: net_profit_yoy > 0.2\\n    - type: rank\\n      by: net_profit_yoy\\n      ascending: false\\n      top: 10\\n  weights:\\n    method: equal",
-    "explanation": "选择净利润同比增长率超过 20% 的沪深300股票，按增长率排序选取前10只，等权重配置"
+    "strategy_yaml": "strategy:\\n  name: ProfitGrowthStrategy\\n  description: 选择净利润同比增长率超过20%的股票\\n  universe:\\n    type: csi500\\n  start_date: 2020-01-01\\n  end_date: 2023-12-31\\n  signals:\\n    - type: filter\\n      condition: net_profit_yoy > 0.2\\n    - type: rank\\n      by: net_profit_yoy\\n      ascending: false\\n      top: 10\\n  weights:\\n    method: equal",
+    "explanation": "选择净利润同比增长率超过 20% 的中证500股票，按增长率排序选取前10只，等权重配置"
 }
 ```
 
@@ -311,7 +319,7 @@ strategy:
 4. **表达式必须可执行**：使用标准 Python 运算符和 shift 函数（仅表达式路径）
 5. **算子参数必须合法**：`operator_factors` 和 `type: operator` signals 的 op 必须来自上方算子目录，params 必须匹配算子的 params_schema（必填参数不可省略）
 6. **日期格式**：YYYY-MM-DD
-7. **股票池必须有效**：从可用类型中选择
+7. **股票池必须有效**：从可用类型中选择。**默认推荐 `main_board+gem`（沪深除科创板所有标的）**，除非 idea 明确指定其他池子；按 idea 与市场环境主动选择，不要默认使用 csi300/csi500
 8. **权重方法**：equal（等权重）、signal（按信号值加权）、custom_formula（自定义公式）
 9. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
 10. **T+1 执行**：回测引擎假设信号在 T 日生成，T+1 日执行

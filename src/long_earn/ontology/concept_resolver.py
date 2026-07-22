@@ -26,6 +26,12 @@ ResolutionKind = Literal[
     "event_graph",  # 事件图谱遍历
     "experience",  # 策略经验图谱检索
     "intelligence",  # 市场情报方法
+    "industry_panel",  # ADR-014 阶段 F：行业指数 K 线面板
+    "industry_constituents",  # ADR-014 阶段 F：行业成分股列表
+    "sector_classifications",  # ADR-014 阶段 F：板块分类树
+    "trading_dates",  # ADR-014 阶段 F：交易日历
+    "instrument_detail",  # ADR-014 阶段 F：标的基础信息
+    "realtime_tick",  # ADR-014 阶段 F：实时快照
     "unknown",  # 未识别概念
 ]
 
@@ -63,6 +69,18 @@ class ConceptResolver:
         "市场情绪": "intelligence",
         "资金流向": "intelligence",
         "热榜": "intelligence",
+        # ADR-014 阶段 F：miniqmt 全能力 aspect 入口
+        "行业指数": "industry_panel",
+        "行业行情": "industry_panel",
+        "行业成分股": "industry_constituents",
+        "板块分类": "sector_classifications",
+        "板块树": "sector_classifications",
+        "交易日历": "trading_dates",
+        "交易日": "trading_dates",
+        "标的基础信息": "instrument_detail",
+        "标的信息": "instrument_detail",
+        "实时快照": "realtime_tick",
+        "实时行情": "realtime_tick",
     }
 
     def __init__(self, registry: OntologyRegistry) -> None:
@@ -75,17 +93,32 @@ class ConceptResolver:
         if node is not None:
             return self._resolve_from_node(node.sid, node.properties)
 
-        # 2. 通配规则
+        # 2. 通配规则 — 用分发字典避免多分支
         kind = self._ASPECT_KIND_RULES.get(aspect, "unknown")
+        # 通配规则直接映射到空 payload 的 ConceptResolution（仅 intelligence
+        # 需要 methods，universe 需要 universe_type 占位）
         if kind == "universe":
             return ConceptResolution(kind="universe", payload={"universe_type": ""})
-        if kind == "event_graph":
-            return ConceptResolution(kind="event_graph", payload={})
         if kind == "intelligence":
             return ConceptResolution(
                 kind="intelligence",
                 payload={"methods": [aspect]},
             )
+        # 其余 kind（event_graph / experience / industry_panel /
+        # industry_constituents / sector_classifications / trading_dates /
+        # instrument_detail / realtime_tick / unknown）均使用空 payload
+        if kind in {
+            "event_graph",
+            "experience",
+            "industry_panel",
+            "industry_constituents",
+            "sector_classifications",
+            "trading_dates",
+            "instrument_detail",
+            "realtime_tick",
+            "unknown",
+        }:
+            return ConceptResolution(kind=kind, payload={})
         return ConceptResolution(kind="unknown", payload={})
 
     def resolve_subject(self, subject: str) -> tuple[str, list[str]]:
@@ -94,6 +127,8 @@ class ConceptResolver:
         - 主体是 universe 概念（如 "csi300"）→ 返回 (universe_sid, [])
           连接器再调 universe 解析为成分股
         - 主体是公司实体（如 "600519.SH" 或 "贵州茅台"）→ 返回 (entity_sid, [xt_symbol])
+        - 主体是逗号分隔的多只股票（如 "600519.SH,000001.SZ"）→ 返回 ("", [sym1, sym2])
+          （多实体无单一 sid，但 symbols 列表可直接用于面板查询）
         - 主体是普通股票代码 → 注册为实体并返回
         """
         # 先查本体是否已有该实体（按 alias）
@@ -109,6 +144,12 @@ class ConceptResolver:
             if node.domain.value == "entity":
                 xt_symbol = node.properties.get("xt_symbol", subject)
                 return node.sid, [xt_symbol]
+        # 多股票场景：逗号分隔的 xt_symbol 列表
+        # （如 "600519.SH,000001.SZ,300750.SZ"）
+        # 不注册为单一实体（多实体无单一 sid），直接返回 symbols 列表
+        if "," in subject and "." in subject:
+            symbols = [s.strip() for s in subject.split(",") if s.strip()]
+            return "", symbols
         # 未注册实体，按 xt_symbol 格式注册
         # 简单启发：含 "." 视为 xtquant 格式
         if "." in subject:

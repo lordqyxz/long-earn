@@ -1,8 +1,9 @@
 """二元算术组合算子：``lhs <op> rhs``，op ∈ + - * /。"""
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Union
 
 import polars as pl
+from pydantic import field_validator
 
 from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 
@@ -10,19 +11,40 @@ ArithOp = Literal["+", "-", "*", "/"]
 
 _OPS: dict[str, str] = {"+": "add", "-": "sub", "*": "mul", "/": "truediv"}
 
+# rhs 可以是列名（str）或标量（int/float）。LLM 生成策略时常需要标量乘法
+# （如年化乘子 15.87、归一化系数 100 等），仅支持列名会让大量合理策略失败。
+RhsType = Union[str, int, float]
+
 
 class ArithmeticParams(OperatorParams):
     lhs: str
-    rhs: str
+    rhs: RhsType
     op: ArithOp = "/"
     alias: str = "compose"
+
+    @field_validator("rhs")
+    @classmethod
+    def _coerce_rhs(cls, v: str | int | float) -> str | int | float:
+        """字符串形式的数值（LLM 偶尔生成 ``rhs: "15.87"``）转 float。
+
+        纯字段名（如 ``"close"``）保持原样。
+        """
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                return v
+        return v
 
 
 @operator
 class Arithmetic(Operator):
     """``arithmetic(lhs, rhs, op)`` —— ``lhs <op> rhs`` 当前行组合。
 
-    因果性：仅用当前行两列，无时序依赖，天然因果。除法除零由 polars 产出
+    ``rhs`` 可以是列名（与 ``lhs`` 同 panel 的另一列）或标量（int/float）。
+    标量场景：``arithmetic(lhs="vol_daily", rhs=15.87, op="*")`` → 年化波动率。
+
+    因果性：仅用当前行数据，无时序依赖，天然因果。除法除零由 polars 产出
     ``inf``/``null``，不在算子层吞异常（让上游诊断可见）。
     """
 
@@ -38,12 +60,18 @@ class Arithmetic(Operator):
         assert isinstance(params, ArithmeticParams)
         if params.op not in _OPS:
             raise ValueError(f"arithmetic.op={params.op!r} 非法，允许: {sorted(_OPS)}")
+        lhs_expr = pl.col(params.lhs)
+        # rhs 是标量 → 直接用 Python 值；是字符串 → 当列名
+        if isinstance(params.rhs, (int, float)):
+            rhs_expr: pl.Expr = pl.lit(params.rhs)
+        else:
+            rhs_expr = pl.col(params.rhs)
         if params.op == "/":
-            expr = (pl.col(params.lhs) / pl.col(params.rhs)).alias(params.alias)
+            expr = (lhs_expr / rhs_expr).alias(params.alias)
         elif params.op == "+":
-            expr = (pl.col(params.lhs) + pl.col(params.rhs)).alias(params.alias)
+            expr = (lhs_expr + rhs_expr).alias(params.alias)
         elif params.op == "-":
-            expr = (pl.col(params.lhs) - pl.col(params.rhs)).alias(params.alias)
+            expr = (lhs_expr - rhs_expr).alias(params.alias)
         else:  # "*"
-            expr = (pl.col(params.lhs) * pl.col(params.rhs)).alias(params.alias)
+            expr = (lhs_expr * rhs_expr).alias(params.alias)
         return panel.select(expr).to_series()

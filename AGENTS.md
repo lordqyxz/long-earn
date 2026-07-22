@@ -30,6 +30,81 @@ uv run python scripts/download_data.py --max-workers 4  # 并发下载（subproc
 
 > 不使用 mypy / pyright CLI：以 Serena LSP 单文件诊断为准，避免双工具冲突与配置分裂。
 
+### 质量基线（系统级，按强弱排序）
+
+> 「质量门槛」是代码层硬性检查（LSP/ruff/lint/pytest 零错）；「质量基线」是系统层能力验证标准——描述系统在四个核心维度上必须持续满足的可测量目标。任何修改不得破坏既有基线，发现偏离须在 TODO.md 登记并按威胁程度排期修复。
+
+#### 1. 策略生成与持续进化
+
+**目标**：HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）能产出可回测的策略 YAML，并通过 held-out OOS 合并门保证策略质量单调提升。
+
+| 指标 | 阈值 / 约束 | 验证位置 |
+|------|------------|---------|
+| HTR 六步循环跑通 | 单循环无异常完成 6 步 + save_tree | `tests/unit/test_strategy_rd/test_htr_subgraph.py` |
+| OOS 合并门严格 | `oos_sharpe > current_best + HTR_MERGE_THRESHOLD (0.05)` 才 merge，否则 continue/stop | `htr_subgraph.py::_evaluate_oos_and_merge` |
+| Held-out 数据隔离 | OOS 仅在测试集 `[TEST_START, TEST_END]` 跑，验证集仅在最终评估触碰 | `backtest_service.py::run_oos` |
+| 因果性硬约束 | 算子上线前必须通过 `prove_causality`（未来扰动不变性，容差 1e-9） | `operator_dev/subgraph.py::_test_and_validate_node` |
+| 策略优化验收 | `sharpe_ratio` 严格提升（`o_sharpe > b_sharpe + eps=1e-6`），否则拒 | `strategy_optimization/acceptance.py::AcceptanceGate` |
+| 假设树持久化 | 每轮 run 完整树落 JSON Store + 摘要回写 SubstanceStore 做 hot-start | `htr_subgraph.py::_save_tree_node` |
+| HTR 安全兜底 | `iteration >= 10` 或 `depth >= 3` 或 LLM "stop" 强制终止 | `htr_subgraph.py:728-732` |
+
+**已知偏离（须改进）**：
+- HTR 子图未集成 PersonaRegistry（4 大师策略生成/反思）与 gap_detector → operator_dev 闭环，二者仅存在于已废弃的 `subgraph.py`
+- `_select_node` 硬编码 `max_select=1`，导致 LangGraph Send 并行 fan-out 路径已实现但未激活
+
+#### 2. 回测金融级可靠性
+
+**目标**：事件驱动引擎在架构层面绝对杜绝未来函数，撮合/风控/审计可追溯、可重放。详见 [ADR-005](docs/adr/005-event-driven-backtest.md)。
+
+| 指标 | 阈值 / 约束 | 验证位置 |
+|------|------------|---------|
+| 防未来函数 | 策略只能通过 `VisibilityGuard.get_context()` 访问 `timestamp ≤ current_timestamp` 的切片 | `tests/unit/test_backtest/test_visibility.py`（5 类 9 用例） |
+| T+1 信号队列 | T 日信号 T+1 日以 `open` 价撮合；跨 fold 状态隔离（`_pending_signals` 等 4 个瞬态每 run 重置） | `engine/core.py::_pending_signals` |
+| 涨跌停板保护 | `±10%`（`prev_close * 1.1/0.9`）；涨停拒买、跌停拒卖；`volume==0` 视为停牌 | `engine/core.py::_compute_price_limits` / `_pre_trade_check` |
+| 成交量参与率 | 单笔 ≤ 日成交量 10%（`max_volume_participation`） | `engine/broker.py::_fill_market` |
+| 限价单保守撮合 | BUY `fill_price = max(order.price, current_price + slip)`，不优于限价 | `engine/broker.py::_try_fill_limit` |
+| 审计完整性 | 13 种事件类型 + 5 种 status（SUCCESS/FAILED/SKIPPED/WARNING/INTERRUPTED）+ `run_id` + 单调 `seq` | `engine/audit.py` + `test_duckdb_audit.py`（3 类 7 用例） |
+| `metrics_unreliable` 标志 | `skip_ratio > 0.5` 或 `partial_fills > 50%` 时置位，上层据此过滤 | `engine/core.py:291-301` |
+| filter/rank 失败 | 输入空 / 选中空 → `return []`（保守不选，不终止回测） | `engine/operator_executor.py:99-136` |
+
+#### 3. 数据利用充分性
+
+**目标**：DuckDB 缓存 + miniqmt 多源降级链覆盖全部业务所需数据，PIT 对齐严格，缓存加速可观测。
+
+| 指标 | 阈值 / 约束 | 验证位置 |
+|------|------------|---------|
+| 缓存命中加速 | 二次读应明显快于首次读（缓存层无网络/xtquant 调用） | `backtest/data/cache.py` |
+| 财务 PIT 对齐 | 财务面板用 `announce_date` 作 `visible_from`，公告前不可见；`groupby(symbol).ffill()` 填充 | `miniqmt_provider.py::_quarterly_to_daily` |
+| 五表合并全字段 | Income + Balance + CashFlow + Pershareindex + Capital 五张表，`FINANCIAL_FIELD_MAP` 全字段 | `miniqmt_provider.py::FINANCIAL_FIELD_MAP` |
+| 多源降级链 | 行情：DuckDB → miniqmt → ciccwm → akshare；市场情报：ciccwm 独占；实时：miniqmt → ciccwm | `backtest/data/connector.py::CompositeDataConnector` |
+| 缓存保护 | `backtest_cache.duckdb` 不得主动 DELETE/DROP，全量刷新仅经 `scripts/download_data.py` | 见「缓存保护约定」 |
+| 物质防未来函数 | `Substance.visible_from ≤ current_bar_date` 才可见 | `substance/model.py` + `tests/unit/test_substance/` |
+
+**已知偏离（须改进）**：
+- Provider 层 staleness 检测 bug 曾抹平缓存加速效果（部分已修复，需持续验证）
+- xtquant 的 Holdernum / Top10holder / Top10flowholder 三张表未通过 `get_financial_data` 暴露（仅文档化降级）
+
+#### 4. 多核 CPU 利用
+
+**目标**：并行回测编排 + 共享数据底座 + 子进程隔离下载，发挥多核优势。
+
+| 指标 | 阈值 / 约束 | 验证位置 |
+|------|------------|---------|
+| 并行回测 worker 数 | 默认 `os.cpu_count()`，可配置（`ParallelRunner(max_workers=...)`） | `engine/parallel.py::ParallelRunner` |
+| SharedMemory 零拷贝 | polars Arrow IPC 序列化，上限 2GB；创建失败 pickle 降级 | `engine/shared_data.py::SharedDataContext` + `test_parallel.py::TestSharedData` |
+| 网格规模上限 | 默认 `_MAX_GRID_DEFAULT=256`，`allow_large_grid=True` 解锁 | `engine/parallel.py:225` |
+| xtquant 进程隔离 | worker 内 `LONG_EARN_DISABLE_XTQUANT=1` 防 SIGABRT；每 worker 独立 DuckDB 文件 | `engine/parallel.py::_disable_xtquant_env` |
+| 下载守护重启 | exit code < 0 触发重启，最多 20 次，延迟 5s；exit code > 0 不重启 | `scripts/download_data.py` |
+| 参数网格 | 标量插值 + 对象层变换全笛卡尔积 | `engine/param_grid.py` + `test_param_grid.py`（3 类 10 用例） |
+| LangGraph 并行 fan-out | HTR 多假设 `Send("executor_single", ...)` + 股票分析 4 视角多边 fan-out | `htr_subgraph.py::_dispatch_cond` / `stock_analysis/subgraph.py` |
+
+**已知偏离（须改进）**：
+- `DataIngestionService._download_concurrent` 实际为单线程串行（`max_workers` 参数签名兼容但忽略），旧「`ThreadPoolExecutor` 并发子进程生成临时文件」描述已过时
+- HTR Send 并行 fan-out 路径已实现但未激活（`_select_node::max_select=1`）
+- 股票分析子图 `fund_flow_analysis` 节点已定义但无入边（孤立于图）
+- `ProcessPoolExecutor` 真正并行路径（max_workers > 1）无单元测试覆盖，CI 仅用 max_workers=1
+- `BacktestService.run_grid` / `run_walk_forward_parallel` 未暴露 `max_workers`，调用方无法控制并行度
+
 ### 架构与设计原则
 
 - **整洁架构 (Clean Architecture)**：依赖方向单向收敛——`tools` → `services` → `domain`，外层可知内层，内层不知外层。
@@ -96,19 +171,21 @@ RuntimeContext(dataclass)
     ├── logger: LoggerService
     ├── monitoring: MonitoringService
     ├── config: AppConfig
-    ├── data_provider: DataProvider | None              # 第一组接口：历史面板（行情/财务）
+    ├── data_provider: DataConnector | None             # 第一组接口：历史面板 + 行业/板块/交易日/标的信息/实时快照（ADR-014 阶段 F）
     ├── market_intelligence: MarketIntelligenceProvider | None  # 第二组接口：市场情报（ciccwm 独占）
     ├── realtime_provider: RealtimeDataProvider | None  # 第三组接口：实时行情（ADR-011）
     └── operator_backlog: OperatorBacklog | None        # 算子缺口队列（ADR-009）
 ```
 
-数据层三组接口（ADR-006/009/011，面向业务分离）：
+数据层三组接口（ADR-006/009/011/014，面向业务分离）：
 
 | 接口 | 职责 | 降级链 | 实现者 |
 |------|------|--------|--------|
-| `DataProvider` | 历史面板（行情/财务） | DuckDB→miniqmt→ciccwm→akshare（行情）/ 仅 miniqmt（财务） | miniqmt/ciccwm/akshare/Composite |
+| `DataConnector` | 历史面板（行情/财务）+ miniqmt 全能力（行业指数/行业成分股/板块分类/交易日历/标的基础信息/实时快照） | DuckDB→miniqmt→ciccwm→akshare（行情）/ 仅 miniqmt（财务/扩展能力） | miniqmt/ciccwm/akshare/Composite |
 | `MarketIntelligenceProvider` | 市场情报（资金流向/排行/板块/资讯） | 无降级，ciccwm 独占 | ciccwm |
 | `RealtimeDataProvider` | 实时行情（快照/订阅） | miniqmt→ciccwm | miniqmt/ciccwm/Composite |
+
+> ADR-014 阶段 F：`DataConnector` 已完全替换 `DataProvider`（`provider.py` 退化为别名层，`DataProvider = DataConnector`），承载 miniqmt 全部 9 类数据能力。`RuntimeContext.data_provider` 字段名保留（dataclass 构造兼容），新增 `data_connector` property 别名。
 
 主图（`agent.py`）路由到子图：
 
@@ -167,6 +244,7 @@ prompt = prompt_template.format(query=query)
 ## Gotchas
 
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
+- **仅支持多头、不支持做空**：`Portfolio` 仅维护 `cash` + 多头 `positions`，无 `short_positions`；DSL `weights` 仅支持 `equal` / `signal`。弱市下唯一可用风控是"空仓 + 止损 + 最大回撤清仓"，无法对冲/做空/动态降仓。动态仓位方法与行业/资产类别数据计划下一步引入。
 - **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，ADR-007 Phase 4）。旧 `memory/` 模块（ADR-004）已删除。
 - **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
@@ -189,6 +267,7 @@ prompt = prompt_template.format(query=query)
 - [ADR-010](docs/adr/010-hypothesis-tree-refinement.md): 假设树精炼 HTR（**已实施**）。将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。**混合持久化**：树本体独立 JSON Store，摘要回写 ADR-007 SubstanceStore 做 hot-start。Phase 1-5 全部完成：假设树领域模型 + 六步循环子图 + held-out 验证门 + 洞察传播记忆增强 + LangGraph Send 并行 fan-out。
 - [ADR-011](docs/adr/011-unified-mustache-prompt-templating.md): 统一 jinja2 + ChatPromptTemplate 提示词模板（**已实施**）。`${var}` → `{{ var }}`（jinja2，默认不 HTML 转义，与 JSON `{}` 不冲突）；`core/render.py` 自定义渲染器删除，委托 langchain `PromptTemplate(template_format='jinja2')`；多消息结构用 `MarkdownChatPromptTemplate`（frontmatter `messages` 字段）。ADR-008 A 部分被废弃。Phase 1-5 全部完成。
 - [ADR-012](docs/adr/012-persona-subgraph-skill-pack.md): 大师智能节点可复用技能包（**已实施**）。4 交易大师（巴菲特/芒格/费雪/彼得林奇）+ 扩展示例（利弗莫尔）升级为 `MasterPersona` Protocol + `PersonaRegistry` 注册表，支持 4 种 mode（stock_analysis / strategy_review / strategy_generate / result_synthesis）；`strategy_rd` 策略生成与反思通过 `PersonaRegistry.create_all()` 自动调用全部大师；新增大师只需 1 类 + N prompt + `__init__.py` import。Phase 1-4 全部完成。
+- [ADR-014](docs/adr/014-ontology-connector.md): 本体论连接器 + DataConnector 全能力接入（**阶段 F 已实施**）。`Connector.get_concept` 作为上层唯一数据访问入口，aspect 字符串经 `ConceptResolver` 解析为 `ResolutionKind`（12 种：indicator_panel/universe/event_graph/experience/intelligence/industry_panel/industry_constituents/sector_classifications/trading_dates/instrument_detail/realtime_tick/unknown）。阶段 F：`DataConnector` Protocol 完全替换 `DataProvider`，承载 miniqmt 全部 9 类数据能力（行情/财务/行业指数/行业成分股/板块分类/交易日历/标的基础信息/实时快照 + universe）；`provider.py` 退化为别名层；`MiniQmtDataProvider` 扩展 6 个新方法 + `MiniQmtClient` 扩展 2 个 xtquant 接口；ciccwm/akshare 添加不支持能力桩；`Connector._dispatch_fetch` 闭包字典分发 11 种 kind。
 
 ## 测试说明
 
@@ -251,11 +330,12 @@ src/long_earn/backtest/
 └── data/
     ├── __init__.py
     ├── cache.py             # DuckDB 本地缓存
-    ├── provider.py          # 三组 Protocol + CompositeDataProvider（降级链编排）
-    ├── miniqmt_provider.py  # xtquant.xtdata 数据获取封装
+    ├── connector.py         # DataConnector Protocol + CompositeDataConnector（降级链编排，ADR-014 阶段 F）
+    ├── provider.py          # 别名层：DataProvider = DataConnector（向后兼容，ADR-014 阶段 F）
+    ├── miniqmt_provider.py  # xtquant.xtdata 数据获取封装（实现 DataConnector 全部 12 方法）
     ├── ciccwm_client.py     # ciccwm HTTP 客户端 + 鉴权
-    ├── ciccwm_provider.py   # ciccwm 数据提供者（DataProvider + MarketIntelligenceProvider）
-    ├── akshare_provider.py  # akshare 降级数据提供者
+    ├── ciccwm_provider.py   # ciccwm 数据提供者（DataConnector 桩 + MarketIntelligenceProvider）
+    ├── akshare_provider.py  # akshare 降级数据提供者（DataConnector 桩 + 行情/成分股）
     ├── realtime.py          # 实时行情 Provider（ADR-011，第三组接口）
     ├── polars_adapter.py    # pandas→polars 适配（to_polars_panel 纯函数）
     ├── symbol.py            # 统一证券代码符号转换
@@ -416,7 +496,8 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 | 影响传播 Prompt | `src/long_earn/event_inference/agents/propagate_prompt.md` |
 | 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
 | 数据模型 | `src/long_earn/backtest/models.py` |
-| 数据提供者 | `src/long_earn/backtest/data/provider.py` |
+| 数据连接器（DataConnector，ADR-014 阶段 F） | `src/long_earn/backtest/data/connector.py` |
+| 数据提供者别名层 | `src/long_earn/backtest/data/provider.py` |
 | 实时行情 Provider（ADR-011） | `src/long_earn/backtest/data/realtime.py` |
 | pandas→polars 适配 | `src/long_earn/backtest/data/polars_adapter.py` |
 | 统一符号转换 | `src/long_earn/backtest/data/symbol.py` |

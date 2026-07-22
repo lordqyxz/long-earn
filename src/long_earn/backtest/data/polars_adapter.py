@@ -20,11 +20,11 @@ import pandas as pd
 import polars as pl
 
 if TYPE_CHECKING:
-    from long_earn.backtest.data.provider import DataProvider
+    from long_earn.backtest.data.connector import DataConnector
 
 
 def to_polars_panel(df: pd.DataFrame) -> pl.DataFrame:
-    """把 :meth:`DataProvider.get_merged_panel` 的 pandas 输出转为 polars。
+    """把 :meth:`DataConnector.get_merged_panel` 的 pandas 输出转为 polars。
 
     Args:
         df: pandas DataFrame，index 为 (date, symbol)，含行情+财务列
@@ -51,13 +51,13 @@ def to_polars_panel(df: pd.DataFrame) -> pl.DataFrame:
 
 
 class PandasToPolarsProvider:
-    """将 pandas 接口的 DataProvider 适配为 polars 输出（向后兼容）。
+    """将 pandas 接口的 DataConnector 适配为 polars 输出（向后兼容）。
 
-    当 provider 自身已实现 ``get_merged_panel_as_polars`` 时，无需此适配器；
+    当 connector 自身已实现 ``get_merged_panel_as_polars`` 时，无需此适配器；
     仅用于包装只实现 pandas 接口的旧 provider。
     """
 
-    def __init__(self, pandas_provider: DataProvider) -> None:
+    def __init__(self, pandas_provider: DataConnector) -> None:
         self._provider = pandas_provider
 
     def get_merged_panel_as_polars(

@@ -9,6 +9,7 @@ ADR-014 阶段 B：``financial_quarterly`` 单一宽表废弃，改为 8 张细�
 """
 
 import contextlib
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -45,8 +46,14 @@ class DataCache:
 
     @staticmethod
     def _normalize_date(date_str: str) -> str:
-        """将日期字符串标准化为 YYYY-MM-DD 格式。"""
+        """将日期字符串标准化为 YYYY-MM-DD 格式。
+
+        空字符串原样返回（由调用方决定语义，如 ``get_universe`` 把空当作"最新可用日期"）。
+        避免 ``pd.to_datetime("")`` 返回 NaT 后调 ``.strftime`` 抛 ``ValueError``。
+        """
         date_str = str(date_str).strip()
+        if not date_str:
+            return ""
         # 已经是 YYYY-MM-DD 格式
         _yyyy_mm_dd_len = 10
         _yyyymmdd_len = 8
@@ -56,7 +63,10 @@ class DataCache:
         if len(date_str) == _yyyymmdd_len:
             return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
         # 其他格式，尝试 pandas 解析
-        return str(pd.to_datetime(date_str).strftime("%Y-%m-%d"))
+        parsed = pd.to_datetime(date_str, errors="coerce")
+        if pd.isna(parsed):
+            return ""
+        return str(parsed.strftime("%Y-%m-%d"))
 
     def _init_tables(self) -> None:
         """初始化数据表"""
@@ -455,12 +465,13 @@ class DataCache:
         symbols: list[str],
         fields: list[str] | None = None,
     ) -> pd.DataFrame | None:
-        """[兼容包装] 从缓存获取财务数据 — union 4 张标量表。
+        """[兼容包装] 从缓存获取财务数据 — union 5 张标量表。
 
         ADR-014 阶段 B：旧 financial_quarterly 已废弃，此方法改为 union
-        income_stmt / balance_sheet / cashflow_stmt / pershareindex 四表，
-        按 (symbol, report_date) 合并成扁平宽表，供旧消费方（provider 的
-        get_financial_panel）过渡使用。新代码应直接用 ``get_financial_table``。
+        income_stmt / balance_sheet / cashflow_stmt / pershareindex / capital
+        五张标量表，按 (symbol, report_date) 合并成扁平宽表，供旧消费方
+        （provider 的 get_financial_panel）过渡使用。
+        新代码应直接用 ``get_financial_table``。
 
         Args:
             symbols: 股票代码列表
@@ -468,7 +479,9 @@ class DataCache:
         """
         if not symbols:
             return None
-        scalar_tables = FinancialSchemaRegistry.scalar_tables()[:4]
+        # ADR-014 任务7：union 5 张标量表（含 Capital），让 Connector 查
+        # "资本结构" 能拿到 total_shares / float_shares 字段。
+        scalar_tables = FinancialSchemaRegistry.scalar_tables()[:5]
         query, params = self._build_union_financials_query(
             scalar_tables, symbols, fields
         )
@@ -550,11 +563,12 @@ class DataCache:
         return query, params
 
     def save_financials(self, df: pd.DataFrame) -> None:
-        """[兼容包装] 保存财务数据 — 拆分写入 4 张标量表。
+        """[兼容包装] 保存财务数据 — 拆分写入 5 张标量表。
 
         ADR-014 阶段 B：旧 financial_quarterly 已废弃。此方法把传入的扁平宽表
         DataFrame 按 schema 字段归属拆到 income_stmt / balance_sheet /
-        cashflow_stmt / pershareindex 四表。新代码应直接用 ``save_financial_table``。
+        cashflow_stmt / pershareindex / capital 五表。新代码应直接用
+        ``save_financial_table``。
         """
         if df.empty:
             return
@@ -568,7 +582,7 @@ class DataCache:
         if df.empty:
             return
 
-        # 4 张标量表的字段归属（与迁移脚本一致）
+        # 5 张标量表的字段归属（与 schema 注册表一致；含 ADR-014 任务7 Capital 表）
         table_field_map = {
             "income_stmt": ["revenue", "net_profit", "eps", "research_expenses"],
             "balance_sheet": ["total_equity", "total_assets", "total_liabilities"],
@@ -584,6 +598,7 @@ class DataCache:
                 "roe",
                 "gross_margin",
             ],
+            "capital": ["total_shares", "float_shares"],
         }
         total = 0
         for table_name, fields in table_field_map.items():
@@ -606,7 +621,10 @@ class DataCache:
         logger.info(f"缓存财务数据(拆分写入 4 表): {len(df)} 行 → {total} 子表行")
 
     def get_universe(self, index_code: str, date: str) -> list[str]:
-        """获取某指数在某日期的成分股列表"""
+        """获取某指数在某日期的成分股列表。
+
+        ``date=""`` 表示取缓存中最新的成分股（无 PIT 约束）。
+        """
         conn = self._get_conn()
         # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
         date_fmt = self._normalize_date(date)
@@ -620,17 +638,31 @@ class DataCache:
                 logger.debug(f"缓存未命中 universe: {index_code}（表中无此指数）")
                 return []
 
-            result = conn.execute(
-                """
-                SELECT symbol
-                FROM universe_constituents
-                WHERE index_code = ? AND date = (
-                    SELECT MAX(date) FROM universe_constituents
-                    WHERE index_code = ? AND date <= ?
-                )
-                """,
-                [index_code, index_code, date_fmt],
-            ).fetchdf()
+            if date_fmt:
+                result = conn.execute(
+                    """
+                    SELECT symbol
+                    FROM universe_constituents
+                    WHERE index_code = ? AND date = (
+                        SELECT MAX(date) FROM universe_constituents
+                        WHERE index_code = ? AND date <= ?
+                    )
+                    """,
+                    [index_code, index_code, date_fmt],
+                ).fetchdf()
+            else:
+                # 空日期：取该指数最新可用日期的成分股
+                result = conn.execute(
+                    """
+                    SELECT symbol
+                    FROM universe_constituents
+                    WHERE index_code = ? AND date = (
+                        SELECT MAX(date) FROM universe_constituents
+                        WHERE index_code = ?
+                    )
+                    """,
+                    [index_code, index_code],
+                ).fetchdf()
 
             if result.empty:
                 logger.debug(f"缓存未命中 universe: {index_code}（无匹配日期）")
@@ -643,13 +675,18 @@ class DataCache:
             return []
 
     def save_universe(self, index_code: str, date: str, symbols: list[str]) -> None:
-        """保存指数成分股到缓存"""
+        """保存指数成分股到缓存。
+
+        ``date=""`` 时使用今天日期作为缓存日期（无 PIT 约束场景）。
+        """
         if not symbols:
             return
 
         conn = self._get_conn()
-        # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
+        # 转换日期格式 YYYYMMDD -> YYYY-MM-DD；空则用今天
         date_fmt = self._normalize_date(date)
+        if not date_fmt:
+            date_fmt = datetime.now().strftime("%Y-%m-%d")
         df = pd.DataFrame(  # noqa: F841
             {
                 "index_code": [index_code] * len(symbols),

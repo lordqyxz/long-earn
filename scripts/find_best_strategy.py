@@ -10,9 +10,15 @@
 4. 覆盖 AppConfig 日期字段后启动策略研发循环。
 5. 循环产出 best_strategy.yaml + strategy_research_results.json。
 
+checkpoint 机制（默认启用）：
+- 用 LangGraph ``SqliteSaver`` 持久化每轮子图状态到 ``checkpoints.sqlite``。
+- 同一 ``thread_id`` 已完成时直接复用结果，未完成时从中断处续跑。
+- 加 ``--no-checkpoint`` 禁用，加 ``--reset-checkpoint`` 清空旧 checkpoint。
+
 用法:
     uv run python scripts/find_best_strategy.py
     uv run python scripts/find_best_strategy.py --max-rounds 3 -y
+    uv run python scripts/find_best_strategy.py --reset-checkpoint -y  # 清旧 checkpoint 重跑
 """
 
 from __future__ import annotations
@@ -28,7 +34,13 @@ import duckdb  # noqa: E402
 
 
 def probe_data_coverage() -> dict:
-    """查询 DuckDB 缓存数据的实际覆盖范围。"""
+    """查询 DuckDB 缓存数据的实际覆盖范围。
+
+    财务数据自 ADR-014 阶段 B 起从单表 ``financial_quarterly`` 拆为 8 张细表
+    （income_stmt / balance_sheet / cashflow_stmt / pershareindex 等）。
+    这里以 ``pershareindex``（含 ROE/毛利率等衍生指标）作为"是否有财务数据"
+    的代理判断；表不存在时视作财务数据未下载。
+    """
     from long_earn.core.storage import backtest_cache_path
 
     db = backtest_cache_path()
@@ -39,18 +51,24 @@ def probe_data_coverage() -> dict:
         ).fetchone()
         price_min, price_max, price_rows, price_symbols = r
 
-        f = conn.execute(
-            "SELECT COUNT(*), COUNT(DISTINCT symbol) FROM financial_quarterly"
-        ).fetchone()
-        fin_rows, fin_symbols = f
+        fin_rows = 0
+        fin_symbols = 0
+        # 优雅降级：pershareindex 表可能尚未创建（新装环境）
+        try:
+            f = conn.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT symbol) FROM pershareindex"
+            ).fetchone()
+            fin_rows, fin_symbols = int(f[0]), int(f[1])
+        except duckdb.CatalogException:
+            pass
 
         return {
             "price_min": str(price_min),
             "price_max": str(price_max),
             "price_rows": int(price_rows),
             "price_symbols": int(price_symbols),
-            "fin_rows": int(fin_rows),
-            "fin_symbols": int(fin_symbols),
+            "fin_rows": fin_rows,
+            "fin_symbols": fin_symbols,
         }
     finally:
         conn.close()
@@ -101,7 +119,7 @@ def pick_idea(coverage: dict) -> str:
 
 
 def main() -> None:
-    import typer
+    import sqlite3
 
     coverage = probe_data_coverage()
     print("=" * 64)
@@ -125,7 +143,11 @@ def main() -> None:
     # 构造 AppConfig 并覆盖日期字段
     from long_earn.config import AppConfig
     from long_earn.context_init import initialize_context
-    from long_earn.core.storage import best_strategy_path, strategy_results_path
+    from long_earn.core.storage import (
+        best_strategy_path,
+        checkpoint_db_path,
+        strategy_results_path,
+    )
     from long_earn.services.strategy_research_service import StrategyResearchService
 
     config = AppConfig.from_env()
@@ -141,12 +163,26 @@ def main() -> None:
     max_rounds = 3
     max_iterations = 2
     yes = False
+    use_checkpoint = "--no-checkpoint" not in sys.argv
+    reset_checkpoint = "--reset-checkpoint" in sys.argv
 
     if "--max-rounds" in sys.argv:
         idx = sys.argv.index("--max-rounds")
         max_rounds = int(sys.argv[idx + 1])
     if "-y" in sys.argv or "--yes" in sys.argv:
         yes = True
+
+    ckpt_path = checkpoint_db_path()
+    if reset_checkpoint and ckpt_path.exists():
+        print(f"清除旧 checkpoint: {ckpt_path}")
+        ckpt_path.unlink()
+
+    print()
+    print("checkpoint 配置")
+    print("-" * 64)
+    print(f"  启用: {use_checkpoint}")
+    print(f"  路径: {ckpt_path}")
+    print("=" * 64)
 
     if not yes and sys.stdin.isatty():
         print()
@@ -157,12 +193,31 @@ def main() -> None:
 
     ctx = initialize_context(config)
     service = StrategyResearchService(ctx)
-    summary = service.run_loop(
-        idea=idea,
-        max_rounds=max_rounds,
-        max_iterations=max_iterations,
-        min_improvement=0.005,
-    )
+
+    if use_checkpoint:
+        # SqliteSaver 需要长连接；用 context manager 保证结束时关闭
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        conn = sqlite3.connect(str(ckpt_path), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+        try:
+            summary = service.run_loop(
+                idea=idea,
+                max_rounds=max_rounds,
+                max_iterations=max_iterations,
+                min_improvement=0.005,
+                checkpointer=checkpointer,
+                thread_id_prefix=f"find-best-{w['recent_start']}",
+            )
+        finally:
+            conn.close()
+    else:
+        summary = service.run_loop(
+            idea=idea,
+            max_rounds=max_rounds,
+            max_iterations=max_iterations,
+            min_improvement=0.005,
+        )
 
     print()
     print("=" * 64)

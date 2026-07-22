@@ -19,10 +19,8 @@ from long_earn.services import (
 )
 
 if TYPE_CHECKING:
-    from long_earn.backtest.data.provider import (
-        DataProvider,
-        MarketIntelligenceProvider,
-    )
+    from long_earn.backtest.data.connector import DataConnector
+    from long_earn.backtest.data.provider import MarketIntelligenceProvider
     from long_earn.backtest.data.realtime import RealtimeDataProvider
     from long_earn.ontology import Connector, OntologyRegistry
     from long_earn.operator_dev.backlog import OperatorBacklog
@@ -64,8 +62,10 @@ class RuntimeContext:
     stock_service: StockService
     backtest_service: BacktestService
 
-    # 数据层（可选）
-    data_provider: "DataProvider | None" = None
+    # 数据层（可选，ADR-014 阶段 F：DataConnector 替代 DataProvider）。
+    # 字段名保留 data_provider 不破坏 dataclass 构造调用方，新增 data_connector
+    # 属性作为新名字别名。新代码应用 data_connector / require_data_connector()。
+    data_provider: "DataConnector | None" = None
     # 市场情报能力（可选，仅 ciccwm 可用时注入；与 data_provider 分离的第二组接口）
     market_intelligence: "MarketIntelligenceProvider | None" = None
     # 实时行情能力（可选，ADR-011 第三组接口；miniqmt→ciccwm 降级）
@@ -76,6 +76,20 @@ class RuntimeContext:
     connector: "Connector | None" = None
     # 本体论注册表（可选，ADR-014；承载 OntologyGraph 供记忆激活图遍历用）
     ontology_registry: "OntologyRegistry | None" = None
+
+    # ── 新名字别名属性 ─────────────────────────────────────────────────
+    # ADR-014 阶段 F：data_provider 字段类型已升级为 DataConnector，新代码
+    # 应使用 data_connector 属性名（指向同一字段）。
+
+    @property
+    def data_connector(self) -> "DataConnector | None":
+        """数据连接器（ADR-014 阶段 F 新名字，等价于 ``self.data_provider``）。"""
+        return self.data_provider
+
+    @data_connector.setter
+    def data_connector(self, value: "DataConnector | None") -> None:
+        """数据连接器 setter（写入 data_provider 字段）。"""
+        self.data_provider = value
 
     def require_llm(self) -> LLMService:
         """获取 LLM 服务（非空保证，等价于读 ``self.llm_service``）"""
@@ -93,11 +107,15 @@ class RuntimeContext:
         """获取回测服务（非空保证）"""
         return self.backtest_service
 
-    def require_data_provider(self) -> "DataProvider":
-        """获取数据提供者，未注入时抛出明确错误"""
+    def require_data_connector(self) -> "DataConnector":
+        """获取数据连接器，未注入时抛出明确错误。"""
         if self.data_provider is None:
-            raise RuntimeError("DataProvider 未初始化")
+            raise RuntimeError("DataConnector 未初始化")
         return self.data_provider
+
+    def require_data_provider(self) -> "DataConnector":
+        """[向后兼容] 等价于 :meth:`require_data_connector`。"""
+        return self.require_data_connector()
 
     def require_market_intelligence(self) -> "MarketIntelligenceProvider":
         """获取市场情报提供者，未注入时抛出明确错误"""

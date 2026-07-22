@@ -105,8 +105,12 @@ class UniverseConfig(BaseModel):
     """股票池配置"""
 
     type: str = Field(
-        default="csi300",
-        description="股票池类型: all_a, csi300, csi500, main_board, gem, star_board, main_board+star_board",
+        default="main_board+gem",
+        description=(
+            "股票池类型: all_a, csi300, csi500, csi1000, sse50, "
+            "main_board, gem, star_board, main_board+gem, main_board+star_board。"
+            "默认 main_board+gem（沪深除科创板所有标的）"
+        ),
     )
     rebalance_freq: str = Field(
         default="20D", description="股票池再平衡频率，如 20D（20个交易日）"

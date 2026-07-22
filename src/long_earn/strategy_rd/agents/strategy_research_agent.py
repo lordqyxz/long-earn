@@ -836,15 +836,40 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         return "上一轮回测指标：\n" + "\n".join(lines) if lines else "无"
 
     def _retrieve_past_experience(self, strategy: dict[str, Any]) -> str:
-        """从记忆系统检索同类策略的历史经验，构造 prompt 段落。"""
+        """从记忆系统检索同类策略的历史经验，构造 prompt 段落。
+
+        检索策略：依次尝试多个查询词，取第一个有结果的。
+        原因：RetrievalIndex 的 keyword 通道用 jieba 分词，对英文策略名 +
+        英文因子名混合的查询支持差（如 "MomentumVolROEStrategy momentum_20"
+        返回 0 条），但用单一中文关键词（如"动量"、"策略"）能命中。
+        """
+        strategy_name = strategy.get("strategy_name", "") or ""
+        factors = strategy.get("factors_used", []) or []
+        factor_str = " ".join(str(f) for f in factors) if isinstance(factors, list) else ""
+
+        # 查询词候选：从最具体到最通用，依次尝试
+        # 中文翻译基于常见因子命名（momentum→动量、volatility→波动率、roe→roe）
+        candidate_queries = [
+            "动量策略",
+            "策略经验",
+            strategy_name,
+            factor_str,
+            "策略优化",
+        ]
+        # 去重 + 去空
+        seen: set[str] = set()
+        queries = [q for q in candidate_queries if q and q not in seen and not seen.add(q)]
+
+        past: list = []
         try:
-            strategy_name = strategy.get("strategy_name", "") or ""
-            factors = strategy.get("factors_used", []) or []
-            keywords_parts = [strategy_name]
-            if isinstance(factors, list):
-                keywords_parts.append(" ".join(str(f) for f in factors))
-            keywords = " ".join(filter(None, keywords_parts)) or "策略优化"
-            past = self.memory.search_experience(query=keywords, k=2)
+            for q in queries:
+                past = self.memory.search_experience(query=q, k=2)
+                if past:
+                    if self.logger:
+                        self.logger.debug(
+                            f"检索历史经验命中（query={q!r}, 返回 {len(past)} 条）"
+                        )
+                    break
         except Exception as exc:
             if self.logger:
                 self.logger.warning(f"检索历史经验失败: {exc}")
@@ -912,18 +937,35 @@ class StrategyResearchAgent(KnowledgeContextMixin):
     # ── HTR 六步循环方法（ADR-010 Phase 2）──────────────────────
 
     def observe(self, tree_snapshot: dict[str, Any]) -> dict[str, Any]:
-        """观察阶段 — 分析当前研究状态，识别弱点和下一步方向。"""
+        """观察阶段 — 分析当前研究状态，识别弱点和下一步方向。
+
+        ADR-014 任务2：``tree_snapshot["related_concepts"]`` 由 HTR 的
+        ``_observe_node`` 通过 Connector 图谱查询填入，非空时 LLM 能拿到
+        结构化图谱视角（关联因子族 / 历史失败案例）。
+        """
         prompt_template = MarkdownPromptTemplate(
-            "observe_prompt.md", ["current_best", "frontier", "ancestor_insights", "pruned_directions"], __file__
+            "observe_prompt.md",
+            [
+                "current_best",
+                "frontier",
+                "ancestor_insights",
+                "pruned_directions",
+                "related_concepts",
+            ],
+            __file__,
         )
         prompt = prompt_template.format(
             current_best=tree_snapshot.get("current_best", "无"),
             frontier=tree_snapshot.get("frontier", "无"),
             ancestor_insights=tree_snapshot.get("ancestor_insights", "无"),
             pruned_directions=tree_snapshot.get("pruned_directions", "无"),
+            related_concepts=tree_snapshot.get("related_concepts", "无"),
         )
         response = self.llm_service.invoke(prompt)
-        result = parse_llm_json(response.content)
+        # LLM 偶发返回空内容或非 JSON 时容错：返回默认观察让循环继续，
+        # 而非抛 JSONDecodeError 让整轮 HTR 崩溃。
+        default_obs = {"next_focus": "继续优化因子组合与风控参数，关注近期回测暴露的问题"}
+        result = parse_llm_json(response.content, default=default_obs)
         if self.logger:
             self.logger.info(f"[HTR-观察] {result.get('next_focus', '未知')}")
         return result if isinstance(result, dict) else {"observations": str(result)}
@@ -950,7 +992,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             branching_factor=str(branching_factor),
         )
         response = self.llm_service.invoke(prompt)
-        result = parse_llm_json(response.content)
+        # LLM 偶发返回空内容或非 JSON 时容错：返回空假设列表让 select 节点处理，
+        # 上层会跳过该轮假设生成（不会崩溃）。
+        result = parse_llm_json(response.content, default={"hypotheses": []})
         hypotheses = result.get("hypotheses", []) if isinstance(result, dict) else []
         if self.logger:
             self.logger.info(f"[HTR-假设] 生成 {len(hypotheses)} 个假设")
@@ -999,7 +1043,10 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             child_results=json.dumps(child_results, ensure_ascii=False, default=str),
         )
         response = self.llm_service.invoke(prompt)
-        result = parse_llm_json(response.content)
+        # LLM 偶发返回空内容或非 JSON 时容错：返回默认洞察让 decide 节点继续。
+        result = parse_llm_json(
+            response.content, default={"insight": "LLM 响应解析失败，无洞察"}
+        )
         if self.logger:
             self.logger.info(
                 f"[HTR-反向传播] insight={result.get('insight', '')[:80] if isinstance(result, dict) else ''}"
@@ -1010,13 +1057,19 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         self,
         tree_state: dict[str, Any],
     ) -> str:
-        """决策阶段 — 基于树状态决定下一步行动（merge/continue/stop）。"""
+        """决策阶段 — 基于树状态决定下一步行动（merge/continue/stop）。
+
+        ADR-014 任务2：``tree_state["similar_experiences"]`` 由 HTR 的
+        ``_decide_node`` 通过 Connector 经验图谱查询填入，非空时 LLM
+        能参考历史相似策略的 sharpe 表现做合并/停止决策。
+        """
         prompt_template = MarkdownPromptTemplate(
             "decide_prompt.md",
             [
                 "node_count", "max_depth", "current_best_oos",
                 "best_dev_score", "best_oos_score",
                 "cycles_used", "max_cycles",
+                "similar_experiences",
             ],
             __file__,
         )
@@ -1028,9 +1081,12 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             best_oos_score=str(tree_state.get("best_oos_score", "无")),
             cycles_used=str(tree_state.get("cycles_used", 0)),
             max_cycles=str(tree_state.get("max_cycles", 10)),
+            similar_experiences=tree_state.get("similar_experiences", "无"),
         )
         response = self.llm_service.invoke(prompt)
-        result = parse_llm_json(response.content)
+        # LLM 偶发返回空内容或非 JSON 时容错：默认 continue 让循环继续，
+        # 避免单次 LLM 失败直接终止整轮 HTR。
+        result = parse_llm_json(response.content, default={"action": "continue"})
         action = result.get("action", "continue") if isinstance(result, dict) else "continue"
         if self.logger:
             self.logger.info(f"[HTR-决策] action={action}")

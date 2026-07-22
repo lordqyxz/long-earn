@@ -1,4 +1,4 @@
-"""本体论连接器 — ADR-014 阶段 C。
+"""本体论连接器 — ADR-014 阶段 C（阶段 F 升级）。
 
 ``Connector.get_concept(ConceptQuery)`` 是上层唯一的数据访问入口。上层用"概念"
 取数（如 "贵州茅台的盈利能力指标"/"沪深300成分股"/"相关事件"），连接器内部：
@@ -11,12 +11,21 @@
 
 依赖方向：``ontology`` 不依赖 ``backtest.data`` / ``services``（import-linter 契约）。
 连接器通过 ``ConnectorDataProvider`` Protocol（结构化子类型）定义它需要的接口，
-由 ``context_init`` 注入具体实现（``MiniQmtDataProvider`` 等）。
+由 ``context_init`` 注入具体实现（``MiniQmtDataProvider`` /
+``CompositeDataConnector`` 等，均实现 :class:`DataConnector`）。
+
+ADR-014 阶段 F：``ConnectorDataProvider`` 升级为扩展 Protocol，新增
+``get_industry_index_panel`` / ``get_industry_constituents`` /
+``get_sector_classifications`` / ``get_trading_dates`` /
+``get_instrument_detail`` / ``get_full_tick`` 6 个方法签名，覆盖 miniqmt
+全数据能力。具体实现（如 ``MiniQmtDataProvider`` / ``CompositeDataConnector``）
+已实现这些方法，本 Protocol 仅声明连接器消费的子集。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -43,10 +52,14 @@ _QUARTER_TIME_LEN = 6
 
 
 class ConnectorDataProvider(Protocol):
-    """连接器需要的数据访问接口 — 由具体 DataProvider 实现。
+    """连接器需要的数据访问接口 — 由具体 DataConnector 实现。
 
     设计为结构化子类型（Protocol），``ontology`` 不 import ``backtest.data``，
-    由 ``context_init`` 注入 ``MiniQmtDataProvider`` / ``CompositeDataProvider``。
+    由 ``context_init`` 注入 ``MiniQmtDataProvider`` / ``CompositeDataConnector``。
+
+    ADR-014 阶段 F：与 :class:`backtest.data.connector.DataConnector` 对齐，
+    声明连接器消费的方法子集（含行业指数/行业成分股/板块树/交易日历/标的
+    基础信息/实时快照 6 类新能力）。
     """
 
     def get_financial_panel(
@@ -58,6 +71,29 @@ class ConnectorDataProvider(Protocol):
     ) -> pd.DataFrame: ...
 
     def get_symbols(self, universe_type: str, date: str = "") -> list[str]: ...
+
+    def get_industry_index_panel(
+        self,
+        industry: str,
+        start_date: str,
+        end_date: str,
+        fields: list[str] | None = None,
+    ) -> pd.DataFrame: ...
+
+    def get_industry_constituents(self, industry: str) -> list[str]: ...
+
+    def get_sector_classifications(self) -> list[str]: ...
+
+    def get_trading_dates(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        market: str = "SSE",
+    ) -> list[str]: ...
+
+    def get_instrument_detail(self, stock_code: str) -> dict[str, Any]: ...
+
+    def get_full_tick(self, code_list: list[str]) -> dict[str, Any]: ...
 
 
 class ConnectorMemoryProvider(Protocol):
@@ -76,6 +112,13 @@ class ConnectorMemoryProvider(Protocol):
         k: int = 5,
         **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
+
+
+def _experience_to_dict(exp: Any) -> dict[str, Any] | Any:
+    """把 StrategyExperience dataclass 转为 dict（HTR 调用方用 .get()）。"""
+    if is_dataclass(exp):
+        return asdict(exp)
+    return exp
 
 
 # ── 概念查询与结果 ──────────────────────────────────────────────────────
@@ -156,28 +199,7 @@ class Connector:
         """单一入口：解析概念 → 分发取数 → 图谱关联 → 返回结构化结果。"""
         resolution = self._resolver.resolve(query.aspect)
         subject_sid, symbols = self._resolver.resolve_subject(query.subject)
-
-        # 按 resolution 类型分发
-        data: pl.DataFrame | dict[str, Any] | list[Any]
-        provenance: list[str] = []
-
-        if resolution.kind == "indicator_panel":
-            data, provenance = self._fetch_indicator_panel(
-                symbols,
-                resolution,
-                query,
-            )
-        elif resolution.kind == "universe":
-            data, provenance = self._fetch_universe(query.subject, query.as_of)
-        elif resolution.kind == "event_graph":
-            data, provenance = self._fetch_event_graph(subject_sid, query)
-        elif resolution.kind == "experience":
-            data, provenance = self._fetch_experience(subject_sid, resolution, query)
-        elif resolution.kind == "intelligence":
-            data, provenance = self._fetch_intelligence(symbols, resolution, query)
-        else:
-            data = {"error": f"未识别的概念: {query.aspect}"}
-            provenance = ["unknown"]
+        data, provenance = self._dispatch_fetch(query, resolution, subject_sid, symbols)
 
         # 图谱关联节点（供 LLM 推理增强）
         related_nodes: list[OntologyNode] = []
@@ -207,6 +229,46 @@ class Connector:
             paths=paths,
             resolution=resolution,
         )
+
+    def _dispatch_fetch(
+        self,
+        query: ConceptQuery,
+        resolution: ConceptResolution,
+        subject_sid: str,
+        symbols: list[str],
+    ) -> tuple[pl.DataFrame | dict[str, Any] | list[Any], list[str]]:
+        """按 resolution.kind 分发到具体 _fetch_* 方法。
+
+        用闭包字典替代多分支 if/elif，避免圈复杂度超标。
+        未识别 kind 返回 ``{"error": ...}``。
+        """
+        # 闭包字典：kind → () → (data, provenance)
+        # 注意每个 lambda 必须返回 tuple，且延迟调用避免无谓执行
+        dispatch: dict[
+            str, Callable[[], tuple[pl.DataFrame | dict[str, Any] | list[Any], list[str]]]
+        ] = {
+            "indicator_panel": lambda: self._fetch_indicator_panel(
+                symbols, resolution, query
+            ),
+            "universe": lambda: self._fetch_universe(query.subject, query.as_of),
+            "event_graph": lambda: self._fetch_event_graph(subject_sid, query),
+            "experience": lambda: self._fetch_experience(
+                subject_sid, resolution, query
+            ),
+            "intelligence": lambda: self._fetch_intelligence(
+                symbols, resolution, query
+            ),
+            "industry_panel": lambda: self._fetch_industry_panel(query),
+            "industry_constituents": lambda: self._fetch_industry_constituents(query),
+            "sector_classifications": self._fetch_sector_classifications,
+            "trading_dates": lambda: self._fetch_trading_dates(query),
+            "instrument_detail": lambda: self._fetch_instrument_detail(query),
+            "realtime_tick": lambda: self._fetch_realtime_tick(query, symbols),
+        }
+        handler = dispatch.get(resolution.kind)
+        if handler is not None:
+            return handler()
+        return {"error": f"未识别的概念: {query.aspect}"}, ["unknown"]
 
     # ── 私有：各概念类型的取数实现 ─────────────────────────────────────
 
@@ -293,20 +355,51 @@ class Connector:
         resolution: ConceptResolution,
         query: ConceptQuery,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        """策略经验图谱 — 按因子族检索相似经验。"""
+        """策略经验图谱 — 按因子族检索相似经验。
+
+        ADR-014 任务5：用候选查询词列表替代单一 ``"策略族:{family}"`` 查询。
+        jieba 对 ``"策略族:动量"`` 这种"前缀:英文"分词命中率低（之前返回 0 条），
+        改为依次尝试多个候选查询词，取第一个有结果的。
+        """
         if self._memory is None:
             return [], []
         family = resolution.payload.get("strategy_family", "")
-        # 用 concept sid 查图谱关联的经验节点（阶段 C 简化：直接按 family 文本检索）
+        # 候选查询词：从具体到通用，覆盖 jieba 分词友好的中文表述
+        candidate_queries = [
+            family,
+            f"{family}策略",
+            f"{family}因子",
+            "动量策略",
+            "策略经验",
+            "策略优化",
+        ]
+        # 去重保序
+        seen: set[str] = set()
+        queries = [
+            q for q in candidate_queries
+            if q and q not in seen and not seen.add(q)
+        ]
+        k = int(query.constraints.get("k", 3))
+        provenance = [f"memory:search_experience:{family}"]
         try:
-            experiences = self._memory.search_experience(
-                query=f"策略族:{family}",
-                k=int(query.constraints.get("k", 3)),
-            )
-            return experiences, [f"memory:search_experience:{family}"]
+            for q in queries:
+                experiences = self._memory.search_experience(query=q, k=k)
+                if experiences:
+                    # StrategyExperience dataclass → dict（HTR 调用方用 .get()）
+                    # 同时把 metrics.sharpe_ratio 提到顶层 sharpe，方便 HTR 调用方
+                    result: list[dict[str, Any]] = []
+                    for e in experiences:
+                        d = _experience_to_dict(e)
+                        if isinstance(d, dict):
+                            metrics = d.get("metrics", {}) or {}
+                            d["sharpe"] = metrics.get(
+                                "sharpe_ratio", metrics.get("sharpe", "?")
+                            )
+                        result.append(d)
+                    return result, provenance
         except Exception as e:
             logger.warning(f"Connector 取经验 {family} 失败: {e}")
-            return [], []
+        return [], provenance
 
     def _fetch_intelligence(
         self,
@@ -322,6 +415,160 @@ class Connector:
             "methods": methods,
             "symbols": symbols,
         }, ["intelligence:pending"]
+
+    # ── 私有：miniqmt 全能力取数（ADR-014 阶段 F）─────────────────────
+
+    def _fetch_industry_panel(
+        self,
+        query: ConceptQuery,
+    ) -> tuple[pl.DataFrame, list[str]]:
+        """行业指数 K 线面板 — 委托 DataConnector.get_industry_index_panel。
+
+        ``query.subject`` 直接作为行业名/行业指数代码传给底层
+        （如 ``"银行"`` / ``"电子"`` / 板块代码）。``query.time`` 解析为
+        ``(start_date, end_date)``，``query.constraints.fields`` 作为字段过滤。
+        """
+        if self._data is None or not query.subject:
+            return pl.DataFrame(), []
+        start, end = self._parse_time(query.time)
+        fields_raw = query.constraints.get("fields")
+        fields: list[str] | None = None
+        if isinstance(fields_raw, list) and fields_raw:
+            fields = [str(f) for f in fields_raw]
+        try:
+            df = self._data.get_industry_index_panel(
+                query.subject,
+                start,
+                end,
+                fields,
+            )
+        except Exception as e:
+            logger.warning(f"Connector 取行业指数 {query.subject} 失败: {e}")
+            return pl.DataFrame(), []
+        if df is None or df.empty:
+            return pl.DataFrame(), []
+        df = df.reset_index()
+        if "date" in df.columns:
+            df = df.rename(columns={"date": "timestamp"})
+        panel = pl.from_pandas(df)
+        return panel, [f"data_connector:industry_index_panel:{query.subject}"]
+
+    def _fetch_industry_constituents(
+        self,
+        query: ConceptQuery,
+    ) -> tuple[list[str], list[str]]:
+        """行业成分股列表 — 委托 DataConnector.get_industry_constituents。"""
+        if self._data is None or not query.subject:
+            return [], []
+        try:
+            symbols = self._data.get_industry_constituents(query.subject)
+            return symbols, [
+                f"data_connector:industry_constituents:{query.subject}"
+            ]
+        except Exception as e:
+            logger.warning(f"Connector 取行业成分股 {query.subject} 失败: {e}")
+            return [], []
+
+    def _fetch_sector_classifications(
+        self,
+    ) -> tuple[list[str], list[str]]:
+        """板块分类树 — 委托 DataConnector.get_sector_classifications。"""
+        if self._data is None:
+            return [], []
+        try:
+            sectors = self._data.get_sector_classifications()
+            return sectors, ["data_connector:sector_classifications"]
+        except Exception as e:
+            logger.warning(f"Connector 取板块分类失败: {e}")
+            return [], []
+
+    def _fetch_trading_dates(
+        self,
+        query: ConceptQuery,
+    ) -> tuple[list[str], list[str]]:
+        """交易日历 — 委托 DataConnector.get_trading_dates。
+
+        ``query.time`` 解析为 ``(start_date, end_date)``，
+        ``query.constraints.market`` 覆盖默认市场（默认 ``"SSE"``）。
+        """
+        if self._data is None:
+            return [], []
+        start, end = self._parse_time(query.time)
+        market = str(query.constraints.get("market", "SSE"))
+        try:
+            dates = self._data.get_trading_dates(start, end, market)
+            return dates, [f"data_connector:trading_dates:{market}"]
+        except Exception as e:
+            logger.warning(f"Connector 取交易日历失败: {e}")
+            return [], []
+
+    def _fetch_instrument_detail(
+        self,
+        query: ConceptQuery,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """标的基础信息 — 委托 DataConnector.get_instrument_detail。
+
+        ``query.subject`` 直接作为 ``stock_code`` 传入。支持逗号分隔的
+        多标的，此时返回 ``{"instruments": [detail, ...]}``。
+        """
+        if self._data is None or not query.subject:
+            return {}, []
+        codes = [s.strip() for s in query.subject.split(",") if s.strip()]
+        if not codes:
+            return {}, []
+        try:
+            if len(codes) == 1:
+                detail = self._data.get_instrument_detail(codes[0])
+                return (
+                    detail if isinstance(detail, dict) else {"data": detail},
+                    [f"data_connector:instrument_detail:{codes[0]}"],
+                )
+            # 多标的：逐个查询，聚合返回
+            details: list[dict[str, Any]] = []
+            for code in codes:
+                d = self._data.get_instrument_detail(code)
+                if isinstance(d, dict):
+                    details.append(d)
+            return (
+                {"instruments": details},
+                [
+                    f"data_connector:instrument_detail:{','.join(codes)}"
+                ],
+            )
+        except Exception as e:
+            logger.warning(f"Connector 取标的基础信息 {query.subject} 失败: {e}")
+            return {}, []
+
+    def _fetch_realtime_tick(
+        self,
+        query: ConceptQuery,
+        symbols: list[str],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """实时快照 — 委托 DataConnector.get_full_tick。
+
+        优先用 ``resolve_subject`` 解析得到的 ``symbols``（如
+        ``"600519.SH,000001.SZ"`` → ``["600519.SH","000001.SZ"]``）；
+        若解析失败，回退使用 ``query.subject``（去除空白后）。
+        """
+        if self._data is None:
+            return {}, []
+        code_list = symbols or [
+            s.strip() for s in query.subject.split(",") if s.strip()
+        ]
+        if not code_list:
+            return {}, []
+        try:
+            tick = self._data.get_full_tick(code_list)
+            if not isinstance(tick, dict):
+                return {"data": tick}, [
+                    f"data_connector:realtime_tick:{len(code_list)}"
+                ]
+            return tick, [
+                f"data_connector:realtime_tick:{','.join(code_list)}"
+            ]
+        except Exception as e:
+            logger.warning(f"Connector 取实时快照失败: {e}")
+            return {}, []
 
     # ── 私有：时间解析 ──────────────────────────────────────────────────
 

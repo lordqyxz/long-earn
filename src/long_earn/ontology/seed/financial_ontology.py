@@ -454,6 +454,9 @@ def build_financial_ontology() -> tuple[list[OntologyNode], list[OntologyEdge]]:
             "total_equity",
             "total_assets",
             "total_liabilities",
+            # ADR-014 任务7：纳入 Capital 表字段（股本变动）
+            "total_shares",
+            "float_shares",
         ],
         description="衡量公司财务杠杆与偿债能力",
     )

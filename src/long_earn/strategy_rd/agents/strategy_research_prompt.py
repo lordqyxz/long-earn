@@ -62,7 +62,8 @@ strategy_optimize_prompt = """你是一位世界顶级的量化策略优化专�
 ## 可用数据字段（必须且只能使用以下字段）
 行情：open, high, low, close, volume
 财务：net_profit_yoy, revenue_yoy, roe, gross_margin, eps, net_profit, revenue, roe_weighted, bps, ocf, capex, debt_to_assets, net_profit_margin, total_equity, total_assets, total_liabilities
-可用股票池：csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board
+可用股票池：csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board, main_board+gem, main_board+star_board
+默认推荐 main_board+gem（沪深除科创板所有标的）；按 idea 与市场环境主动选择，不要默认套用 csi300/csi500
 
 ## 策略表达路径（二选一）
 

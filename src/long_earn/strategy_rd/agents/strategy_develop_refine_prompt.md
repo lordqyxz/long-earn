@@ -1,4 +1,4 @@
-﻿# 策略修复提示词
+# 策略修复提示词
 
 ## 任务描述
 
@@ -49,8 +49,8 @@
 ❌ 错误：缺少必需的字段
 
 ### 6. 股票池
-✅ 正确：`csi300`, `csi500`, `all_a`, `main_board`, `gem`, `star_board`
-❌ 错误：使用不存在的股票池类型
+✅ 正确：`csi300`, `csi500`, `csi1000`, `sse50`, `all_a`, `main_board`, `gem`, `star_board`, `main_board+gem`, `main_board+star_board`（默认推荐 `main_board+gem`）
+❌ 错误：使用不存在的股票池类型；或未按 idea 与市场环境主动选择，默认套用 csi300/csi500
 
 ## 常见错误及修复方案
 

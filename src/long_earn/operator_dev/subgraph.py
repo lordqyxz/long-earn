@@ -233,9 +233,11 @@ def _register_node(
     if spec is None:
         return {}
     instance = load_operator_class(source, expected_name=spec.name)()
-    register_operator(instance)
+    # 传 source_code + category：让 register_operator 同时写盘，
+    # 下次进程启动时 _bootstrap 扫描自动发现，跨进程持久化。
+    register_operator(instance, source_code=source, category=spec.category)
     backlog.update_status(spec.name, "registered")
-    logger.info(f"[op_dev] {spec.name} 已注册上线")
+    logger.info(f"[op_dev] {spec.name} 已注册上线（源码写盘 + 内存热注册）")
     registered = [*state.get("registered_names", []), spec.name]
     return {
         "registered_names": registered,
