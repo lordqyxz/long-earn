@@ -125,21 +125,35 @@ class MiniQmtClient:
     def is_available(self) -> bool:
         """检测 xtquant 是否可用。
 
-        优先检查 LONG_EARN_DISABLE_XTQUANT 环境变量：CI / 无 QMT dev 环境
-        通常 import xtquant 成功但实际查询会让 C++ 端触发 SIGABRT 杀整个进程
-        （Python 层超时无法救，因为 abort 是 process-wide signal）。
-        设置 LONG_EARN_DISABLE_XTQUANT=1 强制走 "xtquant 不可用 → DuckDB 缓存"
-        分支，避免崩溃。
+        优先检查两个环境变量（ADR-014 阶段 G）：
+
+        1. ``LONG_EARN_CACHE_ONLY``：启动时数据同步完成后设置，
+           强制后续所有数据访问走纯缓存分支，支持高并发并行回测。
+           与 ``DISABLE_XTQUANT`` 的区别：CACHE_ONLY 是运行时切换，
+           同步阶段需要 xtquant 可用，同步完才切换到纯缓存。
+        2. ``LONG_EARN_DISABLE_XTQUANT``：CI / 无 QMT dev 环境
+           通常 import xtquant 成功但实际查询会让 C++ 端触发 SIGABRT 杀整个进程
+           （Python 层超时无法救，因为 abort 是 process-wide signal）。
+           设置 =1 强制走 "xtquant 不可用 → DuckDB 缓存" 分支，避免崩溃。
+
+        注：``set_cache_only()`` 会清理 ``_available`` 缓存，确保下次调用
+        重新走环境变量检测分支。
         """
         if self._available is not None:
             return self._available
-        # 1. 显式禁用开关：优先于 import 检测
+        # 1. 纯缓存模式（启动同步后）：优先于 import 检测
+        cache_only = os.environ.get("LONG_EARN_CACHE_ONLY", "").strip().lower()
+        if cache_only in ("1", "true", "yes", "on"):
+            self._available = False
+            logger.info("LONG_EARN_CACHE_ONLY 已设置，强制走纯缓存分支")
+            return self._available
+        # 2. 显式禁用开关：CI / 无 QMT 环境
         disable = os.environ.get("LONG_EARN_DISABLE_XTQUANT", "").strip().lower()
         if disable in ("1", "true", "yes", "on"):
             self._available = False
             logger.info("LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用")
             return self._available
-        # 2. 尝试 import；失败则不可用
+        # 3. 尝试 import；失败则不可用
         try:
             from xtquant import xtdata  # noqa: PLC0415
 

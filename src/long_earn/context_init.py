@@ -127,7 +127,17 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
 def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
     """初始化运行时上下文
 
-    应用启动时调用，完成记忆系统的初始化和回测引擎就绪检查。
+    应用启动时调用，完成：
+    1. 记忆系统的初始化
+    2. **启动时数据缓存同步**（ADR-014 阶段 G）：从 xtquant 增量同步到 DuckDB 缓存，
+       同步完成后设置 ``LONG_EARN_CACHE_ONLY=1``，后续所有数据访问走纯缓存，
+       支持高并发并行回测（worker 进程不触达 xtquant）。
+    3. 回测引擎就绪检查
+
+    跳过同步的场景（环境变量 ``LONG_EARN_SKIP_CACHE_SYNC=1``）：
+    - CI / 单元测试（无 xtquant，无需同步）
+    - 已知缓存新鲜，显式跳过加速启动
+    - 纯 LLM 推理场景（不涉及数据访问）
 
     Args:
         config: 应用配置
@@ -135,7 +145,27 @@ def initialize_context(config: AppConfig | None = None) -> RuntimeContext:
     Returns:
         初始化好的 RuntimeContext
     """
+    import os  # noqa: PLC0415
+
     context = create_runtime_context(config)
     context.require_memory().initialize()
+
+    # 启动时数据缓存同步（ADR-014 阶段 G）
+    skip_sync = os.environ.get("LONG_EARN_SKIP_CACHE_SYNC", "").strip().lower()
+    if skip_sync in ("1", "true", "yes", "on"):
+        context.logger.info("LONG_EARN_SKIP_CACHE_SYNC=1，跳过启动时数据同步")
+    else:
+        from long_earn.services.cache_sync import sync_data_cache  # noqa: PLC0415
+
+        try:
+            sync_data_cache(logger_service=context.logger)
+        except Exception as exc:
+            context.logger.warning(f"启动时数据同步异常（非致命，降级到纯缓存）: {exc}")
+            from long_earn.services.cache_sync import (  # noqa: PLC0415
+                set_cache_only,
+            )
+
+            set_cache_only()
+
     context.logger.info("回测引擎已就绪（内嵌模式）")
     return context
