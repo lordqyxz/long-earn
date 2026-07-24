@@ -43,6 +43,9 @@ from long_earn.operator_dev.subgraph import (
 from long_earn.skills.personas import PersonaRegistry
 from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
 
+# ADR-009 收尾：训练集门（AcceptanceGate）— 优化版 sharpe 严格提升才接受
+from long_earn.strategy_optimization.acceptance import AcceptanceGate
+
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
 HTR_BRANCHING_FACTOR = 3
@@ -508,12 +511,13 @@ def _dispatch_cond(
     return "executor"
 
 
-def _executor_single_wrapper(
+def _executor_single_wrapper(  # noqa: PLR0913
     state: dict[str, Any],
     research_agent: StrategyResearchAgent,
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
     """Phase 5 并行执行器入口 — 从 Send payload 提取 node_id 调 _executor_single_node。"""
     node_id = state.get("_parallel_node_id", "")
@@ -526,17 +530,25 @@ def _executor_single_wrapper(
         develop_agent=develop_agent,
         backtest_service=backtest_service,
         logger=logger,
+        gate=gate,
     )
 
 
-def _executor_node(
+def _executor_node(  # noqa: PLR0913
     state: State,
     research_agent: StrategyResearchAgent,
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
-    """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。"""
+    """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。
+
+    ADR-009 收尾：接入 AcceptanceGate 作为训练集门。优化版回测后立即校验
+    ``o_sharpe > b_sharpe + eps``，未通过的候选标记 rejected 并跳过 evidence
+    更新，避免无效候选进入下游 OOS 合并门浪费 held-out 测试集回测算力。
+    与 _evaluate_oos_and_merge 形成双层防护：训练集门 + 测试集门。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     selected = state.get("selected_leaves", []) or []
@@ -568,6 +580,26 @@ def _executor_node(
                 start_date="",
                 end_date="",
             )
+
+            # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
+            if gate is not None:
+                acceptance = gate.evaluate(previous_backtest, backtest_result)
+                if not acceptance.accepted:
+                    node.status = NodeStatus.FAILED
+                    if logger:
+                        logger.warning(
+                            f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
+                            f"{acceptance.reason}"
+                        )
+                    results.append(
+                        {
+                            "node_id": node_id,
+                            "rejected": True,
+                            "rejection_reason": acceptance.reason,
+                            "optimized_strategy": optimized,
+                        }
+                    )
+                    continue
 
             dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
@@ -620,11 +652,14 @@ def _executor_single_node(  # noqa: PLR0913
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
     """单个假设的执行器（Phase 5 并行模式 — 每个 Send 一个实例）。
 
     与 _executor_node 逻辑相同，但只处理一个 node_id，
     返回单个 result dict（reducer _collect_executor_results 会累加）。
+
+    ADR-009 收尾：同步接入 AcceptanceGate 训练集门。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -649,6 +684,28 @@ def _executor_single_node(  # noqa: PLR0913
             start_date="",
             end_date="",
         )
+
+        # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
+        if gate is not None:
+            acceptance = gate.evaluate(previous_backtest, backtest_result)
+            if not acceptance.accepted:
+                node.status = NodeStatus.FAILED
+                if logger:
+                    logger.warning(
+                        f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
+                        f"{acceptance.reason}"
+                    )
+                result = {
+                    "node_id": node_id,
+                    "rejected": True,
+                    "rejection_reason": acceptance.reason,
+                    "optimized_strategy": optimized,
+                }
+                return {
+                    "executor_results": [result],
+                    "hypothesis_tree": tree.serialize(),
+                }
+
         dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
         tree.update_evidence(
@@ -957,6 +1014,8 @@ def create_htr_subgraph(
         ),
     )
     workflow.add_node("dispatch", partial(_dispatch_node, logger=logger))
+    # ADR-009 收尾：训练集门（AcceptanceGate）— 优化版 sharpe 严格提升才接受
+    acceptance_gate = AcceptanceGate()
     workflow.add_node(
         "executor",
         partial(
@@ -965,6 +1024,7 @@ def create_htr_subgraph(
             develop_agent=develop_agent,
             backtest_service=backtest_service,
             logger=logger,
+            gate=acceptance_gate,
         ),
     )
     # Phase 5: 并行执行器（每个 Send 一个实例）
@@ -976,6 +1036,7 @@ def create_htr_subgraph(
             develop_agent=develop_agent,
             backtest_service=backtest_service,
             logger=logger,
+            gate=acceptance_gate,
         ),
     )
     workflow.add_node(
