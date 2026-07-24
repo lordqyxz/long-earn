@@ -1,6 +1,6 @@
 """回测引擎包
 
-事件驱动回测引擎，支持 YAML DSL 策略描述和 ML 算法交易。
+事件驱动回测引擎，支持 YAML DSL 策略描述（ADR-009 收尾：仅算子目录路径）。
 可被 LangGraph 节点直接调用。
 
 领域模型：
@@ -12,8 +12,7 @@
 引擎核心：
 - EventDrivenBacktestEngine: 事件驱动回测引擎
 - BaseStrategy: 策略基类（Agent 友好状态化接口）
-- MLSignalStrategy: ML 策略基类（支持特征工程）
-- FeatureEngine: 截面特征工程
+- TimeSeriesSplit: 时序交叉验证分割器（Walk-Forward OOS 用）
 """
 
 from long_earn.backtest.domain.entities import (
@@ -34,14 +33,6 @@ from long_earn.backtest.engine.dsl import (
     StrategyDSL,
     parse_strategy_yaml,
 )
-from long_earn.backtest.engine.ml_strategy import (
-    FeatureEngine,
-    MLSignalStrategy,
-    compute_atr,
-    compute_bollinger_bands,
-    compute_macd,
-    compute_rsi,
-)
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.models import BacktestResult
@@ -55,18 +46,12 @@ __all__ = [
     "DateRange",
     "EventDrivenBacktestEngine",
     "ExpressionEvalError",
-    "FeatureEngine",
     "InMemoryAuditTrail",
-    "MLSignalStrategy",
     "PerformanceMetrics",
     "Position",
     "StrategyDSL",
     "StrategyValidationError",
     "TimeSeriesSplit",
     "UniverseError",
-    "compute_atr",
-    "compute_bollinger_bands",
-    "compute_macd",
-    "compute_rsi",
     "parse_strategy_yaml",
 ]
