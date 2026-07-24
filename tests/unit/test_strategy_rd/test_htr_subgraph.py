@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from long_earn.config import RuntimeContext
 from long_earn.services import MemoryService
@@ -14,6 +14,7 @@ from long_earn.services.llm_service import LLMService
 from long_earn.services.logger_service import LoggerService
 from long_earn.services.monitoring_service import MonitoringService
 from long_earn.services.stock_service import StockService
+from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
 from long_earn.strategy_rd.hypothesis_tree import HypothesisTree
 
 
@@ -35,6 +36,7 @@ def _make_mock_context() -> RuntimeContext:
     mock_config.memory_path = ":memory:"
     mock_config.init_dir = "./init"
     mock_config.max_iterations = 1
+    mock_config.htr_max_select = 1
     mock_config.backtest_start_date = "2020-01-01"
     mock_config.backtest_end_date = "2023-12-31"
     mock_config.train_start_date = "2022-01-01"
@@ -205,3 +207,400 @@ class TestPhase5ParallelDispatch:
         context = _make_mock_context()
         subgraph = create_htr_subgraph(context)
         assert subgraph is not None
+
+
+class TestMaxSelectFanOut:
+    """ADR-010 Phase 5: max_select 可配置，>1 激活并行 fan-out。"""
+
+    def test_select_node_max_select_2_adds_two_nodes(self):
+        """max_select=2 时 _select_node 应向树添加 2 个子节点。"""
+        from long_earn.strategy_rd.htr_subgraph import _select_node
+
+        tree = HypothesisTree(run_id="test_fanout_2")
+        tree.init_root(hypothesis="父假设")
+
+        research_agent = MagicMock()
+        # 模拟 select 返回 2 个假设
+        research_agent.select.return_value = [
+            {"hypothesis": "假设A", "direction": "动量"},
+            {"hypothesis": "假设B", "direction": "均值回归"},
+        ]
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "improvement_suggestions": ["假设A", "假设B", "假设C"],
+        }
+        result = _select_node(
+            state,  # type: ignore[arg-type]
+            research_agent=research_agent,
+            logger=None,
+            max_select=2,
+        )
+
+        # research_agent.select 应被调用且 max_select=2 转发
+        research_agent.select.assert_called_once()
+        call_kwargs = research_agent.select.call_args.kwargs
+        assert call_kwargs.get("max_select") == 2
+
+        # 树应含 root + 2 个子节点
+        assert len(result["selected_leaves"]) == 2
+        updated_tree = HypothesisTree.deserialize(result["hypothesis_tree"])
+        root_children = [
+            n for n in updated_tree.all_nodes() if n.parent_id == "root"
+        ]
+        assert len(root_children) == 2
+
+    def test_select_node_max_select_1_serial_behavior(self):
+        """max_select=1 时 _select_node 保持串行行为（向后兼容）。"""
+        from long_earn.strategy_rd.htr_subgraph import _select_node
+
+        tree = HypothesisTree(run_id="test_serial")
+        tree.init_root(hypothesis="父假设")
+
+        research_agent = MagicMock()
+        research_agent.select.return_value = [
+            {"hypothesis": "唯一假设", "direction": "动量"},
+        ]
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "improvement_suggestions": ["假设A", "假设B"],
+        }
+        result = _select_node(
+            state,  # type: ignore[arg-type]
+            research_agent=research_agent,
+            logger=None,
+            max_select=1,
+        )
+
+        assert len(result["selected_leaves"]) == 1
+        call_kwargs = research_agent.select.call_args.kwargs
+        assert call_kwargs.get("max_select") == 1
+
+    def test_fanout_flow_select_then_dispatch(self):
+        """端到端：select 2 个 → dispatch_cond 返回 2 个 Send。"""
+        from langgraph.types import Send
+
+        from long_earn.strategy_rd.htr_subgraph import (
+            _dispatch_cond,
+            _select_node,
+        )
+
+        tree = HypothesisTree(run_id="test_flow")
+        tree.init_root(hypothesis="父假设")
+
+        research_agent = MagicMock()
+        research_agent.select.return_value = [
+            {"hypothesis": "假设A", "direction": "动量"},
+            {"hypothesis": "假设B", "direction": "均值回归"},
+        ]
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "improvement_suggestions": ["假设A", "假设B"],
+        }
+        select_result = _select_node(
+            state,  # type: ignore[arg-type]
+            research_agent=research_agent,
+            logger=None,
+            max_select=2,
+        )
+
+        # 将 select 结果送入 dispatch_cond
+        dispatch_state = {"selected_leaves": select_result["selected_leaves"]}
+        dispatch_result = _dispatch_cond(dispatch_state)  # type: ignore[arg-type]
+
+        # 2 个假设应触发 Send fan-out
+        assert isinstance(dispatch_result, list)
+        assert len(dispatch_result) == 2
+        assert all(isinstance(s, Send) for s in dispatch_result)
+        # 每个 Send 的目标节点应是 executor_single
+        assert all(s.node == "executor_single" for s in dispatch_result)
+
+    def test_subgraph_reads_htr_max_select_from_config(self):
+        """create_htr_subgraph 应从 config.htr_max_select 读取并行度。"""
+        from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
+
+        context = _make_mock_context()
+        # 修改 htr_max_select 为 2
+        context.config.htr_max_select = 2
+        subgraph = create_htr_subgraph(context)
+        assert subgraph is not None
+
+
+class TestPersonaIntegration:
+    """ADR-012: HTR 集成 PersonaRegistry（ideate + backpropagate）。"""
+
+    def test_ideate_node_calls_persona_registry(self):
+        """_ideate_node 应调用 PersonaRegistry.create_all 生成大师建议。"""
+        from long_earn.strategy_rd.htr_subgraph import _ideate_node
+
+        tree = HypothesisTree(run_id="test_persona_ideate")
+        tree.init_root(hypothesis="动量策略")
+
+        context = _make_mock_context()
+        memory = context.require_memory()
+        memory.search_hypothesis_trees.return_value = []
+
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        # 拦截 ideate 避免真实 LLM 调用
+        agent.ideate = MagicMock(return_value=[{"hypothesis": "h1"}])
+
+        # 构造 mock persona：analyze 返回 PersonaResult
+        mock_persona = MagicMock()
+        mock_persona.analyze.return_value = PersonaResult(
+            verdict="推荐",
+            rationale="测试建议",
+            suggestions=["建议1"],
+            confidence=0.8,
+        )
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            return_value={"buffett": mock_persona},
+        ):
+            _ideate_node(
+                {"hypothesis_tree": tree.serialize(), "result": "观察"},
+                research_agent=agent,
+                memory=memory,
+                connector=None,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        # PersonaRegistry.create_all 应被调用
+        mock_persona.analyze.assert_called_once()
+        # 调用时的 context.mode 应是 strategy_generate
+        call_ctx = mock_persona.analyze.call_args.args[0]
+        assert isinstance(call_ctx, PersonaContext)
+        assert call_ctx.mode == "strategy_generate"
+
+    def test_ideate_node_passes_master_hints_to_ideate(self):
+        """_ideate_node 应把大师建议通过 master_hints 传给 ideate。"""
+        from long_earn.strategy_rd.htr_subgraph import _ideate_node
+
+        tree = HypothesisTree(run_id="test_hints")
+        tree.init_root(hypothesis="动量策略")
+
+        context = _make_mock_context()
+        memory = context.require_memory()
+        memory.search_hypothesis_trees.return_value = []
+
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        agent.ideate = MagicMock(return_value=[])
+
+        mock_persona = MagicMock()
+        mock_persona.analyze.return_value = PersonaResult(
+            verdict="推荐", rationale="大师建议"
+        )
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            return_value={"buffett": mock_persona},
+        ):
+            _ideate_node(
+                {"hypothesis_tree": tree.serialize(), "result": "观察"},
+                research_agent=agent,
+                memory=memory,
+                connector=None,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        # ideate 应被调用且 master_hints 含 buffett 条目
+        agent.ideate.assert_called_once()
+        master_hints_arg = agent.ideate.call_args.kwargs.get("master_hints")
+        assert master_hints_arg is not None
+        assert "buffett" in master_hints_arg
+
+    def test_ideate_node_degrades_when_persona_fails(self):
+        """PersonaRegistry 初始化失败时 _ideate_node 应降级为无大师建议。"""
+        from long_earn.strategy_rd.htr_subgraph import _ideate_node
+
+        tree = HypothesisTree(run_id="test_degrade")
+        tree.init_root(hypothesis="动量策略")
+
+        context = _make_mock_context()
+        memory = context.require_memory()
+        memory.search_hypothesis_trees.return_value = []
+
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        agent.ideate = MagicMock(return_value=[])
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            side_effect=RuntimeError("注册表初始化失败"),
+        ):
+            # 不应抛异常
+            _ideate_node(
+                {"hypothesis_tree": tree.serialize(), "result": "观察"},
+                research_agent=agent,
+                memory=memory,
+                connector=None,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        # ideate 仍应被调用，master_hints 为 None（降级）
+        agent.ideate.assert_called_once()
+        master_hints_arg = agent.ideate.call_args.kwargs.get("master_hints")
+        assert master_hints_arg is None
+
+    def test_backpropagate_node_calls_persona_registry(self):
+        """_backpropagate_node 应调用 PersonaRegistry 的 strategy_review mode。"""
+        from long_earn.strategy_rd.htr_subgraph import _backpropagate_node
+
+        tree = HypothesisTree(run_id="test_bp_persona")
+        tree.init_root(hypothesis="父假设")
+        child_id = tree.add_child("root", "子假设")
+
+        # 给子节点添加回测结果
+        tree.update_evidence(
+            node_id=child_id, dev_score=0.5, backtest_result={"sharpe_ratio": 0.5}
+        )
+
+        context = _make_mock_context()
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        agent.backpropagate_insights = MagicMock(
+            return_value={"insight": "测试洞察"}
+        )
+
+        mock_persona = MagicMock()
+        mock_persona.analyze.return_value = PersonaResult(
+            verdict="改进",
+            rationale="大师反思",
+            weaknesses=["弱点1"],
+            suggestions=["建议1"],
+        )
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "executor_results": [
+                {"node_id": child_id, "backtest_result": {"sharpe_ratio": 0.5}}
+            ],
+            "strategy": {"strategy_name": "TestStrategy"},
+        }
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            return_value={"buffett": mock_persona},
+        ):
+            _backpropagate_node(
+                state,  # type: ignore[arg-type]
+                research_agent=agent,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        mock_persona.analyze.assert_called_once()
+        call_ctx = mock_persona.analyze.call_args.args[0]
+        assert isinstance(call_ctx, PersonaContext)
+        assert call_ctx.mode == "strategy_review"
+
+    def test_backpropagate_node_passes_master_perspectives(self):
+        """_backpropagate_node 应把大师视角通过 master_perspectives 传给 backpropagate_insights。"""
+        from long_earn.strategy_rd.htr_subgraph import _backpropagate_node
+
+        tree = HypothesisTree(run_id="test_bp_hints")
+        tree.init_root(hypothesis="父假设")
+        child_id = tree.add_child("root", "子假设")
+        tree.update_evidence(
+            node_id=child_id, dev_score=0.5, backtest_result={"sharpe_ratio": 0.5}
+        )
+
+        context = _make_mock_context()
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        agent.backpropagate_insights = MagicMock(
+            return_value={"insight": "测试洞察"}
+        )
+
+        mock_persona = MagicMock()
+        mock_persona.analyze.return_value = PersonaResult(
+            verdict="改进", rationale="反思"
+        )
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "executor_results": [
+                {"node_id": child_id, "backtest_result": {"sharpe_ratio": 0.5}}
+            ],
+            "strategy": {"strategy_name": "TestStrategy"},
+        }
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            return_value={"munger": mock_persona},
+        ):
+            _backpropagate_node(
+                state,  # type: ignore[arg-type]
+                research_agent=agent,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        agent.backpropagate_insights.assert_called_once()
+        perspectives_arg = (
+            agent.backpropagate_insights.call_args.kwargs.get(
+                "master_perspectives"
+            )
+        )
+        assert perspectives_arg is not None
+        assert "munger" in perspectives_arg
+
+    def test_backpropagate_node_degrades_when_persona_fails(self):
+        """PersonaRegistry 失败时 _backpropagate_node 应降级为无大师视角。"""
+        from long_earn.strategy_rd.htr_subgraph import _backpropagate_node
+
+        tree = HypothesisTree(run_id="test_bp_degrade")
+        tree.init_root(hypothesis="父假设")
+        child_id = tree.add_child("root", "子假设")
+        tree.update_evidence(
+            node_id=child_id, dev_score=0.5, backtest_result={"sharpe_ratio": 0.5}
+        )
+
+        context = _make_mock_context()
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+        agent = StrategyResearchAgent(context=context)
+        agent.backpropagate_insights = MagicMock(
+            return_value={"insight": "降级洞察"}
+        )
+
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "executor_results": [
+                {"node_id": child_id, "backtest_result": {"sharpe_ratio": 0.5}}
+            ],
+            "strategy": {"strategy_name": "TestStrategy"},
+        }
+
+        with patch(
+            "long_earn.skills.personas.PersonaRegistry.create_all",
+            side_effect=RuntimeError("注册表初始化失败"),
+        ):
+            # 不应抛异常
+            _backpropagate_node(
+                state,  # type: ignore[arg-type]
+                research_agent=agent,
+                logger=None,  # type: ignore[arg-type]
+            )
+
+        # backpropagate_insights 仍应被调用，master_perspectives 为 None
+        agent.backpropagate_insights.assert_called_once()
+        perspectives_arg = (
+            agent.backpropagate_insights.call_args.kwargs.get(
+                "master_perspectives"
+            )
+        )
+        assert perspectives_arg is None

@@ -970,18 +970,37 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             self.logger.info(f"[HTR-观察] {result.get('next_focus', '未知')}")
         return result if isinstance(result, dict) else {"observations": str(result)}
 
-    def ideate(
+    def ideate(  # noqa: PLR0913
         self,
         observations: dict[str, Any],
         parent_hypothesis: str = "",
         child_insights: str = "",
         pruned_directions: str = "",
         branching_factor: int = 3,
+        master_hints: "dict[str, PersonaResult] | None" = None,
     ) -> list[dict[str, Any]]:
-        """假设生成 — 基于观察结果生成改进假设。"""
+        """假设生成 — 基于观察结果生成改进假设。
+
+        Args:
+            master_hints: name -> PersonaResult 映射，由 HTR _ideate_node
+                调用 4 个大师 strategy_generate mode 得到。None 或空 dict 时
+                行为与原 ideate 完全一致（向后兼容）。
+        """
+        master_hints_context = self._format_master_hints(master_hints)
+        if master_hints_context and self.logger:
+            self.logger.info(
+                f"[HTR-假设] 注入大师策略生成建议: {len(master_hints or {})} 位"
+            )
         prompt_template = MarkdownPromptTemplate(
             "ideate_prompt.md",
-            ["observations", "parent_hypothesis", "child_insights", "pruned_directions", "branching_factor"],
+            [
+                "observations",
+                "parent_hypothesis",
+                "child_insights",
+                "pruned_directions",
+                "branching_factor",
+                "master_hints_context",
+            ],
             __file__,
         )
         prompt = prompt_template.format(
@@ -990,6 +1009,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             child_insights=child_insights or "无",
             pruned_directions=pruned_directions or "无",
             branching_factor=str(branching_factor),
+            master_hints_context=master_hints_context or "无",
         )
         response = self.llm_service.invoke(prompt)
         # LLM 偶发返回空内容或非 JSON 时容错：返回空假设列表让 select 节点处理，
@@ -1031,16 +1051,29 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         self,
         parent_hypothesis: str,
         child_results: list[dict[str, Any]],
+        master_perspectives: "dict[str, PersonaResult] | None" = None,
     ) -> dict[str, Any]:
-        """洞察反向传播 — 将子节点实验结果抽象为方向级教训。"""
+        """洞察反向传播 — 将子节点实验结果抽象为方向级教训。
+
+        Args:
+            master_perspectives: name -> PersonaResult 映射，由 HTR
+                _backpropagate_node 调用 4 个大师 strategy_review mode 得到。
+                None 或空 dict 时行为与原方法完全一致（向后兼容）。
+        """
+        master_context = self._format_master_perspectives(master_perspectives)
+        if master_context and self.logger:
+            self.logger.info(
+                f"[HTR-反向传播] 注入大师反思视角: {len(master_perspectives or {})} 位"
+            )
         prompt_template = MarkdownPromptTemplate(
             "backpropagate_prompt.md",
-            ["parent_hypothesis", "child_results"],
+            ["parent_hypothesis", "child_results", "master_perspectives"],
             __file__,
         )
         prompt = prompt_template.format(
             parent_hypothesis=parent_hypothesis,
             child_results=json.dumps(child_results, ensure_ascii=False, default=str),
+            master_perspectives=master_context or "无",
         )
         response = self.llm_service.invoke(prompt)
         # LLM 偶发返回空内容或非 JSON 时容错：返回默认洞察让 decide 节点继续。

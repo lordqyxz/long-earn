@@ -39,6 +39,10 @@ from long_earn.operator_dev.subgraph import (
     create_operator_dev_subgraph,
 )
 
+# ADR-012：HTR ideate/backpropagate 节点接入 PersonaRegistry（4 大师策略生成/反思）
+from long_earn.skills.personas import PersonaRegistry
+from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
+
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
 HTR_BRANCHING_FACTOR = 3
@@ -48,6 +52,47 @@ HTR_MERGE_THRESHOLD = 0.05
 # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
 _DEFAULT_UNIVERSE = "main_board+gem"
 _FINANCIAL_BRIEF_MAX_SYMBOLS = 50
+
+
+def _invoke_personas(
+    research_agent: StrategyResearchAgent,
+    persona_context: PersonaContext,
+    logger: LoggerService | None,
+    log_tag: str,
+) -> dict[str, PersonaResult]:
+    """调用所有已注册大师的 analyze 方法，返回 name -> PersonaResult。
+
+    ADR-012：HTR ideate/backpropagate 节点共用的大师调用辅助函数。
+    大师调用失败时降级为空 dict，不阻塞主流程。
+
+    Args:
+        research_agent: 策略研究 Agent（提供 llm_service）
+        persona_context: 大师调用上下文（mode/target/backtest_result）
+        logger: 日志服务
+        log_tag: 日志标签（如 "[HTR-ideate]"）
+
+    Returns:
+        name -> PersonaResult 映射；全部失败时返回空 dict
+    """
+    results: dict[str, PersonaResult] = {}
+    try:
+        llm = research_agent.llm_service.get_llm()
+        personas = PersonaRegistry.create_all(llm)
+        for name, persona in personas.items():
+            try:
+                results[name] = persona.analyze(persona_context)
+            except NotImplementedError:
+                # 该大师尚未支持此 mode，跳过
+                continue
+            except Exception as e:
+                if logger:
+                    logger.warning(f"{log_tag} 大师 {name} 调用失败: {e}")
+                continue
+    except Exception as e:
+        if logger:
+            logger.warning(f"{log_tag} 大师注册表初始化失败: {e}")
+    return results
+
 
 # ADR-009：算子缺口关键词映射（keyword → (op_name, category, intent)）
 # 扫描 reflection / improvement_suggestions / insight 文本，命中关键词且算子目录暂缺时
@@ -250,6 +295,53 @@ def _observe_node(
     return {"result": str(observations.get("next_focus", ""))}
 
 
+def _enhance_child_insights(
+    child_insights: str,
+    connector: Connector | None,
+    parent_hypothesis: str,
+    strategy_yaml: str,
+    logger: LoggerService | None,
+) -> str:
+    """用 Connector 图谱经验 + universe 财务面板摘要增强 child_insights。
+
+    ADR-014 任务2/4：从 _ideate_node 抽取的辅助函数，降低主节点分支复杂度。
+    两次增强：图谱按策略族检索相似经验 + universe 财务面板统计摘要。
+    任一增强失败都不阻塞主流程。
+    """
+    # ADR-014 任务2：图谱按策略族检索相似经验
+    if connector is not None and parent_hypothesis:
+        try:
+            exp_result = connector.get_concept(ConceptQuery(
+                subject=parent_hypothesis,
+                aspect="动量族",  # 默认动量族，可根据假设内容扩展
+                constraints={"k": 3},
+            ))
+            if isinstance(exp_result.data, list) and exp_result.data:
+                graph_insights = "\n".join(
+                    f"- [图谱] {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
+                    for e in exp_result.data
+                )
+                child_insights = (
+                    f"{child_insights}\n{graph_insights}"
+                    if child_insights
+                    else graph_insights
+                )
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-ideate] 图谱经验检索失败: {e}")
+
+    # ADR-014 任务4：注入 universe 财务面板摘要
+    universe = _parse_universe_from_yaml(strategy_yaml)
+    financial_brief = _fetch_universe_financial_brief(connector, universe)
+    if financial_brief != "无":
+        child_insights = (
+            f"{child_insights}\n{financial_brief}"
+            if child_insights
+            else financial_brief
+        )
+    return child_insights
+
+
 def _ideate_node(
     state: State,
     research_agent: StrategyResearchAgent,
@@ -291,43 +383,42 @@ def _ideate_node(
         if logger:
             logger.warning(f"[HTR-ideate] 历史树检索失败: {e}")
 
-    # ADR-014 任务2：图谱按策略族检索相似经验（增强 child_insights）
-    if connector is not None and parent_hypothesis:
-        try:
-
-            exp_result = connector.get_concept(ConceptQuery(
-                subject=parent_hypothesis,
-                aspect="动量族",  # 默认动量族，可根据假设内容扩展
-                constraints={"k": 3},
-            ))
-            if isinstance(exp_result.data, list) and exp_result.data:
-                graph_insights = "\n".join(
-                    f"- [图谱] {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
-                    for e in exp_result.data
-                )
-                if child_insights:
-                    child_insights = f"{child_insights}\n{graph_insights}"
-                else:
-                    child_insights = graph_insights
-        except Exception as e:
-            if logger:
-                logger.warning(f"[HTR-ideate] 图谱经验检索失败: {e}")
-
-    # ADR-014 任务4：注入 universe 财务面板摘要，辅助 LLM 生成改进假设
+    # ADR-014 任务2/4：Connector 图谱经验 + 财务面板增强 child_insights
     strategy_yaml = state.get("strategy_yaml", "") or ""
-    universe = _parse_universe_from_yaml(strategy_yaml)
-    financial_brief = _fetch_universe_financial_brief(connector, universe)
-    if financial_brief != "无":
-        if child_insights:
-            child_insights = f"{child_insights}\n{financial_brief}"
-        else:
-            child_insights = financial_brief
+    child_insights = _enhance_child_insights(
+        child_insights=child_insights,
+        connector=connector,
+        parent_hypothesis=parent_hypothesis,
+        strategy_yaml=strategy_yaml,
+        logger=logger,
+    )
+
+    # ADR-012：调用 4 大师 strategy_generate mode 提供策略生成建议
+    # 大师针对当前父假设各自给出视角，注入 ideate prompt 增强假设多样性
+    master_hints = _invoke_personas(
+        research_agent,
+        PersonaContext(
+            mode="strategy_generate",
+            target={
+                "query": parent_hypothesis or "策略优化",
+                "knowledge_context": child_insights,
+            },
+        ),
+        logger,
+        "[HTR-ideate]",
+    )
+
+    if logger and master_hints:
+        logger.info(
+            f"[HTR-ideate] 大师策略生成建议完成: {len(master_hints)} 位提供视角"
+        )
 
     hypotheses = research_agent.ideate(
         observations=observations,
         parent_hypothesis=parent_hypothesis,
         child_insights=child_insights,
         branching_factor=HTR_BRANCHING_FACTOR,
+        master_hints=master_hints if master_hints else None,
     )
 
     return {"improvement_suggestions": [h.get("hypothesis", "") for h in hypotheses]}
@@ -337,8 +428,14 @@ def _select_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
+    max_select: int = 1,
 ) -> dict:
-    """选择阶段 — 从假设中选择最优的进行验证。"""
+    """选择阶段 — 从假设中选择最优的进行验证。
+
+    Args:
+        max_select: 每轮选择的假设数。1=串行（向后兼容）；
+            >1 激活 LangGraph Send 并行 fan-out（ADR-010 Phase 5）。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
@@ -346,7 +443,7 @@ def _select_node(
     suggestions = state.get("improvement_suggestions", []) or []
     hypotheses = [{"hypothesis": s, "direction": ""} for s in suggestions]
 
-    selected = research_agent.select(hypotheses, max_select=1)
+    selected = research_agent.select(hypotheses, max_select=max_select)
 
     # 将选中的假设添加到树中
     parent = tree.best_node() or tree.root
@@ -587,10 +684,16 @@ def _backpropagate_node(
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
 ) -> dict:
-    """反向传播 — 将实验结果抽象为洞察并传播到父节点。"""
+    """反向传播 — 将实验结果抽象为洞察并传播到父节点。
+
+    ADR-012：对每个有回测结果的节点调用 4 大师 strategy_review mode 反思，
+    将大师视角注入 backpropagate_insights prompt，让反思融合量化数据与投资
+    大师视角。大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     results = state.get("executor_results", []) or []
+    strategy = state.get("strategy", {}) or {}
 
     for r in results:
         node_id = r.get("node_id", "")
@@ -602,9 +705,30 @@ def _backpropagate_node(
         if parent is None:
             continue
 
+        # ADR-012：调用 4 大师 strategy_review mode 反思失败假设
+        # 让大师针对该节点的具体回测结果从各自视角反思
+        backtest_result = r.get("backtest_result", {}) or {}
+        master_perspectives = _invoke_personas(
+            research_agent,
+            PersonaContext(
+                mode="strategy_review",
+                target=strategy,
+                backtest_result=backtest_result,
+            ),
+            logger,
+            "[HTR-backpropagate]",
+        )
+
+        if logger and master_perspectives:
+            logger.info(
+                f"[HTR-backpropagate] 大师反思完成: "
+                f"{len(master_perspectives)} 位提供视角"
+            )
+
         insight_result = research_agent.backpropagate_insights(
             parent_hypothesis=parent.hypothesis,
             child_results=results,
+            master_perspectives=master_perspectives if master_perspectives else None,
         )
 
         insight_text = (
@@ -821,8 +945,16 @@ def create_htr_subgraph(
             connector=connector, logger=logger
         ),
     )
+    # ADR-010 Phase 5: max_select 可配置（HTR_MAX_SELECT），>1 时激活 Send fan-out
+    htr_max_select = max(1, getattr(context.config, "htr_max_select", 1))
     workflow.add_node(
-        "select", partial(_select_node, research_agent=research_agent, logger=logger)
+        "select",
+        partial(
+            _select_node,
+            research_agent=research_agent,
+            logger=logger,
+            max_select=htr_max_select,
+        ),
     )
     workflow.add_node("dispatch", partial(_dispatch_node, logger=logger))
     workflow.add_node(

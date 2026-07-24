@@ -166,6 +166,8 @@ class AppConfig:
     best_strategy_path: str = str(_storage.best_strategy_path())
     init_dir: str = "./init"
     max_iterations: int = 3
+    # HTR 每轮选择的最大假设数（1=串行，>1=并行 fan-out，ADR-010 Phase 5）
+    htr_max_select: int = 1
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
     # 量化数据分割（AGENTS.md「量化数据分割规范」）
@@ -214,6 +216,7 @@ class AppConfig:
             best_strategy_path=str(paths["best_strategy_path"]),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
+            htr_max_select=int(os.getenv("HTR_MAX_SELECT", "1")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
             train_start_date=os.getenv("TRAIN_START", "2022-01-01"),

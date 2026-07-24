@@ -49,8 +49,8 @@ uv run python scripts/download_data.py --max-workers 4  # 并发下载（subproc
 | HTR 安全兜底 | `iteration >= 10` 或 `depth >= 3` 或 LLM "stop" 强制终止 | `htr_subgraph.py:728-732` |
 
 **已知偏离（须改进）**：
-- HTR 子图未集成 PersonaRegistry（4 大师策略生成/反思）与 gap_detector → operator_dev 闭环，二者仅存在于已废弃的 `subgraph.py`
-- `_select_node` 硬编码 `max_select=1`，导致 LangGraph Send 并行 fan-out 路径已实现但未激活
+- gap_detector → operator_dev 闭环仅在已废弃的 `subgraph.py` 中，HTR 子图尚未接入
+- `_select_node` 默认 `max_select=1`（串行），已通过 `HTR_MAX_SELECT` 环境变量支持配置激活并行 fan-out（ADR-010 Phase 5）
 
 #### 2. 回测金融级可靠性
 
@@ -100,7 +100,6 @@ uv run python scripts/download_data.py --max-workers 4  # 并发下载（subproc
 
 **已知偏离（须改进）**：
 - `DataIngestionService._download_concurrent` 实际为单线程串行（`max_workers` 参数签名兼容但忽略），旧「`ThreadPoolExecutor` 并发子进程生成临时文件」描述已过时
-- HTR Send 并行 fan-out 路径已实现但未激活（`_select_node::max_select=1`）
 - 股票分析子图 `fund_flow_analysis` 节点已定义但无入边（孤立于图）
 - `ProcessPoolExecutor` 真正并行路径（max_workers > 1）无单元测试覆盖，CI 仅用 max_workers=1
 - `BacktestService.run_grid` / `run_walk_forward_parallel` 未暴露 `max_workers`，调用方无法控制并行度
@@ -412,6 +411,7 @@ src/long_earn/substance/
 | VALIDATION_START | 2026-03-25 | 验证集起始（前瞻验证）|
 | VALIDATION_END | 2026-06-25 | 验证集结束 |
 | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
+| HTR_MAX_SELECT | 1 | HTR 每轮选择的最大假设数（1=串行，>1 激活 LangGraph Send 并行 fan-out，ADR-010 Phase 5）|
 | STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔）|
 | STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔）|
 | EVENT_INFERENCE_KEYWORDS | 新闻,事件,热点,资讯,利好,利空 | 事件推理路由关键词（逗号分隔）|

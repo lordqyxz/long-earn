@@ -20,7 +20,6 @@ from .state import State
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
     from long_earn.operator_dev.backlog import OperatorBacklog
-    from long_earn.services import LLMService
 
 from long_earn.backtest.operators import list_operators
 from long_earn.operator_dev.spec import OperatorSpec, OperatorSpecPriority
@@ -158,13 +157,11 @@ def _research_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
-    llm_service: "LLMService | None" = None,
 ) -> dict:
     """研究节点 - 生成初始策略
 
-    ADR-012 Phase 3：在策略生成前调用 4 个大师的 strategy_generate mode，
-    将大师视角注入策略研究 prompt 作为补充上下文。
-    大师调用失败时降级为原行为（无大师建议），不阻塞策略生成流程。
+    [DEPRECATED] ADR-012 大师策略生成建议已迁移到 HTR _ideate_node。
+    本子图已废弃，保留线性流程供回滚参考。
     """
     query = state.get("query", "")
     knowledge_context = state.get("knowledge_context", "")
@@ -172,50 +169,9 @@ def _research_node(
     if logger:
         logger.info(f"[策略研究] 开始研究策略: {query}")
 
-    # ADR-012 Phase 3：调用大师提供策略生成建议
-    master_hints: dict = {}
-    if llm_service is not None:
-        try:
-            # 延迟导入避免 skills.personas 在测试未安装时影响 subgraph 模块加载
-            from long_earn.skills.personas import PersonaRegistry
-            from long_earn.skills.personas.protocol import PersonaContext
-
-            personas = PersonaRegistry.create_all(llm_service.get_llm())
-            for name, persona in personas.items():
-                try:
-                    hint = persona.analyze(
-                        PersonaContext(
-                            mode="strategy_generate",
-                            target={
-                                "query": query,
-                                "knowledge_context": knowledge_context,
-                            },
-                        )
-                    )
-                    master_hints[name] = hint
-                except NotImplementedError:
-                    # 该大师尚未支持 strategy_generate mode，跳过
-                    continue
-                except Exception as e:
-                    if logger:
-                        logger.warning(f"大师 {name} 策略生成建议失败: {e}")
-                    continue
-        except Exception as e:
-            if logger:
-                logger.warning(f"大师注册表初始化失败: {e}")
-
-    if logger:
-        if master_hints:
-            logger.info(
-                f"[策略研究] 大师策略生成建议完成: {len(master_hints)} 位提供视角"
-            )
-        else:
-            logger.info("[策略研究] 无大师建议，按原流程生成策略")
-
     strategy = research_agent.research_strategy_with_context(
         query,
         knowledge_context,
-        master_hints=master_hints if master_hints else None,
     )
 
     if logger:
@@ -361,63 +317,27 @@ def _reflection_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
-    llm_service: "LLMService | None" = None,
 ) -> dict:
     """反思节点 - 分析回测结果并生成改进建议
 
-    ADR-012 Phase 2：在 ToT 反思前调用 4 个大师的 strategy_review mode
-    审视当前策略，将大师视角注入反思 prompt 作为补充上下文。
-    大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
+    [DEPRECATED] ADR-012 大师反思视角已迁移到 HTR _backpropagate_node。
+    本子图已废弃，保留线性流程供回滚参考。
     """
     strategy = state.get("strategy", {}) or {}
     backtest_result = state.get("backtest_result", {}) or {}
 
-    # ADR-012 Phase 2：调用大师审视策略
-    master_perspectives: dict = {}
-    if llm_service is not None:
-        try:
-            # 延迟导入避免 skills.personas 在测试未安装时影响 subgraph 模块加载
-            from long_earn.skills.personas import PersonaRegistry
-            from long_earn.skills.personas.protocol import PersonaContext
-
-            personas = PersonaRegistry.create_all(llm_service.get_llm())
-            for name, persona in personas.items():
-                try:
-                    view = persona.analyze(
-                        PersonaContext(
-                            mode="strategy_review",
-                            target=strategy,
-                            backtest_result=backtest_result,
-                        )
-                    )
-                    master_perspectives[name] = view
-                except NotImplementedError:
-                    # 该大师尚未支持 strategy_review mode，跳过
-                    continue
-                except Exception as e:
-                    if logger:
-                        logger.warning(f"大师 {name} 审视失败: {e}")
-                    continue
-        except Exception as e:
-            if logger:
-                logger.warning(f"大师注册表初始化失败: {e}")
-
-    if logger:
-        if master_perspectives:
-            logger.info(
-                f"[反思] 大师审视完成: {len(master_perspectives)} 位提供视角，"
-                f"开始 ToT 多分支反思..."
-            )
-        else:
-            logger.info("[反思] 开始 ToT 多分支反思...")
-
     # 跨轮数据回流：历史窗口收益率（家族失效检测信号）
     history_return = float(state.get("history_return", 0.0) or 0.0)
+
+    if logger:
+        logger.info(
+            f"[反思] 开始 ToT 多分支反思（history_return={history_return:.4f}）..."
+        )
 
     reflection_result = research_agent.reflect(
         strategy,
         backtest_result,
-        master_perspectives=master_perspectives if master_perspectives else None,
+        master_perspectives=None,
         history_return=history_return,
     )
 
@@ -425,7 +345,6 @@ def _reflection_node(
         logger.info(
             f"[反思] 完成, 选定方向: "
             f"{reflection_result.get('selected_direction', '未知')}"
-            f"（history_return={history_return:.4f}）"
         )
 
     return {
@@ -815,7 +734,7 @@ def _backtest_optimized_cond(state: State) -> str:
     return "reflection" if state.get("code_valid", False) else "refine_optimized"
 
 
-def create_strategy_rd_subgraph(
+def create_strategy_rd_subgraph(  # noqa: PLR0915
     context: "RuntimeContext",
     *,
     checkpointer: Any = None,
@@ -868,7 +787,6 @@ def create_strategy_rd_subgraph(
             _research_node,
             research_agent=research_agent,
             logger=logger,
-            llm_service=context.llm_service,
         ),
     )
     workflow.add_node(
@@ -902,7 +820,6 @@ def create_strategy_rd_subgraph(
             _reflection_node,
             research_agent=research_agent,
             logger=logger,
-            llm_service=context.llm_service,
         ),
     )
     workflow.add_node(
