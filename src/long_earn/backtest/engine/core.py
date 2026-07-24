@@ -21,7 +21,7 @@ from long_earn.backtest.domain.entities import (
     SignalEvent,
 )
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
-from long_earn.backtest.engine.ml_strategy import TimeSeriesSplit
+from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.backtest.engine.visibility import VisibilityGuard

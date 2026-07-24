@@ -37,13 +37,13 @@ from long_earn.backtest.engine.dsl import (
 from long_earn.backtest.engine.ml_strategy import (
     FeatureEngine,
     MLSignalStrategy,
-    TimeSeriesSplit,
     compute_atr,
     compute_bollinger_bands,
     compute_macd,
     compute_rsi,
 )
 from long_earn.backtest.engine.strategy import BaseStrategy
+from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.models import BacktestResult
 
 __all__ = [
