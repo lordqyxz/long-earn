@@ -47,7 +47,7 @@ def mock_conn_with_old_table() -> duckdb.DuckDBPyConnection:
     """)
     # 插入 3 行旧数据（old_rows 被 DuckDB SELECT FROM 引用，ruff F841 误报）
     old_rows = pd.DataFrame(
-        [  # noqa: F841
+        [
             {
                 "symbol": "600519.SH",
                 "report_date": "2024-09-30",

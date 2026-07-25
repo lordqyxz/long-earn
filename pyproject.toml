@@ -76,6 +76,11 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "src/long_earn/backtest/data/ciccwm_client.py" = ["PLC0415", "PLR2004"]
 "src/long_earn/backtest/data/ciccwm_provider.py" = ["PLR2004", "ARG002"]
 "src/long_earn/backtest/data/akshare_provider.py" = ["ARG002"]
+# CLI 故意使用延迟 import（避免 --help 加载整个应用），与 tests//scripts/ 同策略
+# download 子命令参数多为 typer Option 声明，PLR0913 不适用
+"src/long_earn/cli.py" = ["PLC0415", "PLR0913"]
+# 数据下载服务：start_date 保留 for API 一致性；run/download 签名参数多属设计选择
+"src/long_earn/services/data_ingestion_service.py" = ["ARG002", "PLR0913"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

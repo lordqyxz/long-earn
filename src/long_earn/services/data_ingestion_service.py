@@ -207,7 +207,9 @@ class DataIngestionService:
             symbols, end_date, start_date
         )
         if not full_missing and not stale:
-            self._info(f"[行情][增量] 全部 {len(symbols)} 只行情已齐到 {end_date}，跳过下载")
+            self._info(
+                f"[行情][增量] 全部 {len(symbols)} 只行情已齐到 {end_date}，跳过下载"
+            )
             return
 
         # 阶段1：待补股票（只缺几天，快速）
@@ -361,7 +363,7 @@ class DataIngestionService:
         end_date: str,
         kind: str,
         batch_size: int,
-        max_workers: int,  # noqa: ARG002 保留参数兼容签名，单线程直接调用忽略
+        max_workers: int,  # 保留参数兼容签名，单线程直接调用忽略
     ) -> None:
         """单线程串行下载+写入：主进程直接调 xtquant 下载一批 → 写入一批 → 下一批。
 
@@ -436,7 +438,9 @@ class DataIngestionService:
         """
         try:
             table_dfs = self.data_provider._fetch_financials_by_table(
-                batch, start_date, end_date,
+                batch,
+                start_date,
+                end_date,
             )
             if not table_dfs:
                 return False
@@ -539,23 +543,21 @@ class DataIngestionService:
         self._info("=" * 60)
 
         if not self.is_available:
-            self._warning(
-                "xtquant 不可用，无法下载数据。请确保 miniQMT 客户端已连接。"
-            )
+            self._warning("xtquant 不可用，无法下载数据。请确保 miniQMT 客户端已连接。")
             return {"status": "error", "reason": "xtquant_unavailable"}
 
         date_str = end.replace("-", "")
 
-        price_symbols, financial_symbols = self.get_universe_symbols(
-            universe, date_str
-        )
+        price_symbols, financial_symbols = self.get_universe_symbols(universe, date_str)
         if not price_symbols:
             self._warning("股票池为空，终止")
             return {"status": "error", "reason": "empty_universe"}
 
         # 行情：全量 or 智能增量
         if full:
-            self.download_prices(price_symbols, start_date, end, price_batch, max_workers)
+            self.download_prices(
+                price_symbols, start_date, end, price_batch, max_workers
+            )
         else:
             self.download_prices_incremental(
                 price_symbols, start_date, end, price_batch, max_workers

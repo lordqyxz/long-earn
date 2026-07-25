@@ -11,7 +11,6 @@ from long_earn.core.chat_prompt_loader import MarkdownChatPromptTemplate
 from long_earn.event_inference.agents import LLMEventExtractor, LLMEventPropagator
 from long_earn.event_inference.collectors.base import CollectedItem
 
-
 # ── extract_prompt.md ────────────────────────────────────────────────
 
 
