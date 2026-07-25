@@ -12,12 +12,9 @@ _MAX_EXPERIENCES = 2
 
 _DEVELOP_SOURCE_FILES = [
     "01_data.md",
-    "02_strategy.md",
-    "03_signals.md",
+    "02_yaml_dsl.md",
     "04_backtest.md",
     "05_metrics.md",
-    "06_errors.md",
-    "07_example.md",
 ]
 
 

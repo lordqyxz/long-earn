@@ -316,3 +316,74 @@ Phase 1-3 的 JSONL 全量重写暴露 7 处工程缺陷，Phase 4 一次性修�
 ## 对 CLAUDE.md TODO 的影响
 
 CLAUDE.md "记忆系统" 4 项 TODO（语义增强检索/记忆压缩/记忆衰减/冲突检测）在 TODO.md 标记为"v2.0 完成"，但正是被替换的旧实现。Phase 1 完成后重新标记为"v3.0 物质-运动架构重构"。Phase 4 持久化升级不新增 TODO 项。
+
+---
+
+## 附录：PIT 数据修复（原独立 ADR-007 分支，已并入）
+
+> 原文件 `007-real-announce-date-pit.md` 与本 ADR 共用 007 编号但主题不同。为消除编号冲突，将其作为附录并入本文件。状态：已确认（2026-07-09）— Phase 1-3 全部实施。
+
+### 背景
+
+- **Phase 1：PIT 修复**：原数据层 PIT 契约使用 `report_date + 60天固定延迟`，审计发现 AUDIT-P0-01：年报 report_date=12-31，法定披露截止次年 4-30（120 天），60 天延迟导致 3-01 至 4-29 约 40 个交易日的未来函数泄漏。调研发现 akshare 已返回 `公告日期`、miniqmt 已返回 `m_anntime`，但代码完全忽略。
+- **Phase 2：接口统一**：ciccwm/akshare 财务降级分支增加维护成本，且字段口径与 miniqmt 不一致。用户决策：屏蔽 ciccwm/akshare 财务降级，聚焦 miniqmt 打通系统核心目标。
+- **Phase 3：全量字段**：原系统只提取 7 个财务字段（revenue/net_profit/eps/roe/gross_margin/net_profit_yoy/revenue_yoy），xtquant 提供的 8 张财务表仅用了 Income 和 Balance 两张。大量可用字段未入库。
+
+### 决策
+
+#### Phase 1：announce_date 必填，无回退
+
+**announce_date 必填，无回退。** `_quarterly_to_daily` 只有一个逻辑：`visible_from = announce_date`。
+
+- 简洁第一：`_quarterly_to_daily` 不再有 `publication_lag_days` 参数，不再有回退分支
+- 不兼容旧数据：缓存表直接 DROP + CREATE，旧数据全量重建
+- Provider 自治：各 provider 自己负责提取/构造 announce_date 字段（miniqmt 从 `m_anntime` 字段提取，**唯一保留的财务路径**）
+
+```python
+def _quarterly_to_daily(self, quarterly_df, symbols, trading_dates, fields) -> pd.DataFrame:
+    for _, row in symbol_data.iterrows():
+        visible_from = pd.to_datetime(row["announce_date"])  # 唯一逻辑，无回退
+        mask = daily.index >= visible_from
+        ...
+```
+
+#### Phase 2：财务接口统一到 miniqmt
+
+- `CompositeDataProvider` 的 `get_financial_panel` 只走 miniqmt 路径
+- `akshare_provider.py` / `ciccwm_provider.py` **删除全部财务方法**（`get_financial_panel` / `_quarterly_to_daily` / `_normalize_finance_items` / `_lag_by_report_type` / `CICCWM_FINANCIAL_FIELD_MAP`）
+- ciccwm 保留 `MarketIntelligenceProvider` 接口（资金流向/排行/板块/资讯）
+- akshare 保留行情/成分股降级能力
+
+#### Phase 3：四表合并全量字段提取（FINANCIAL_FIELD_MAP，18 字段）
+
+```python
+FINANCIAL_FIELD_MAP = {
+    # 利润表（Income）原始字段
+    "revenue": "revenue", "net_profit": "net_profit", "eps": "eps", "research_expenses": "research_expenses",
+    # 资产负债表（Balance）原始字段
+    "total_equity": "total_equity", "total_assets": "total_assets", "total_liabilities": "total_liabilities",
+    # 现金流量表（CashFlow）原始字段
+    "ocf": "ocf", "capex": "capex",
+    # 每股指标/主要指标表（Pershareindex）预计算字段
+    "bps": "bps", "ocf_per_share": "ocf_per_share", "debt_to_assets": "debt_to_assets",
+    "net_profit_margin": "net_profit_margin", "roe_weighted": "roe_weighted",
+    # 衍生指标（Pershareindex 预计算优先，手算兜底）
+    "net_profit_yoy": "net_profit_yoy", "revenue_yoy": "revenue_yoy", "roe": "roe", "gross_margin": "gross_margin",
+}
+```
+
+miniqmt 的 `_fetch_financials` 并行获取四张表，以 Income 表为基础按 `(symbol, report_date)` 对齐。`_compute_derived_financials` 改为**手算兜底模式**：优先使用 Pershareindex 表的预计算值（监管口径，比手算更准确），仅当预计算值缺失（NaN）时才用手算兜底。
+
+**缓存表结构（22 列，DROP + CREATE）**：`financial_quarterly` 含 `symbol`/`report_date`/`announce_date` NOT NULL + 18 个财务字段 + 主键 `(symbol, report_date)`。
+
+### 影响范围
+
+- Phase 1-2（提交 f2708c3 + 851c3dc）：`cache.py` / `miniqmt_provider.py` / `akshare_provider.py` / `ciccwm_provider.py` / `provider.py` / `test_provider_pit_contract.py`
+- Phase 3：`miniqmt_provider.py`（FINANCIAL_FIELD_MAP 7→18 字段）/ `cache.py`（表结构 10→22 列）/ `polars_adapter.py`（删除硬编码 4 字段）/ `strategy_develop_prompt.md`（字段白名单 7→23 字段）/ `test_provider_pit_contract.py`（C5 字段提取契约测试）
+
+### 验证
+
+- 全量单元测试通过（549 passed）
+- lint-imports 架构契约通过（3 kept, 0 broken）
+- ruff check 全部通过
+- 端到端回测验证无 PIT 泄漏（Phase 1 已验证）
