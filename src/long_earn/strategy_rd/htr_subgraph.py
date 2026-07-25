@@ -559,8 +559,6 @@ def _executor_node(  # noqa: PLR0913
         if node is None:
             continue
 
-        node.status = NodeStatus.RUNNING
-
         # 复用现有 optimize 逻辑
         strategy = state.get("strategy", {}) or {}
         suggestions = [node.hypothesis]
@@ -582,10 +580,11 @@ def _executor_node(  # noqa: PLR0913
             )
 
             # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
+            # tree.status 更新由 _backpropagate_node 根据 rejected 标志统一处理
+            # （并行 fan-out 时各 executor_single 不写 tree，避免 last_value 覆盖）
             if gate is not None:
                 acceptance = gate.evaluate(previous_backtest, backtest_result)
                 if not acceptance.accepted:
-                    node.status = NodeStatus.FAILED
                     if logger:
                         logger.warning(
                             f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
@@ -603,13 +602,7 @@ def _executor_node(  # noqa: PLR0913
 
             dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
-            tree.update_evidence(
-                node_id=node_id,
-                dev_score=dev_score,
-                backtest_result=backtest_result,
-                insight=f"dev sharpe={dev_score:.2f}",
-            )
-
+            # tree.update_evidence 移到 _backpropagate_node（并行安全单点更新）
             results.append(
                 {
                     "node_id": node_id,
@@ -624,7 +617,6 @@ def _executor_node(  # noqa: PLR0913
                 logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
 
         except Exception as e:
-            node.status = NodeStatus.FAILED
             if logger:
                 logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
             results.append(
@@ -635,7 +627,6 @@ def _executor_node(  # noqa: PLR0913
             )
 
     return {
-        "hypothesis_tree": tree.serialize(),
         "executor_results": results,
         "backtest_result": results[0].get("backtest_result", {}) if results else {},
         "strategy_yaml": results[0].get("strategy_yaml", "") if results else "",
@@ -667,7 +658,8 @@ def _executor_single_node(  # noqa: PLR0913
     if node is None:
         return {"executor_results": [{"node_id": node_id, "error": "节点不存在"}]}
 
-    node.status = NodeStatus.RUNNING
+    # tree 只读：并行 fan-out 时各 executor_single 不写 tree（避免 last_value 覆盖）。
+    # tree.status / update_evidence 由 _backpropagate_node 统一处理。
     strategy = state.get("strategy", {}) or {}
     suggestions = [node.hypothesis]
     previous_backtest = state.get("backtest_result", {})
@@ -689,7 +681,6 @@ def _executor_single_node(  # noqa: PLR0913
         if gate is not None:
             acceptance = gate.evaluate(previous_backtest, backtest_result)
             if not acceptance.accepted:
-                node.status = NodeStatus.FAILED
                 if logger:
                     logger.warning(
                         f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
@@ -701,39 +692,26 @@ def _executor_single_node(  # noqa: PLR0913
                     "rejection_reason": acceptance.reason,
                     "optimized_strategy": optimized,
                 }
-                return {
-                    "executor_results": [result],
-                    "hypothesis_tree": tree.serialize(),
-                }
+                return {"executor_results": [result]}
 
         dev_score = float(backtest_result.get("sharpe_ratio", 0))
-
-        tree.update_evidence(
-            node_id=node_id,
-            dev_score=dev_score,
-            backtest_result=backtest_result,
-            insight=f"dev sharpe={dev_score:.2f}",
-        )
 
         result = {
             "node_id": node_id,
             "dev_score": dev_score,
             "backtest_result": backtest_result,
             "strategy_yaml": strategy_yaml,
+            "optimized_strategy": optimized,
         }
         if logger:
             logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
 
     except Exception as e:
-        node.status = NodeStatus.FAILED
         if logger:
             logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
         result = {"node_id": node_id, "error": str(e)}
 
-    return {
-        "executor_results": [result],
-        "hypothesis_tree": tree.serialize(),
-    }
+    return {"executor_results": [result]}
 
 
 def _backpropagate_node(
@@ -757,6 +735,19 @@ def _backpropagate_node(
         node = tree.get_node(node_id)
         if node is None:
             continue
+
+        # tree evidence/status 更新（从 _executor_node/_executor_single_node 迁移来）
+        # 并行 fan-out 时各 executor 不写 tree，此处单点更新避免 last_value 覆盖。
+        if r.get("rejected") or r.get("error"):
+            tree.update_evidence(node_id=node_id, status=NodeStatus.FAILED)
+        else:
+            dev_score = float(r.get("dev_score", 0.0))
+            tree.update_evidence(
+                node_id=node_id,
+                dev_score=dev_score,
+                backtest_result=r.get("backtest_result", {}) or {},
+                insight=f"dev sharpe={dev_score:.2f}",
+            )
 
         parent = tree.get_node(node.parent_id) if node.parent_id else None
         if parent is None:

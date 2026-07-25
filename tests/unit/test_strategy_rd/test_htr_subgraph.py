@@ -328,6 +328,89 @@ class TestMaxSelectFanOut:
         assert subgraph is not None
 
 
+class TestParallelFanOutGraphInvoke:
+    """层 5 修复回归：真实 graph.invoke 触发 executor_single 并行写。
+
+    验证 state.py 的 _collect_executor_results reducer 生效（修 Annotated|None 缺陷）
+    + executor 节点不写 tree + backpropagate 接管 tree 更新（修并行覆盖）。
+    """
+
+    def test_parallel_fanout_invoke_no_crash_and_tree_updated(self):
+        """max_select=2 时 graph.invoke 不崩溃，executor_results 累加 2 项，tree 更新。"""
+        from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
+        from long_earn.strategy_rd.hypothesis_tree import (
+            HypothesisTree,
+            NodeStatus,
+        )
+
+        context = _make_mock_context()
+        context.config.htr_max_select = 2
+        # context.backtest_service 是 MagicMock(spec=BacktestService)，直接设 return_value
+        # （patch BacktestServiceImpl.run 类方法不影响 mock 实例）
+        context.backtest_service.run.return_value = {
+            "sharpe_ratio": 1.3,
+            "total_return": 0.1,
+            "strategy_diagnostics": {"degenerate": False},
+        }
+        # _decide_node 会调 run_oos 取 oos_sharpe，必须返回真实 dict 否则 MagicMock 触发 format 错误
+        context.backtest_service.run_oos.return_value = {"oos_sharpe": 1.5}
+
+        # 拦截所有 LLM 依赖路径，让 graph.invoke 快速跑完一轮
+        with patch(
+            "long_earn.strategy_rd.htr_subgraph.PersonaRegistry.create_all",
+            return_value={},  # 跳过大师 LLM
+        ), patch(
+            "long_earn.strategy_rd.htr_subgraph.HypothesisTreeStore.save",
+            return_value=None,  # 避免沙箱磁盘写入
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.observe",
+            return_value={"observation": "测试观察"},
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.ideate",
+            return_value=[{"hypothesis": "假设A"}, {"hypothesis": "假设B"}],
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.select",
+            return_value=[
+                {"hypothesis": "假设A", "direction": "动量"},
+                {"hypothesis": "假设B", "direction": "反转"},
+            ],
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.optimize_strategy",
+            return_value={"name": "optimized"},
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_develop_agent.StrategyDevelopAgent.develop_strategy",
+            return_value="strategy:\n  name: opt\n",
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.backpropagate_insights",
+            return_value={"insight": "测试洞察"},
+        ), patch(
+            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.decide",
+            return_value="stop",  # 单轮停止
+        ):
+            graph = create_htr_subgraph(context)
+            result = graph.invoke(
+                {"query": "测试并行"}, config={"recursion_limit": 50}
+            )
+
+        # 1. 不崩溃（走到这里即证明 InvalidUpdateError 已修复）
+        # 2. executor_results 通过 reducer 累加 2 项
+        exec_results = result.get("executor_results", [])
+        assert len(exec_results) == 2, f"期望 2 个并行结果，实际 {len(exec_results)}"
+        node_ids = {r.get("node_id") for r in exec_results}
+        assert len(node_ids) == 2, "两个 result 应对应不同 node_id"
+
+        # 3. hypothesis_tree 在 backpropagate 后含 2 个子节点，evidence 已更新
+        #    backpropagate 标记 VALIDATED；_decide_node 跑 OOS 通过合并门会把
+        #    最佳节点升级为 MERGED（run_oos mock 返回 oos_sharpe=1.5 > None+threshold）
+        tree = HypothesisTree.deserialize(result["hypothesis_tree"])
+        children = [n for n in tree.all_nodes() if n.parent_id == "root"]
+        assert len(children) == 2, "tree 应含 2 个子节点"
+        for child in children:
+            assert child.dev_score == 1.3, f"子节点 {child.id} dev_score 应已更新"
+            assert child.status in (NodeStatus.VALIDATED, NodeStatus.MERGED)
+            assert child.insight == "测试洞察"
+
+
 class TestPersonaIntegration:
     """ADR-012: HTR 集成 PersonaRegistry（ideate + backpropagate）。"""
 
