@@ -37,6 +37,8 @@ def _make_mock_context() -> RuntimeContext:
     mock_config.init_dir = "./init"
     mock_config.max_iterations = 1
     mock_config.htr_max_select = 1
+    # ADR-010: htr_max_cycles 从 config 注入 _decide_node（必须为 int，否则 max() 报错）
+    mock_config.htr_max_cycles = 10
     mock_config.backtest_start_date = "2020-01-01"
     mock_config.backtest_end_date = "2023-12-31"
     mock_config.train_start_date = "2022-01-01"
@@ -92,6 +94,51 @@ class TestDecideNodeLogic:
         }
         result = _decide_node(state, agent, backtest_service, connector=None, logger=None)  # type: ignore[arg-type]
         assert result["result"] == "stop"
+
+    def test_max_cycles_config_override(self):
+        """max_cycles 参数应能覆盖默认 HTR_MAX_CYCLES。
+
+        验证 ADR-010 修复：htr_max_cycles 不再硬编码，从 config 注入。
+        设 max_cycles=3，iteration=3 应触发停止（默认 10 不会停止）。
+        """
+        from long_earn.strategy_rd.htr_subgraph import _decide_node
+
+        tree = HypothesisTree(run_id="test_cfg")
+        tree.init_root()
+
+        context = _make_mock_context()
+        from long_earn.strategy_rd.agents.strategy_research_agent import (
+            StrategyResearchAgent,
+        )
+
+        agent = StrategyResearchAgent(context=context)
+        backtest_service = context.require_backtest()
+
+        # iteration=3 + max_cycles=3 → 应停止（iteration >= max_cycles）
+        state = {
+            "hypothesis_tree": tree.serialize(),
+            "iteration": 3,
+            "executor_results": [],
+        }
+        result = _decide_node(
+            state,
+            agent,
+            backtest_service,
+            connector=None,
+            logger=None,  # type: ignore[arg-type]
+            max_cycles=3,
+        )
+        assert result["result"] == "stop"
+
+    def test_subgraph_reads_htr_max_cycles_from_config(self):
+        """create_htr_subgraph 应从 config.htr_max_cycles 读取最大周期数。"""
+        from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
+
+        context = _make_mock_context()
+        # 修改 htr_max_cycles 为较小值，验证子图仍能编译
+        context.config.htr_max_cycles = 5
+        subgraph = create_htr_subgraph(context)
+        assert subgraph is not None
 
     def test_max_depth_forces_stop(self):
         """达到最大深度时必须强制停止。"""

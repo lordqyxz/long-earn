@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""寻找最近6个月收益率最佳的策略 — 程序性根据数据实际覆盖动态设定窗口。
+"""寻找最近6个月收益率最佳的策略 — 尊重 config 三段式数据分割规范。
 
 流程：
-1. 查询 DuckDB 缓存数据实际覆盖范围（最新交易日、股票数、财务表是否非空）。
-2. 据此程序性设定窗口（非硬编码默认）：
-   - 训练集（研发寻优）= 数据最新日往前 3 年，再留出最近 6 个月作 held-out
-   - 最近 6 个月评估窗口 = 数据最新日往前 6 个月 ~ 数据最新日
+1. 查询 DuckDB 缓存数据实际覆盖范围（仅作日志展示，不覆盖 config 日期）。
+2. 使用 AppConfig.from_env() 默认值（或环境变量 TRAIN_START/TEST_END/VALIDATION_*
+   等）作为三段式数据分割窗口，**严格遵守量化数据分割规范**，不得交叉使用。
 3. 根据财务表是否非空，自动选择 idea（纯量价 vs 量价+基本面）。
-4. 覆盖 AppConfig 日期字段后启动策略研发循环。
+4. 启动策略研发循环。
 5. 循环产出 best_strategy.yaml + strategy_research_results.json。
+
+可选：``--auto-window`` 标志根据数据最新日动态推导窗口（覆盖 config），
+仅用于探索性分析，默认关闭以遵守数据分割规范。
 
 checkpoint 机制（默认启用）：
 - 用 LangGraph ``SqliteSaver`` 持久化每轮子图状态到 ``checkpoints.sqlite``。
@@ -18,6 +20,7 @@ checkpoint 机制（默认启用）：
 用法:
     uv run python scripts/find_best_strategy.py
     uv run python scripts/find_best_strategy.py --max-rounds 3 -y
+    uv run python scripts/find_best_strategy.py --auto-window -y  # 动态窗口（覆盖 config）
     uv run python scripts/find_best_strategy.py --reset-checkpoint -y  # 清旧 checkpoint 重跑
 """
 
@@ -118,7 +121,7 @@ def pick_idea(coverage: dict) -> str:
     )
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0912
     import sqlite3
 
     coverage = probe_data_coverage()
@@ -132,15 +135,23 @@ def main() -> None:
     w = derive_windows(coverage)
     idea = pick_idea(coverage)
 
+    # 默认遵守 config 三段式数据分割规范（不覆盖 config 日期）
+    # --auto-window 标志才启用动态窗口覆盖（探索性分析用）
+    auto_window = "--auto-window" in sys.argv
+
     print()
-    print("程序推导窗口（基于数据最新日，非硬编码默认）")
+    print("数据分割窗口")
     print("-" * 64)
-    print(f"  训练集（研发寻优）: {w['train_start']} ~ {w['train_end']}")
-    print(f"  最近6个月评估窗口: {w['recent_start']} ~ {w['recent_end']}")
+    if auto_window:
+        print("  [动态窗口模式 --auto-window]")
+        print(f"  训练集（研发寻优）: {w['train_start']} ~ {w['train_end']}")
+        print(f"  最近6个月评估窗口: {w['recent_start']} ~ {w['recent_end']}")
+    else:
+        print("  [config 三段式分割（遵守数据分割规范）]")
     print(f"  idea: {idea[:60]}...")
     print("=" * 64)
 
-    # 构造 AppConfig 并覆盖日期字段
+    # 构造 AppConfig
     from long_earn.config import AppConfig
     from long_earn.context_init import initialize_context
     from long_earn.core.storage import (
@@ -151,14 +162,29 @@ def main() -> None:
     from long_earn.services.strategy_research_service import StrategyResearchService
 
     config = AppConfig.from_env()
-    config.train_start_date = w["train_start"]
-    config.train_end_date = w["train_end"]
-    config.test_start_date = w["train_start"]  # 研发循环 history 窗口用 train 区间
-    config.test_end_date = w["train_end"]
-    config.validation_start_date = w["recent_start"]
-    config.validation_end_date = w["recent_end"]
-    config.backtest_start_date = w["train_start"]
-    config.backtest_end_date = w["train_end"]
+
+    if auto_window:
+        # 仅在 --auto-window 时覆盖 config 日期（探索性分析用）
+        config.train_start_date = w["train_start"]
+        config.train_end_date = w["train_end"]
+        config.test_start_date = w["train_start"]
+        config.test_end_date = w["train_end"]
+        config.validation_start_date = w["recent_start"]
+        config.validation_end_date = w["recent_end"]
+        config.backtest_start_date = w["train_start"]
+        config.backtest_end_date = w["train_end"]
+
+    # 始终确保回测区间默认为训练集
+    config.backtest_start_date = config.train_start_date
+    config.backtest_end_date = config.test_end_date
+
+    print()
+    print("实际使用窗口")
+    print("-" * 64)
+    print(f"  训练集: {config.train_start_date} ~ {config.train_end_date}")
+    print(f"  测试集: {config.test_start_date} ~ {config.test_end_date}")
+    print(f"  验证集: {config.validation_start_date} ~ {config.validation_end_date}")
+    print("=" * 64)
 
     max_rounds = 3
     max_iterations = 2
@@ -207,7 +233,7 @@ def main() -> None:
                 max_iterations=max_iterations,
                 min_improvement=0.005,
                 checkpointer=checkpointer,
-                thread_id_prefix=f"find-best-{w['recent_start']}",
+                thread_id_prefix=f"find-best-{config.validation_start_date}",
             )
         finally:
             conn.close()

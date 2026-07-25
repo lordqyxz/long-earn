@@ -104,7 +104,10 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     # ADR-014 阶段 C：StockServiceImpl 注入 Connector（get_financial_metrics 走概念查询）
     stock_service = StockServiceImpl(config, logger, connector=connector)
     backtest_service = BacktestServiceImpl(
-        config, logger, data_provider=data_connector
+        config,
+        logger,
+        data_provider=data_connector,
+        max_workers=getattr(config, "max_workers", 0),
     )
 
     return RuntimeContext(

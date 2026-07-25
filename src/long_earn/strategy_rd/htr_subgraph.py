@@ -838,12 +838,13 @@ def _evaluate_oos_and_merge(  # noqa: PLR0913
     return "continue"
 
 
-def _decide_node(
+def _decide_node(  # noqa: PLR0913
     state: State,
     research_agent: StrategyResearchAgent,
     backtest_service: BacktestService,
     connector: Connector | None,
     logger: LoggerService,
+    max_cycles: int = HTR_MAX_CYCLES,
 ) -> dict:
     """决策阶段 — 决定 merge/continue/stop。
 
@@ -852,6 +853,10 @@ def _decide_node(
 
     ADR-014 任务2：注入 Connector 时，用图谱查相似失败案例注入 tree_state，
     LLM 决策时能看到"历史上类似假设的失败原因"。
+
+    Args:
+        max_cycles: HTR 六步循环最大周期数（从 config.htr_max_cycles 注入），
+            达到时强制停止。默认 HTR_MAX_CYCLES=10。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -890,7 +895,7 @@ def _decide_node(
         "best_dev_score": max((r.get("dev_score", 0) for r in results), default=0.0),
         "best_oos_score": oos_score,
         "cycles_used": iteration,
-        "max_cycles": HTR_MAX_CYCLES,
+        "max_cycles": max_cycles,
     }
 
     # ADR-014 任务2：图谱查相似失败案例（注入 tree_state 供 LLM 决策参考）
@@ -926,7 +931,7 @@ def _decide_node(
     llm_action = research_agent.decide(tree_state)
     # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
     if (
-        iteration >= HTR_MAX_CYCLES
+        iteration >= max_cycles
         or tree_state["max_depth"] >= HTR_MAX_DEPTH
         or llm_action == "stop"
     ):
@@ -1034,6 +1039,8 @@ def create_htr_subgraph(
         "backpropagate",
         partial(_backpropagate_node, research_agent=research_agent, logger=logger),
     )
+    # ADR-010: max_cycles 可配置（HTR_MAX_CYCLES），控制 HTR 循环最大周期数
+    htr_max_cycles = max(1, getattr(context.config, "htr_max_cycles", HTR_MAX_CYCLES))
     workflow.add_node(
         "decide",
         partial(
@@ -1042,6 +1049,7 @@ def create_htr_subgraph(
             backtest_service=backtest_service,
             connector=connector,
             logger=logger,
+            max_cycles=htr_max_cycles,
         ),
     )
     workflow.add_node(

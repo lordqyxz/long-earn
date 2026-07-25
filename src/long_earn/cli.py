@@ -20,11 +20,10 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
 import typer
-from loguru import logger
 from dotenv import load_dotenv
+from loguru import logger
 
 load_dotenv()
 
@@ -58,7 +57,7 @@ _DEFAULT_IDEA = "研究一个基于净利润增长和ROE的选股策略，要求
 
 @app.command()
 def research(
-    idea: Optional[str] = typer.Argument(
+    idea: str | None = typer.Argument(
         None,
         help="初始交易策略或交易思路（缺省时使用默认思路）",
     ),
@@ -111,7 +110,7 @@ def research(
 
 def _print_research_banner(
     idea: str,
-    config: "object",
+    config: object,
     history_window: str,
     recent_window: str,
 ) -> None:
