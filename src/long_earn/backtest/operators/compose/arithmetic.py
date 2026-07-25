@@ -1,6 +1,6 @@
 """二元算术组合算子：``lhs <op> rhs``，op ∈ + - * /。"""
 
-from typing import ClassVar, Literal, Union
+from typing import ClassVar, Literal
 
 import polars as pl
 from pydantic import field_validator
@@ -13,7 +13,7 @@ _OPS: dict[str, str] = {"+": "add", "-": "sub", "*": "mul", "/": "truediv"}
 
 # rhs 可以是列名（str）或标量（int/float）。LLM 生成策略时常需要标量乘法
 # （如年化乘子 15.87、归一化系数 100 等），仅支持列名会让大量合理策略失败。
-RhsType = Union[str, int, float]
+RhsType = str | int | float
 
 
 class ArithmeticParams(OperatorParams):

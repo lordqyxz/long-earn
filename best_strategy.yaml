@@ -1,18 +1,34 @@
+# best_strategy.yaml — 系统当前最佳策略（ADR-009 收尾：算子目录 DSL）
+# 20日动量选股策略：选近20日收益率为正且 momentum_5 排名前 5 的股票等权持仓
 name: Momentum20Strategy
-description: 20日动量选股策略 - 选近20日收益率最高的5只股票等权持仓
+description: 20日动量选股策略 - operator_factors + filter + rank
 universe:
   type: csi300
   rebalance_freq: 20D
-factors:
-  momentum_20: close / shift(close, 20) - 1
-  momentum_5: close / shift(close, 5) - 1
+operator_factors:
+  - op: returns
+    alias: momentum_20
+    params:
+      field: close
+      period: 20
+  - op: returns
+    alias: momentum_5
+    params:
+      field: close
+      period: 5
 signals:
-  - type: filter
-    condition: momentum_20 > 0
-  - type: rank
-    by: momentum_20
-    ascending: false
-    top: 5
+  - type: operator
+    op: filter_threshold
+    params:
+      field: momentum_20
+      op: ">"
+      value: 0
+  - type: operator
+    op: rank_top
+    params:
+      field: momentum_5
+      top: 5
+      ascending: false
 weights:
   method: equal
 risk_control:

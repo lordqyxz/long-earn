@@ -1,8 +1,8 @@
-"""算子目录策略执行器 —— 把算子目录接入策略执行路径。
+"""算子目录策略执行器 —— 策略 DSL 唯一执行路径（ADR-009 收尾）。
 
-本模块是"调整系统架构"的关键连接件：策略 DSL 的算子引用步骤（``operator_factors``
-与 ``type: operator`` 信号步骤）经此执行器跑在算子目录上，**绕过旧的表达式求值器**
-(``SafeExpressionEvaluator``)。
+本模块是策略 DSL 的算子引用步骤（``operator_factors`` 与 ``type: operator``
+信号步骤）的唯一执行器。ADR-009 收尾后旧的表达式求值器
+（``SafeExpressionEvaluator``）已退役，所有策略必须走算子目录。
 
 执行语义（因果性由算子目录保证，与 :mod:`visibility` 同源）：
 1. 在 polars 历史面板（``timestamp <= 当前时刻``，由 VisibilityGuard 保证）上依次

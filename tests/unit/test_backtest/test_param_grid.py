@@ -25,16 +25,15 @@ class TestRenderTemplate:
         assert "threshold:" in result  # 空串替换后只剩 key
 
     def test_code_braces_not_affected(self):
-        template = 'factors:\n  score: "close / shift(close, {{ lookback }}) - 1"'
+        # 模板里的 {{ }} 是 jinja2 占位符，YAML 里的其他花括号不应被误伤
+        template = "operator_factors:\n  - op: returns\n    params: { field: close, period: {{ lookback }} }"
         result = render_template(template, {"lookback": 20})
-        assert "shift(close, 20)" in result
+        assert "period: 20" in result
 
 
 class TestApplyStructParams:
     def test_top_level_field(self):
-        dsl = parse_strategy_yaml(
-            "name: Test\nuniverse:\n  type: csi300\n"
-        )
+        dsl = parse_strategy_yaml("name: Test\nuniverse:\n  type: csi300\n")
         result = apply_struct_params(dsl, {"name": "NewName"})
         assert result.name == "NewName"
 
@@ -42,9 +41,7 @@ class TestApplyStructParams:
         dsl = parse_strategy_yaml(
             "name: Test\nuniverse:\n  type: csi300\nrisk_control:\n  stop_loss: 0.15\n"
         )
-        result = apply_struct_params(
-            dsl, {"risk_control.stop_loss": 0.08}
-        )
+        result = apply_struct_params(dsl, {"risk_control.stop_loss": 0.08})
         assert result.risk_control.stop_loss == 0.08
 
     def test_no_params_returns_copy(self):

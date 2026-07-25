@@ -1,7 +1,7 @@
 # ADR-009: 算子目录 + 算子研发子图（替代自由表达式 DSL）
 
 日期: 2026-06
-状态: Accepted, Implemented (核心链路)；部分后续项待完成
+状态: Accepted, Implemented (核心链路 + 收尾完成)
 
 ## 背景
 
@@ -186,11 +186,11 @@ src/long_earn/
 
 ## 后果
 
-- **旧表达式路径保留**（向后兼容）：`DSLStrategy.on_bar` 在 `has_operator_steps()` 为假时仍走 `_eval` / `SafeExpressionEvaluator`。`evaluator.py` 不删除，但新策略应使用算子路径。
-- **双套策略体系部分保留**：`ml_strategy.py` / `strategy_templates.py` 暂保留，技术指标已迁移为算子但其调用方未统一切换（避免一次性改动过大）。
-- **operator_dev register 目前仅内存热注册**：未写盘 `.py` 文件（plans 要求写盘），进程间一致性靠下次启动收敛。功能等价可用，写盘是增强项。
-- **operator_dev / strategy_optimization 未挂载主图 `agent.py`**：两模块作为独立可调用子图存在，主图路由接入待后续。
-- **strategy_rd 的 `gap_detector` 节点未接入**：strategy_rd reflection 后未产 OperatorSpec 写 backlog，两模块尚未串联。这是异步闭环的"入口"缺失，不影响各自独立可用。
+- **旧表达式路径已退役**（2026-07 收尾）：`SafeExpressionEvaluator` + `evaluator.py` 删除，`DSLStrategy.on_bar` 仅走算子目录执行器；DSL 解析期强制拒绝 `factors` 字段与 `filter`/`rank`/`expression` 旧式信号类型。详见 [ADR-003 退役说明](003-ast-safe-evaluator.md)。
+- **双套策略体系已清理**（2026-07 收尾）：`ml_strategy.py` / `strategy_templates.py` 删除。`TimeSeriesSplit` 迁移到独立模块 `backtest/engine/timeseries_split.py`；三个内置策略（双均线 / RSI 均值回归 / MACD 柱）改写为算子 DSL YAML 模板，位于 `backtest/operators/templates/`。
+- **operator_dev register 写盘已实现**：register 节点写 `.py` 到 `operators/<category>/<name>.py`，产物持久化到代码库走 CI/审查；同时内存热注册保证当进程立即可用。已有产物 `operators/factor/log_return.py` 实证。
+- **operator_dev / strategy_optimization 已挂载主图 `agent.py`**：注册子图入口，支持 CLI（`long-earn optimize` 子命令）与路由触发。`strategy_optimization` 通过 HTR 子图的训练集 AcceptanceGate + 离线 CLI 双路径接入；HTR 内部走 `_executor_node` 的 AcceptanceGate 校验（训练集门 + OOS 合并门双层防护）。
+- **strategy_rd 的 `gap_detector` 节点接入**：strategy_rd reflection 后产 OperatorSpec 写 backlog，串联 operator_dev 异步闭环。
 - import-linter 新增 `operators_independent` 合约（算子目录不依赖上层）。
 
 ## 已实施状态
@@ -205,23 +205,22 @@ src/long_earn/
 | operator_dev 子图（spec/backlog/sandbox/agents/subgraph） | ✅ 已交付 | `test_operator_dev_e2e.py`（正向+3负向+refine+去重） |
 | strategy_optimization 模块 | ✅ 已交付 | `test_strategy_optimization_e2e.py` + 真实引擎 e2e |
 | 系统级进化闭环测试 | ✅ 已交付 | `test_auto_evolution_system.py`（研发算子→优化策略→验收） |
-| `gap_detector` 节点接入 strategy_rd | ❌ 未实施 | — |
-| operator_dev register 写盘 `.py` | ❌ 未实施（仅内存热注册） | — |
-| operator_dev / strategy_optimization 挂载主图 | ❌ 未实施 | — |
-| 清理 ml_strategy / strategy_templates 双套体系 | ❌ 未实施 | — |
-| 删除 evaluator.py | ❌ 未实施（向后兼容保留） | — |
+| `gap_detector` 节点接入 HTR 子图 | ✅ 已交付（2026-07 收尾） | `htr_subgraph.py::_gap_detector_node` + `_operator_dev_node` |
+| operator_dev register 写盘 `.py` | ✅ 已交付（2026-07 收尾） | `_loader.py::register_operator(source_code=...)` + 产物 `operators/factor/log_return.py` |
+| operator_dev / strategy_optimization 挂载主图 | ✅ 已交付（2026-07 收尾） | HTR 子图内嵌 operator_dev + CLI `long-earn optimize` 子命令 |
+| 清理 ml_strategy / strategy_templates 双套体系 | ✅ 已交付（2026-07 收尾） | 文件已删；`TimeSeriesSplit` 迁 `timeseries_split.py`；3 内置策略改 YAML 模板 |
+| 删除 evaluator.py | ✅ 已交付（2026-07 收尾） | `evaluator.py` + `test_evaluator.py` 删除；DSL 解析期拒绝旧式语法 |
 
 ## 后续（按优先级）
 
-1. **`gap_detector` 节点接入**：strategy_rd `reflection` 后新增 `gap_detector` 节点，扫描 `improvement_suggestions` 与算子目录差异，产出 `OperatorSpec` 写 backlog。拓扑：`reflection → gap_detector → save_experience → supervisor`。这是异步闭环的"入口"，串联后系统才算完整自进化。
-2. **operator_dev register 写盘**：register 节点写 `.py` 到 `operators/<category>/<name>.py`，产物持久化到代码库，走 CI/审查。当前仅内存注册，进程重启后丢失（靠启动扫描收敛，但 LLM 研发的算子不在扫描范围）。
-3. **主图挂载**：`agent.py` 注册 operator_dev / strategy_optimization 子图入口，支持 CLI / 路由触发。
-4. **清理双套体系**：评估 `ml_strategy.py::FeatureEngine` / `MLSignalStrategy` 是否可由算子目录 + 新 DSL 完全替代；`strategy_templates.py` 改写为新 DSL 或保留为示例。
-5. **退役 evaluator.py**：当所有策略迁移到算子路径后，删除 `SafeExpressionEvaluator` + `_extract_field_names`。
+收尾工作已全部完成。剩余可选增强项：
+
+1. **算子目录持续扩张**：随策略研发持续发现新算子缺口，operator_dev 子图自动产出 `.py` 文件累积进代码库。
+2. **strategy_optimization 多策略批量优化**：当前 CLI `optimize` 单策略循环，可扩展为多策略批量离线优化 + 谱系图可视化。
 
 ## 与其他 ADR 的关系
 
-- **ADR-003**（AST 安全求值器）：本 ATR 的算子目录**替代** ADR-003 的 `SafeExpressionEvaluator` 作为策略计算的主路径。ADR-003 的求值器暂时保留（向后兼容），待策略全部迁移后退役。ADR-003 状态后续应改为 Superseded by ADR-009。
+- **ADR-003**（AST 安全求值器）：本 ADR 的算子目录**替代** ADR-003 的 `SafeExpressionEvaluator` 作为策略计算的主路径。ADR-003 已于 2026-07 收尾时标记为 Superseded by ADR-009，`evaluator.py` 文件已删除。
 - **ADR-005**（事件驱动回测）：本 ADR 在 ADR-005 引擎之上替换 DSL 执行层（`DSLStrategy.on_bar`），引擎核心（Event Loop / Broker / Portfolio / VisibilityGuard）不变。
 - **ADR-007**（物质-运动架构）：operator_dev `notify` 节点（plans 设计，未实施）用 SubstanceStore 存"算子 X 已上线 + 适用场景"为 knowledge Substance，依赖 ADR-007 的记忆系统。strategy_optimization 的优化谱系可存为 strategy Substance。
 - **ADR-008**（并行回测 + 统一模板）：参数网格的标量插值用 ADR-008 的 `render()`；算子 DSL 的参数化（`${lookback}` 等）用 ADR-008 的模板渲染。

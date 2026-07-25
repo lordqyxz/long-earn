@@ -82,8 +82,8 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
 - 毛利率：gross_margin
 
 #### 动量因子
-- N日收益率：close / shift(close, N) - 1
-- 波动率：std(close / shift(close, 1) - 1)
+- N日收益率：用 `returns` 算子（operator_factors + op: returns, params: { field: close, period: N }）
+- 波动率：用 `windowed` 算子（op: windowed, params: { field: close, window: N, agg: std }）
 
 #### 估值因子
 - 每股收益：eps
@@ -144,7 +144,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
     ],
     "improvement_directions": [
         "可结合其他因子（如 roe、gross_margin）构建多因子策略",
-        "可考虑加入动量因子（close / shift(close, 20) - 1）",
+        "可考虑加入动量因子（用 returns 算子算 20 日收益率）",
         "可调整阈值和选股数量优化表现"
     ]
 }

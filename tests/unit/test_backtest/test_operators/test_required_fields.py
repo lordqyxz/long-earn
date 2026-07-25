@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-from long_earn.backtest.operators.factor.shift import Shift, ShiftParams
-from long_earn.backtest.operators.technical.sma_ema import SMA, SMAParams
 from long_earn.backtest.operators.compose.arithmetic import (
     Arithmetic,
     ArithmeticParams,
 )
+from long_earn.backtest.operators.factor.shift import Shift, ShiftParams
+from long_earn.backtest.operators.technical.sma_ema import SMA, SMAParams
 
 
 class TestRequiredFields:
