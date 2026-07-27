@@ -1,7 +1,7 @@
 # ADR-003: AST 白名单表达式求值替代 eval()
 
 日期: 2024-05
-状态: 已采纳
+状态: Superseded by ADR-009（2026-07 退役）
 
 ## 背景
 
@@ -27,3 +27,14 @@
 - 某些 numpy/pandas 高级用法可能不被支持（如 `df.apply(lambda ...)`）
 - 比 `eval()` 稍慢（AST 遍历开销，但回测场景下可忽略）
 - 需要维护白名单和 AST 节点处理逻辑
+
+## 退役说明（2026-07）
+
+ADR-009 算子目录已全面落地为策略 DSL 的唯一执行路径，本 ADR 的 `SafeExpressionEvaluator` 正式退役：
+
+- **删除文件**：`backtest/engine/evaluator.py` + 对应测试 `tests/unit/test_backtest/test_evaluator.py` 已删除。
+- **DSL 收窄**：`backtest/engine/dsl.py` 移除 `factors` 字段、`filter`/`rank`/`expression` 信号类型、`custom_formula`/`signal` 权重方法，解析期强制拒绝旧式语法。
+- **策略执行路径统一**：`DSLStrategy.on_bar` 仅走算子目录执行器（`OperatorStrategyExecutor`），不再有 `_eval` 分支。
+- **因果性保证迁移**：旧路径靠 AST 白名单"控制可计算什么"保证安全；新路径靠 `prove_causality`（数学证明未来扰动不变性）+ 算子目录白名单（控制可引用哪些算子）共同保证，安全模型从"表达式审查"升级为"数学证明 + 算子审查"。
+
+详见 [ADR-009](009-operator-catalog-and-operator-dev-subgraph.md)。

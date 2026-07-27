@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+"""对比当前最佳策略与候选新策略的回测指标（多核并行加速版）。
+
+严格遵守量化数据分割规范：
+- 训练集（2022-01-01 ~ 2024-12-31）：策略研发、参数寻优，可自由使用
+- 测试集（2025-01-01 ~ 2026-03-24）：仅 HTR 合并门，本脚本不触碰
+- 验证集（2026-03-25 ~ 2026-06-25）：开发阶段禁止使用
+
+加速方案：
+1. ParallelRunner 预取数据一次，SharedMemory 共享给两个策略
+2. ProcessPoolExecutor 并行回测基准 + 候选（2 核同时跑）
+3. worker 进程日志降噪（ERROR 级别），减少 I/O 开销
+
+用法:
+    uv run python scripts/compare_strategies.py
+    uv run python scripts/compare_strategies.py --max-workers 4
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "src"))
+
+# 主进程日志降噪（减少 I/O 开销）
+from loguru import logger as _loguru_logger  # noqa: E402
+
+_loguru_logger.remove()
+_loguru_logger.add(sys.stderr, level="ERROR")
+
+from long_earn.backtest.data.cache import DataCache  # noqa: E402
+from long_earn.backtest.data.polars_adapter import (  # noqa: E402
+    PandasToPolarsProvider,
+)
+from long_earn.backtest.engine.dsl import parse_strategy_yaml  # noqa: E402
+from long_earn.backtest.engine.parallel import (  # noqa: E402
+    BacktestTask,
+    ParallelRunner,
+    _run_one_backtest,
+)
+from long_earn.backtest.engine.shared_data import SharedDataContext  # noqa: E402
+from long_earn.config import AppConfig  # noqa: E402
+from long_earn.context_init import initialize_context  # noqa: E402
+from long_earn.core.storage import best_strategy_path  # noqa: E402
+
+# 严格遵循量化数据分割规范：仅用训练集
+TRAIN_START = "2022-01-01"
+TRAIN_END = "2024-12-31"
+
+
+# ── 候选策略 A：短期反转 + 中期动量 + 低波 + EP + ROE + 净利润同比 ─────
+# 核心假设：A 股短期反转效应稳健，用 5 日反转替换 120 日动量（避免与 60d 重复），
+# 移除 BP（与 EP 高度相关），保持 6 因子等权，但因子构成更均衡（反转+动量+波动+估值+盈利+成长）。
+CANDIDATE_A = """\
+strategy:
+  name: ReversalMomentumHybrid
+  description: 短期反转+中期动量+低波+估值+盈利+成长复合因子策略，利用A股短期反转效应与中期动量互补，6因子等权合成
+  universe:
+    type: csi500
+    rebalance_freq: 20D
+  start_date: 2022-01-01
+  end_date: 2024-12-31
+  operator_factors:
+    # 1. 短期反转：5日收益率取负（过度反应后回归）
+    - op: returns
+      alias: rev_5
+      params: { field: close, period: 5 }
+    - op: arithmetic
+      alias: reversal
+      params: { lhs: rev_5, rhs: -1, op: '*' }
+    # 2. 中期动量：60日收益率（趋势延续）
+    - op: returns
+      alias: mom_60
+      params: { field: close, period: 60 }
+    # 3. 波动率：20日收益率标准差取负值
+    - op: returns
+      alias: ret_20
+      params: { field: close, period: 20 }
+    - op: windowed
+      alias: vol_20
+      params: { field: ret_20, window: 20, agg: std }
+    - op: arithmetic
+      alias: neg_vol
+      params: { lhs: vol_20, rhs: -1, op: '*' }
+    # 4. 估值因子：PE倒数
+    - op: arithmetic
+      alias: ep
+      params: { lhs: eps, rhs: close, op: '/' }
+    # 5. 盈利因子：ROE
+    # 6. 成长因子：净利润同比
+    # —— 时间序列标准化（过去60日滚动z-score）——
+    # 对 reversal
+    - op: windowed
+      alias: reversal_mean
+      params: { field: reversal, window: 60, agg: mean }
+    - op: windowed
+      alias: reversal_std
+      params: { field: reversal, window: 60, agg: std }
+    - op: arithmetic
+      alias: reversal_z
+      params: { lhs: reversal, rhs: reversal_mean, op: '-' }
+    - op: arithmetic
+      alias: reversal_z_scaled
+      params: { lhs: reversal_z, rhs: reversal_std, op: '/' }
+    # 对 mom_60
+    - op: windowed
+      alias: mom_60_mean
+      params: { field: mom_60, window: 60, agg: mean }
+    - op: windowed
+      alias: mom_60_std
+      params: { field: mom_60, window: 60, agg: std }
+    - op: arithmetic
+      alias: mom_60_z
+      params: { lhs: mom_60, rhs: mom_60_mean, op: '-' }
+    - op: arithmetic
+      alias: mom_60_z_scaled
+      params: { lhs: mom_60_z, rhs: mom_60_std, op: '/' }
+    # 对 neg_vol
+    - op: windowed
+      alias: neg_vol_mean
+      params: { field: neg_vol, window: 60, agg: mean }
+    - op: windowed
+      alias: neg_vol_std
+      params: { field: neg_vol, window: 60, agg: std }
+    - op: arithmetic
+      alias: neg_vol_z
+      params: { lhs: neg_vol, rhs: neg_vol_mean, op: '-' }
+    - op: arithmetic
+      alias: neg_vol_z_scaled
+      params: { lhs: neg_vol_z, rhs: neg_vol_std, op: '/' }
+    # 对 ep
+    - op: windowed
+      alias: ep_mean
+      params: { field: ep, window: 60, agg: mean }
+    - op: windowed
+      alias: ep_std
+      params: { field: ep, window: 60, agg: std }
+    - op: arithmetic
+      alias: ep_z
+      params: { lhs: ep, rhs: ep_mean, op: '-' }
+    - op: arithmetic
+      alias: ep_z_scaled
+      params: { lhs: ep_z, rhs: ep_std, op: '/' }
+    # 对 roe_weighted
+    - op: windowed
+      alias: roe_mean
+      params: { field: roe_weighted, window: 60, agg: mean }
+    - op: windowed
+      alias: roe_std
+      params: { field: roe_weighted, window: 60, agg: std }
+    - op: arithmetic
+      alias: roe_z
+      params: { lhs: roe_weighted, rhs: roe_mean, op: '-' }
+    - op: arithmetic
+      alias: roe_z_scaled
+      params: { lhs: roe_z, rhs: roe_std, op: '/' }
+    # 对 net_profit_yoy
+    - op: windowed
+      alias: npy_mean
+      params: { field: net_profit_yoy, window: 60, agg: mean }
+    - op: windowed
+      alias: npy_std
+      params: { field: net_profit_yoy, window: 60, agg: std }
+    - op: arithmetic
+      alias: npy_z
+      params: { lhs: net_profit_yoy, rhs: npy_mean, op: '-' }
+    - op: arithmetic
+      alias: npy_z_scaled
+      params: { lhs: npy_z, rhs: npy_std, op: '/' }
+    # 6. 等权求和得到综合得分
+    - op: arithmetic
+      alias: sum1
+      params: { lhs: reversal_z_scaled, rhs: mom_60_z_scaled, op: '+' }
+    - op: arithmetic
+      alias: sum2
+      params: { lhs: sum1, rhs: neg_vol_z_scaled, op: '+' }
+    - op: arithmetic
+      alias: sum3
+      params: { lhs: sum2, rhs: ep_z_scaled, op: '+' }
+    - op: arithmetic
+      alias: sum4
+      params: { lhs: sum3, rhs: roe_z_scaled, op: '+' }
+    - op: arithmetic
+      alias: sum5
+      params: { lhs: sum4, rhs: npy_z_scaled, op: '+' }
+    - op: arithmetic
+      alias: score
+      params: { lhs: sum5, rhs: 6, op: '/' }
+  signals:
+    - type: operator
+      op: rank_top
+      params: { field: score, ascending: false, top: 30 }
+  weights:
+    method: equal
+"""
+
+# ── 候选策略 B：候选 A + 风控（止损+最大回撤清仓）─────────────────────
+# 核心假设：2022-2024 熊市中纯多头策略必然亏损，加入风控可在回撤超限时清仓避险。
+# AGENTS.md："弱市下唯一可用风控是空仓+止损+最大回撤清仓"。
+# 参数：stop_loss=0.15（单股亏 15% 止损）、max_drawdown_limit=0.3（组合回撤 30% 清仓）。
+CANDIDATE_B = CANDIDATE_A.replace(
+    "  weights:\n    method: equal\n",
+    "  weights:\n    method: equal\n"
+    "  risk_control:\n"
+    "    max_position_per_stock: 0.1\n"
+    "    stop_loss: 0.15\n"
+    "    max_drawdown_limit: 0.3\n",
+)
+
+
+def fmt_pct(x: float) -> str:
+    return f"{x * 100:.2f}%"
+
+
+def _worker_init() -> None:
+    """worker 进程初始化：日志降噪到 ERROR 级别。
+
+    Windows spawn 模式下 worker 不继承主进程的 loguru 配置，
+    需在 initializer 中重新配置，避免"现金不足跳过买入"等 WARNING 淹没 I/O。
+    """
+    from loguru import logger
+
+    logger.remove()
+    logger.add(sys.stderr, level="ERROR")
+
+
+def get_csi500_symbols() -> list[str]:
+    """从 DuckDB 缓存获取 csi500 成分股（避免依赖 miniqmt 实时连接）。"""
+    cache = DataCache()
+    # 优先用空 date 取最新快照（成分股变化慢，近似可接受）
+    symbols = cache.get_universe("中证500", "")
+    if not symbols:
+        symbols = cache.get_universe("csi500", "")
+    if not symbols:
+        raise RuntimeError("缓存中无 csi500/中证500 成分股数据")
+    return symbols
+
+
+def run_parallel_backtest(
+    yamls: list[tuple[str, str]],
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    max_workers: int,
+    data_provider: object,
+) -> list:
+    """并行回测多个策略 YAML。
+
+    Args:
+        yamls: [(yaml_str, label), ...]
+        symbols: 股票池
+        start_date / end_date: 回测窗口
+        max_workers: 并发 worker 数
+        data_provider: 数据提供者（用于预取数据）
+
+    Returns:
+        BacktestOutcome 列表（与 yamls 顺序一致）
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    runner = ParallelRunner(max_workers=max_workers, data_provider=data_provider)
+
+    # 预取数据（主进程执行一次，SharedMemory 共享给所有 worker）
+    print(f"  预取数据: {len(symbols)} 只股票, {start_date} ~ {end_date}")
+    full_data = runner._prepare_data(symbols, start_date, end_date)
+    if full_data.is_empty():
+        return [
+            _make_error_outcome(str(i), "数据预取为空") for i in range(len(yamls))
+        ]
+
+    # 解析第一个 YAML 获取风控参数（两个策略风控配置相同）
+    first_dsl = parse_strategy_yaml(yamls[0][0])
+    stop_loss = first_dsl.risk_control.stop_loss
+    max_dd_limit = first_dsl.risk_control.max_drawdown_limit
+    max_pos_pct = first_dsl.risk_control.max_position_per_stock
+
+    outcomes: list = []
+    with SharedDataContext(full_data) as sctx:
+        shm_token, shm_size, pickle_data = sctx.get_worker_args()
+        tasks = [
+            BacktestTask(
+                strategy_yaml=yaml_str,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                benchmark_symbol="000300.SH",
+                shm_token=shm_token,
+                shm_size=shm_size,
+                pickle_data=pickle_data,
+                stop_loss=stop_loss,
+                max_drawdown_limit=max_dd_limit,
+                max_position_pct=max_pos_pct,
+                task_id=str(idx),
+                param_desc=label,
+            )
+            for idx, (yaml_str, label) in enumerate(yamls)
+        ]
+
+        if max_workers <= 1:
+            print("  串行模式（max_workers=1）")
+            outcomes = [_run_one_backtest(t) for t in tasks]
+        else:
+            print(f"  并行模式（{max_workers} workers, {len(tasks)} 任务）")
+            with ProcessPoolExecutor(
+                max_workers=max_workers, initializer=_worker_init
+            ) as ex:
+                outcomes = list(ex.map(_run_one_backtest, tasks))
+    return outcomes
+
+
+def _make_error_outcome(task_id: str, error: str):
+    """构造错误结果。"""
+    from long_earn.backtest.engine.parallel import BacktestOutcome
+
+    return BacktestOutcome(
+        task_id=task_id,
+        success=False,
+        error=error,
+        error_category="engine_error",
+    )
+
+
+def print_outcome(o, label: str) -> None:
+    """打印单个回测结果。"""
+    print(f"\n[{label}]")
+    if not o.success:
+        print(f"  ❌ 回测失败: {o.error}")
+        print(f"  error_category: {o.error_category}")
+        return
+    print(f"  总收益率:   {fmt_pct(o.total_return)}")
+    print(f"  年化收益率: {fmt_pct(o.annual_return)}")
+    print(f"  夏普比率:   {o.sharpe_ratio:.4f}")
+    print(f"  最大回撤:   {fmt_pct(o.max_drawdown)}")
+    print(f"  波动率:     {fmt_pct(o.volatility)}")
+    print(f"  calmar:     {o.calmar_ratio:.4f}")
+    print(f"  sortino:    {o.sortino_ratio:.4f}")
+    print(f"  胜率:       {fmt_pct(o.win_rate)}")
+    print(f"  交易天数:   {o.trading_days}")
+    print(f"  指标可信:   {'否' if o.metrics_unreliable else '是'}")
+
+
+def print_comparison(baseline, candidate, candidate_label: str = "候选") -> None:
+    """打印对比表格。
+
+    Args:
+        baseline: 基准 BacktestOutcome
+        candidate: 候选 BacktestOutcome
+        candidate_label: 候选策略标签（如 "候选A" / "候选B"），用于表头与结论
+    """
+    print("\n" + "=" * 80)
+    print(f"对比结论（训练集 {TRAIN_START} ~ {TRAIN_END}）")
+    print("=" * 80)
+    if not baseline.success or not candidate.success:
+        print("  ⚠ 至少一个策略回测失败，无法对比")
+        return
+
+    print(
+        f"{'指标':<16} {'基准(最佳)':>16} {candidate_label:>20} "
+        f"{'差异':>16} {'结论':>8}"
+    )
+    print("-" * 80)
+
+    # (名称, 基准值, 候选值, 是否百分比)
+    rows = [
+        ("夏普比率", baseline.sharpe_ratio, candidate.sharpe_ratio, False),
+        ("总收益率", baseline.total_return, candidate.total_return, True),
+        ("年化收益率", baseline.annual_return, candidate.annual_return, True),
+        ("最大回撤", baseline.max_drawdown, candidate.max_drawdown, True),
+        ("calmar", baseline.calmar_ratio, candidate.calmar_ratio, False),
+        ("sortino", baseline.sortino_ratio, candidate.sortino_ratio, False),
+        ("波动率", baseline.volatility, candidate.volatility, True),
+    ]
+
+    sharpe_improved = False
+    for name, b, c, is_pct in rows:
+        if is_pct:
+            diff = (c - b) * 100
+            b_str = f"{b * 100:.2f}%"
+            c_str = f"{c * 100:.2f}%"
+            d_str = f"{diff:+.2f}pp"
+        else:
+            diff = c - b
+            b_str = f"{b:.4f}"
+            c_str = f"{c:.4f}"
+            d_str = f"{diff:+.4f}"
+        if name == "夏普比率":
+            sharpe_improved = diff > 0.05
+        if name in ("最大回撤", "波动率"):
+            ok = "✅" if diff < 0 else "❌"
+        else:
+            ok = "✅" if diff > 0 else "❌"
+        print(f"  {name:<14} {b_str:>16} {c_str:>20} {d_str:>16} {ok:>6}")
+
+    print()
+    if sharpe_improved:
+        print(f"  ✅ {candidate_label} 夏普比率显著提升（>0.05），可考虑作为新基准")
+        print("  下一步：通过 HTR 合并门在测试集验证 OOS 表现")
+    else:
+        print(f"  ❌ {candidate_label} 夏普比率未显著提升（≤0.05），不替换基准")
+        print("  下一步：尝试假设 B（流动性过滤）或假设 C（RSI 技术面）")
+
+
+def main() -> None:
+    max_workers = os.cpu_count() or 4
+    if "--max-workers" in sys.argv:
+        idx = sys.argv.index("--max-workers")
+        max_workers = int(sys.argv[idx + 1])
+    # 任务数 = 3（基准 + 候选 A + 候选 B），worker 数不超过任务数
+    max_workers = min(max_workers, 3)
+
+    config = AppConfig.from_env()
+    config.backtest_start_date = TRAIN_START
+    config.backtest_end_date = TRAIN_END
+    ctx = initialize_context(config)
+
+    # 1. 获取股票池（从缓存，避免 miniqmt 依赖）
+    print("=" * 80)
+    print("多核并行回测对比")
+    print("=" * 80)
+    symbols = get_csi500_symbols()
+    formatted_symbols = PandasToPolarsProvider.format_symbols(symbols)
+    print(f"股票池: csi500, {len(formatted_symbols)} 只")
+    print(f"回测窗口: {TRAIN_START} ~ {TRAIN_END}")
+    print(f"并发 worker 数: {max_workers}")
+
+    # 2. 读取基准策略 + 候选策略
+    baseline_path = best_strategy_path()
+    print(f"基准策略文件: {baseline_path}")
+    if not Path(baseline_path).exists():
+        print("❌ 最佳策略文件不存在，退出")
+        return
+    baseline_yaml = Path(baseline_path).read_text(encoding="utf-8")
+
+    yamls = [
+        (baseline_yaml, "基准: MultiCycleMomentumValueEarningsComposite"),
+        (CANDIDATE_A, "候选A: ReversalMomentumHybrid"),
+        (CANDIDATE_B, "候选B: ReversalMomentumHybrid+风控"),
+    ]
+
+    # 3. 并行回测
+    print(f"\n开始并行回测（{len(yamls)} 策略, {max_workers} workers）...")
+    t0 = time.time()
+    outcomes = run_parallel_backtest(
+        yamls=yamls,
+        symbols=formatted_symbols,
+        start_date=TRAIN_START,
+        end_date=TRAIN_END,
+        max_workers=max_workers,
+        data_provider=ctx.data_provider,
+    )
+    t1 = time.time()
+    print(f"回测完成: {t1 - t0:.1f}s")
+
+    # 4. 打印结果
+    for i, (_yaml_str, label) in enumerate(yamls):
+        print_outcome(outcomes[i], label)
+
+    # 5. 对比：候选 A vs 基准，候选 B vs 基准
+    baseline_o = outcomes[0]
+    candidate_a_o = outcomes[1]
+    candidate_b_o = outcomes[2]
+
+    print("\n" + "=" * 80)
+    print("对比 1: 候选 A（反转+动量）vs 基准")
+    print("=" * 80)
+    print_comparison(baseline_o, candidate_a_o, candidate_label="候选A")
+
+    print("\n" + "=" * 80)
+    print("对比 2: 候选 B（反转+动量+风控）vs 基准")
+    print("=" * 80)
+    print_comparison(baseline_o, candidate_b_o, candidate_label="候选B")
+
+    # 6. 选出最佳候选
+    print("\n" + "=" * 80)
+    print("最终结论")
+    print("=" * 80)
+    candidates = [
+        ("候选A", candidate_a_o),
+        ("候选B", candidate_b_o),
+    ]
+    best_candidate = None
+    best_sharpe = baseline_o.sharpe_ratio if baseline_o.success else -999
+    for name, o in candidates:
+        if o.success and o.sharpe_ratio > best_sharpe + 0.05:
+            best_sharpe = o.sharpe_ratio
+            best_candidate = (name, o)
+    if best_candidate:
+        name, o = best_candidate
+        print(f"  ✅ {name} 夏普 {o.sharpe_ratio:.4f} 显著超越基准（>0.05）")
+        print(f"     总收益 {fmt_pct(o.total_return)}, 回撤 {fmt_pct(o.max_drawdown)}")
+    else:
+        print("  ❌ 无候选显著超越基准（夏普提升 ≤ 0.05）")
+        print("     基准夏普: "
+              f"{baseline_o.sharpe_ratio:.4f}" if baseline_o.success else "基准失败")
+        for name, o in candidates:
+            if o.success:
+                print(f"     {name} 夏普: {o.sharpe_ratio:.4f}")
+
+
+if __name__ == "__main__":
+    main()

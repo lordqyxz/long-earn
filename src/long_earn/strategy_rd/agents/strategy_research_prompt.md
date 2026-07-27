@@ -38,16 +38,20 @@
 | revenue | 营业总收入 |
 
 ### 可用股票池类型
-| 类型代码 | 说明 |
-|----------|------|
-| csi300 | 沪深300成分股 |
-| csi500 | 中证500成分股 |
-| csi1000 | 中证1000成分股 |
-| sse50 | 上证50成分股 |
-| all_a | 全A股 |
-| main_board | 沪深主板 |
-| gem | 创业板 |
-| star_board | 科创板 |
+| 类型代码 | 说明 | 适用场景 |
+|----------|------|---------|
+| csi300 | 沪深300成分股 | 大盘蓝筹 |
+| csi500 | 中证500成分股 | 中盘成长 |
+| csi1000 | 中证1000成分股 | 小盘高波动 |
+| sse50 | 上证50成分股 | 超大盘蓝筹 |
+| all_a | 全A股 | 全市场扫描，回测慢 |
+| main_board | 沪深主板 | 主板全市场 |
+| gem | 创业板 | 创业板全市场 |
+| star_board | 科创板 | 科技主题 |
+
+> **股票池选择原则**：根据策略风格与市场环境主动选择股票池，**不要默认使用任何一种**。
+> 大盘蓝筹 → csi300/sse50；中盘成长 → csi500；小盘高波动 → csi1000/gem；
+> 全市场扫描 → main_board/all_a；科技主题 → star_board。
 
 ### 可用表达式函数
 shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
@@ -78,8 +82,8 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
 - 毛利率：gross_margin
 
 #### 动量因子
-- N日收益率：close / shift(close, N) - 1
-- 波动率：std(close / shift(close, 1) - 1)
+- N日收益率：用 `returns` 算子（operator_factors + op: returns, params: { field: close, period: N }）
+- 波动率：用 `windowed` 算子（op: windowed, params: { field: close, window: N, agg: std }）
 
 #### 估值因子
 - 每股收益：eps
@@ -102,7 +106,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
     "strategy_name": "ProfitGrowthStrategy",
     "strategy_type": "基本面选股",
     "rationale": "基于行为金融学中的'盈利公告后漂移'现象，市场对盈利增长信息的反应往往不充分且滞后。通过选择净利润持续高增长的公司，可以获得超额收益。",
-    "investment_logic": "选择净利润同比增长率超过 20% 的沪深300股票，按增长率排序选取前 10 只，等权重配置。",
+    "investment_logic": "选择净利润同比增长率超过 20% 的中证500股票，按增长率排序选取前 10 只，等权重配置。",
     "factors_used": [
         {
             "name": "净利润同比增长率",
@@ -126,7 +130,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
         "start_date": "2020-01-01",
         "end_date": "2023-12-31",
         "benchmark": "csi300",
-        "universe": "csi300"
+        "universe": "main_board+gem"
     },
     "expected_metrics": {
         "annual_return": "15-25%",
@@ -140,7 +144,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
     ],
     "improvement_directions": [
         "可结合其他因子（如 roe、gross_margin）构建多因子策略",
-        "可考虑加入动量因子（close / shift(close, 20) - 1）",
+        "可考虑加入动量因子（用 returns 算子算 20 日收益率）",
         "可调整阈值和选股数量优化表现"
     ]
 }
@@ -197,7 +201,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
         "start_date": "2020-01-01",
         "end_date": "2023-12-31",
         "benchmark": "csi300",
-        "universe": "csi300"
+        "universe": "main_board+gem"
     },
     "expected_metrics": {
         "annual_return": "12-20%",
@@ -264,7 +268,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
                 "benchmark": {"type": "string"},
-                "universe": {"type": "string", "description": "必须使用可用股票池类型，如 csi300、csi500 等"}
+                "universe": {"type": "string", "description": "必须使用可用股票池类型，如 csi300、csi500、main_board+gem 等"}
             }
         },
         "expected_metrics": {
@@ -289,7 +293,7 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
 1. **逻辑清晰**：策略逻辑必须清晰可解释，不能是黑箱
 2. **YAML DSL 可实现**：策略必须能通过 YAML DSL 描述并回测，不要生成 Python 代码
 3. **仅使用可用字段**：factors_used 中的 field 必须来自可用数据字段列表（net_profit_yoy, revenue_yoy, roe, gross_margin, eps, close, open, high, low, volume, net_profit, revenue）
-4. **仅使用可用股票池**：backtest_params.universe 必须使用可用股票池类型（csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board）
+4. **仅使用可用股票池**：backtest_params.universe 必须使用可用股票池类型（csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board, main_board+gem, main_board+star_board）。**默认推荐 `main_board+gem`（沪深除科创板所有标的）**，除非 idea 明确指定其他池子
 5. **风险控制**：必须包含具体的风险控制措施
 6. **避免过拟合**：考虑样本外表现，不能过度优化参数
 7. **考虑成本**：考虑交易成本、冲击成本

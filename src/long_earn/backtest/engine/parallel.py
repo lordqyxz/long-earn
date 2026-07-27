@@ -381,7 +381,7 @@ class ParallelRunner:
         audit_db_path: Path | str | None = None,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
-        from long_earn.backtest.engine.ml_strategy import (  # noqa: PLC0415
+        from long_earn.backtest.engine.timeseries_split import (  # noqa: PLC0415
             TimeSeriesSplit,
         )
 

@@ -13,6 +13,8 @@ import pytest
 from long_earn.backtest.operators import OPERATOR_REGISTRY, list_operators
 from long_earn.backtest.operators.causality import is_causal, math_note, prove_causality
 from long_earn.backtest.operators.compose.arithmetic import ArithmeticParams
+from long_earn.backtest.operators.factor.log_return import LogReturnParams
+from long_earn.backtest.operators.factor.realized_vol import RealizedVolParams
 from long_earn.backtest.operators.factor.returns import ReturnsParams
 from long_earn.backtest.operators.factor.shift import ShiftParams
 from long_earn.backtest.operators.factor.windowed import WindowedParams
@@ -38,6 +40,9 @@ PARAM_CASES = [
     ("rsi", RSIParams(field="close", window=14)),
     ("macd", MACDParams(field="close", fast=5, slow=12, signal=3)),
     ("bollinger", BollingerParams(field="close", window=15, k=2.0)),
+    # operator_dev 自主研发写盘算子
+    ("log_return", LogReturnParams(field="close", period=5)),
+    ("realized_vol", RealizedVolParams(field="close", window=10)),
 ]
 
 

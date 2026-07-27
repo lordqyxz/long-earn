@@ -14,11 +14,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from long_earn.strategy_rd.subgraph import create_strategy_rd_subgraph
+from long_earn.strategy_rd.htr_subgraph import (
+    create_htr_subgraph as create_strategy_rd_subgraph,
+)
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-    from long_earn.services import BacktestService
 
 from long_earn.core.storage import best_strategy_path, strategy_results_path
 
@@ -82,25 +83,36 @@ class StrategyResearchService:
     多轮循环编排与结果落盘能力。无状态：每次 ``run_loop`` 独立。
     """
 
-    def __init__(self, ctx: "RuntimeContext") -> None:
+    def __init__(self, ctx: RuntimeContext) -> None:
         self.ctx = ctx
         self.backtest_service = ctx.require_backtest()
         self.logger = ctx.logger
 
         config = ctx.config
+        # 铁律 #1/#2/#3：开发阶段只允许使用训练集。
+        # - history = 完整训练集（train_start ~ train_end）
+        # - recent = 训练集最后 6 个月（开发期不得触碰测试集/验证集；
+        #   测试集仅供 HTR _decide 节点合并门触碰，验证集仅最终评估一次）
+        from datetime import date, timedelta
+
         self.history_start = config.train_start_date
-        self.history_end = config.test_end_date
-        self.recent_start = config.validation_start_date
-        self.recent_end = config.validation_end_date
+        self.history_end = config.train_end_date
+        train_end_date = date.fromisoformat(config.train_end_date)
+        recent_start_date = train_end_date - timedelta(days=183)
+        self.recent_start = recent_start_date.isoformat()
+        self.recent_end = config.train_end_date
 
     # ── 单轮子图执行 ──────────────────────────────────────────────
 
-    def run_round(
+    def run_round(  # noqa: PLR0913
         self,
         idea: str,
         max_iterations: int,
         history_return: float = 0.0,
         round_history: list[dict[str, Any]] | None = None,
+        *,
+        checkpointer: Any = None,
+        thread_id: str | None = None,
     ) -> RoundResult:
         """运行一轮策略研发子图。
 
@@ -109,19 +121,46 @@ class StrategyResearchService:
             max_iterations: 子图内部最大迭代次数
             history_return: 上一轮历史窗口收益率（家族失效检测信号）
             round_history: 跨轮历史序列（recent_return/history_return 列表）
+            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``），
+                启用后子图状态会持久化，支持中断恢复。None 时不持久化。
+            thread_id: 当 ``checkpointer`` 非空时的研究线程 ID。同一
+                ``thread_id`` 可从中断处续跑；新一轮须用新 ID 避免状态污染。
         """
         config = self.ctx.config
         config.max_iterations = max_iterations
 
-        subgraph = create_strategy_rd_subgraph(self.ctx)
+        subgraph = create_strategy_rd_subgraph(
+            self.ctx, checkpointer=checkpointer
+        )
         self.logger.info(f"[循环] 启动策略研发子图，idea='{idea}'")
+        if checkpointer is not None:
+            self.logger.info(
+                f"[循环] checkpoint 已启用，thread_id={thread_id}"
+            )
         t0 = time.time()
         invoke_input: dict[str, Any] = {"query": idea}
         if history_return != 0.0:
             invoke_input["history_return"] = history_return
         if round_history:
             invoke_input["round_history"] = round_history
-        result = subgraph.invoke(invoke_input)
+
+        invoke_config: dict[str, Any] | None = None
+        if checkpointer is not None and thread_id:
+            invoke_config = {"configurable": {"thread_id": thread_id}}
+
+        # 启用 checkpointer 时，若该 thread 已有完成态则直接取最终状态；
+        # 否则正常 invoke（首跑或中断后续跑传 None 即可，但这里首跑必须传 input）
+        if (
+            checkpointer is not None
+            and invoke_config is not None
+            and self._thread_already_completed(subgraph, invoke_config)
+        ):
+            self.logger.info(
+                f"[循环] thread_id={thread_id} 已有完成态，直接复用结果"
+            )
+            result = subgraph.get_state(invoke_config).values
+        else:
+            result = subgraph.invoke(invoke_input, config=invoke_config)
         elapsed = time.time() - t0
         self.logger.info(f"[循环] 子图完成，耗时 {elapsed:.1f}s")
 
@@ -139,6 +178,21 @@ class StrategyResearchService:
             reflection=reflection,
             elapsed=elapsed,
         )
+
+    @staticmethod
+    def _thread_already_completed(subgraph: Any, invoke_config: dict) -> bool:
+        """检查 thread 是否已存在完成态（避免重跑）。"""
+        try:
+            snapshot = subgraph.get_state(invoke_config)
+        except Exception:
+            return False
+        # next 为空元组/None 表示该线程已运行到 END
+        next_nodes = getattr(snapshot, "next", None)
+        if not next_nodes:
+            # 还需确认 values 非空，否则可能是首次创建空快照
+            values = getattr(snapshot, "values", None) or {}
+            return bool(values)
+        return False
 
     # ── 双窗口评估 ────────────────────────────────────────────────
 
@@ -182,6 +236,9 @@ class StrategyResearchService:
         best_recent_return: float,
         min_improvement: float,
         round_history: list[dict[str, Any]] | None = None,
+        *,
+        checkpointer: Any = None,
+        thread_id: str | None = None,
     ) -> tuple[RoundMetrics | None, float, str, dict[str, Any], bool]:
         """运行单轮研究并返回 (metrics, best_return, best_yaml, best_round, should_stop)。
 
@@ -201,6 +258,8 @@ class StrategyResearchService:
             max_iterations,
             history_return=prev_history_return,
             round_history=round_history,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
         )
         strategy_yaml = round_result.strategy_yaml
 
@@ -272,12 +331,15 @@ class StrategyResearchService:
 
     # ── 多轮循环编排 ──────────────────────────────────────────────
 
-    def run_loop(
+    def run_loop(  # noqa: PLR0913
         self,
         idea: str,
         max_rounds: int = 5,
         max_iterations: int = 2,
         min_improvement: float = 0.005,
+        *,
+        checkpointer: Any = None,
+        thread_id_prefix: str = "research",
     ) -> ResearchLoopSummary:
         """运行完整策略研究循环。
 
@@ -286,6 +348,11 @@ class StrategyResearchService:
             max_rounds: 最大研究轮次
             max_iterations: 每轮子图内部最大迭代次数
             min_improvement: 近三个月收益率最小改善幅度
+            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``）。
+                启用后每轮状态持久化，重跑时已完成的轮次直接复用结果，
+                未完成的轮次可从中断处续跑。None 时不持久化。
+            thread_id_prefix: checkpointer 启用时，每轮 thread_id 为
+                ``"{prefix}-round{N}-family{F}"``。
 
         家族切换机制：连续 ``_FAMILY_PIVOT_THRESHOLD`` 轮无改善时，
         从 ``_IDEA_FAMILY_POOL`` 取下一个家族 idea 继续研发，
@@ -306,6 +373,12 @@ class StrategyResearchService:
             self.logger.info(f"# 第 {round_num}/{max_rounds} 轮 (家族索引 {family_idx})")
             self.logger.info("#" * 60)
 
+            thread_id = (
+                f"{thread_id_prefix}-round{round_num}-family{family_idx}"
+                if checkpointer is not None
+                else None
+            )
+
             metrics, new_best, best_yaml, best_round, should_stop = (
                 self.run_single_round(
                     idea=current_idea,
@@ -314,6 +387,8 @@ class StrategyResearchService:
                     best_recent_return=best_recent_return,
                     min_improvement=min_improvement,
                     round_history=round_history,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
                 )
             )
 

@@ -7,7 +7,7 @@ import contextlib
 import math
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -21,9 +21,9 @@ from long_earn.backtest.domain.entities import (
     SignalEvent,
 )
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
-from long_earn.backtest.engine.ml_strategy import TimeSeriesSplit
 from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
+from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.engine.visibility import VisibilityGuard
 from long_earn.backtest.models import BacktestResult
 
@@ -118,13 +118,14 @@ class EventDrivenBacktestEngine:
             return float("inf"), 0.0
         return round(prev_close * 1.1, 2), round(prev_close * 0.9, 2)
 
-    def _pre_trade_check(
+    def _pre_trade_check(  # noqa: PLR0913
         self,
         order: Any,
         price: float,
         signal_trace_id: str,  # noqa: ARG002
         db_audit: Any,  # noqa: ARG002
         slab: pl.DataFrame | None = None,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> str | None:
         """Pre-trade 单笔风控门（P0-08）：聚合多项合规检查。
 
@@ -146,7 +147,9 @@ class EventDrivenBacktestEngine:
 
         # 停牌检查（P1-09）：成交量 = 0 时视为停牌
         if slab is not None:
-            volume = self._lookup_price(slab, order.symbol, field="volume")
+            volume = self._lookup_price_fast(
+                slab, order.symbol, field="volume", price_dict=price_dict
+            )
             if volume is not None and volume == 0:
                 return f"停牌拒单:{order.symbol} 当日成交量为 0（疑似停牌）"
 
@@ -179,16 +182,21 @@ class EventDrivenBacktestEngine:
         symbols: list[str],
         benchmark_symbol: str = "",
         full_data: pl.DataFrame | None = None,
+        warmup_days: int = 0,
     ) -> BacktestResult:
         """执行回测
 
         Args:
             strategy: 策略实例
-            start_date: 起始日期
+            start_date: 起始日期（产生交易的时间范围起点）
             end_date: 结束日期
             symbols: 候选股票列表
             benchmark_symbol: 基准指数代码（如 "000300"），用于计算 Alpha/Beta 等
             full_data: 预加载的完整数据面板；传入则跳过 _prepare_data()，适合并行回测
+            warmup_days: 预热期天数（日历日）。取数时把 start_date 提前 warmup_days
+                天，让时序因子（如 returns(period=120)）在 start_date 当天就有非 NaN
+                值；交易时间戳仍按 [start_date, end_date] 过滤，不会在 warmup 期产生
+                交易。
         """
         # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
         run_id = str(uuid.uuid4())
@@ -233,12 +241,24 @@ class EventDrivenBacktestEngine:
 
         try:
             if full_data is None:
-                full_data = self._prepare_data(symbols, start_date, end_date)
+                full_data = self._prepare_data(
+                    symbols, start_date, end_date, warmup_days=warmup_days
+                )
             else:
-                # 防御性日期过滤：即使外部传入 full_data，也确保只取 [start_date, end_date] 范围
+                # 防御性日期过滤：外部传入的 full_data 可能含 warmup 期数据，
+                # 这里按 [start - warmup, end] 保留，避免扔掉预热期历史。
+                # ``start_date`` 可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
+                # （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符做日期解析。
                 date_col = "timestamp" if "timestamp" in full_data.columns else "date"
-                start_dt = pl.lit(start_date).str.to_datetime()
-                end_dt = pl.lit(end_date).str.to_datetime()
+                end_dt = pl.lit(end_date[:10]).str.to_datetime()
+                if warmup_days > 0:
+                    data_start = (
+                        datetime.strptime(start_date[:10], "%Y-%m-%d")
+                        - timedelta(days=warmup_days)
+                    ).strftime("%Y-%m-%d")
+                else:
+                    data_start = start_date[:10]
+                start_dt = pl.lit(data_start).str.to_datetime()
                 full_data = full_data.filter(
                     (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
                 )
@@ -253,7 +273,32 @@ class EventDrivenBacktestEngine:
                     {"message": "加载数据为空", "symbols_count": len(symbols)},
                     db_audit,
                 )
-                return BacktestResult(success=False, message="加载数据为空")
+                # 补全 RUN_END：监督报告判据 3 要求 RUN_START/RUN_END 配对，
+                # 原 DATA_EMPTY 路径直接 return 导致 RUN_END 缺失，审计日志
+                # 不配对（如 7/26 HTR 中 2 个节点只有 RUN_START 无 RUN_END）。
+                empty_result = BacktestResult(
+                    success=False, message="加载数据为空"
+                )
+                self._log_audit(
+                    "RUN_END",
+                    str(uuid.uuid4()),
+                    run_id,
+                    "Engine",
+                    "FAILED",
+                    {
+                        "success": False,
+                        "total_return": 0.0,
+                        "sharpe_ratio": 0.0,
+                        "max_drawdown": 0.0,
+                        "trade_count": 0,
+                        "trading_days": 0,
+                        "metrics_unreliable": True,
+                        "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
+                    },
+                    db_audit,
+                    latency_ms=(time.perf_counter() - run_start_ts) * 1000,
+                )
+                return empty_result
 
             guard = VisibilityGuard(full_data)
             portfolio = Portfolio(cost_config=self.cost_config)
@@ -261,7 +306,11 @@ class EventDrivenBacktestEngine:
             broker.reset()
             strategy.init()
 
-            timestamps = self._get_timestamps(full_data)
+            # warmup_days > 0 时 full_data 含预热期数据；交易时间戳仍按
+            # [start_date, end_date] 过滤，避免在 warmup 期产生交易。
+            timestamps = self._get_timestamps(
+                full_data, start_date=start_date, end_date=end_date
+            )
 
             for _bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
@@ -291,6 +340,9 @@ class EventDrivenBacktestEngine:
             )
 
             # RUN_END：记录回测结果摘要（成功/失败都要记）
+            # metrics_unreliable 补全：监督报告判据 4 需机器可验证，原 payload
+            # 仅 7 字段，遗漏了 metrics_unreliable 标志。审计日志 payload 是 JSON
+            # 列，新增字段无需改 schema（DuckDBAuditProvider 整包序列化）。
             self._log_audit(
                 "RUN_END",
                 str(uuid.uuid4()),
@@ -304,6 +356,7 @@ class EventDrivenBacktestEngine:
                     "max_drawdown": result.max_drawdown,
                     "trade_count": result.trade_count,
                     "trading_days": result.trading_days,
+                    "metrics_unreliable": metrics_unreliable,
                     "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
                 },
                 db_audit,
@@ -363,14 +416,26 @@ class EventDrivenBacktestEngine:
         return AuditLogger(self.audit_provider, run_id)
 
     @staticmethod
-    def _get_timestamps(full_data: pl.DataFrame) -> list[Any]:
-        return (
-            full_data.select("timestamp")
-            .unique()
-            .sort("timestamp")
-            .to_series()
-            .to_list()
-        )
+    def _get_timestamps(
+        full_data: pl.DataFrame,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[Any]:
+        """从 full_data 提取交易时间戳列表。
+
+        ``start_date`` / ``end_date`` 同时给定时，仅返回该范围内的 timestamps，
+        用于在 warmup_days > 0 时把预热期数据排除在交易循环外。
+        输入可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
+        （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符。
+        """
+        df = full_data.select("timestamp").unique()
+        if start_date and end_date:
+            start_dt = pl.lit(start_date[:10]).str.to_datetime()
+            end_dt = pl.lit(end_date[:10]).str.to_datetime()
+            df = df.filter(
+                (pl.col("timestamp") >= start_dt) & (pl.col("timestamp") <= end_dt)
+            )
+        return df.sort("timestamp").to_series().to_list()
 
     # ── 单时间戳处理 ──────────────────────────────────────────
 
@@ -406,6 +471,12 @@ class EventDrivenBacktestEngine:
                 self._current_limit_up_map[sym] = up
                 self._current_limit_down_map[sym] = down
 
+        # 构建 price_dict: dict[symbol, dict[field, value]]（O(U) 一次）
+        # 后续所有 _lookup_price 调用改为 dict 查找 O(1)，消除每 bar
+        # 多次 polars filter（_check_stop_loss / _check_take_profit /
+        # _check_max_drawdown / _execute_signals / _pre_trade_check）
+        price_dict = self._build_price_dict(slab)
+
         # ── T+1 信号执行：执行前一 bar 产生的 pending 信号，以当日 open 成交 ──
         # P0-05 修复：策略基于 T 日 close 产生的信号不会在当日 close 成交，
         # 而是进入 pending 队列，在 T+1 日以 open 价撮合，消除前视偏差。
@@ -437,19 +508,14 @@ class EventDrivenBacktestEngine:
                     db_audit,
                     price_field="open",
                     execution_ts=ts,
+                    price_dict=price_dict,
                 )
 
-        # 检查待成交订单（限价/止损单）
-        price_lookup = {}
-        for sym, price in zip(
-            slab.select("symbol").to_series().to_list(),
-            slab.select("close").to_series().to_list(),
-            strict=True,
-        ):
-            if price is not None:
-                with contextlib.suppress(TypeError, ValueError):
-                    price_lookup[sym] = float(price)
-        pending_fills = broker.check_pending_orders(price_lookup=price_lookup)
+        # 检查待成交订单（限价/止损单）— 从 price_dict 提取 close 价格映射
+        close_lookup = {
+            s: fields.get("close") for s, fields in price_dict.items()
+        }
+        pending_fills = broker.check_pending_orders(price_lookup=close_lookup)
         for pf in pending_fills:
             portfolio.update_from_fill(pf)
             self._log_audit(
@@ -472,7 +538,9 @@ class EventDrivenBacktestEngine:
         # 待成交订单可能影响 portfolio.total_value，先更新市值再做风控
         portfolio.update_market_values(slab)
 
-        risk_triggered = self._run_risk_checks(portfolio, slab, ts, broker)
+        risk_triggered = self._run_risk_checks(
+            portfolio, slab, ts, broker, price_dict=price_dict
+        )
         self._log_audit(
             "MARKET_DATA",
             mkt_event.trace_id,
@@ -538,15 +606,22 @@ class EventDrivenBacktestEngine:
         slab: pl.DataFrame,
         ts: Any,
         broker: Broker,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> bool:
         """执行止损 + 止盈 + 最大回撤检查，返回是否触发风控"""
         triggered = False
         if self.stop_loss is not None:
-            triggered = self._check_stop_loss(portfolio, slab, ts, broker)
+            triggered = self._check_stop_loss(
+                portfolio, slab, ts, broker, price_dict=price_dict
+            )
         if self.take_profit is not None and not triggered:
-            triggered = self._check_take_profit(portfolio, slab, ts, broker)
+            triggered = self._check_take_profit(
+                portfolio, slab, ts, broker, price_dict=price_dict
+            )
         if self.max_drawdown_limit is not None and not triggered:
-            triggered = self._check_max_drawdown(portfolio, slab, ts, broker)
+            triggered = self._check_max_drawdown(
+                portfolio, slab, ts, broker, price_dict=price_dict
+            )
         return triggered
 
     def _check_take_profit(
@@ -555,6 +630,7 @@ class EventDrivenBacktestEngine:
         slab: pl.DataFrame,
         ts: Any,
         broker: Broker,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> bool:
         """止盈检查（P1-05）：持仓盈利超过 take_profit 阈值时强制卖出。"""
         assert self.take_profit is not None
@@ -563,8 +639,12 @@ class EventDrivenBacktestEngine:
             # T+1 锁定：当日买入不可被风控卖出（P0-06）
             if pos.available_date is not None and ts < pos.available_date:
                 continue
-            high_price = self._lookup_price(slab, symbol, field="high")
-            close_price = self._lookup_price(slab, symbol, field="close")
+            high_price = self._lookup_price_fast(
+                slab, symbol, field="high", price_dict=price_dict
+            )
+            close_price = self._lookup_price_fast(
+                slab, symbol, field="close", price_dict=price_dict
+            )
             check_price = high_price if (high_price and high_price > 0) else close_price
             if check_price is None or check_price <= 0:
                 continue
@@ -613,6 +693,7 @@ class EventDrivenBacktestEngine:
         slab: pl.DataFrame,
         ts: Any,
         broker: Broker,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> bool:
         assert self.stop_loss is not None
         triggered = False
@@ -621,8 +702,12 @@ class EventDrivenBacktestEngine:
             if pos.available_date is not None and ts < pos.available_date:
                 continue
             # 触发判断：用日内最低价确认是否触及止损线（真实止损单监控盘中价格）
-            low_price = self._lookup_price(slab, symbol, field="low")
-            close_price = self._lookup_price(slab, symbol, field="close")
+            low_price = self._lookup_price_fast(
+                slab, symbol, field="low", price_dict=price_dict
+            )
+            close_price = self._lookup_price_fast(
+                slab, symbol, field="close", price_dict=price_dict
+            )
             check_price = low_price if (low_price and low_price > 0) else close_price
             if check_price is None or check_price <= 0:
                 continue
@@ -683,6 +768,7 @@ class EventDrivenBacktestEngine:
         slab: pl.DataFrame,
         ts: Any,
         broker: Broker,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> bool:
         assert self.max_drawdown_limit is not None
         peak_value = portfolio.peak_value
@@ -735,7 +821,9 @@ class EventDrivenBacktestEngine:
             # T+1 锁定：当日买入不可被风控卖出（P0-06）
             if pos.available_date is not None and ts < pos.available_date:
                 continue
-            price = self._lookup_price(slab, symbol)
+            price = self._lookup_price_fast(
+                slab, symbol, price_dict=price_dict
+            )
             if price is not None:
                 order = OrderEvent(
                     timestamp=ts,
@@ -751,10 +839,60 @@ class EventDrivenBacktestEngine:
         return True
 
     @staticmethod
+    def _build_price_dict(slab: pl.DataFrame) -> dict[str, dict[str, float]]:
+        """从 slab 构建 symbol -> {field: value} 字典（O(U) 一次）。
+
+        性能优化（P0）：避免每 bar 多次 polars filter（_lookup_price 调用）。
+        包含 close/open/high/low/volume 五个常用字段。
+        """
+        result: dict[str, dict[str, float]] = {}
+        if slab.is_empty() or "symbol" not in slab.columns:
+            return result
+
+        symbols = slab.select("symbol").to_series().to_list()
+        fields_to_extract = [
+            f for f in ("open", "high", "low", "close", "volume") if f in slab.columns
+        ]
+        for field in fields_to_extract:
+            vals = slab.select(field).to_series().to_list()
+            for sym, val in zip(symbols, vals, strict=True):
+                if sym not in result:
+                    result[sym] = {}
+                if val is not None:
+                    with contextlib.suppress(TypeError, ValueError):
+                        result[sym][field] = float(val)
+        return result
+
+    @staticmethod
+    def _lookup_price_fast(
+        slab: pl.DataFrame,
+        symbol: str,
+        field: str = "close",
+        price_dict: dict[str, dict[str, float]] | None = None,
+    ) -> float | None:
+        """快速价格查找：优先用 price_dict O(1)，降级到 slab filter O(U)。
+
+        性能优化（P0）：price_dict 在 _process_timestamp 开头构建一次，
+        后续所有风控/撮合/订单检查统一走此方法，消除 polars filter 重复扫描。
+        """
+        if price_dict is not None:
+            fields = price_dict.get(symbol)
+            if fields is not None:
+                val = fields.get(field)
+                if val is not None:
+                    return val
+                # dict 中无此字段（如 field 不在预提取列表），降级到 slab
+        # 降级路径：price_dict 未命中或未提供
+        return EventDrivenBacktestEngine._lookup_price(slab, symbol, field)
+
+    @staticmethod
     def _lookup_price(
         slab: pl.DataFrame, symbol: str, field: str = "close"
     ) -> float | None:
-        """从 slab 中查找指定字段的价格"""
+        """从 slab 中查找指定字段的价格（兜底路径，O(U) polars filter）。
+
+        优先使用 ``_lookup_price_fast`` + ``price_dict`` 加速。
+        """
         if field not in slab.columns:
             return None
         price_series = slab.filter(pl.col("symbol") == symbol).select(field).to_series()
@@ -774,6 +912,7 @@ class EventDrivenBacktestEngine:
         db_audit: Any,
         price_field: str = "close",
         execution_ts: Any = None,
+        price_dict: dict[str, dict[str, float]] | None = None,
     ) -> None:
         orders = portfolio.process_signal(
             signal_event,
@@ -817,7 +956,9 @@ class EventDrivenBacktestEngine:
                 db_audit,
             )
 
-            price = self._lookup_price(slab, order.symbol, field=price_field)
+            price = self._lookup_price_fast(
+                slab, order.symbol, field=price_field, price_dict=price_dict
+            )
             if price is None:
                 self._total_skipped += 1
                 # G3: 订单因找不到价格被静默跳过，必须审计
@@ -839,7 +980,12 @@ class EventDrivenBacktestEngine:
 
             # Pre-trade 单笔风控（P0-08）：聚合涨跌停板、价格有效性等检查
             pre_trade_reason = self._pre_trade_check(
-                order, price, signal_event.trace_id, db_audit, slab=slab
+                order,
+                price,
+                signal_event.trace_id,
+                db_audit,
+                slab=slab,
+                price_dict=price_dict,
             )
             if pre_trade_reason is not None:
                 self._total_skipped += 1
@@ -860,7 +1006,9 @@ class EventDrivenBacktestEngine:
                 continue
 
             # 获取当日成交量（用于成交量参与率限制，P0-04）
-            daily_volume = self._lookup_price(slab, order.symbol, field="volume") or 0.0
+            daily_volume = self._lookup_price_fast(
+                slab, order.symbol, field="volume", price_dict=price_dict
+            ) or 0.0
 
             fill = broker.execute_order(order, price, daily_volume=daily_volume)
             portfolio.update_from_fill(fill)
@@ -1134,6 +1282,7 @@ class EventDrivenBacktestEngine:
         symbols: list[str],
         n_splits: int = 3,
         benchmark_symbol: str = "",
+        warmup_days: int = 0,
     ) -> dict[str, Any]:
         """执行 Walk-Forward 滚动回测（自动样本外验证）
 
@@ -1144,6 +1293,10 @@ class EventDrivenBacktestEngine:
             symbols: 候选股票列表
             n_splits: 时间窗折叠数
             benchmark_symbol: 基准指数代码
+            warmup_days: 预热期日历日数。时序因子（如 ``returns(period=120)``）
+                在 fold 训练期初会全 NaN，需把取数窗口向前推 warmup 天，
+                让 fold 训练期首个 timestamp 就有非 NaN 因子值。
+                交易时间戳仍按 fold 的 [train_start, train_end] / [test_start, test_end] 过滤。
 
         Returns:
             {
@@ -1157,11 +1310,17 @@ class EventDrivenBacktestEngine:
         不进入 average_metrics 计算，避免把失败的 0 当作平均业绩的一部分。
         """
 
-        full_data = self._prepare_data(symbols, start_date, end_date)
+        full_data = self._prepare_data(
+            symbols, start_date, end_date, warmup_days=warmup_days
+        )
         if full_data.is_empty():
             return {"error": "加载数据为空"}
 
-        timestamps = self._get_timestamps(full_data)
+        # Walk-Forward 内部 fold 的时间戳过滤仍按 [start_date, end_date]，
+        # warmup 期数据只用于算子因子的历史窗口，不进入交易循环。
+        timestamps = self._get_timestamps(
+            full_data, start_date=start_date, end_date=end_date
+        )
         splitter = TimeSeriesSplit(n_splits=n_splits)
         splits = splitter.split(timestamps)
 
@@ -1180,6 +1339,8 @@ class EventDrivenBacktestEngine:
             test_end = str(test_ts[-1]) if test_ts else train_end
 
             # 训练期回测（每个 fold 使用独立的审计日志）
+            # warmup_days 透传：fold 训练期初的时序因子需要预热数据，
+            # full_data 已含 warmup 期，run() 内部会按 [train_start - warmup, train_end] 保留。
             self.audit_logger.trail.clear()
             strategy.init()
             train_result = self.run(
@@ -1189,6 +1350,7 @@ class EventDrivenBacktestEngine:
                 symbols,
                 benchmark_symbol,
                 full_data=full_data,
+                warmup_days=warmup_days,
             )
             if train_result.success:
                 train_metrics = {
@@ -1210,6 +1372,7 @@ class EventDrivenBacktestEngine:
                 )
 
             # 测试期回测（重置策略状态和审计日志，防止训练期信息泄漏）
+            # warmup_days 透传：测试期初同样需要预热数据填充时序因子。
             self.audit_logger.trail.clear()
             strategy.init()
             test_result = self.run(
@@ -1219,6 +1382,7 @@ class EventDrivenBacktestEngine:
                 symbols,
                 benchmark_symbol,
                 full_data=full_data,
+                warmup_days=warmup_days,
             )
             if test_result.success:
                 test_metrics = {
@@ -1269,14 +1433,34 @@ class EventDrivenBacktestEngine:
 
     # ── 数据与指标 ────────────────────────────────────────────
 
-    def _prepare_data(self, symbols: list[str], start: str, end: str) -> pl.DataFrame:
-        """准备 Polars 格式的数据面板（引擎层防御性过滤日期范围）"""
+    def _prepare_data(
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
+        warmup_days: int = 0,
+    ) -> pl.DataFrame:
+        """准备 Polars 格式的数据面板（引擎层防御性过滤日期范围）。
+
+        ``warmup_days > 0`` 时把取数起点提前 ``warmup_days`` 天（日历日），
+        让时序因子（如 ``returns(period=120)``）在 ``start`` 当天就有非 NaN 值。
+        交易时间戳过滤在 :meth:`_get_timestamps` 中完成，不会在 warmup 期产生交易。
+        """
         if self.data_provider is not None:
-            df = self.data_provider.get_merged_panel_as_polars(symbols, start, end)
+            if warmup_days > 0:
+                data_start = (
+                    datetime.strptime(start[:10], "%Y-%m-%d")
+                    - timedelta(days=warmup_days)
+                ).strftime("%Y-%m-%d")
+            else:
+                data_start = start[:10]
+            df = self.data_provider.get_merged_panel_as_polars(
+                symbols, data_start, end[:10]
+            )
             if df is not None and not df.is_empty():
-                # 防御性过滤：确保数据不超出请求的日期范围，防止 Walk-Forward 等场景下的数据泄漏
+                # 防御性过滤：确保数据不超出 [data_start, end] 范围
                 if "timestamp" in df.columns:
-                    start_dt = pl.lit(start).str.to_datetime()
+                    start_dt = pl.lit(data_start).str.to_datetime()
                     end_dt = pl.lit(end).str.to_datetime()
                     df = df.filter(
                         (pl.col("timestamp") >= start_dt)

@@ -12,38 +12,40 @@ from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
 from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
+    StrategyDSL,
     parse_strategy_yaml,
 )
-from long_earn.backtest.engine.evaluator import SafeExpressionEvaluator
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.services import BacktestService, LoggerService
 
 if TYPE_CHECKING:
-    from long_earn.backtest.data.provider import DataProvider
+    from long_earn.backtest.data.connector import DataConnector
     from long_earn.config import AppConfig
 
 
 class DSLStrategy(BaseStrategy):
-    """从 YAML DSL 自动生成的状态化策略"""
+    """从 YAML DSL 自动生成的状态化策略（ADR-009 收尾：仅算子目录路径）
+
+    旧式 factors + filter/rank/expression 信号路径已退役，所有策略必须含
+    operator_factors 或 type=operator 信号步骤（DSL 解析期强制校验）。
+    因果性由算子目录（每个算子过 prove_causality）+ VisibilityGuard
+    （history 仅含 timestamp <= 当前时刻）共同保证。
+    """
 
     def __init__(self, strategy_id: str, dsl_strategy: Any, config: dict | None = None):
         super().__init__(strategy_id, config)
         self.dsl = dsl_strategy
         # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
         # 还是只是退化成"什么都不做"而被错误标记 success=True。
+        # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
         self.factor_failures: list[dict[str, str]] = []
         self.step_failures: list[dict[str, str]] = []
 
-    def _eval(self, expr: str, df) -> Any:
-        """使用 SafeExpressionEvaluator 安全求值"""
-        evaluator = SafeExpressionEvaluator(df)
-        return evaluator.evaluate(expr)
-
     def _build_operator_executor(self):
-        """惰性构造算子目录执行器（仅当 DSL 含算子步骤时）。
+        """惰性构造算子目录执行器。
 
-        把算子目录接入策略执行路径：算子因子/信号步骤经此执行器跑在算子目录上，
-        绕过旧表达式求值器。解析期已校验过 op/params，这里直接 resolve。
+        把算子目录接入策略执行路径：算子因子/信号步骤经此执行器跑在算子目录上。
+        解析期已校验过 op/params，这里直接 resolve。
         """
         from long_earn.backtest.engine.operator_executor import (  # noqa: PLC0415
             OperatorStrategyExecutor,
@@ -59,12 +61,11 @@ class DSLStrategy(BaseStrategy):
         ]
         return OperatorStrategyExecutor(factor_specs, signal_specs)
 
-    def _on_bar_operators(self, bars: pl.DataFrame, context) -> Any:  # noqa: ARG002
+    def on_bar(self, bars: pl.DataFrame, context) -> Any:  # noqa: ARG002
         """算子目录执行路径：在 polars 历史面板上跑算子链 → 选中标的 → 等权信号。
 
-        与旧路径的区别：因子/信号计算全部走算子目录（polars），无表达式求值、
-        无 pandas 转换。因果性由算子目录（每个算子过 prove_causality）+
-        VisibilityGuard（history 仅含 timestamp <= 当前时刻）共同保证。
+        ADR-009 收尾：旧式 factors + expression 路径已退役，所有策略必须含
+        operator_factors 或 operator 信号步骤（DSL 解析期强制校验）。
         ``bars`` 参数为 BaseStrategy.on_bar 契约要求，算子路径改用 history 面板。
         """
         from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
@@ -78,7 +79,7 @@ class DSLStrategy(BaseStrategy):
             self.step_failures.append(
                 {
                     "type": "history_fetch",
-                    "step": "on_bar_operators history",
+                    "step": "on_bar history",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
@@ -108,169 +109,6 @@ class DSLStrategy(BaseStrategy):
             strategy_id=self.strategy_id,
         )
 
-    def on_bar(self, bars: pl.DataFrame, context) -> Any:
-        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
-
-        # 算子目录路径：DSL 含 operator_factors / operator 信号时，走算子执行器，
-        # 在 polars 历史面板上直接跑算子目录（因果性由算子目录 + VisibilityGuard 保证）。
-        # 这条路径绕过旧 SafeExpressionEvaluator，是"调整系统架构"后的主执行路径。
-        # getattr 兜底：兼容不含 has_operator_steps 的旧 stub DSL（测试用）。
-        if getattr(self.dsl, "has_operator_steps", lambda: False)():
-            return self._on_bar_operators(bars, context)
-
-        # 因子计算必须基于历史窗口而非当前截面：否则 shift(close, N) 这类
-        # 时序因子在每 symbol 单行的 slab 上永远是 NaN，所有动量/反转/波动率
-        # 因子全部失效——这是 LLM 生成的量化策略最常见的因子类型。
-        # context.get_history_df() 由 VisibilityGuard 保证只含 timestamp <= 当前时刻。
-        try:
-            history_pl = context.get_history_df()
-            history_df = history_pl.to_pandas()
-            # 因子层：MultiIndex (timestamp, symbol)，shift(level="symbol") 才能正确按
-            # 每只股票的时间序列做位移
-            if "timestamp" in history_df.columns and "symbol" in history_df.columns:
-                history_df = history_df.sort_values(["symbol", "timestamp"]).set_index(
-                    ["timestamp", "symbol"]
-                )
-            factors_df = self._compute_factors(history_df)
-            # 取当前时刻的截面快照（信号和权重在 symbol 单层 index 上工作）
-            ct = context.current_timestamp
-            if ct in factors_df.index.get_level_values(0):
-                df = factors_df.xs(ct, level="timestamp")
-            else:
-                # 兜底：若历史 df 没有当前 ts（数据缺失等），退回到 bars 截面
-                df = bars.to_pandas()
-                if "symbol" not in df.index.names:
-                    df = df.set_index("symbol")
-        except Exception as exc:
-            # 历史数据获取失败时回退旧路径，但记录到 step_failures 便于上层观测
-            self.step_failures.append(
-                {
-                    "type": "history_fetch",
-                    "step": "on_bar history",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            df = bars.to_pandas()
-            if "symbol" not in df.index.names:
-                df = df.set_index("symbol")
-            df = self._compute_factors(df)
-
-        selected = self._execute_signal_steps(df)
-        final_weights = self._compute_weights(df, selected)
-
-        if not final_weights:
-            return None
-
-        return SignalEvent(
-            timestamp=context.current_timestamp,
-            trace_id=f"dsl_{context.current_timestamp.isoformat()}",
-            event_id=f"dsl_{context.current_timestamp.isoformat()}",
-            signals=final_weights,
-            strategy_id=self.strategy_id,
-        )
-
-    def _compute_factors(self, df: Any) -> Any:
-        """计算 DSL 定义的因子并加入 DataFrame
-
-        失败的因子写入 self.factor_failures，便于上层判断策略是否真的在工作。
-        """
-        for alias, expr in self.dsl.factors.items():
-            try:
-                result = self._eval(expr, df)
-                if result is not None:
-                    df[alias] = result
-            except Exception as exc:
-                # 不要让一个坏因子直接挂掉整张图，但要让失败可观测
-                self.factor_failures.append(
-                    {"alias": alias, "expr": str(expr), "error": str(exc)}
-                )
-                continue
-        return df
-
-    def _execute_signal_steps(self, df: Any) -> list:
-        """执行 DSL 信号步骤（filter/rank/expression），返回选中的标的列表
-
-        失败的 step 写入 self.step_failures，便于上层判断策略是否真的在工作。
-
-        关键：filter/rank step 失败时 selected 置空并终止后续步骤（保守不选），
-        而非保持初始的"全部股票"。否则一个坏因子（如引用不存在的 volatility
-        字段）会让 filter 静默失效，后续 rank 从全量 df 选 top N，在某些行情下
-        产生虚高收益。终止后续步骤是因为：filter 失败后选股逻辑已残缺，再跑
-        rank 只是从全量股票虚选，结果不可信。
-        """
-        selected = df.index.unique().tolist()
-        for idx, step in enumerate(self.dsl.signals):
-            step_type = step.get("type", "")
-            try:
-                if step_type == "filter":
-                    selected = self._apply_filter_step(step, df)
-                elif step_type == "rank":
-                    selected = self._apply_rank_step(step, df)
-                elif step_type == "expression":
-                    self._apply_expression_step(step, df)
-            except Exception as exc:
-                self.step_failures.append(
-                    {
-                        "index": str(idx),
-                        "type": step_type,
-                        "step": str(step),
-                        "error": str(exc),
-                    }
-                )
-                # filter/rank 失败：保守不选 + 终止后续步骤，避免"坏因子 →
-                # filter 失效 → rank 从全量股票虚选 top N → 虚高收益"
-                if step_type in ("filter", "rank"):
-                    selected = []
-                    break
-                continue
-        return selected
-
-    def _apply_filter_step(self, step: dict, df: Any) -> list:
-        """执行 filter 信号步骤"""
-        condition = step.get("condition", "")
-        result = self._eval(condition, df)
-        df_filtered = df[result.fillna(False)]
-        return df_filtered.index.unique().tolist()
-
-    def _apply_rank_step(self, step: dict, df: Any) -> list:
-        """执行 rank 信号步骤"""
-        by_field = step.get("by", "")
-        top_n = step.get("top", 10)
-        ascending = step.get("ascending", False)
-        if by_field in df.columns:
-            sorted_df = df[by_field].dropna().sort_values(ascending=ascending)
-            return sorted_df.head(top_n).index.tolist()
-        return []
-
-    def _apply_expression_step(self, step: dict, df: Any) -> None:
-        """执行 expression 信号步骤，将结果列加入 DataFrame"""
-        formula = step.get("formula", "")
-        alias_new = step.get("alias", "")
-        result = self._eval(formula, df)
-        if result is not None:
-            df[alias_new] = result
-
-    def _compute_weights(self, df: Any, selected: list) -> dict[str, float]:
-        """根据权重配置计算最终权重
-
-        所有"返回空 {}"的退化路径都必须写入 step_failures，
-        让上层（reflection / supervisor）知道是策略层退化而非真业绩 0。
-        """
-        method = self.dsl.weights.method
-        if method == "equal":
-            return self._equal_weights(selected)
-        if method == "signal":
-            return self._signal_weights(df, selected)
-        # 未知 method：LLM 写错了配置
-        self.step_failures.append(
-            {
-                "type": "weights",
-                "step": f"method={method}",
-                "error": f"未知 weights.method '{method}'，仅支持 equal/signal",
-            }
-        )
-        return {}
-
     def _equal_weights(self, selected: list) -> dict[str, float]:
         if not selected:
             self.step_failures.append(
@@ -284,47 +122,29 @@ class DSLStrategy(BaseStrategy):
         weight = 1.0 / len(selected)
         return dict.fromkeys(selected, weight)
 
-    def _signal_weights(self, df: Any, selected: list) -> dict[str, float]:
-        if not self.dsl.weights.signal_field:
-            self.step_failures.append(
-                {
-                    "type": "weights",
-                    "step": "method=signal",
-                    "error": "signal_field 未配置",
-                }
-            )
-            return {}
-        field = self.dsl.weights.signal_field
-        step_label = f"method=signal,field={field}"
-        if field not in df.columns:
-            self.step_failures.append(
-                {
-                    "type": "weights",
-                    "step": step_label,
-                    "error": f"signal_field '{field}' 不在 DataFrame 列中",
-                }
-            )
-            return {}
-        if not selected:
-            self.step_failures.append(
-                {
-                    "type": "weights",
-                    "step": step_label,
-                    "error": "selected 为空：信号步骤未选出任何标的",
-                }
-            )
-            return {}
-        total = df.loc[selected, field].clip(lower=0).sum()
-        if total <= 0:
-            self.step_failures.append(
-                {
-                    "type": "weights",
-                    "step": step_label,
-                    "error": "signal_field 在 selected 上的正部和为 0，无法分配权重",
-                }
-            )
-            return {}
-        return {s: max(0.0, df.loc[s, field]) / total for s in selected}
+
+def _compute_warmup_days(dsl: "StrategyDSL") -> int:
+    """从 DSL 算子参数推断所需预热期（日历日）。
+
+    扫描 ``operator_factors`` 取最大 period/window（``returns`` / ``windowed`` /
+    ``shift`` 等时序算子的回溯窗口），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
+    0 表示无时序算子，不需要 warmup。
+
+    关键 bug 修复背景：原引擎 ``_prepare_data`` 按 [start, end] 取数，导致近6个月
+    回测时 ``returns(period=120)`` 在前 60-90 天全 NaN，``rank_top(momentum_120)``
+    选不出股票，整轮回测 trade_count=0。
+    """
+    max_period = 0
+    for factor in dsl.operator_factors:
+        params = factor.get("params") or {}
+        period = params.get("period", 0) or 0
+        window = params.get("window", 0) or 0
+        span = params.get("span", 0) or 0
+        max_period = max(max_period, period, window, span)
+    if max_period <= 0:
+        return 0
+    # 交易日 → 日历日：约 7/5 倍；加 30 天 buffer 防节假日
+    return int(max_period * 1.5 + 30)
 
 
 class BacktestServiceImpl(BacktestService):
@@ -340,11 +160,15 @@ class BacktestServiceImpl(BacktestService):
         self,
         config: "AppConfig",
         logger: LoggerService,
-        data_provider: "DataProvider | None" = None,
+        data_provider: "DataConnector | None" = None,
+        max_workers: int = 0,
     ):
         self.config = config
         self.logger = logger
         self.data_provider = data_provider
+        # 并行 worker 数：0=自动（os.cpu_count()），1=串行，>1=指定核数
+        # 控制 Walk-Forward fold 级并行（run_oos / run_walk_forward_parallel）
+        self.max_workers = max_workers or getattr(config, "max_workers", 0)
 
     def _build_strategy_diagnostics(
         self,
@@ -355,46 +179,41 @@ class BacktestServiceImpl(BacktestService):
         """收集策略层静默失败信息
 
         让上层（reflection / supervisor）能识别"策略实际上几乎啥都没干，
-        业绩 0 是退化结果而非真实表现"，或"部分因子/信号失败导致回测指标不可信"。
+        业绩 0 是退化结果而非真实表现"，或"算子执行链失败导致回测指标不可信"。
 
-        关键：factor_failures / step_failures 跨 bar 累积——每个 bar 都会重新跑
-        一遍因子和信号步骤。直接用 len(step_failures) == total_steps 判断"全失败"
-        在多 bar 下永远 False（1000 bar × 6 step = 6000 ≠ 6）。
-        正确做法：按 step index / factor alias 去重，看"是否每个 step 至少失败过一次"。
+        ADR-009 收尾：算子路径的 step_failures 用 ``step`` 字段标记失败位置
+        （如 ``operator_executor`` / ``on_bar history`` / ``method=equal``），
+        跨 bar 累积——每个 bar 都会重新跑算子链。按 step 标签去重，
+        看是否曾发生失败（任何一次失败都意味着选股逻辑可能残缺）。
         """
         factor_failures = list(strategy_obj.factor_failures)
         step_failures = list(strategy_obj.step_failures)
         trade_count = result.trade_count or 0
+        # 信号步骤总数（仅用于 diagnostics 展示，不参与失败判定）
+        total_signals = len(getattr(dsl, "signals", []) or [])
 
-        total_factors = len(getattr(dsl, "factors", {}) or {})
-        total_steps = len(getattr(dsl, "signals", []) or [])
-
-        # 去重：哪些 alias / index 至少失败过一次
+        # 去重：哪些 step 标签 / factor alias 至少失败过一次
         failed_factor_aliases: set[str] = {
             alias for f in factor_failures if (alias := f.get("alias"))
         }
-        failed_step_indices: set[str] = {
-            idx for f in step_failures if (idx := f.get("index")) is not None
+        failed_step_labels: set[str] = {
+            label for f in step_failures if (label := f.get("step"))
         }
 
-        all_factors_failed = (
-            total_factors > 0 and len(failed_factor_aliases) >= total_factors
-        )
-        all_steps_failed = total_steps > 0 and len(failed_step_indices) >= total_steps
-        # 任何 filter/rank step 失败都意味着选股逻辑残缺，回测指标不可信
-        # （filter 失效 → selected 置空 → 策略不交易；或因子失败 → filter 引用缺失字段 → 失效）
-        any_step_failed = len(failed_step_indices) > 0
+        # 任何算子执行 step 失败都意味着选股逻辑残缺，回测指标不可信
+        any_step_failed = len(failed_step_labels) > 0
         any_factor_failed = len(failed_factor_aliases) > 0
-        degenerate = all_factors_failed or all_steps_failed or trade_count == 0
+        # degenerate: 策略层退化（无交易 = 啥都没干）；any_step_failed 进一步标记不可信
+        degenerate = trade_count == 0
         # metrics_unreliable: 指标不可信，上层不应基于此做收益对比或验收决策
         metrics_unreliable = degenerate or any_step_failed or any_factor_failed
 
         if self.logger and metrics_unreliable:
             self.logger.warning(
                 f"策略指标不可信：trade_count={trade_count}, "
-                f"factor_failures={len(failed_factor_aliases)}/{total_factors} "
+                f"factor_failures={len(failed_factor_aliases)} "
                 f"unique（共 {len(factor_failures)} 次）, "
-                f"step_failures={len(failed_step_indices)}/{total_steps} "
+                f"step_failures={len(failed_step_labels)} "
                 f"unique（共 {len(step_failures)} 次）, "
                 f"degenerate={degenerate}, metrics_unreliable={metrics_unreliable}"
             )
@@ -403,7 +222,8 @@ class BacktestServiceImpl(BacktestService):
             "factor_failures": factor_failures,
             "step_failures": step_failures,
             "failed_factor_aliases": sorted(failed_factor_aliases),
-            "failed_step_indices": sorted(failed_step_indices),
+            "failed_step_labels": sorted(failed_step_labels),
+            "total_signals": total_signals,
             "trade_count": trade_count,
             "degenerate": degenerate,
             "metrics_unreliable": metrics_unreliable,
@@ -423,10 +243,10 @@ class BacktestServiceImpl(BacktestService):
             return None
 
     def _get_universe_symbols(self, universe_type: str, date: str) -> list[str]:
-        """获取股票池（优先走 data_provider 降级链，退回 MiniQmtUniverseProvider）。
+        """获取股票池（优先走 data_connector 降级链，退回 MiniQmtUniverseProvider）。
 
         将 universe 获取纳入 DI 容器管理：注入了 ``data_provider``（如
-        ``CompositeDataProvider``）时走降级链（miniqmt→ciccwm→akshare），
+        ``CompositeDataConnector``）时走降级链（DuckDB→miniqmt），
         xtquant 不可用时不再断链；未注入时退回直接构造 ``MiniQmtUniverseProvider``。
         """
         if self.data_provider is not None:
@@ -490,23 +310,29 @@ class BacktestServiceImpl(BacktestService):
 
             data_provider = self.data_provider
             if data_provider is not None:
-                # DataProvider Protocol 已定义 get_merged_panel_as_polars；
-                # 直接注入让引擎经统一接口消费（CompositeDataProvider 等已实现）。
+                # DataConnector Protocol 已定义 get_merged_panel_as_polars；
+                # 直接注入让引擎经统一接口消费（CompositeDataConnector 等已实现）。
                 engine.data_provider = data_provider
 
             strategy_obj = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
 
             # 根据 DSL 配置获取股票池（优先走 data_provider 降级链）
-            universe_type = dsl.universe.type or "csi300"
+            # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
+            universe_type = dsl.universe.type or "main_board+gem"
             start_date_str = start_date.replace("-", "")
             universe_symbols = self._get_universe_symbols(universe_type, start_date_str)
 
-            # 降级：如果指定股票池为空，尝试 csi300
-            if not universe_symbols and universe_type != "csi300":
+            # 降级：如果指定股票池为空，尝试 main_board+gem（系统默认池）
+            default_universe = "main_board+gem"
+            if not universe_symbols and universe_type != default_universe:
                 if self.logger:
-                    self.logger.warning(f"股票池 '{universe_type}' 为空，降级到 csi300")
-                universe_type = "csi300"
-                universe_symbols = self._get_universe_symbols("csi300", start_date_str)
+                    self.logger.warning(
+                        f"股票池 '{universe_type}' 为空，降级到 {default_universe}"
+                    )
+                universe_type = default_universe
+                universe_symbols = self._get_universe_symbols(
+                    default_universe, start_date_str
+                )
 
             if not universe_symbols:
                 return {
@@ -528,6 +354,7 @@ class BacktestServiceImpl(BacktestService):
                 start_date,
                 end_date,
                 formatted_symbols,
+                warmup_days=_compute_warmup_days(dsl),
             )
 
             if self.logger:
@@ -582,7 +409,7 @@ class BacktestServiceImpl(BacktestService):
         param_grid: Any,
         start_date: str = "",
         end_date: str = "",
-        universe_type: str = "csi300",
+        universe_type: str = "main_board+gem",
         benchmark_symbol: str = "",
         allow_large_grid: bool = False,
     ) -> dict[str, Any]:
@@ -640,7 +467,7 @@ class BacktestServiceImpl(BacktestService):
         start_date: str = "",
         end_date: str = "",
         n_splits: int = 3,
-        universe_type: str = "csi300",
+        universe_type: str = "main_board+gem",
         benchmark_symbol: str = "",
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
@@ -692,12 +519,8 @@ class BacktestServiceImpl(BacktestService):
             WalkForwardResult dict: n_splits / fold_results / average_test_metrics /
             failed_folds / oos_sharpe
         """
-        start_date = start_date or getattr(
-            self.config, "test_start_date", "2025-01-01"
-        )
-        end_date = end_date or getattr(
-            self.config, "test_end_date", "2026-03-24"
-        )
+        start_date = start_date or getattr(self.config, "test_start_date", "2025-01-01")
+        end_date = end_date or getattr(self.config, "test_end_date", "2026-03-24")
 
         if self.logger:
             self.logger.info(
@@ -705,40 +528,135 @@ class BacktestServiceImpl(BacktestService):
             )
 
         try:
-            wf_result = self._engine.walk_forward_run(
+            dsl = parse_strategy_yaml(strategy_yaml)
+        except ValueError as e:
+            return self._empty_oos_result(n_splits, f"策略解析失败: {e}")
+
+        try:
+            formatted_symbols, universe_type = self._resolve_oos_symbols(dsl, start_date)
+            if not formatted_symbols:
+                return self._empty_oos_result(
+                    n_splits, f"股票池 '{universe_type}' 为空，数据源不可用"
+                )
+
+            if self.logger:
+                self.logger.info(
+                    f"[OOS] 股票池: {universe_type}, {len(formatted_symbols)} 只股票"
+                )
+
+            # 性能优化（P0）：Walk-Forward fold 级并行
+            # 默认走 ParallelRunner（max_workers=0 自动用 os.cpu_count()），
+            # 每个 fold 独立进程跑 train+test，SharedMemory 零拷贝共享 full_data。
+            # max_workers=1 时退化为串行（等价于旧 engine.walk_forward_run）。
+            from long_earn.backtest.engine.parallel import (  # noqa: PLC0415
+                ParallelRunner,
+            )
+
+            runner = ParallelRunner(
+                max_workers=self.max_workers,
+                data_provider=self.data_provider,
+            )
+            if self.logger:
+                self.logger.info(
+                    f"[OOS] 并行回测 max_workers={runner.max_workers} "
+                    f"(0=自动 cpu_count)"
+                )
+
+            wf_result = runner.run_walk_forward_parallel(
                 strategy_yaml=strategy_yaml,
                 start_date=start_date,
                 end_date=end_date,
+                symbols=formatted_symbols,
                 n_splits=n_splits,
             )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[OOS] Walk-Forward 失败: {e}")
-            return {
-                "n_splits": n_splits,
-                "fold_results": [],
-                "average_test_metrics": {},
-                "failed_folds": list(range(n_splits)),
-                "oos_sharpe": None,
-                "error": str(e),
-            }
+            return self._empty_oos_result(n_splits, str(e))
 
-        fold_results = wf_result.get("folds", [])
+        if isinstance(wf_result, dict) and wf_result.get("error"):
+            # 引擎返回错误（如加载数据为空）
+            return self._empty_oos_result(n_splits, wf_result["error"])
+
+        return self._aggregate_oos_result(wf_result, n_splits)
+
+    def _empty_oos_result(self, n_splits: int, error: str) -> dict[str, Any]:
+        """构造空的 OOS 结果（失败/错误路径）。"""
+        return {
+            "n_splits": n_splits,
+            "fold_results": [],
+            "average_test_metrics": {},
+            "failed_folds": list(range(n_splits)),
+            "oos_sharpe": None,
+            "error": error,
+        }
+
+    def _resolve_oos_symbols(
+        self, dsl: Any, start_date: str
+    ) -> tuple[list[str], str]:
+        """解析 OOS 回测的股票池，返回 (formatted_symbols, universe_type)。
+
+        含 main_board+gem 降级逻辑：指定股票池为空时退回默认池。
+        """
+        universe_type = dsl.universe.type or "main_board+gem"
+        start_date_str = start_date.replace("-", "")
+        universe_symbols = self._get_universe_symbols(universe_type, start_date_str)
+
+        default_universe = "main_board+gem"
+        if not universe_symbols and universe_type != default_universe:
+            if self.logger:
+                self.logger.warning(
+                    f"股票池 '{universe_type}' 为空，降级到 {default_universe}"
+                )
+            universe_type = default_universe
+            universe_symbols = self._get_universe_symbols(
+                default_universe, start_date_str
+            )
+
+        if not universe_symbols:
+            return [], universe_type
+
+        formatted_symbols = PandasToPolarsProvider.format_symbols(universe_symbols)
+        return formatted_symbols, universe_type
+
+    def _aggregate_oos_result(
+        self, wf_result: dict[str, Any], n_splits: int
+    ) -> dict[str, Any]:
+        """聚合 Walk-Forward 结果为 OOS 指标 dict。
+
+        兼容 ParallelRunner（含 average_metrics）和旧 core.py 路径两种格式。
+        """
+        fold_results = wf_result.get("folds", []) or wf_result.get("fold_results", [])
+        # 兼容 engine/core.py 与 engine/parallel.py 的两种键名：
+        # - core.py 用 "test"（当前实现）
+        # - 早期文档/测试用 "test_metrics"
         test_metrics = [
-            f.get("test_metrics", {}) or {} for f in fold_results
+            f.get("test", {}) or f.get("test_metrics", {}) or {} for f in fold_results
         ]
-        failed_folds = [
-            i for i, f in enumerate(fold_results) if f.get("error")
-        ]
+        # failed_folds 兼容两种格式：
+        # - ParallelRunner 返回 list of dicts（含 fold_id）
+        # - 旧 core.py 返回 list of fold indices
+        raw_failed = wf_result.get("failed_folds", [])
+        if raw_failed and isinstance(raw_failed[0], dict):
+            failed_folds = [
+                f.get("fold_id", i) for i, f in enumerate(raw_failed)
+            ]
+        else:
+            failed_folds = list(raw_failed)
 
         # 计算平均 OOS 指标
+        # 优先用 ParallelRunner 返回的 average_metrics.test（已聚合），
+        # 退化到自行从 fold_results 聚合（兼容旧 core.py 路径）
         avg_metrics: dict[str, float] = {}
-        if test_metrics:
+        avg_from_runner = (
+            wf_result.get("average_metrics", {}).get("test", {}) or {}
+        )
+        if avg_from_runner:
+            avg_metrics = dict(avg_from_runner)
+        elif test_metrics:
             for key in ("sharpe_ratio", "total_return", "max_drawdown"):
                 values = [
-                    float(m.get(key, 0))
-                    for m in test_metrics
-                    if m.get(key) is not None
+                    float(m.get(key, 0)) for m in test_metrics if m.get(key) is not None
                 ]
                 if values:
                     avg_metrics[key] = sum(values) / len(values)

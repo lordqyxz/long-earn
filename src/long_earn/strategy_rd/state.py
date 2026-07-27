@@ -63,11 +63,12 @@ class State(TypedDict, total=False):
     hypothesis_tree: dict[str, Any] | None
     current_best_node_id: str | None
     selected_leaves: list[str] | None
-    executor_results: Annotated[list[dict[str, Any]], _collect_executor_results] | None
+    # 注意：不能用 `Annotated[...] | None`，LangGraph 不识别 Union 包装的 Annotated
+    # reducer，会退化为 last_value 导致并行 fan-out 写崩溃。total=False 已让字段可选。
+    executor_results: Annotated[list[dict[str, Any]], _collect_executor_results]
     run_id: str | None
     oos_threshold: float
     oos_n_splits: int
-    operator_gaps: list[dict[str, str]] | None
 
 
 StrategyResearchState = State

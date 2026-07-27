@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
+from functools import reduce
 from typing import Any
 
 import pandas as pd
@@ -26,6 +27,10 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.financial.schemas import (
+    FinancialSchemaRegistry,
+    FinancialTableSchema,
+)
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 
 # 缓存数据过期阈值（天）：超过此天数视为过期，需从 miniqmt 更新
@@ -51,7 +56,7 @@ BOARD_NAME_MAP = {
 }
 
 # 财务字段映射：标准字段名清单（get_financial_panel 默认返回这些列）
-# 原始字段提取在 _fetch_financials 中按表（Income/Balance/CashFlow/Pershareindex）进行
+# 原始字段提取在 _fetch_financials 中按表（Income/Balance/CashFlow/Pershareindex/Capital）进行
 FINANCIAL_FIELD_MAP = {
     # 利润表（Income）原始字段
     "revenue": "revenue",
@@ -76,6 +81,9 @@ FINANCIAL_FIELD_MAP = {
     "revenue_yoy": "revenue_yoy",
     "roe": "roe",
     "gross_margin": "gross_margin",
+    # 资本变动表（Capital）原始字段（ADR-014 任务7）
+    "total_shares": "total_shares",
+    "float_shares": "float_shares",
 }
 
 
@@ -117,21 +125,35 @@ class MiniQmtClient:
     def is_available(self) -> bool:
         """检测 xtquant 是否可用。
 
-        优先检查 LONG_EARN_DISABLE_XTQUANT 环境变量：CI / 无 QMT dev 环境
-        通常 import xtquant 成功但实际查询会让 C++ 端触发 SIGABRT 杀整个进程
-        （Python 层超时无法救，因为 abort 是 process-wide signal）。
-        设置 LONG_EARN_DISABLE_XTQUANT=1 强制走 "xtquant 不可用 → DuckDB 缓存"
-        分支，避免崩溃。
+        优先检查两个环境变量（ADR-014 阶段 G）：
+
+        1. ``LONG_EARN_CACHE_ONLY``：启动时数据同步完成后设置，
+           强制后续所有数据访问走纯缓存分支，支持高并发并行回测。
+           与 ``DISABLE_XTQUANT`` 的区别：CACHE_ONLY 是运行时切换，
+           同步阶段需要 xtquant 可用，同步完才切换到纯缓存。
+        2. ``LONG_EARN_DISABLE_XTQUANT``：CI / 无 QMT dev 环境
+           通常 import xtquant 成功但实际查询会让 C++ 端触发 SIGABRT 杀整个进程
+           （Python 层超时无法救，因为 abort 是 process-wide signal）。
+           设置 =1 强制走 "xtquant 不可用 → DuckDB 缓存" 分支，避免崩溃。
+
+        注：``set_cache_only()`` 会清理 ``_available`` 缓存，确保下次调用
+        重新走环境变量检测分支。
         """
         if self._available is not None:
             return self._available
-        # 1. 显式禁用开关：优先于 import 检测
+        # 1. 纯缓存模式（启动同步后）：优先于 import 检测
+        cache_only = os.environ.get("LONG_EARN_CACHE_ONLY", "").strip().lower()
+        if cache_only in ("1", "true", "yes", "on"):
+            self._available = False
+            logger.info("LONG_EARN_CACHE_ONLY 已设置，强制走纯缓存分支")
+            return self._available
+        # 2. 显式禁用开关：CI / 无 QMT 环境
         disable = os.environ.get("LONG_EARN_DISABLE_XTQUANT", "").strip().lower()
         if disable in ("1", "true", "yes", "on"):
             self._available = False
             logger.info("LONG_EARN_DISABLE_XTQUANT 已设置，强制将 xtquant 标记为不可用")
             return self._available
-        # 2. 尝试 import；失败则不可用
+        # 3. 尝试 import；失败则不可用
         try:
             from xtquant import xtdata  # noqa: PLC0415
 
@@ -392,6 +414,66 @@ class MiniQmtClient:
             logger.warning(f"获取板块 {sector_name} 成分股失败: {e}")
             return []
 
+    def get_sector_list(self) -> list[str]:
+        """获取所有板块分类名（含行业板块、概念板块、指数板块）。
+
+        xtquant ``xtdata.get_sector_list`` 返回 ``list[str]``，含中文板块名
+        （如 "沪深A股"/"创业板"/"白酒"/"半导体" 等）。DataConnector 据此
+        发现 miniqmt 支持的全部行业/概念板块，供本体论种子数据扩展用。
+        """
+        xtdata = self._ensure_xtdata()
+        if xtdata is None:
+            return []
+        try:
+            result = self._run_with_timeout(
+                xtdata.get_sector_list, self._DOWNLOAD_TIMEOUT
+            )
+            return list(result or [])
+        except TimeoutError:
+            logger.warning("get_sector_list 超时")
+            return []
+        except Exception as e:
+            logger.warning(f"get_sector_list 异常: {e}")
+            return []
+
+    def get_trading_dates(
+        self, start_time: str = "", end_time: str = "", market: str = "SSE"
+    ) -> list[str]:
+        """获取交易日历。
+
+        xtquant ``xtdata.get_trading_dates_by_market(market, start_time, end_time)``
+        返回 ``list[int]``（YYYYMMDD 整数）。本方法统一转为 ``YYYY-MM-DD`` 字符串。
+
+        Args:
+            start_time: YYYYMMDD 或 YYYY-MM-DD 起始日
+            end_time: YYYYMMDD 或 YYYY-MM-DD 结束日
+            market: 市场标识（SSE 上交所 / SZSE 深交所），默认 SSE
+        """
+        xtdata = self._ensure_xtdata()
+        if xtdata is None:
+            return []
+        try:
+            s = start_time.replace("-", "") if start_time else ""
+            e = end_time.replace("-", "") if end_time else ""
+            raw = self._run_with_timeout(
+                xtdata.get_trading_dates_by_market,
+                self._DOWNLOAD_TIMEOUT,
+                market,
+                s,
+                e,
+            )
+            if not raw:
+                return []
+            return [
+                f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for d in raw
+            ]
+        except TimeoutError:
+            logger.warning("get_trading_dates_by_market 超时")
+            return []
+        except Exception as e:
+            logger.warning(f"get_trading_dates_by_market 异常: {e}")
+            return []
+
     # ── 标的信息 ──────────────────────────────────────────────────────────
 
     def get_instrument_detail(self, stock_code: str) -> dict[str, Any]:
@@ -453,13 +535,28 @@ def _is_price_stale(cache: DataCache, symbols: list[str], end_date: str) -> bool
     return False
 
 
-def _is_financial_stale(cache: DataCache, symbols: list[str]) -> bool:
+def _is_financial_stale(
+    cache: DataCache,
+    symbols: list[str],
+    end_date: str = "",
+) -> bool:
     """检测财务缓存是否过期。
 
-    如果任一股票的缓存最新报告期距今超过 120 天，视为过期。
+    判定规则：
+    - 若 ``end_date`` 距今超过 120 天，说明用户请求的是历史数据，
+      不需要最新财报 → 直接返回 False（不做 staleness 检查）。
+    - 否则，任一股票的缓存最新报告期距今超过 120 天 → 视为过期。
+
+    之前版本不带 ``end_date`` 参数，对历史回测查询也会判定过期
+    （因为缓存最新报告期永远早于"今天"），导致每次都触发 xtquant 增量下载，
+    抹平了缓存 120x 加速效果（ADR-014 修正）。
     """
     threshold = timedelta(days=120)
     now = datetime.now()
+    if end_date:
+        end_dt = pd.to_datetime(end_date)
+        if (now - end_dt) > threshold:
+            return False
     for sym in symbols:
         rng = cache.get_financial_range(sym)
         if rng is None:
@@ -584,19 +681,29 @@ class MiniQmtDataProvider:
 
         fields = fields or list(FINANCIAL_FIELD_MAP.values())
         quarters = self._get_quarters_between(start_date, end_date)
+        # _get_quarters_between 会把 start_date 之前最近一季（before_start）
+        # 也纳入 quarters，用于 ffill。但该季在用户请求范围外，**不参与**
+        # missing 判定——否则缓存里没该季就永远"缺失 1 个"，每次都触发
+        # xtquant 下载，抹平缓存加速（ADR-014 修正）。
+        start_pd = pd.to_datetime(start_date)
+        in_range_quarters = [
+            q for q in quarters if pd.to_datetime(q, format="%Y%m%d") >= start_pd
+        ]
 
         # 1. 从 DuckDB 缓存读取
         cached_df = self.cache.get_financials(symbols, fields)
-        missing_quarters = quarters
+        missing_quarters = in_range_quarters
         if cached_df is not None and not cached_df.empty:
             cached_quarters = set(
                 cached_df["report_date"].dt.strftime("%Y%m%d").unique()
             )
-            missing_quarters = [q for q in quarters if q not in cached_quarters]
+            missing_quarters = [
+                q for q in in_range_quarters if q not in cached_quarters
+            ]
 
-        # 2. 检测是否需要刷新
+        # 2. 检测是否需要刷新（带 end_date 让历史回测查询跳过 staleness）
         need_refresh = bool(missing_quarters) or _is_financial_stale(
-            self.cache, symbols
+            self.cache, symbols, end_date
         )
 
         # 3. 若需要刷新且 miniqmt 可用，增量获取
@@ -627,110 +734,164 @@ class MiniQmtDataProvider:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame | None:
-        """从 miniqmt 下载财务数据（Income + Balance + CashFlow + Pershareindex 四表合并）。
+        """[兼容包装] 从 miniqmt 下载财务数据 — 按表分别取数后合并返回扁平宽表。
 
-        ADR-007 Phase 3：全量字段提取。
-        - Income：营业收入/净利润/每股收益/研发费用/营业总成本
-        - Balance：所有者权益/总资产/总负债
-        - CashFlow：经营现金流净额/资本支出
-        - Pershareindex：每股净资产/每股经营现金流/资产负债率/净利率/加权ROE/
-          YoY增长率/毛利率（预计算值，优先于手算）
+        ADR-014 阶段 B：内部调 ``_fetch_financials_by_table`` 按 8 张表 schema 分别
+        取数并写入各自细表，再 union 4 张旧表返回扁平宽表（保持旧调用方契约）。
+        新代码应直接用 ``_fetch_financials_by_table`` 获取 dict 结果。
+        """
+        table_dfs = self._fetch_financials_by_table(symbols, start_date, end_date)
+        if not table_dfs:
+            return None
+        # union 5 张标量表（含 Capital）为扁平宽表
+        # ADR-014 任务7：把 Capital 表纳入 union，让 Connector 查"资本结构"
+        # 能返回 total_shares/float_shares 字段
+        scalar_old = FinancialSchemaRegistry.scalar_tables()[:5]
+        parts: list[pd.DataFrame] = []
+        for schema in scalar_old:
+            df = table_dfs.get(schema.table_name)
+            if df is not None and not df.empty:
+                parts.append(df)
+        if not parts:
+            return None
+        # 按 (symbol, report_date) outer merge 4 表
+        # 注意：4 张表都含 announce_date 列，每次 merge 都会产生 announce_date_dup。
+        # 必须在每次 merge 后立即合并 announce_date_dup → announce_date 并 drop，
+        # 否则下一次 merge 会因已有 announce_date_dup 列而报 MergeError。
+        def _merge_two(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
+            merged = pd.merge(
+                a, b, on=["symbol", "report_date"], how="outer", suffixes=("", "_dup")
+            )
+            if "announce_date_dup" in merged.columns:
+                merged["announce_date"] = merged["announce_date"].fillna(
+                    merged["announce_date_dup"]
+                )
+                merged = merged.drop(columns=["announce_date_dup"])
+            return merged
+
+        merged = reduce(_merge_two, parts)
+        # dropna NOT NULL
+        merged = merged.dropna(subset=["symbol", "report_date", "announce_date"])
+        # 衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）
+        merged = self._compute_derived_financials(merged)
+        logger.info(
+            f"miniqmt 获取 {len(merged)} 条财务数据（union 4 表），"
+            f"{merged['symbol'].nunique()} 只股票"
+        )
+        return merged
+
+    def _fetch_financials_by_table(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, pd.DataFrame]:
+        """ADR-014 阶段 B：按 8 张表 schema 分别从 miniqmt 取数。
+
+        每张表用 ``_extract_by_schema`` 从 xtquant 原始字段按 schema.xt_fields
+        候选顺序提取标准字段名，写入各自 DuckDB 细表。
+
+        Returns:
+            {table_name: DataFrame}，只含成功取数的表
         """
         try:
             start_fmt = start_date.replace("-", "")
             end_fmt = end_date.replace("-", "")
+            result: dict[str, pd.DataFrame] = {}
 
-            # 四张表并行获取
-            income_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Income",
-            )
-            balance_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Balance",
-            )
-            cashflow_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="CashFlow",
-            )
-            pershare_df = self.client.get_financial(
-                stock_list=symbols, start_time=start_fmt, end_time=end_fmt,
-                table="Pershareindex",
-            )
+            for schema in FinancialSchemaRegistry.TABLES:
+                df = self._fetch_financial_table(schema, symbols, start_fmt, end_fmt)
+                if df is not None and not df.empty:
+                    # 写入对应细表
+                    self.cache.save_financial_table(schema.table_name, df)
+                    result[schema.table_name] = df
 
-            if (
-                income_df.empty
-                and balance_df.empty
-                and cashflow_df.empty
-                and pershare_df.empty
-            ):
-                return None
-
-            # 以 Income 表为基础（含 report_date / announce_date）
-            base_df = income_df if not income_df.empty else balance_df
-            if base_df.empty:
-                base_df = cashflow_df if not cashflow_df.empty else pershare_df
-
-            result_df = pd.DataFrame()
-            result_df["symbol"] = base_df.get("symbol")
-            if len(symbols) == 1 and (result_df["symbol"].isna().all() or result_df.empty):
-                result_df["symbol"] = symbols[0]
-            result_df["report_date"] = base_df.get("report_date", pd.NaT)
-            # announce_date 优先从基础表取（get_financial 已统一提取 m_anntime）
-            if "announce_date" in base_df.columns:
-                result_df["announce_date"] = base_df["announce_date"]
-            else:
-                result_df["announce_date"] = pd.NaT
-
-            # ── Income 表字段提取 ──
-            self._extract_income_fields(result_df, income_df)
-
-            # ── Balance 表字段提取（含多字段兜底映射） ──
-            self._extract_balance_fields(result_df, balance_df)
-
-            # ── CashFlow 表字段提取 ──
-            self._extract_table_fields(
-                result_df, cashflow_df,
-                {"net_cash_flows_oper_act": "ocf", "cash_pay_acq_const_fiolta": "capex"},
-            )
-
-            # ── Pershareindex 表字段提取（预计算值，优先于手算） ──
-            self._extract_table_fields(
-                result_df, pershare_df,
-                {
-                    "s_fa_bps": "bps",
-                    "s_fa_ocfps": "ocf_per_share",
-                    "gear_ratio": "debt_to_assets",
-                    "net_profit": "net_profit_margin",
-                    "equity_roe": "roe_weighted",
-                    # 预计算衍生指标（优先值，_compute_derived_financials 只在缺失时手算兜底）
-                    "du_return_on_equity": "roe",
-                    "gross_profit": "gross_margin",
-                    "du_profit_rate": "net_profit_yoy",
-                    "inc_revenue_rate": "revenue_yoy",
-                },
-            )
-
-            # 确保 report_date / announce_date 为 datetime 并过滤无效行
-            result_df["report_date"] = pd.to_datetime(
-                result_df["report_date"], errors="coerce"
-            )
-            result_df["announce_date"] = pd.to_datetime(
-                result_df["announce_date"], errors="coerce"
-            )
-            result_df = result_df.dropna(subset=["report_date", "announce_date"])
-
-            # 衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）
-            result_df = self._compute_derived_financials(result_df)
-
-            logger.info(
-                f"miniqmt 获取 {len(result_df)} 条财务数据，"
-                f"{result_df['symbol'].nunique()} 只股票"
-            )
-            return result_df
+            if result:
+                total_rows = sum(len(df) for df in result.values())
+                logger.info(
+                    f"miniqmt 按表取数完成: {len(result)}/{len(FinancialSchemaRegistry.TABLES)} 表，"
+                    f"共 {total_rows} 行"
+                )
+            return result
         except Exception as e:
-            logger.warning(f"miniqmt 财务数据下载失败: {e}")
+            logger.warning(f"miniqmt 按表财务数据下载失败: {e}")
+            return {}
+
+    def _fetch_financial_table(
+        self,
+        schema: FinancialTableSchema,
+        symbols: list[str],
+        start_fmt: str,
+        end_fmt: str,
+    ) -> pd.DataFrame | None:
+        """按单张表 schema 从 miniqmt 取数 + 字段提取。
+
+        Args:
+            schema: FinancialTableSchema（含 xt_table + columns + xt_fields 候选）
+            symbols: 股票代码列表
+            start_fmt / end_fmt: YYYYMMDD 格式时间
+        """
+        try:
+            raw = self.client.get_financial(
+                stock_list=symbols,
+                start_time=start_fmt,
+                end_time=end_fmt,
+                table=schema.xt_table,
+            )
+            if raw.empty:
+                return None
+            return self._extract_by_schema(schema, raw, symbols)
+        except Exception as e:
+            logger.warning(f"miniqmt 取 {schema.xt_table} 失败: {e}")
             return None
+
+    def _extract_by_schema(
+        self,
+        schema: FinancialTableSchema,
+        raw: pd.DataFrame,
+        symbols: list[str],
+    ) -> pd.DataFrame:
+        """通用字段提取：按 schema.columns 的 xt_fields 候选顺序提取标准字段名。
+
+        替代旧 _extract_income_fields / _extract_balance_fields / _extract_table_fields
+        三个硬编码提取器，改为 schema 驱动的通用逻辑。
+        """
+        result = pd.DataFrame()
+        # 主键 + announce_date 从 raw 统一取（client 已提取 m_timetag/m_anntime）
+        result["symbol"] = raw.get("symbol")
+        if len(symbols) == 1 and (result["symbol"].isna().all() or result.empty):
+            result["symbol"] = symbols[0]
+        result["report_date"] = raw.get("report_date", pd.NaT)
+        if "announce_date" in raw.columns:
+            result["announce_date"] = raw["announce_date"]
+        else:
+            result["announce_date"] = pd.NaT
+
+        # Top10 长表额外取 rank（xtquant Top10holder 有 rank 列）
+        if not schema.is_scalar and "rank" in raw.columns:
+            result["rank"] = raw["rank"]
+
+        # 按 schema.columns 的 xt_fields 候选顺序提取
+        for col in schema.data_columns:
+            if col.name in ("announce_date", "rank"):
+                continue  # 已处理
+            if not col.xt_fields:
+                continue
+            # 按候选顺序找第一个存在的原始列
+            for xt_col in col.xt_fields:
+                if xt_col in raw.columns:
+                    result[col.name] = raw[xt_col].values
+                    break
+            else:
+                result[col.name] = None
+
+        # 日期列转 datetime + 过滤无效行
+        result["report_date"] = pd.to_datetime(result["report_date"], errors="coerce")
+        result["announce_date"] = pd.to_datetime(
+            result["announce_date"], errors="coerce"
+        )
+        result = result.dropna(subset=["symbol", "report_date", "announce_date"])
+        return result
 
     @staticmethod
     def _merge_by_symbol_date(
@@ -778,7 +939,8 @@ class MiniQmtDataProvider:
             return
         balance_extract = {
             "total_equity": [
-                "total_equity", "tot_shrhldr_eqy_excl_min_int",
+                "total_equity",
+                "tot_shrhldr_eqy_excl_min_int",
                 "total_hldr_eqy_exc_min_int",
                 "total_hldr_eqy_incl_min_int",
                 "s_fa_total_hldr_eqy_exc_min_int",
@@ -881,9 +1043,7 @@ class MiniQmtDataProvider:
         ) / rev[valid]
 
     @staticmethod
-    def _fill_yoy_growth(
-        symbol_data: pd.DataFrame, field: str, yoy_field: str
-    ) -> None:
+    def _fill_yoy_growth(symbol_data: pd.DataFrame, field: str, yoy_field: str) -> None:
         """YoY 增长率手算兜底：(本期 - 上年同期) / |上年同期|。"""
         if field not in symbol_data.columns or yoy_field not in symbol_data.columns:
             return
@@ -901,9 +1061,9 @@ class MiniQmtDataProvider:
             if not last_year_data.empty and last_year_data.iloc[0] != 0:
                 last_year_val = float(last_year_data.iloc[0])
                 current_val = float(row[field])
-                symbol_data.loc[idx, yoy_field] = (
-                    current_val - last_year_val
-                ) / abs(last_year_val)
+                symbol_data.loc[idx, yoy_field] = (current_val - last_year_val) / abs(
+                    last_year_val
+                )
 
     @staticmethod
     def _fill_roe(symbol_data: pd.DataFrame) -> None:
@@ -937,6 +1097,9 @@ class MiniQmtDataProvider:
 
         ADR-007：用 announce_date（miniqmt 返回的 m_anntime 字段）作为
         信息可见的起点，不再用 report_date + 固定 lag。
+
+        ADR-014 任务7：保证 ``fields`` 中所有字段都作为列出现在返回 DataFrame 中，
+        即使该字段在 quarterly_df 中全缺失（如 Capital 表尚未下载）。
         """
         panels: list[pd.DataFrame] = []
         for symbol in symbols:
@@ -946,6 +1109,10 @@ class MiniQmtDataProvider:
             symbol_data = symbol_data.sort_values("announce_date")
             daily = pd.DataFrame(index=trading_dates)
             daily.index.name = "date"
+            # 预创建所有请求字段的列（NaN），保证输出 schema 稳定
+            for field in fields:
+                if field not in daily.columns:
+                    daily[field] = pd.NA
             for _, row in symbol_data.iterrows():
                 announce_date = row.get("announce_date")
                 if pd.isna(announce_date):
@@ -1022,6 +1189,94 @@ class MiniQmtDataProvider:
         委托给 :class:`MiniQmtUniverseProvider`，共享同一 DuckDB 缓存。
         """
         return MiniQmtUniverseProvider(self.cache).get_symbols(universe_type, date)
+
+    # ── DataConnector 扩展能力（行业/板块/交易日历/标的信息/实时快照）───
+
+    def get_industry_index_panel(
+        self,
+        industry: str,
+        start_date: str,
+        end_date: str,
+        fields: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """获取行业指数 K 线面板。
+
+        miniqmt 通过 ``get_market_data_ex`` 查询行业指数代码（如 "BK0428.SZ"
+        半导体 / "BK0475.SH" 白酒）。行业代码通过 :meth:`get_sector_list`
+        或 :meth:`get_industry_constituents` 派生，本方法直接用 industry
+        参数当 symbol 调用 K 线接口。
+
+        Args:
+            industry: 行业指数代码（如 "BK0428.SZ"）或板块名（如 "白酒"）
+            start_date: YYYY-MM-DD 起始日
+            end_date: YYYY-MM-DD 结束日
+            fields: 字段列表，默认 open/high/low/close/volume
+
+        Returns:
+            DataFrame，index 为 (date, symbol)，列为 fields；空数据返回空 DataFrame
+        """
+        if not industry:
+            return pd.DataFrame()
+        # 板块名 → 行业指数代码的映射由调用方负责（本体论种子数据已含）。
+        # 本方法直接拿 industry 当 xtquant symbol 查 K 线（与 get_price_panel
+        # 共用 _fetch_kline 逻辑，但走缓存表 industry_index_daily）。
+        symbols = [industry]
+        # 复用 price_panel 路径（miniqmt 行业指数 K 线格式与股票一致）
+        df = self.get_price_panel(symbols, start_date, end_date, fields)
+        if df is not None and not df.empty:
+            return df
+        # 缓存未命中且 miniqmt 不可用时直接返回空
+        return pd.DataFrame()
+
+    def get_industry_constituents(self, industry: str) -> list[str]:
+        """获取行业成分股列表。
+
+        委托 :meth:`MiniQmtClient.get_sector_stocks` 查询 miniqmt 板块成分股。
+        industry 可为中文板块名（"白酒"）/ 申万行业代码（"sw1_bank"）/
+        xtquant 行业指数代码（"BK0428.SZ"）。
+
+        Args:
+            industry: 行业标识（板块名 / 行业代码）
+
+        Returns:
+            成分股 xt_symbol 列表，空数据返回空列表
+        """
+        if not industry:
+            return []
+        return self.client.get_sector_stocks(industry)
+
+    def get_sector_classifications(self) -> list[str]:
+        """获取 miniqmt 支持的全部板块分类名。
+
+        委托 :meth:`MiniQmtClient.get_sector_list`，返回 xtquant 所有板块名
+        （含行业板块、概念板块、指数板块）。供本体论种子数据扩展与 LLM
+        推理用（"系统知道哪些行业"）。
+        """
+        return self.client.get_sector_list()
+
+    def get_trading_dates(
+        self, start_date: str = "", end_date: str = "", market: str = "SSE"
+    ) -> list[str]:
+        """获取交易日历。
+
+        委托 :meth:`MiniQmtClient.get_trading_dates`，返回 YYYY-MM-DD 字符串列表。
+        """
+        return self.client.get_trading_dates(start_date, end_date, market)
+
+    def get_instrument_detail(self, stock_code: str) -> dict[str, Any]:
+        """获取标的基础信息。
+
+        委托 :meth:`MiniQmtClient.get_instrument_detail`，返回原始字段字典
+        （含名称/上市日期/总股本/流通股本/行业/板块等）。
+        """
+        return self.client.get_instrument_detail(stock_code)
+
+    def get_full_tick(self, code_list: list[str]) -> dict[str, Any]:
+        """获取最新逐笔行情（实时快照）。
+
+        委托 :meth:`MiniQmtClient.get_full_tick`，返回 ``{symbol: tick_dict}``。
+        """
+        return self.client.get_full_tick(code_list)
 
     @staticmethod
     def _get_quarters_between(start_date: str, end_date: str) -> list[str]:
@@ -1101,6 +1356,16 @@ class MiniQmtUniverseProvider:
         cached = self.cache.get_universe(index_name, date)
         if cached:
             return cached
+        # PIT 查询无果（缓存中无早于 date 的快照）但缓存有更晚的快照：
+        # 成分股半年度调整，变化缓慢，用最新快照近似（标注 warning）
+        if date:
+            fallback = self.cache.get_universe(index_name, "")
+            if fallback:
+                logger.warning(
+                    f"{index_name} 缓存无早于 {date} 的快照，"
+                    f"用最新快照近似（{len(fallback)} 只，成分股近似）"
+                )
+                return fallback
         if self.client.is_available:
             result = self.client.get_sector_stocks(index_name)
             if result:

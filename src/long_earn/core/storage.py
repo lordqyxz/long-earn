@@ -95,3 +95,12 @@ def strategy_results_path() -> Path:
 def best_strategy_path() -> Path:
     """最佳策略 YAML 路径。"""
     return get_data_dir() / "best_strategy.yaml"
+
+
+def checkpoint_db_path() -> Path:
+    """LangGraph SqliteSaver checkpoint 数据库路径。
+
+    用于策略研发循环的断点持久化与中断恢复。每个研究 thread 由
+    ``thread_id`` 区分，可共享同一个 sqlite 文件。
+    """
+    return get_data_dir() / "checkpoints.sqlite"

@@ -11,7 +11,10 @@
 ## 子节点洞察
 {{ child_insights }}
 
-## 已剪枝方向（避免重复）
+## 大师策略生成建议
+{{ master_hints_context }}
+
+## 已尝试/已失败方向（避免重复，必须探索新方向）
 {{ pruned_directions }}
 
 ## 任务

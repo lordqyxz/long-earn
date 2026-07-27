@@ -1,10 +1,12 @@
 """YAML DSL 解析与编译模块
 
 将 LLM 生成的 YAML 策略描述解析为可执行的数据结构。
+
+ADR-009 收尾：旧式 ``factors`` + ``filter``/``rank``/``expression`` 信号路径已退役，
+所有策略必须使用算子目录（``operator_factors`` + ``type: operator`` 信号步骤）。
 """
 
 import datetime
-import re
 from typing import Any
 
 import yaml
@@ -14,33 +16,6 @@ from pydantic import BaseModel, Field, field_validator
 from long_earn.backtest.engine.broker import (
     TradingCostConfig as BrokerTradingCostConfig,
 )
-
-
-class SignalFilter(BaseModel):
-    """信号过滤条件"""
-
-    type: str = Field(default="filter")
-    condition: str = Field(..., description="过滤条件表达式，如 'net_profit_yoy > 0.3'")
-
-
-class SignalRank(BaseModel):
-    """信号排序条件"""
-
-    type: str = Field(default="rank")
-    by: str = Field(..., description="排序字段")
-    ascending: bool = Field(default=False, description="是否升序")
-    top: int = Field(default=10, description="选取前 N 个")
-
-
-class SignalExpression(BaseModel):
-    """信号表达式"""
-
-    type: str = Field(default="expression")
-    formula: str = Field(..., description="计算公式，如 'close / shift(close, 20) - 1'")
-    alias: str = Field(..., description="结果字段名")
-
-
-SignalStep = SignalFilter | SignalRank | SignalExpression
 
 
 class TradingCostConfig(BaseModel):
@@ -70,18 +45,22 @@ class TradingCostConfig(BaseModel):
 
 
 class WeightConfig(BaseModel):
-    """权重配置"""
+    """权重配置（ADR-009 收尾：仅支持 equal，custom_formula/signal 已退役）"""
 
     method: str = Field(
         default="equal",
-        description="权重方法: equal, market_cap, custom_formula, signal",
+        description="权重方法: equal（ADR-009 收尾后仅支持 equal）",
     )
-    formula: str | None = Field(
-        default=None, description="自定义权重公式（method=custom_formula 时必填）"
-    )
-    signal_field: str | None = Field(
-        default=None, description="使用哪个信号字段作为权重（method=signal 时必填）"
-    )
+
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v: str) -> str:
+        if v != "equal":
+            raise ValueError(
+                f"weights.method='{v}' 不被支持，"
+                f"ADR-009 收尾后仅支持 'equal'（旧式 custom_formula/signal 已退役）"
+            )
+        return v
 
 
 class RiskControlConfig(BaseModel):
@@ -105,8 +84,12 @@ class UniverseConfig(BaseModel):
     """股票池配置"""
 
     type: str = Field(
-        default="csi300",
-        description="股票池类型: all_a, csi300, csi500, main_board, gem, star_board, main_board+star_board",
+        default="main_board+gem",
+        description=(
+            "股票池类型: all_a, csi300, csi500, csi1000, sse50, "
+            "main_board, gem, star_board, main_board+gem, main_board+star_board。"
+            "默认 main_board+gem（沪深除科创板所有标的）"
+        ),
     )
     rebalance_freq: str = Field(
         default="20D", description="股票池再平衡频率，如 20D（20个交易日）"
@@ -114,22 +97,25 @@ class UniverseConfig(BaseModel):
 
 
 class StrategyDSL(BaseModel):
-    """策略 DSL 模型"""
+    """策略 DSL 模型（ADR-009 收尾：仅支持算子目录路径）
+
+    旧式 ``factors`` 字段、``filter``/``rank``/``expression`` 信号类型、
+    ``custom_formula``/``signal`` 权重方法已退役，解析期强制拒绝。
+    所有策略必须使用 ``operator_factors`` + ``type: operator`` 信号步骤，
+    走算子目录执行路径（因果性由 ``prove_causality`` 保证）。
+    """
 
     name: str = Field(default="Strategy", description="策略名称")
     description: str = Field(default="", description="策略描述")
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     start_date: str | None = Field(default=None, description="回测开始日期")
     end_date: str | None = Field(default=None, description="回测结束日期")
-    factors: dict[str, str] = Field(
-        default_factory=dict, description="因子定义，{alias: expression}"
-    )
     operator_factors: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="算子目录因子步骤，[{op, alias, params}]（绕过表达式求值器）",
+        description="算子目录因子步骤，[{op, alias, params}]",
     )
     signals: list[dict[str, Any]] = Field(
-        default_factory=list, description="信号生成步骤列表"
+        default_factory=list, description="信号生成步骤列表（仅支持 type=operator）"
     )
     weights: WeightConfig = Field(default_factory=WeightConfig)
     risk_control: RiskControlConfig = Field(default_factory=RiskControlConfig)
@@ -138,20 +124,26 @@ class StrategyDSL(BaseModel):
     @field_validator("signals", mode="before")
     @classmethod
     def validate_signals(cls, v: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """校验信号步骤"""
+        """校验信号步骤 — 仅允许 type=operator（ADR-009 收尾）"""
         for i, step in enumerate(v):
             if "type" not in step:
                 raise ValueError(f"第 {i} 个信号步骤缺少 type 字段")
-            if step["type"] == "filter" and "condition" not in step:
-                raise ValueError(f"第 {i} 个 filter 步骤缺少 condition 字段")
-            if step["type"] == "rank" and "by" not in step:
-                raise ValueError(f"第 {i} 个 rank 步骤缺少 by 字段")
-            if step["type"] == "operator" and "op" not in step:
+            if step["type"] != "operator":
+                raise ValueError(
+                    f"第 {i} 个信号步骤 type='{step['type']}' 不被支持，"
+                    f"ADR-009 收尾后仅支持 type='operator'"
+                    f"（旧式 filter/rank/expression 已退役）"
+                )
+            if "op" not in step:
                 raise ValueError(f"第 {i} 个 operator 信号步骤缺少 op 字段")
         return v
 
     def has_operator_steps(self) -> bool:
-        """是否含算子目录步骤（factor 或 signal）。"""
+        """是否含算子目录步骤（factor 或 signal）。
+
+        ADR-009 收尾后所有策略均走算子路径，此函数保留为 True 兜底
+        （兼容调用方旧分支判断逻辑）。
+        """
         return bool(self.operator_factors) or any(
             s.get("type") == "operator" for s in self.signals
         )
@@ -196,6 +188,13 @@ def parse_strategy_yaml(yaml_str: str) -> StrategyDSL:
     # 转换日期对象为字符串
     data = _convert_dates(data)
 
+    # ADR-009 收尾：旧式 factors 字段强制拒绝
+    if "factors" in data:
+        raise ValueError(
+            "旧式 factors 字段已退役（ADR-009 收尾），"
+            "请改用 operator_factors 声明算子目录步骤"
+        )
+
     try:
         strategy = StrategyDSL.model_validate(data)
     except Exception as e:
@@ -229,79 +228,3 @@ def _validate_operator_steps(strategy: StrategyDSL) -> None:
             resolve_signal_step(step)
         except ValueError as exc:
             raise ValueError(f"第 {i} 个 operator 信号步骤非法: {exc}") from exc
-
-
-def validate_fields(strategy: StrategyDSL, available_fields: list[str]) -> list[str]:
-    """校验策略中引用的字段是否在可用字段列表中"""
-    used_fields = set()
-
-    # 1. 首先收集所有定义的别名 (Aliases)
-    defined_aliases = set()
-    for step in strategy.signals:
-        if step.get("type") == "expression":
-            alias = step.get("alias")
-            if alias:
-                defined_aliases.add(alias)
-
-    # 从 factors 中提取字段
-    for expr in strategy.factors.values():
-        used_fields.update(_extract_field_names(expr))
-
-    # 从 signals 中提取字段
-    for step in strategy.signals:
-        if step["type"] == "filter":
-            used_fields.update(_extract_field_names(step.get("condition", "")))
-        elif step["type"] == "rank":
-            used_fields.add(step.get("by", ""))
-        elif step["type"] == "expression":
-            used_fields.update(_extract_field_names(step.get("formula", "")))
-
-    # 从 weights 中提取字段
-    if strategy.weights.formula:
-        used_fields.update(_extract_field_names(strategy.weights.formula))
-    if strategy.weights.signal_field:
-        used_fields.add(strategy.weights.signal_field)
-
-    # 过滤出缺失的字段（factors 的别名和 signals 定义的 alias 都是合法字段）
-    valid_fields = (
-        set(available_fields) | set(strategy.factors.keys()) | defined_aliases
-    )
-    # 兜底排除空串（rank.by 缺失会塞 ""）；其它关键字 / 函数已由 _extract_field_names 过滤
-    missing = used_fields - valid_fields - {""}
-
-    return sorted(missing)
-
-
-def _extract_field_names(expression: str) -> set[str]:
-    """从表达式中提取字段名
-
-    需排除以下三类标识符（与 SafeExpressionEvaluator 支持的语法保持一致）：
-    1. Python 关键字（True/False/None/if/else/and/or/not/in/is）—— evaluator 走 ast 节点
-       原生支持，不会进 _namespace
-    2. evaluator 内置函数白名单（_SAFE_FUNCTIONS / 领域函数 shift/rank）
-    3. 数值与字符串常量
-    """
-    # 移除字符串常量
-    expr = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
-    # 移除数字
-    expr = re.sub(r"\b\d+\.?\d*\b", "", expr)
-    # 移除常见函数名 + Python 关键字 + evaluator 支持的所有内置 / 领域函数
-    # 必须与 _KEYWORDS_AND_FUNCTIONS 集合保持同步（validate_fields 也用同一集合）
-    keywords_and_funcs = (
-        # 领域函数
-        "shift|rank|"
-        # numpy 数学函数（_SAFE_FUNCTIONS）
-        "sum|mean|std|abs|max|min|where|clip|log|exp|sqrt|"
-        # Python 逻辑 / 比较关键字
-        "and|or|not|in|is|"
-        # Python 常量
-        "True|False|None|"
-        # if/else 三元表达式（evaluator 走 ast.IfExp 原生支持）
-        "if|else"
-    )
-    expr = re.sub(rf"\b({keywords_and_funcs})\b", "", expr)
-    # 移除比较运算符和逻辑运算符
-    expr = re.sub(r"[><=!&|+\-*/()\[\],\.\:\%\^]", " ", expr)
-    # 提取剩余标识符
-    tokens = re.findall(r"\b[a-zA-Z_]\w*\b", expr)
-    return set(tokens)

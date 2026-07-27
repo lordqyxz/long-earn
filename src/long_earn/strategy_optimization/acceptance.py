@@ -6,8 +6,11 @@
 规则（全部满足才 accept）：
 1. 优化版回测无 error；
 2. 优化版非 degenerate（有真实交易，trade_count > 0 且非全 step 失败）；
-3. 主指标（默认 sharpe_ratio）**严格优于**基线；若基线 sharpe 缺失/为 0，则要求
-   优化版 sharpe > 0 且 total_return 优于基线。
+3. 主指标（默认 sharpe_ratio）**严格优于**基线；
+4. 基线 sharpe 缺失时（HTR 首次循环 ``previous_backtest`` 为空）：接受任何有有效
+   sharpe 的策略作为初始基线（即使为负 sharpe）。这是为了让 HTR 能建立初始基线
+   供后续循环比较——若要求首次循环即正 sharpe，在弱势市场下 HTR 永远无法接受
+   任何策略，整个研发循环空转。
 
 金融严谨性：用夏普（风险调整收益）而非裸收益率做主判据，避免"高收益但超高波动"
 的劣化被误判为改进。容差 ``eps`` 防止数值噪声导致误判。
@@ -95,15 +98,25 @@ class AcceptanceGate:
                 o_ret,
             )
 
-        # 基线 sharpe 缺失：要求优化版 sharpe>0 且收益提升
-        if (
-            o_sharpe is not None
-            and o_sharpe > self.eps
-            and (b_ret is None or (o_ret is not None and o_ret > b_ret + self.eps))
-        ):
+        # 基线 sharpe 缺失（HTR 首次循环 previous_backtest 为空）：
+        # 接受任何有有效 sharpe 的策略作为初始基线（即使为负 sharpe）。
+        # 否则弱势市场下所有策略都是负 sharpe，HTR 永远无法建立基线，
+        # 整个研发循环空转（如 2026-07-26 run_20260726_174857 中 6 个节点
+        # 全部因此被拒绝）。
+        if o_sharpe is not None:
+            # 优化版有有效 sharpe（即使为负），接受作为初始基线
+            if b_ret is None or (o_ret is not None and o_ret > b_ret + self.eps):
+                return AcceptanceResult(
+                    True,
+                    "基线无 sharpe，优化版作为初始基线接受（有有效回测指标）",
+                    b_sharpe,
+                    o_sharpe,
+                    b_ret,
+                    o_ret,
+                )
             return AcceptanceResult(
-                True,
-                "基线无 sharpe，优化版 sharpe>0 且收益提升",
+                False,
+                "基线无 sharpe 且优化版收益未优于基线",
                 b_sharpe,
                 o_sharpe,
                 b_ret,
@@ -111,7 +124,7 @@ class AcceptanceGate:
             )
         return AcceptanceResult(
             False,
-            "基线无 sharpe 且优化版未表现出正 sharpe/收益提升",
+            "基线无 sharpe 且优化版无有效 sharpe",
             b_sharpe,
             o_sharpe,
             b_ret,

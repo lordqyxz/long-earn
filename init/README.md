@@ -1,6 +1,8 @@
 # 知识库初始化文件
 
-本文件夹包含系统启动时自动加载到 Qdrant 向量数据库的知识库文件。
+本目录包含系统启动时自动加载到物质-运动统一架构记忆系统（ADR-007）的知识库文件。
+
+> **注**：本目录中描述旧版 DSL（`factors` 字段 + `filter`/`rank`/`expression` 信号类型）的内容已被 ADR-009 算子目录路径取代，仅作历史参考保留。生产环境策略研发已切换到算子目录路径，DSL 解析期强制拒绝旧式 `factors` 字段与 `filter`/`rank`/`expression` 信号类型。
 
 ## 文件格式
 
@@ -11,52 +13,32 @@
 
 ## 加载规则
 
-1. 系统启动时自动扫描此文件夹
-2. 检查 Qdrant 中是否存在对应的 Collection
-3. 如果 Collection 不存在或为空，则加载所有文件
-4. 如果已存在，则跳过加载
+1. 系统启动时 `MemoryService` 自动扫描此目录（`config.init_dir`，默认 `./init`）
+2. 通过 `SubstanceStore.load_directory()` 加载到物质-运动统一架构记忆系统
+3. 加载后可通过 `SubstanceStore.search()` 检索相关知识
 
-## Markdown 切分策略
+## 当前文件清单
 
-系统使用 **MarkdownHeadingSplitter** 类处理 Markdown 文件，目标是每个词条作为一个独立的 Document。
+| 文件 | 说明 | 状态 |
+|------|------|------|
+| `01_data.md` | 数据获取指南 + 财务字段详细说明（五表合并，20 字段） | 有效 |
+| `02_yaml_dsl.md` | YAML DSL 策略定义、信号、错误与示例（旧版 DSL，已合并） | 已弃用 |
+| `04_backtest.md` | 事件驱动回测引擎说明 | 有效 |
+| `05_metrics.md` | 绩效指标计算与评估标准 | 有效 |
+| `08_glossary.md` | 金融量化词汇表（约 80+ 词条） | 有效 |
+| `README.md` | 本文件 | — |
 
-### 切分原则
+## 历史文件合并记录
 
-- **h1**: 文档标题
-- **h2**: 一级类别 (如 "一、基础指标类")
-- **h3**: 二级类别 (如 "1.1 价格指标")
-- **h4**: 词条标题 (如 "收盘价")
+以下文件已按主题重组合并，原文件已删除：
 
-### 元数据
-
-每个 Document 携带以下元数据：
-
-| 字段 | 说明 |
-|------|------|
-| `source_file` | 来源文件名 |
-| `term` | 词条名称 (如 "夏普比率") |
-| `category` | 所属类别 (如 "四、风险指标类") |
-| `section_level` | 标题级别 (3=h3, 4=h4) |
-
-### 搜索接口
-
-`search_knowledge` 函数支持多种过滤方式：
-
-```python
-from long_earn.tools.store import search_knowledge
-
-# 基础搜索
-results = search_knowledge("夏普比率", k=3)
-
-# 按类别过滤 (词汇表)
-results = search_knowledge("策略优化", k=3, categories=["四、风险指标类"])
-
-# 按词条名称过滤
-results = search_knowledge("收益", k=3, terms=["夏普比率", "Beta"])
-
-# 按源文件过滤 (代码文档)
-results = search_knowledge("数据获取", k=3, source_files=["01_data.md", "02_strategy.md"])
-```
+| 原文件 | 合并到 | 说明 |
+|--------|--------|------|
+| `02_strategy.md` | `02_yaml_dsl.md` | 策略定义 + 信号 + 错误 + 示例统一文档 |
+| `03_signals.md` | `02_yaml_dsl.md` | 同上 |
+| `06_errors.md` | `02_yaml_dsl.md` | 同上 |
+| `07_example.md` | `02_yaml_dsl.md` | 同上 |
+| `09_financial_fields.md` | `01_data.md` | 财务字段详细说明合并到数据文档 |
 
 ## 节点知识配置
 
@@ -71,17 +53,14 @@ results = search_knowledge("数据获取", k=3, source_files=["01_data.md", "02_
 
 ### develop 节点检索的文件
 
-- `01_data.md` - 数据获取
-- `02_strategy.md` - 策略基类
-- `03_signals.md` - 信号生成
+- `01_data.md` - 数据获取与财务字段
+- `02_yaml_dsl.md` - YAML DSL 策略定义（旧版，已弃用）
 - `04_backtest.md` - 回测配置
 - `05_metrics.md` - 绩效指标
-- `06_errors.md` - 错误处理
-- `07_example.md` - 代码示例
 
 ## 词汇表文件规范
 
-词汇表文件 (如 `08_glossary.md`) 使用统一的标题层级：
+词汇表文件 (`08_glossary.md`) 使用统一的标题层级：
 
 ```markdown
 # 文档标题 (h1)
@@ -94,17 +73,3 @@ results = search_knowledge("数据获取", k=3, source_files=["01_data.md", "02_
 - **解释**: 词条解释
 - **计算方法**: 计算公式或方法
 ```
-
-## 当前文件清单
-
-| 文件 | 说明 |
-|------|------|
-| `01_data.md` | miniqmt/xtquant 数据获取指南 |
-| `02_strategy.md` | 策略开发指南 |
-| `03_signals.md` | 信号生成 |
-| `04_backtest.md` | 回测框架 |
-| `05_metrics.md` | 策略指标 |
-| `06_errors.md` | 常见错误处理 |
-| `07_example.md` | 示例代码 |
-| `08_glossary.md` | 金融量化词汇表 (约 80+ 词条) |
-| `README.md` | 本文件 |

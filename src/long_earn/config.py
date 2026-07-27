@@ -19,11 +19,10 @@ from long_earn.services import (
 )
 
 if TYPE_CHECKING:
-    from long_earn.backtest.data.provider import (
-        DataProvider,
-        MarketIntelligenceProvider,
-    )
+    from long_earn.backtest.data.connector import DataConnector
+    from long_earn.backtest.data.provider import MarketIntelligenceProvider
     from long_earn.backtest.data.realtime import RealtimeDataProvider
+    from long_earn.ontology import Connector, OntologyRegistry
     from long_earn.operator_dev.backlog import OperatorBacklog
 
 # 项目数据目录 — 统一由 core.storage 裁决（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
@@ -63,14 +62,34 @@ class RuntimeContext:
     stock_service: StockService
     backtest_service: BacktestService
 
-    # 数据层（可选）
-    data_provider: "DataProvider | None" = None
+    # 数据层（可选，ADR-014 阶段 F：DataConnector 替代 DataProvider）。
+    # 字段名保留 data_provider 不破坏 dataclass 构造调用方，新增 data_connector
+    # 属性作为新名字别名。新代码应用 data_connector / require_data_connector()。
+    data_provider: "DataConnector | None" = None
     # 市场情报能力（可选，仅 ciccwm 可用时注入；与 data_provider 分离的第二组接口）
     market_intelligence: "MarketIntelligenceProvider | None" = None
     # 实时行情能力（可选，ADR-011 第三组接口；miniqmt→ciccwm 降级）
     realtime_provider: "RealtimeDataProvider | None" = None
     # 算子缺口队列（可选，gap_detector 写入 / operator_dev 消费）
     operator_backlog: "OperatorBacklog | None" = None
+    # 本体论连接器（可选，ADR-014；上层通过概念取数，屏蔽多数据源/PIT/降级链）
+    connector: "Connector | None" = None
+    # 本体论注册表（可选，ADR-014；承载 OntologyGraph 供记忆激活图遍历用）
+    ontology_registry: "OntologyRegistry | None" = None
+
+    # ── 新名字别名属性 ─────────────────────────────────────────────────
+    # ADR-014 阶段 F：data_provider 字段类型已升级为 DataConnector，新代码
+    # 应使用 data_connector 属性名（指向同一字段）。
+
+    @property
+    def data_connector(self) -> "DataConnector | None":
+        """数据连接器（ADR-014 阶段 F 新名字，等价于 ``self.data_provider``）。"""
+        return self.data_provider
+
+    @data_connector.setter
+    def data_connector(self, value: "DataConnector | None") -> None:
+        """数据连接器 setter（写入 data_provider 字段）。"""
+        self.data_provider = value
 
     def require_llm(self) -> LLMService:
         """获取 LLM 服务（非空保证，等价于读 ``self.llm_service``）"""
@@ -88,11 +107,15 @@ class RuntimeContext:
         """获取回测服务（非空保证）"""
         return self.backtest_service
 
-    def require_data_provider(self) -> "DataProvider":
-        """获取数据提供者，未注入时抛出明确错误"""
+    def require_data_connector(self) -> "DataConnector":
+        """获取数据连接器，未注入时抛出明确错误。"""
         if self.data_provider is None:
-            raise RuntimeError("DataProvider 未初始化")
+            raise RuntimeError("DataConnector 未初始化")
         return self.data_provider
+
+    def require_data_provider(self) -> "DataConnector":
+        """[向后兼容] 等价于 :meth:`require_data_connector`。"""
+        return self.require_data_connector()
 
     def require_market_intelligence(self) -> "MarketIntelligenceProvider":
         """获取市场情报提供者，未注入时抛出明确错误"""
@@ -109,7 +132,51 @@ class RuntimeContext:
 
 @dataclass
 class AppConfig:
-    """应用配置
+    """应用配置（环境变量单一真相源）
+
+    所有环境变量集中在此文档维护，AGENTS.md / README 不再重复。新增环境变量时
+    同步更新此 docstring，并在 ``from_env`` 中读取。
+
+    ── AppConfig.from_env() 读取的业务配置 ─────────────────────────────
+
+    | 变量 | 默认值 | 说明 |
+    |------|--------|------|
+    | LLM_TYPE | ollama | LLM 类型（ollama / dashscope / openai） |
+    | LLM_MODEL | deepseek-v4-flash:cloud | LLM 模型名称 |
+    | LLM_BASE_URL | http://localhost:11434 | LLM API 基础 URL |
+    | LONG_EARN_DATA_DIR | D:/dev/long-earn-data | 统一数据根目录（唯一存储位置控制变量，派生全部生成数据路径） |
+    | INIT_DIR | ./init | 知识库初始化目录 |
+    | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
+    | BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
+    | TRAIN_START | 2022-01-01 | 训练集起始（量化数据分割规范） |
+    | TRAIN_END | 2024-12-31 | 训练集结束 |
+    | TEST_START | 2025-01-01 | 测试集起始（Walk-Forward OOS） |
+    | TEST_END | 2026-03-24 | 测试集结束 |
+    | VALIDATION_START | 2026-03-25 | 验证集起始（前瞻验证） |
+    | VALIDATION_END | 2026-06-25 | 验证集结束 |
+    | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
+    | HTR_MAX_SELECT | 1 | HTR 每轮选择的最大假设数（1=串行，>1 激活 LangGraph Send 并行 fan-out） |
+    | HTR_MAX_CYCLES | 10 | HTR 六步循环最大周期数（达到时强制停止） |
+    | LONG_EARN_MAX_WORKERS | 0 | 回测并行 worker 数（0=自动 cpu_count，1=串行，>1=指定核数） |
+    | STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔） |
+    | STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔） |
+    | EVENT_INFERENCE_KEYWORDS | 新闻,事件,热点,资讯,利好,利空 | 事件推理路由关键词（逗号分隔） |
+
+    ── 运行时控制环境变量（不在 from_env，由各模块直接读取） ──────────
+
+    | 变量 | 读取位置 | 说明 |
+    |------|----------|------|
+    | LONG_EARN_SKIP_CACHE_SYNC | context_init.py | =1 跳过启动时数据缓存同步（CI/单元测试/纯 LLM 推理场景） |
+    | LONG_EARN_CACHE_ONLY | cache_sync.py / miniqmt_provider.py | =1 强制纯缓存模式（启动同步完成后设置，所有数据访问只读 DuckDB） |
+    | LONG_EARN_DISABLE_XTQUANT | parallel.py / miniqmt_provider.py | =1 永久禁用 xtquant（CI / 无 QMT 环境；与 CACHE_ONLY 区别：本变量是入口期永久禁用，CACHE_ONLY 是运行时切换） |
+
+    ── 第三方 API Key 环境变量 ────────────────────────────────────────
+
+    | 变量 | 读取位置 | 说明 |
+    |------|----------|------|
+    | DASHSCOPE_API_KEY | utils/llm_factory.py | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） |
+    | OPENAI_API_KEY | langchain_openai（隐式读取） | OpenAI API Key（LLM_TYPE=openai 时必填） |
+    | MOONSHOT_API_KEY / KIMI_API_KEY | event_inference/collectors/kimi_collector.py / tools/kimi_web_search.py | Kimi / Moonshot API Key（事件推理采集 + 网页搜索，二选一） |
 
     Attributes:
         llm_type: LLM 类型，可选值：ollama, dashscope, openai
@@ -143,6 +210,14 @@ class AppConfig:
     best_strategy_path: str = str(_storage.best_strategy_path())
     init_dir: str = "./init"
     max_iterations: int = 3
+    # HTR 每轮选择的最大假设数（1=串行，>1=并行 fan-out，ADR-010 Phase 5）
+    htr_max_select: int = 1
+    # HTR 六步循环最大周期数（_decide_node 强制停止兜底，ADR-010）
+    # 默认 10 与原硬编码一致；可通过 HTR_MAX_CYCLES 环境变量配置
+    htr_max_cycles: int = 10
+    # 回测并行 worker 数（0=自动使用 os.cpu_count()，1=串行，>1=指定核数）
+    # 控制 ParallelRunner / Walk-Forward fold 级并行的并发度
+    max_workers: int = 0
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
     # 量化数据分割（AGENTS.md「量化数据分割规范」）
@@ -154,7 +229,14 @@ class AppConfig:
     validation_end_date: str = "2026-06-25"
     strategy_keywords: tuple[str, ...] = ("策略", "思路", "投资策略")
     stock_analysis_keywords: tuple[str, ...] = ("股票", "分析", "公司")
-    event_inference_keywords: tuple[str, ...] = ("新闻", "事件", "热点", "资讯", "利好", "利空")
+    event_inference_keywords: tuple[str, ...] = (
+        "新闻",
+        "事件",
+        "热点",
+        "资讯",
+        "利好",
+        "利空",
+    )
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -165,7 +247,9 @@ class AppConfig:
         """
         strategy_env = os.getenv("STRATEGY_KEYWORDS", "策略,思路,投资策略")
         stock_analysis_env = os.getenv("STOCK_ANALYSIS_KEYWORDS", "股票,分析,公司")
-        event_env = os.getenv("EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空")
+        event_env = os.getenv(
+            "EVENT_INFERENCE_KEYWORDS", "新闻,事件,热点,资讯,利好,利空"
+        )
 
         # 唯一存储环境变量：LONG_EARN_DATA_DIR → 派生全部数据路径
         paths = _storage.resolve_paths(os.getenv("LONG_EARN_DATA_DIR"))
@@ -182,6 +266,9 @@ class AppConfig:
             best_strategy_path=str(paths["best_strategy_path"]),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
+            htr_max_select=int(os.getenv("HTR_MAX_SELECT", "1")),
+            htr_max_cycles=int(os.getenv("HTR_MAX_CYCLES", "10")),
+            max_workers=int(os.getenv("LONG_EARN_MAX_WORKERS", "0")),
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
             train_start_date=os.getenv("TRAIN_START", "2022-01-01"),

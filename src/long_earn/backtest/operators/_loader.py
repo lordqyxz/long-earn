@@ -120,11 +120,19 @@ def _register_class(cls: type[Operator]) -> None:
     logger.debug(f"已注册算子: {cls.name} ({cls.category})")
 
 
-def register_operator(op: Operator) -> None:
+def register_operator(op: Operator, source_code: str = "", category: str = "") -> None:
     """运行期热注册一个算子实例（写盘后让当进程立即可用）。
 
-    用于算子开发子图 ``register`` 节点：写 ``.py`` 后调用本函数内存热注册，
+    用于算子开发子图 ``register`` 节点：可选写盘 + 内存热注册，
     无需等下次启动扫描。跨进程一致性靠下次启动收敛。
+
+    Args:
+        op: 已实例化的算子实例
+        source_code: 算子源码。非空时写入 ``operators/<category>/<name>.py``，
+            下次启动 ``_bootstrap`` 扫描会发现该文件并自动注册。
+            为空时只做内存热注册（重启丢失）。
+        category: 算子类别（factor/filter/rank/compose/technical），
+            决定写盘子目录。``source_code`` 非空时必填。
     """
 
     cls = type(op)
@@ -133,6 +141,21 @@ def register_operator(op: Operator) -> None:
         raise OperatorContractError(
             f"热注册冲突: {cls.name} 已由 {type(OPERATOR_REGISTRY[cls.name]).__name__} 占用"
         )
+
+    # 写盘：把 LLM 生成的算子源码落到 operators/<category>/<name>.py
+    # 下次进程启动时 _bootstrap() 扫描会自动发现并注册，实现跨进程持久化。
+    if source_code and category:
+        target_dir = _REGISTRY_DIR / category
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / f"{cls.name}.py"
+        if not target_file.exists():
+            target_file.write_text(source_code, encoding="utf-8")
+            logger.info(
+                f"算子 {cls.name} 源码已写盘: {target_file}（下次启动自动扫描注册）"
+            )
+        else:
+            logger.debug(f"算子 {cls.name} 源码文件已存在，跳过写盘: {target_file}")
+
     OPERATOR_REGISTRY[cls.name] = op
 
 
@@ -147,15 +170,17 @@ def get_operator(name: str) -> Operator:
 
 
 def list_operators() -> dict[str, dict[str, Any]]:
-    """返回目录清单（name -> {category, inputs, params_schema, min_history}）。
+    """返回目录清单（name -> {category, inputs, field_params, params_schema, min_history}）。
 
-    供 LLM function calling / dashboard 展示 / 策略研发检索。
+    供 LLM function calling / dashboard 展示 / 策略研发检索 / 连接器按需取数。
+    ADR-014 任务3：新增 ``field_params``（params 中承载列名的键）。
     """
 
     return {
         name: {
             "category": type(op).category,
             "inputs": list(type(op).inputs),
+            "field_params": list(type(op).field_params),
             "params_schema": type(op).param_schema(),
             "min_history": type(op).min_history,
         }

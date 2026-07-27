@@ -37,6 +37,8 @@ class WindowedFactor(Operator):
     name: ClassVar[str] = "windowed"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = WindowedParams
     # min_history 在 apply 前无法静态确定（依赖 window），用 0 占位；具体门槛
     # 由策略层按 params.window 校验。contract 要求非负即可。

@@ -1,9 +1,9 @@
 """财务字段知识库检索测试。
 
 验证 LLM 通过 MemoryService.search() → SubstanceStore.search() 能从 init/ 知识库
-正确提取 18 个财务字段的背景信息（ADR-007 Phase 3）。
+正确提取 20 个财务字段的背景信息（ADR-007 Phase 3 + ADR-014 任务7）。
 
-测试对象：init/09_financial_fields.md + init/01_data.md 的字段说明
+测试对象：init/01_data.md 的财务字段说明（原 09_financial_fields.md 已合并入此）
 测试哲学：验证"大模型能从知识库提取需要的字段信息"这一端到端契约，
 不验证检索引擎实现细节。
 """
@@ -136,25 +136,14 @@ class TestFinancialFieldDetailRetrieval:
 
 
 class TestKnowledgeBaseFieldCoverage:
-    """验证知识库文档覆盖全部 18 个财务字段。
+    """验证知识库文档覆盖全部 20 个财务字段。
 
     检索质量（大模型能否用自然语言查到）已由 TestFinancialFieldRetrieval 的
     12 个参数化用例覆盖；本类校验源文档本身的字段覆盖完整性。
     """
 
-    def test_all_18_fields_in_fields_doc(self):
-        """09_financial_fields.md 应覆盖全部 18 个标准字段名。"""
-        from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
-
-        fields_doc = INIT_DIR / "09_financial_fields.md"
-        content = fields_doc.read_text(encoding="utf-8")
-        missing = [f for f in FINANCIAL_FIELD_MAP if f not in content]
-        assert not missing, (
-            f"09_financial_fields.md 缺失字段: {missing}"
-        )
-
     def test_field_count_in_data_doc(self):
-        """init/01_data.md 财务字段表应包含 18 个字段。"""
+        """init/01_data.md 财务字段表应包含 20 个字段。"""
         data_doc = INIT_DIR / "01_data.md"
         content = data_doc.read_text(encoding="utf-8")
         from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
@@ -162,6 +151,6 @@ class TestKnowledgeBaseFieldCoverage:
         documented = sum(
             1 for f in FINANCIAL_FIELD_MAP if f in content
         )
-        assert documented == 18, (
-            f"01_data.md 应记录全部 18 个字段，实际 {documented} 个"
+        assert documented == 20, (
+            f"01_data.md 应记录全部 20 个字段，实际 {documented} 个"
         )

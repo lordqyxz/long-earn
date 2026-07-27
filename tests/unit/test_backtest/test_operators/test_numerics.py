@@ -77,6 +77,34 @@ class TestArithmetic:
         for high_v, low_v, sp in zip(df["high"], df["low"], df["spread"], strict=True):
             assert sp == pytest.approx(high_v - low_v)
 
+    def test_lhs_scalar_int_rejected(self) -> None:
+        """lhs 为 int 标量时解析期拒绝（LLM 高频错误：lhs=1）。"""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="lhs 必须是列名"):
+            ArithmeticParams(lhs=1, rhs="close", op="*", alias="bad")
+
+    def test_lhs_scalar_float_rejected(self) -> None:
+        """lhs 为 float 标量时解析期拒绝（LLM 错误：lhs=0.0）。"""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="lhs 必须是列名"):
+            ArithmeticParams(lhs=0.0, rhs="close", op="*", alias="bad")
+
+    def test_lhs_numeric_string_rejected(self) -> None:
+        """lhs 为数字字符串（Pydantic 强制转换后）拒绝。"""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="lhs 必须是列名"):
+            ArithmeticParams(lhs="15.87", rhs="close", op="*", alias="bad")
+
+    def test_lhs_column_with_digits_accepted(self) -> None:
+        """列名含数字（如 ret_20）合法，不被误拒。"""
+        params = ArithmeticParams(
+            lhs="ret_20", rhs="close", op="*", alias="ok"
+        )
+        assert params.lhs == "ret_20"
+
 
 class TestFilterThreshold:
     def test_returns_bool_mask(self, panel: pl.DataFrame):

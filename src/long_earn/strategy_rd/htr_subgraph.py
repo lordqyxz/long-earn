@@ -1,4 +1,4 @@
-﻿"""HTR 六步循环子图（ADR-010 Phase 2）。
+"""HTR 六步循环子图（ADR-010 Phase 2）。
 
 Observe → Ideate → Select → Dispatch → Executor → Backpropagate → Decide
 
@@ -16,6 +16,7 @@ from langgraph.types import Send
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
 from long_earn.strategy_rd.hypothesis_tree import (
+    HypothesisNode,
     HypothesisTree,
     NodeStatus,
 )
@@ -24,12 +25,195 @@ from long_earn.strategy_rd.tree_store import HypothesisTreeStore
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
+    from long_earn.ontology import Connector
     from long_earn.services import BacktestService, LoggerService, MemoryService
+
+# ADR-014 任务2：HTR 节点用 ConceptQuery 调 Connector 做图谱关联增强
+# ADR-009：算子缺口检测 + 自主研发新算子（gap_detector + operator_dev 接入 HTR）
+from long_earn.backtest.operators._loader import list_operators
+from long_earn.ontology import ConceptQuery
+from long_earn.operator_dev.spec import (
+    OperatorSpec,
+    OperatorSpecPriority,
+)
+from long_earn.operator_dev.subgraph import (
+    create_operator_dev_subgraph,
+)
+
+# ADR-012：HTR ideate/backpropagate 节点接入 PersonaRegistry（4 大师策略生成/反思）
+from long_earn.skills.personas import PersonaRegistry
+from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
+
+# ADR-009 收尾：训练集门（AcceptanceGate）— 优化版 sharpe 严格提升才接受
+from long_earn.strategy_optimization.acceptance import AcceptanceGate
 
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
 HTR_BRANCHING_FACTOR = 3
 HTR_MERGE_THRESHOLD = 0.05
+
+# 已尝试假设摘要截断长度（避免 ideate prompt 膨胀）
+_TRUNCATE_HYPOTHESIS_LEN = 120
+
+# ADR-014 任务4：默认 universe 与股票数量上限
+# 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
+_DEFAULT_UNIVERSE = "main_board+gem"
+_FINANCIAL_BRIEF_MAX_SYMBOLS = 50
+
+
+def _invoke_personas(
+    research_agent: StrategyResearchAgent,
+    persona_context: PersonaContext,
+    logger: LoggerService | None,
+    log_tag: str,
+) -> dict[str, PersonaResult]:
+    """调用所有已注册大师的 analyze 方法，返回 name -> PersonaResult。
+
+    ADR-012：HTR ideate/backpropagate 节点共用的大师调用辅助函数。
+    大师调用失败时降级为空 dict，不阻塞主流程。
+
+    Args:
+        research_agent: 策略研究 Agent（提供 llm_service）
+        persona_context: 大师调用上下文（mode/target/backtest_result）
+        logger: 日志服务
+        log_tag: 日志标签（如 "[HTR-ideate]"）
+
+    Returns:
+        name -> PersonaResult 映射；全部失败时返回空 dict
+    """
+    results: dict[str, PersonaResult] = {}
+    try:
+        llm = research_agent.llm_service.get_llm()
+        personas = PersonaRegistry.create_all(llm)
+        for name, persona in personas.items():
+            try:
+                results[name] = persona.analyze(persona_context)
+            except NotImplementedError:
+                # 该大师尚未支持此 mode，跳过
+                continue
+            except Exception as e:
+                if logger:
+                    logger.warning(f"{log_tag} 大师 {name} 调用失败: {e}")
+                continue
+    except Exception as e:
+        if logger:
+            logger.warning(f"{log_tag} 大师注册表初始化失败: {e}")
+    return results
+
+
+# ADR-009：算子缺口关键词映射（keyword → (op_name, category, intent)）
+# 扫描 reflection / improvement_suggestions / insight 文本，命中关键词且算子目录暂缺时
+# 产出 OperatorSpec 写入 OperatorBacklog，由 operator_dev 节点消费研发新算子。
+_GAP_KEYWORD_MAP: dict[str, tuple[str, str, str]] = {
+    "动量": ("momentum", "factor", "计算价格动量（区间收益率）"),
+    "rsi": ("rsi", "technical", "RSI 超买超卖相对强弱指标"),
+    "macd": ("macd", "technical", "MACD 指标移动平均收敛发散"),
+    "布林": ("bollinger", "technical", "布林带上下轨计算"),
+    "止盈": ("take_profit", "filter", "动态止盈条件过滤"),
+    "止损": ("stop_loss", "filter", "动态止损条件过滤"),
+    "成交量": ("volume_weighted", "factor", "成交量加权因子"),
+    "波动率": ("realized_volatility", "factor", "已实现波动率计算"),
+    "换手率": ("turnover", "factor", "换手率因子"),
+    "均线": ("ma", "technical", "移动平均线（MA）"),
+    "趋势": ("trend_filter", "filter", "趋势过滤（跌破均线空仓）"),
+    "市场状态": ("market_regime", "filter", "市场状态识别（牛熊判定）"),
+}
+
+
+def _parse_universe_from_yaml(strategy_yaml: str) -> str:
+    """从 strategy_yaml 解析 universe.type（如 'main_board+gem'）。
+
+    解析失败时返回默认 universe。
+    """
+    if not strategy_yaml:
+        return _DEFAULT_UNIVERSE
+    # 简单行扫描，避免引入 yaml 依赖
+    in_universe = False
+    for line in strategy_yaml.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("universe:"):
+            in_universe = True
+            continue
+        if in_universe:
+            if stripped.startswith("type:"):
+                val = stripped[5:].strip().strip("\"'")
+                if val:
+                    return val
+            elif stripped and not stripped.startswith("#"):
+                # 离开 universe 块
+                in_universe = False
+    return _DEFAULT_UNIVERSE
+
+
+def _fetch_universe_financial_brief(
+    connector: Connector | None,
+    universe: str,
+    aspect: str = "盈利能力",
+) -> str:
+    """通过 Connector 查 universe 成分股 + 财务面板，返回紧凑摘要文本。
+
+    ADR-014 任务4：让 HTR 节点能把 xtquant 财务数据的统计摘要注入 LLM prompt，
+    辅助观察 / 决策。两次 Connector 调用：
+    1. subject=universe, aspect="成分股" → 取股票列表
+    2. subject="sym1,sym2,...", aspect=aspect → 取财务面板
+
+    返回紧凑文本（mean/median/min/max 摘要），失败返回 "无"。
+    """
+    if connector is None:
+        return "无"
+    try:
+        # 1. 查成分股
+        universe_result = connector.get_concept(
+            ConceptQuery(subject=universe, aspect="成分股")
+        )
+        symbols = (
+            universe_result.data
+            if isinstance(universe_result.data, list)
+            else []
+        )
+        if not symbols:
+            return f"无（universe={universe} 未取到成分股）"
+        symbols = symbols[:_FINANCIAL_BRIEF_MAX_SYMBOLS]
+        symbols_str = ",".join(symbols)
+
+        # 2. 查财务面板
+        result = connector.get_concept(
+            ConceptQuery(
+                subject=symbols_str,
+                aspect=aspect,
+                time="2024Q1~2024Q4",
+            )
+        )
+        data = result.data
+        if not hasattr(data, "shape") or data.shape[0] == 0:
+            return f"无（{universe} 共 {len(symbols)} 只，但 {aspect} 面板为空）"
+
+        # 3. 压缩为统计摘要
+        # polars DataFrame：列含 symbol/timestamp + 财务字段
+        numeric_cols = [
+            c
+            for c in data.columns
+            if c not in ("symbol", "timestamp", "report_date", "announce_date")
+        ]
+        lines = [
+            f"{aspect} 摘要（{universe} 前 {len(symbols)} 只，最新季度）:"
+        ]
+        for col in numeric_cols[:6]:
+            try:
+                vals = data[col].drop_nulls()
+                if len(vals) > 0:
+                    mean_v = float(vals.mean())
+                    median_v = float(vals.median())
+                    lines.append(
+                        f"  {col}: mean={mean_v:.2f}, median={median_v:.2f}"
+                    )
+            except Exception:
+                continue
+        if len(lines) == 1:
+            return f"无（{universe} {aspect} 面板无可统计数值列）"
+        return "\n".join(lines)
+    except Exception as e:
+        return f"无（查询失败: {e}）"
 
 
 def _init_tree_node(
@@ -59,9 +243,14 @@ def _init_tree_node(
 def _observe_node(
     state: State,
     research_agent: StrategyResearchAgent,
+    connector: Connector | None,
     logger: LoggerService,  # noqa: ARG001
 ) -> dict:
-    """观察阶段 — 分析当前研究状态。"""
+    """观察阶段 — 分析当前研究状态。
+
+    ADR-014 任务2：注入 Connector 时，用图谱关联增强观察上下文
+    （当前最佳假设的关联概念/历史失败案例），LLM 拿到结构化图谱视角。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
@@ -69,40 +258,177 @@ def _observe_node(
     best = tree.best_node() or tree.root
     frontier = tree.frontier()
 
+    # ADR-014 阶段 E：查询已剪枝方向（替代旧硬编码 "无"）
+    pruned_nodes = [n for n in tree.all_nodes() if n.status == NodeStatus.PRUNED]
+    pruned_directions = "\n".join(f"- {n.hypothesis}" for n in pruned_nodes) or "无"
+
+    # ADR-014 任务2：图谱关联增强（当前最佳假设的关联概念）
+    related_concepts = "无"
+    if connector is not None and best and best.hypothesis:
+        try:
+
+            result = connector.get_concept(ConceptQuery(
+                subject=best.hypothesis,
+                aspect="研究上下文",
+            ))
+            if result.related_nodes:
+                related_concepts = "\n".join(
+                    f"- {n.label} ({n.domain.value})" for n in result.related_nodes[:5]
+                )
+        except Exception:
+            # 图谱查询失败不阻塞主流程
+            pass
+
+    # ADR-014 任务4：从 strategy_yaml 解析 universe，查 Connector 财务面板摘要
+    # 让 LLM 看到 xtquant 财务数据的统计分布，辅助判断策略是否在盈利强的股票池上运行
+    strategy_yaml = state.get("strategy_yaml", "") or ""
+    universe = _parse_universe_from_yaml(strategy_yaml)
+    financial_brief = _fetch_universe_financial_brief(connector, universe)
+    if financial_brief != "无":
+        if related_concepts == "无":
+            related_concepts = financial_brief
+        else:
+            related_concepts = f"{related_concepts}\n{financial_brief}"
+
     snapshot = {
         "current_best": best.hypothesis if best else "无",
         "frontier": "\n".join(f"- {n.hypothesis}" for n in frontier) or "无",
         "ancestor_insights": (best.insight if best else "") or "无",
-        "pruned_directions": "无",  # Phase 2 简化
+        "pruned_directions": pruned_directions,
+        "related_concepts": related_concepts,
     }
 
     observations = research_agent.observe(snapshot)
     return {"result": str(observations.get("next_focus", ""))}
 
 
+def _enhance_child_insights(
+    child_insights: str,
+    connector: Connector | None,
+    parent_hypothesis: str,
+    strategy_yaml: str,
+    logger: LoggerService | None,
+) -> str:
+    """用 Connector 图谱经验 + universe 财务面板摘要增强 child_insights。
+
+    ADR-014 任务2/4：从 _ideate_node 抽取的辅助函数，降低主节点分支复杂度。
+    两次增强：图谱按策略族检索相似经验 + universe 财务面板统计摘要。
+    任一增强失败都不阻塞主流程。
+    """
+    # ADR-014 任务2：图谱按策略族检索相似经验
+    if connector is not None and parent_hypothesis:
+        try:
+            exp_result = connector.get_concept(ConceptQuery(
+                subject=parent_hypothesis,
+                aspect="动量族",  # 默认动量族，可根据假设内容扩展
+                constraints={"k": 3},
+            ))
+            if isinstance(exp_result.data, list) and exp_result.data:
+                graph_insights = "\n".join(
+                    f"- [图谱] {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
+                    for e in exp_result.data
+                )
+                child_insights = (
+                    f"{child_insights}\n{graph_insights}"
+                    if child_insights
+                    else graph_insights
+                )
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-ideate] 图谱经验检索失败: {e}")
+
+    # ADR-014 任务4：注入 universe 财务面板摘要
+    universe = _parse_universe_from_yaml(strategy_yaml)
+    financial_brief = _fetch_universe_financial_brief(connector, universe)
+    if financial_brief != "无":
+        child_insights = (
+            f"{child_insights}\n{financial_brief}"
+            if child_insights
+            else financial_brief
+        )
+    return child_insights
+
+
+def _collect_tried_directions(
+    tree: HypothesisTree,
+    parent: HypothesisNode | None,
+    logger: LoggerService | None,
+) -> str:
+    """收集 parent 的已尝试子节点方向（failed/pruned）。
+
+    监督报告指出 8 个子节点假设同质化严重（全部"多因子复合+行业中性化"），
+    反向传播未能引导 LLM 探索新方向。本函数把 parent 下所有 failed/pruned
+    子节点的假设摘要注入 ideate prompt 的 ``pruned_directions`` 变量，
+    让 LLM 显式避开已失败方向。
+
+    Returns:
+        格式化的方向列表字符串（每行一个方向），无已尝试方向时返回 ``"无"``。
+    """
+    if parent is None:
+        return "无"
+
+    tried: list[str] = []
+    for child_id in parent.children_ids:
+        child = tree.get_node(child_id)
+        if child is None:
+            continue
+        if child.status in (NodeStatus.FAILED, NodeStatus.PRUNED):
+            hypothesis = child.hypothesis.strip()
+            if not hypothesis:
+                continue
+            # 截断长假设避免 prompt 膨胀
+            if len(hypothesis) > _TRUNCATE_HYPOTHESIS_LEN:
+                hypothesis = hypothesis[: _TRUNCATE_HYPOTHESIS_LEN - 3] + "..."
+            tried.append(f"- [{child.status.value}] {hypothesis}")
+
+    if not tried:
+        return "无"
+
+    if logger:
+        logger.info(
+            f"[HTR-ideate] 检测到 {len(tried)} 个已尝试/失败方向，"
+            f"将注入 ideate prompt 避免重复"
+        )
+    return "\n".join(tried)
+
+
 def _ideate_node(
     state: State,
     research_agent: StrategyResearchAgent,
     memory: MemoryService,
+    connector: Connector | None,
     logger: LoggerService,
 ) -> dict:
-    """假设生成 — 基于观察结果 + 历史树洞察（hot-start）生成改进假设。"""
+    """假设生成 — 基于观察结果 + 历史树洞察（hot-start）生成改进假设。
+
+    ADR-014 任务2：注入 Connector 时，用图谱按策略族检索相似经验
+    （替代纯文本 TF-IDF），增强 child_insights 的结构化关联。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
     parent = tree.best_node() or tree.root
     parent_hypothesis = parent.hypothesis if parent else ""
 
+    # 收集 parent 的已尝试子节点方向（failed/pruned）—— 避免 LLM 重复生成
+    # 同质化假设。监督报告显示 8 个子节点全部围绕"多因子复合+行业中性化"，
+    # 反向传播未能引导 LLM 探索新方向，需显式注入已尝试方向。
+    tried_directions = _collect_tried_directions(tree, parent, logger)
+
     # 从 state 获取上一轮的观察结果
     observations_raw = state.get("result", "")
     observations: dict[str, Any] = (
-        {"next_focus": observations_raw} if isinstance(observations_raw, str) else observations_raw
+        {"next_focus": observations_raw}
+        if isinstance(observations_raw, str)
+        else observations_raw
     )
 
     # Hot-start: 检索历史假设树洞察
     child_insights = ""
     try:
-        past_trees = memory.search_hypothesis_trees(query=parent_hypothesis or "策略优化", k=2)
+        past_trees = memory.search_hypothesis_trees(
+            query=parent_hypothesis or "策略优化", k=2
+        )
         if past_trees:
             child_insights = "\n".join(
                 f"- {t.get('best_direction', '')}: {t.get('best_insight', '')[:100]}"
@@ -112,11 +438,47 @@ def _ideate_node(
         if logger:
             logger.warning(f"[HTR-ideate] 历史树检索失败: {e}")
 
+    # ADR-014 任务2/4：Connector 图谱经验 + 财务面板增强 child_insights
+    strategy_yaml = state.get("strategy_yaml", "") or ""
+    child_insights = _enhance_child_insights(
+        child_insights=child_insights,
+        connector=connector,
+        parent_hypothesis=parent_hypothesis,
+        strategy_yaml=strategy_yaml,
+        logger=logger,
+    )
+
+    # ADR-012：调用 4 大师 strategy_generate mode 提供策略生成建议
+    # 大师针对当前父假设各自给出视角，注入 ideate prompt 增强假设多样性
+    master_hints = _invoke_personas(
+        research_agent,
+        PersonaContext(
+            mode="strategy_generate",
+            target={
+                "query": parent_hypothesis or "策略优化",
+                "knowledge_context": child_insights,
+            },
+        ),
+        logger,
+        "[HTR-ideate]",
+    )
+
+    if logger and master_hints:
+        logger.info(
+            f"[HTR-ideate] 大师策略生成建议完成: {len(master_hints)} 位提供视角"
+        )
+    if logger and tried_directions != "无":
+        logger.info(
+            f"[HTR-ideate] 注入已尝试方向避免重复: {len(tried_directions.splitlines())} 个"
+        )
+
     hypotheses = research_agent.ideate(
         observations=observations,
         parent_hypothesis=parent_hypothesis,
         child_insights=child_insights,
+        pruned_directions=tried_directions,
         branching_factor=HTR_BRANCHING_FACTOR,
+        master_hints=master_hints if master_hints else None,
     )
 
     return {"improvement_suggestions": [h.get("hypothesis", "") for h in hypotheses]}
@@ -126,18 +488,22 @@ def _select_node(
     state: State,
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
+    max_select: int = 1,
 ) -> dict:
-    """选择阶段 — 从假设中选择最优的进行验证。"""
+    """选择阶段 — 从假设中选择最优的进行验证。
+
+    Args:
+        max_select: 每轮选择的假设数。1=串行（向后兼容）；
+            >1 激活 LangGraph Send 并行 fan-out（ADR-010 Phase 5）。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
     # 从 ideate 的结果构造假设列表
     suggestions = state.get("improvement_suggestions", []) or []
-    hypotheses = [
-        {"hypothesis": s, "direction": ""} for s in suggestions
-    ]
+    hypotheses = [{"hypothesis": s, "direction": ""} for s in suggestions]
 
-    selected = research_agent.select(hypotheses, max_select=1)
+    selected = research_agent.select(hypotheses, max_select=max_select)
 
     # 将选中的假设添加到树中
     parent = tree.best_node() or tree.root
@@ -202,12 +568,13 @@ def _dispatch_cond(
     return "executor"
 
 
-def _executor_single_wrapper(
+def _executor_single_wrapper(  # noqa: PLR0913
     state: dict[str, Any],
     research_agent: StrategyResearchAgent,
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
     """Phase 5 并行执行器入口 — 从 Send payload 提取 node_id 调 _executor_single_node。"""
     node_id = state.get("_parallel_node_id", "")
@@ -220,17 +587,25 @@ def _executor_single_wrapper(
         develop_agent=develop_agent,
         backtest_service=backtest_service,
         logger=logger,
+        gate=gate,
     )
 
 
-def _executor_node(
+def _executor_node(  # noqa: PLR0913
     state: State,
     research_agent: StrategyResearchAgent,
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
-    """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。"""
+    """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。
+
+    ADR-009 收尾：接入 AcceptanceGate 作为训练集门。优化版回测后立即校验
+    ``o_sharpe > b_sharpe + eps``，未通过的候选标记 rejected 并跳过 evidence
+    更新，避免无效候选进入下游 OOS 合并门浪费 held-out 测试集回测算力。
+    与 _evaluate_oos_and_merge 形成双层防护：训练集门 + 测试集门。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     selected = state.get("selected_leaves", []) or []
@@ -240,8 +615,6 @@ def _executor_node(
         node = tree.get_node(node_id)
         if node is None:
             continue
-
-        node.status = NodeStatus.RUNNING
 
         # 复用现有 optimize 逻辑
         strategy = state.get("strategy", {}) or {}
@@ -263,41 +636,60 @@ def _executor_node(
                 end_date="",
             )
 
+            # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
+            # tree.status 更新由 _backpropagate_node 根据 rejected 标志统一处理
+            # （并行 fan-out 时各 executor_single 不写 tree，避免 last_value 覆盖）
+            if gate is not None:
+                acceptance = gate.evaluate(previous_backtest, backtest_result)
+                if not acceptance.accepted:
+                    if logger:
+                        logger.warning(
+                            f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
+                            f"{acceptance.reason}"
+                        )
+                    results.append(
+                        {
+                            "node_id": node_id,
+                            "rejected": True,
+                            "rejection_reason": acceptance.reason,
+                            "optimized_strategy": optimized,
+                        }
+                    )
+                    continue
+
             dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
-            tree.update_evidence(
-                node_id=node_id,
-                dev_score=dev_score,
-                backtest_result=backtest_result,
-                insight=f"dev sharpe={dev_score:.2f}",
+            # tree.update_evidence 移到 _backpropagate_node（并行安全单点更新）
+            results.append(
+                {
+                    "node_id": node_id,
+                    "dev_score": dev_score,
+                    "backtest_result": backtest_result,
+                    "strategy_yaml": strategy_yaml,
+                    "optimized_strategy": optimized,
+                }
             )
 
-            results.append({
-                "node_id": node_id,
-                "dev_score": dev_score,
-                "backtest_result": backtest_result,
-                "strategy_yaml": strategy_yaml,
-            })
-
             if logger:
-                logger.info(
-                    f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}"
-                )
+                logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
 
         except Exception as e:
-            node.status = NodeStatus.FAILED
             if logger:
                 logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
-            results.append({
-                "node_id": node_id,
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "error": str(e),
+                }
+            )
 
     return {
-        "hypothesis_tree": tree.serialize(),
         "executor_results": results,
         "backtest_result": results[0].get("backtest_result", {}) if results else {},
         "strategy_yaml": results[0].get("strategy_yaml", "") if results else "",
+        # 把 optimized strategy 写回 state，让下一周期的 optimize_strategy
+        # 能看到累积的 evolution_lineage（否则每周期都从空 lineage 开始）
+        "strategy": results[0].get("optimized_strategy", {}) if results else {},
     }
 
 
@@ -308,11 +700,14 @@ def _executor_single_node(  # noqa: PLR0913
     develop_agent: StrategyDevelopAgent,
     backtest_service: BacktestService,
     logger: LoggerService,
+    gate: AcceptanceGate | None = None,
 ) -> dict:
     """单个假设的执行器（Phase 5 并行模式 — 每个 Send 一个实例）。
 
     与 _executor_node 逻辑相同，但只处理一个 node_id，
     返回单个 result dict（reducer _collect_executor_results 会累加）。
+
+    ADR-009 收尾：同步接入 AcceptanceGate 训练集门。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -320,7 +715,8 @@ def _executor_single_node(  # noqa: PLR0913
     if node is None:
         return {"executor_results": [{"node_id": node_id, "error": "节点不存在"}]}
 
-    node.status = NodeStatus.RUNNING
+    # tree 只读：并行 fan-out 时各 executor_single 不写 tree（避免 last_value 覆盖）。
+    # tree.status / update_evidence 由 _backpropagate_node 统一处理。
     strategy = state.get("strategy", {}) or {}
     suggestions = [node.hypothesis]
     previous_backtest = state.get("backtest_result", {})
@@ -337,34 +733,42 @@ def _executor_single_node(  # noqa: PLR0913
             start_date="",
             end_date="",
         )
-        dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
-        tree.update_evidence(
-            node_id=node_id,
-            dev_score=dev_score,
-            backtest_result=backtest_result,
-            insight=f"dev sharpe={dev_score:.2f}",
-        )
+        # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
+        if gate is not None:
+            acceptance = gate.evaluate(previous_backtest, backtest_result)
+            if not acceptance.accepted:
+                if logger:
+                    logger.warning(
+                        f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
+                        f"{acceptance.reason}"
+                    )
+                result = {
+                    "node_id": node_id,
+                    "rejected": True,
+                    "rejection_reason": acceptance.reason,
+                    "optimized_strategy": optimized,
+                }
+                return {"executor_results": [result]}
+
+        dev_score = float(backtest_result.get("sharpe_ratio", 0))
 
         result = {
             "node_id": node_id,
             "dev_score": dev_score,
             "backtest_result": backtest_result,
             "strategy_yaml": strategy_yaml,
+            "optimized_strategy": optimized,
         }
         if logger:
             logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
 
     except Exception as e:
-        node.status = NodeStatus.FAILED
         if logger:
             logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
         result = {"node_id": node_id, "error": str(e)}
 
-    return {
-        "executor_results": [result],
-        "hypothesis_tree": tree.serialize(),
-    }
+    return {"executor_results": [result]}
 
 
 def _backpropagate_node(
@@ -372,10 +776,16 @@ def _backpropagate_node(
     research_agent: StrategyResearchAgent,
     logger: LoggerService,
 ) -> dict:
-    """反向传播 — 将实验结果抽象为洞察并传播到父节点。"""
+    """反向传播 — 将实验结果抽象为洞察并传播到父节点。
+
+    ADR-012：对每个有回测结果的节点调用 4 大师 strategy_review mode 反思，
+    将大师视角注入 backpropagate_insights prompt，让反思融合量化数据与投资
+    大师视角。大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
+    """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     results = state.get("executor_results", []) or []
+    strategy = state.get("strategy", {}) or {}
 
     for r in results:
         node_id = r.get("node_id", "")
@@ -383,16 +793,54 @@ def _backpropagate_node(
         if node is None:
             continue
 
+        # tree evidence/status 更新（从 _executor_node/_executor_single_node 迁移来）
+        # 并行 fan-out 时各 executor 不写 tree，此处单点更新避免 last_value 覆盖。
+        if r.get("rejected") or r.get("error"):
+            tree.update_evidence(node_id=node_id, status=NodeStatus.FAILED)
+        else:
+            dev_score = float(r.get("dev_score", 0.0))
+            tree.update_evidence(
+                node_id=node_id,
+                dev_score=dev_score,
+                backtest_result=r.get("backtest_result", {}) or {},
+                insight=f"dev sharpe={dev_score:.2f}",
+            )
+
         parent = tree.get_node(node.parent_id) if node.parent_id else None
         if parent is None:
             continue
 
+        # ADR-012：调用 4 大师 strategy_review mode 反思失败假设
+        # 让大师针对该节点的具体回测结果从各自视角反思
+        backtest_result = r.get("backtest_result", {}) or {}
+        master_perspectives = _invoke_personas(
+            research_agent,
+            PersonaContext(
+                mode="strategy_review",
+                target=strategy,
+                backtest_result=backtest_result,
+            ),
+            logger,
+            "[HTR-backpropagate]",
+        )
+
+        if logger and master_perspectives:
+            logger.info(
+                f"[HTR-backpropagate] 大师反思完成: "
+                f"{len(master_perspectives)} 位提供视角"
+            )
+
         insight_result = research_agent.backpropagate_insights(
             parent_hypothesis=parent.hypothesis,
             child_results=results,
+            master_perspectives=master_perspectives if master_perspectives else None,
         )
 
-        insight_text = insight_result.get("insight", "") if isinstance(insight_result, dict) else ""
+        insight_text = (
+            insight_result.get("insight", "")
+            if isinstance(insight_result, dict)
+            else ""
+        )
         if insight_text:
             node.insight = insight_text
             tree.backpropagate_insight(node_id)
@@ -447,16 +895,25 @@ def _evaluate_oos_and_merge(  # noqa: PLR0913
     return "continue"
 
 
-def _decide_node(
+def _decide_node(  # noqa: PLR0913
     state: State,
     research_agent: StrategyResearchAgent,
     backtest_service: BacktestService,
+    connector: Connector | None,
     logger: LoggerService,
+    max_cycles: int = HTR_MAX_CYCLES,
 ) -> dict:
     """决策阶段 — 决定 merge/continue/stop。
 
     Phase 3: 对本轮最佳 dev 候选跑 Walk-Forward OOS，
     oos_score > current_best_oos + threshold → merge。
+
+    ADR-014 任务2：注入 Connector 时，用图谱查相似失败案例注入 tree_state，
+    LLM 决策时能看到"历史上类似假设的失败原因"。
+
+    Args:
+        max_cycles: HTR 六步循环最大周期数（从 config.htr_max_cycles 注入），
+            达到时强制停止。默认 HTR_MAX_CYCLES=10。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -474,10 +931,19 @@ def _decide_node(
     else:
         best_result = max(results, key=lambda r: r.get("dev_score", 0))
         action = _evaluate_oos_and_merge(
-            tree, best_result, current_best_oos,
-            backtest_service, oos_n_splits, oos_threshold, logger,
+            tree,
+            best_result,
+            current_best_oos,
+            backtest_service,
+            oos_n_splits,
+            oos_threshold,
+            logger,
         )
-        oos_score = tree.get_node(best_result.get("node_id", "")).oos_score if best_result.get("node_id") else None
+        oos_score = (
+            tree.get_node(best_result.get("node_id", "")).oos_score
+            if best_result.get("node_id")
+            else None
+        )
 
     tree_state = {
         "node_count": tree.node_count,
@@ -486,28 +952,46 @@ def _decide_node(
         "best_dev_score": max((r.get("dev_score", 0) for r in results), default=0.0),
         "best_oos_score": oos_score,
         "cycles_used": iteration,
-        "max_cycles": HTR_MAX_CYCLES,
+        "max_cycles": max_cycles,
     }
+
+    # ADR-014 任务2：图谱查相似失败案例（注入 tree_state 供 LLM 决策参考）
+    if connector is not None and best and best.hypothesis:
+        try:
+
+            fail_result = connector.get_concept(ConceptQuery(
+                subject=best.hypothesis,
+                aspect="动量族",  # 按策略族查经验（含失败案例）
+                constraints={"k": 2},
+            ))
+            if isinstance(fail_result.data, list) and fail_result.data:
+                tree_state["similar_experiences"] = "\n".join(
+                    f"- {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
+                    for e in fail_result.data
+                )
+        except Exception as e:
+            if logger:
+                logger.warning(f"[HTR-decide] 图谱失败案例查询失败: {e}")
+
+    # ADR-014 任务4：注入 universe 财务面板摘要，辅助 LLM 决策
+    # （历史经验 + 财务分布 一起供 LLM 参考）
+    strategy_yaml = state.get("strategy_yaml", "") or ""
+    universe = _parse_universe_from_yaml(strategy_yaml)
+    financial_brief = _fetch_universe_financial_brief(connector, universe)
+    if financial_brief != "无":
+        existing = tree_state.get("similar_experiences", "无")
+        if existing == "无":
+            tree_state["similar_experiences"] = financial_brief
+        else:
+            tree_state["similar_experiences"] = f"{existing}\n{financial_brief}"
 
     llm_action = research_agent.decide(tree_state)
     # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
-    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
-        action = "stop"
-
-    if logger:
-        logger.info(f"[HTR-决策] action={action}, iteration={iteration}")
-
-    next_iteration = iteration + 1
-    return {
-        "iteration": next_iteration,
-        "result": action,
-        "hypothesis_tree": tree.serialize(),
-    }
-
-    # LLM 决策（可覆盖安全兜底）
-    llm_action = research_agent.decide(tree_state)
-    # 安全兜底：达到最大周期或深度时强制停止
-    if iteration >= HTR_MAX_CYCLES or tree_state["max_depth"] >= HTR_MAX_DEPTH or llm_action == "stop":
+    if (
+        iteration >= max_cycles
+        or tree_state["max_depth"] >= HTR_MAX_DEPTH
+        or llm_action == "stop"
+    ):
         action = "stop"
 
     if logger:
@@ -529,12 +1013,24 @@ def _decide_cond(state: State) -> str:
     return "save_tree"
 
 
-def create_htr_subgraph(context: RuntimeContext):
+def create_htr_subgraph(
+    context: RuntimeContext,
+    *,
+    checkpointer: Any = None,
+    interrupt_before: list[str] | None = None,
+):
     """创建 HTR 六步循环子图。
 
     Observe → Ideate → Select → Dispatch → Executor → Backpropagate → Decide
     →(continue)→ Observe → ...
     →(merge/stop)→ SaveTree → END
+
+    Args:
+        context: 运行时上下文
+        checkpointer: LangGraph checkpointer（如 ``SqliteSaver``），启用后
+            支持断点续跑与中断恢复。None 时不启用持久化。
+        interrupt_before: 在指定节点前暂停（需配合 checkpointer 使用），
+            常用断点：``["decide", "save_tree"]``。
     """
     research_agent = StrategyResearchAgent(context=context)
     develop_agent = StrategyDevelopAgent(context=context)
@@ -542,14 +1038,37 @@ def create_htr_subgraph(context: RuntimeContext):
     logger = context.logger
     backtest_service = context.require_backtest()
     memory = context.require_memory()
+    # ADR-014 任务2：注入 Connector 供 observe/ideate/decide 图谱关联增强
+    connector = context.connector
 
     workflow = StateGraph(State)
 
     workflow.add_node("init_tree", partial(_init_tree_node, logger=logger))
-    workflow.add_node("observe", partial(_observe_node, research_agent=research_agent, logger=logger))
-    workflow.add_node("ideate", partial(_ideate_node, research_agent=research_agent, memory=memory, logger=logger))
-    workflow.add_node("select", partial(_select_node, research_agent=research_agent, logger=logger))
+    workflow.add_node(
+        "observe", partial(_observe_node, research_agent=research_agent,
+                           connector=connector, logger=logger)
+    )
+    workflow.add_node(
+        "ideate",
+        partial(
+            _ideate_node, research_agent=research_agent, memory=memory,
+            connector=connector, logger=logger
+        ),
+    )
+    # ADR-010 Phase 5: max_select 可配置（HTR_MAX_SELECT），>1 时激活 Send fan-out
+    htr_max_select = max(1, getattr(context.config, "htr_max_select", 1))
+    workflow.add_node(
+        "select",
+        partial(
+            _select_node,
+            research_agent=research_agent,
+            logger=logger,
+            max_select=htr_max_select,
+        ),
+    )
     workflow.add_node("dispatch", partial(_dispatch_node, logger=logger))
+    # ADR-009 收尾：训练集门（AcceptanceGate）— 优化版 sharpe 严格提升才接受
+    acceptance_gate = AcceptanceGate()
     workflow.add_node(
         "executor",
         partial(
@@ -558,6 +1077,7 @@ def create_htr_subgraph(context: RuntimeContext):
             develop_agent=develop_agent,
             backtest_service=backtest_service,
             logger=logger,
+            gate=acceptance_gate,
         ),
     )
     # Phase 5: 并行执行器（每个 Send 一个实例）
@@ -569,22 +1089,36 @@ def create_htr_subgraph(context: RuntimeContext):
             develop_agent=develop_agent,
             backtest_service=backtest_service,
             logger=logger,
+            gate=acceptance_gate,
         ),
     )
     workflow.add_node(
         "backpropagate",
         partial(_backpropagate_node, research_agent=research_agent, logger=logger),
     )
+    # ADR-010: max_cycles 可配置（HTR_MAX_CYCLES），控制 HTR 循环最大周期数
+    htr_max_cycles = max(1, getattr(context.config, "htr_max_cycles", HTR_MAX_CYCLES))
     workflow.add_node(
         "decide",
         partial(
             _decide_node,
             research_agent=research_agent,
             backtest_service=backtest_service,
+            connector=connector,
             logger=logger,
+            max_cycles=htr_max_cycles,
         ),
     )
-    workflow.add_node("save_tree", partial(_save_tree_node, memory=memory, logger=logger))
+    workflow.add_node(
+        "save_tree", partial(_save_tree_node, memory=memory, logger=logger)
+    )
+    # ADR-009：接入 gap_detector + operator_dev 节点（DI 注入 context，不用模块级全局）
+    workflow.add_node(
+        "gap_detector", partial(_gap_detector_node, context=context, logger=logger)
+    )
+    workflow.add_node(
+        "operator_dev", partial(_operator_dev_node, context=context, logger=logger)
+    )
 
     workflow.add_edge(START, "init_tree")
     workflow.add_edge("init_tree", "observe")
@@ -608,9 +1142,18 @@ def create_htr_subgraph(context: RuntimeContext):
         {"observe": "observe", "save_tree": "save_tree"},
     )
 
-    workflow.add_edge("save_tree", END)
+    # ADR-009：save_tree 后接 gap_detector → operator_dev → END
+    # 非阻塞：gap_detector 无命中 / operator_dev backlog 为空时快速返回空 dict
+    workflow.add_edge("save_tree", "gap_detector")
+    workflow.add_edge("gap_detector", "operator_dev")
+    workflow.add_edge("operator_dev", END)
 
-    return workflow.compile()
+    compile_kwargs: dict[str, Any] = {}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    if interrupt_before:
+        compile_kwargs["interrupt_before"] = interrupt_before
+    return workflow.compile(**compile_kwargs)
 
 
 def _save_tree_node(
@@ -645,3 +1188,133 @@ def _save_tree_node(
         logger.info(f"[HTR] 假设树已保存: {tree.run_id} ({tree.node_count} 节点)")
 
     return {}
+
+
+def _collect_reflection_texts(state: State) -> list[str]:
+    """从 state 收集所有反思类文本（reflection / improvement_suggestions / 树节点 insight）。"""
+    texts: list[str] = []
+    for key in ("reflection", "improvement_suggestions"):
+        val = state.get(key)
+        if not val:
+            continue
+        if isinstance(val, list):
+            texts.extend(str(v) for v in val)
+        else:
+            texts.append(str(val))
+    # backpropagate 的 insight 存在 hypothesis_tree 节点里
+    tree_data = state.get("hypothesis_tree", {}) or {}
+    try:
+        tree = HypothesisTree.deserialize(tree_data)
+        texts.extend(n.insight for n in tree.nodes if n.insight)
+    except Exception:
+        pass
+    return texts
+
+
+def _gap_detector_node(
+    state: State,
+    context: RuntimeContext,
+    logger: LoggerService,
+) -> dict:
+    """算子缺口检测节点（ADR-009 接入 HTR）。
+
+    扫描本轮 backpropagate 产出的 insight / reflection / improvement_suggestions
+    文本，匹配关键词；命中且算子目录暂缺时，产出 OperatorSpec 写入
+    ``context.operator_backlog``，供下游 ``_operator_dev_node`` 消费研发新算子。
+
+    非阻塞：backlog 不可用或无命中时直接返回空列表，不影响主流程。
+    与旧 ``strategy_rd/subgraph.py`` 中的 gap_detector 区别：
+    不依赖模块级全局变量，改为通过 ``context.operator_backlog`` 注入（DI 原则）。
+    """
+    backlog = context.operator_backlog
+    if backlog is None:
+        return {"operator_gaps": []}
+
+    texts = _collect_reflection_texts(state)
+    if not texts:
+        return {"operator_gaps": []}
+
+    strategy_yaml = state.get("strategy_yaml", "") or state.get(
+        "optimized_strategy_yaml", ""
+    ) or ""
+
+    # 所有策略被 AcceptanceGate 拒绝时 strategy_yaml 为空，
+    # 此时无 reference_strategy 可用，跳过缺口检测（避免 OperatorSpec 非空校验崩溃）
+    if not strategy_yaml:
+        return {"operator_gaps": []}
+
+    # 已注册算子名集合
+    try:
+        existing_ops = {op["name"] for op in list_operators()}
+    except Exception:
+        existing_ops = set()
+
+    gaps: list[dict[str, str]] = []
+    combined_lower = "\n".join(texts).lower()
+    for keyword, (op_name, category, intent) in _GAP_KEYWORD_MAP.items():
+        if keyword.lower() not in combined_lower:
+            continue
+        if op_name in existing_ops:
+            continue  # 目录已有，不是缺口
+
+        spec = OperatorSpec(
+            name=op_name,
+            intent=intent,
+            input_fields=["close", "volume"] if "volume" in keyword else ["close"],
+            category=category,
+            expected_output="每行 float",
+            reference_strategy=strategy_yaml[:500],
+            motivation=f"HTR 反思命中关键词「{keyword}」，目录暂缺该算子",
+            priority=OperatorSpecPriority.NORMAL,
+        )
+        submitted = backlog.submit(spec)
+        if submitted:
+            gaps.append({"name": op_name, "intent": intent, "keyword": keyword})
+            if logger:
+                logger.info(
+                    f"[HTR-缺口检测] 发现算子缺口: {op_name} ({category}) — {intent}"
+                )
+
+    return {"operator_gaps": gaps}
+
+
+def _operator_dev_node(
+    state: State,  # noqa: ARG001
+    context: RuntimeContext,
+    logger: LoggerService,
+) -> dict:
+    """算子研发节点（ADR-009 接入 HTR）。
+
+    消费 ``context.operator_backlog`` 中的 pending spec，调用
+    ``create_operator_dev_subgraph`` 跑 spec→审计→因果证明→注册闭环。
+    新算子通过 ``register_operator`` 热注册到 ``OPERATOR_REGISTRY``，
+    下一轮 HTR 的 develop agent 即可在 operator_factors 中引用。
+
+    非阻塞降级：backlog 为空或子图执行异常时不阻断主流程。
+    """
+    backlog = context.operator_backlog
+    if backlog is None or backlog.is_empty():
+        return {"registered_operators": []}
+
+    pending = [s.name for s in backlog.all_specs() if s.status == "pending"]
+    if not pending:
+        return {"registered_operators": []}
+
+    if logger:
+        logger.info(f"[HTR-算子研发] backlog 有 {len(pending)} 个待开发算子: {pending}")
+
+    try:
+        op_subgraph = create_operator_dev_subgraph(context, backlog=backlog)
+        result = op_subgraph.invoke({})
+        registered = result.get("registered_names", []) or []
+        if logger and registered:
+            logger.info(f"[HTR-算子研发] 新注册算子: {registered}")
+        elif logger:
+            logger.info(
+                "[HTR-算子研发] 本轮无新算子注册（可能因果证明未通过或被 blocked）"
+            )
+        return {"registered_operators": registered}
+    except Exception as e:
+        if logger:
+            logger.warning(f"[HTR-算子研发] 子图执行失败，跳过: {e}")
+        return {"registered_operators": []}

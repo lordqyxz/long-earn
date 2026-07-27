@@ -7,8 +7,7 @@
 from __future__ import annotations
 
 import contextlib
-from datetime import date
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -52,7 +51,7 @@ class DataIngestionService:
     封装行情/财务数据的批量下载与入库逻辑，与 CLI 表现层解耦。
     """
 
-    def __init__(self, logger: "LoggerService | None" = None) -> None:
+    def __init__(self, logger: LoggerService | None = None) -> None:
         self.logger = logger
         self.cache = DataCache()
         self.data_provider = MiniQmtDataProvider(self.cache)
@@ -208,7 +207,9 @@ class DataIngestionService:
             symbols, end_date, start_date
         )
         if not full_missing and not stale:
-            self._info(f"[行情][增量] 全部 {len(symbols)} 只行情已齐到 {end_date}，跳过下载")
+            self._info(
+                f"[行情][增量] 全部 {len(symbols)} 只行情已齐到 {end_date}，跳过下载"
+            )
             return
 
         # 阶段1：待补股票（只缺几天，快速）
@@ -362,7 +363,7 @@ class DataIngestionService:
         end_date: str,
         kind: str,
         batch_size: int,
-        max_workers: int,  # noqa: ARG002 保留参数兼容签名，单线程直接调用忽略
+        max_workers: int,  # 保留参数兼容签名，单线程直接调用忽略
     ) -> None:
         """单线程串行下载+写入：主进程直接调 xtquant 下载一批 → 写入一批 → 下一批。
 
@@ -371,6 +372,9 @@ class DataIngestionService:
         若 xtquant SIGABRT 杀死主进程，外层守护脚本会重启进程，
         靠智能模式的缓存检测（get_price_latest_dates / get_financial_latest_announces）
         跳过已写入的股票，从断点续传。
+
+        ADR-014 阶段 B：financial 分支改为按 8 张表分别取数（_fetch_financials_by_table），
+        覆盖 Capital/Holdernum/Top10holder/Top10flowholder（旧路径只下 4 表）。
         """
         total = len(symbols)
         if total == 0:
@@ -390,12 +394,18 @@ class DataIngestionService:
         failed_count = 0
         for idx, batch in enumerate(batches):
             batch_num = idx + 1
-            # 单线程直接调 xtquant 下载一批
-            df = self._fetch_batch(batch, start_date, end_date, kind)
-            # 单线程写入一批
-            wrote_ok = self._write_batch_to_cache(
-                kind, df, batch_num, total_batches
-            )
+            if kind == "price":
+                # 行情：旧路径（单 DataFrame）
+                df = self._fetch_batch(batch, start_date, end_date, kind)
+                wrote_ok = self._write_batch_to_cache(
+                    kind, df, batch_num, total_batches
+                )
+            else:
+                # ADR-014 阶段 B：财务按 8 表分别取数（_fetch_financials_by_table
+                # 内部已 save_financial_table 写各自细表，覆盖全部 8 张表）
+                wrote_ok = self._fetch_financial_batch_by_table(
+                    batch, start_date, end_date, batch_num, total_batches
+                )
             if wrote_ok:
                 ok_count += len(batch)
             else:
@@ -410,6 +420,41 @@ class DataIngestionService:
         if failed_count:
             msg += f"，{failed_count} 只失败"
         self._info(msg)
+
+    def _fetch_financial_batch_by_table(
+        self,
+        batch: list[str],
+        start_date: str,
+        end_date: str,
+        batch_num: int,
+        total_batches: int,
+    ) -> bool:
+        """ADR-014 阶段 B：按 8 张表分别取数并写入各自细表。
+
+        ``_fetch_financials_by_table`` 内部已调 ``cache.save_financial_table``
+        写入对应细表，本方法只负责异常隔离 + 进度日志。
+        覆盖 Income/Balance/CashFlow/Pershareindex/Capital/Holdernum/
+        Top10holder/Top10flowholder 全部 8 张表。
+        """
+        try:
+            table_dfs = self.data_provider._fetch_financials_by_table(
+                batch,
+                start_date,
+                end_date,
+            )
+            if not table_dfs:
+                return False
+            if batch_num % 5 == 0 or batch_num == total_batches:
+                tables_str = ", ".join(
+                    f"{name}:{len(df)}" for name, df in table_dfs.items()
+                )
+                self._info(
+                    f"[财务] 写入进度 {batch_num}/{total_batches} ({tables_str})"
+                )
+            return True
+        except Exception as e:
+            self._warning(f"[财务] 批次 {batch_num}/{total_batches} 下载失败: {e}")
+            return False
 
     def _fetch_batch(
         self,
@@ -498,23 +543,21 @@ class DataIngestionService:
         self._info("=" * 60)
 
         if not self.is_available:
-            self._warning(
-                "xtquant 不可用，无法下载数据。请确保 miniQMT 客户端已连接。"
-            )
+            self._warning("xtquant 不可用，无法下载数据。请确保 miniQMT 客户端已连接。")
             return {"status": "error", "reason": "xtquant_unavailable"}
 
         date_str = end.replace("-", "")
 
-        price_symbols, financial_symbols = self.get_universe_symbols(
-            universe, date_str
-        )
+        price_symbols, financial_symbols = self.get_universe_symbols(universe, date_str)
         if not price_symbols:
             self._warning("股票池为空，终止")
             return {"status": "error", "reason": "empty_universe"}
 
         # 行情：全量 or 智能增量
         if full:
-            self.download_prices(price_symbols, start_date, end, price_batch, max_workers)
+            self.download_prices(
+                price_symbols, start_date, end, price_batch, max_workers
+            )
         else:
             self.download_prices_incremental(
                 price_symbols, start_date, end, price_batch, max_workers

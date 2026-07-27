@@ -69,10 +69,18 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLC0415", "PLR2004", "ARG001", "ARG002", "ARG005", "PLR0913"]
 "tests/integration/conftest.py" = ["PLC0415", "PLR2004", "PLR0912", "PLR0915", "PLW2901"]
+"scripts/**" = ["PLC0415", "PLR2004", "PLR0913", "PLR0915"]
 "src/long_earn/backtest/data/provider.py" = ["I001", "PLC0415", "PLR2004"]
+"src/long_earn/backtest/data/connector.py" = ["I001", "PLC0415", "PLR2004"]
 "src/long_earn/backtest/data/miniqmt_provider.py" = ["PLR0912", "PLR2004"]
 "src/long_earn/backtest/data/ciccwm_client.py" = ["PLC0415", "PLR2004"]
-"src/long_earn/backtest/data/ciccwm_provider.py" = ["PLR2004"]
+"src/long_earn/backtest/data/ciccwm_provider.py" = ["PLR2004", "ARG002"]
+"src/long_earn/backtest/data/akshare_provider.py" = ["ARG002"]
+# CLI 故意使用延迟 import（避免 --help 加载整个应用），与 tests//scripts/ 同策略
+# download 子命令参数多为 typer Option 声明，PLR0913 不适用
+"src/long_earn/cli.py" = ["PLC0415", "PLR0913"]
+# 数据下载服务：start_date 保留 for API 一致性；run/download 签名参数多属设计选择
+"src/long_earn/services/data_ingestion_service.py" = ["ARG002", "PLR0913"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
@@ -121,6 +129,13 @@ name = "服务层不依赖 tools"
 type = "independence"
 modules = ["long_earn.services"]
 message = "services 层不应依赖 tools 模块"
+
+[[tool.importlinter.contracts]]
+id = "ontology_independent"
+name = "本体论层不依赖上层模块"
+type = "independence"
+modules = ["long_earn.ontology"]
+message = "ontology 层不应依赖 backtest/services/tools/strategy_rd 等上层模块"
 
 [[tool.importlinter.contracts]]
 id = "substance_independent"

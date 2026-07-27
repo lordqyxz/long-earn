@@ -28,6 +28,8 @@ class RSI(Operator):
     name: ClassVar[str] = "rsi"
     category: ClassVar[str] = "technical"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = RSIParams
     min_history: ClassVar[int] = 0
 

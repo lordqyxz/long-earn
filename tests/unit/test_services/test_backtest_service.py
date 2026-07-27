@@ -1,8 +1,16 @@
-"""BacktestServiceImpl 单元测试"""
+"""BacktestServiceImpl 单元测试
+
+ADR-009 收尾：DSLStrategy 仅走算子目录路径，旧式 factors / filter / rank /
+expression 信号路径已退役。本测试覆盖：
+1. BacktestServiceImpl.run 高层行为（DSL 解析 / 错误归类）
+2. DSLStrategy 算子路径失败可观测性（history_fetch / operator_execute / equal 空选）
+3. _build_strategy_diagnostics 跨 bar 累积去重 + metrics_unreliable 判定
+"""
 
 from unittest.mock import MagicMock
 
 import pandas as pd
+import polars as pl
 
 from long_earn.config import AppConfig
 from long_earn.services.backtest_service import BacktestServiceImpl, DSLStrategy
@@ -65,471 +73,243 @@ class TestRunBacktest:
 
 
 class _StubDSL:
-    """构造测试用的 DSL 桩（绕开 pydantic 校验）"""
+    """构造测试用的 DSL 桩（绕开 pydantic 校验）。
 
-    def __init__(self, factors=None, signals=None):
+    ADR-009 收尾后仅含算子目录字段：``operator_factors`` / ``signals`` / ``weights``。
+    """
+
+    def __init__(self, operator_factors=None, signals=None, weights=None):
         self.name = "stub"
-        self.factors = factors or {}
+        self.operator_factors = operator_factors or []
         self.signals = signals or []
-
-
-class TestDSLStrategyFailureObservability:
-    """DSLStrategy 失败可观测性测试
-
-    防止"所有因子/step 静默失败 → 退化为全持仓平均权重 → 业绩 0 但 success=True"的假象。
-    """
-
-    def _make_df(self) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "symbol": ["000001", "000002"],
-                "close": [10.0, 20.0],
-                "open": [9.5, 19.0],
-                "volume": [1000, 2000],
-            }
-        ).set_index("symbol")
-
-    def test_bad_factor_records_failure(self):
-        """因子表达式引用不存在字段时，失败必须被记录到 factor_failures"""
-        dsl = _StubDSL(
-            factors={"bad": "non_existent_field * 2", "good": "close * 1.0"}
-        )
-        strategy = DSLStrategy("test", dsl)
-        df = self._make_df()
-
-        out = strategy._compute_factors(df.copy())
-
-        # 至少捕获到一个失败的因子
-        assert len(strategy.factor_failures) >= 1
-        # 失败记录含 alias / expr / error 字段
-        failure = strategy.factor_failures[0]
-        assert "alias" in failure
-        assert "expr" in failure
-        assert "error" in failure
-        # 好因子仍然被计算（不影响其他因子）
-        assert "good" in out.columns or len(strategy.factor_failures) == 2
-
-    def test_bad_signal_step_records_failure(self):
-        """signal step 表达式失败时，必须被记录到 step_failures"""
-        dsl = _StubDSL(
-            signals=[
-                {"type": "filter", "condition": "non_existent_field > 0"},
-                {"type": "rank", "by": "close", "top": 1},
-            ]
-        )
-        strategy = DSLStrategy("test", dsl)
-        df = self._make_df()
-
-        strategy._execute_signal_steps(df)
-
-        assert len(strategy.step_failures) >= 1
-        first = strategy.step_failures[0]
-        assert first["type"] == "filter"
-        assert "non_existent_field" in first["error"] or first["error"]
-
-    def test_clean_strategy_has_no_failures(self):
-        """正常策略 factor_failures / step_failures 为空"""
-        dsl = _StubDSL(
-            factors={"f1": "close * 1.0"},
-            signals=[{"type": "rank", "by": "close", "top": 1}],
-        )
-        strategy = DSLStrategy("test", dsl)
-        df = self._make_df()
-
-        strategy._compute_factors(df.copy())
-        strategy._execute_signal_steps(df)
-
-        assert strategy.factor_failures == []
-        assert strategy.step_failures == []
-
-
-class TestDSLFactorUsesHistoryWindow:
-    """DSL 因子计算必须用历史窗口而非当前截面，否则 shift() 永远 NaN
-
-    防止"LLM 生成动量/反转/波动率因子 → 因子永远 NaN → 信号步骤拿到全 NaN →
-    要么 selected 空、要么退化为全持仓平均权重"的隐蔽失败。
-    """
-
-    def _make_history_df(self):
-        """构造 5 个 bar × 2 symbol 的历史数据（polars）"""
-        import polars as pl
-
-        rows = []
-        for day in range(1, 6):
-            for sym, base in [("A", 10.0), ("B", 20.0)]:
-                rows.append(
-                    {
-                        "timestamp": f"2024-01-0{day}",
-                        "symbol": sym,
-                        "open": base + day - 1,
-                        "high": base + day,
-                        "low": base + day - 1.5,
-                        "close": base + day,  # A: 10..14, B: 20..24
-                        "volume": 1000.0,
-                    }
-                )
-        df = pl.DataFrame(rows)
-        return df.with_columns(pl.col("timestamp").str.to_datetime())
-
-    def _make_context(self, history_df, current_ts):
-        """模拟 VisibilityContext：暴露 get_history_df 和 current_timestamp"""
-
-        class _Ctx:
-            def __init__(self):
-                self._df = history_df
-                self.current_timestamp = current_ts
-
-            def get_history_df(self):
-                return self._df
-
-        return _Ctx()
-
-    def test_shift_factor_no_longer_all_nan(self):
-        """shift(close, 1) 在 5-bar 历史下应得到真实数值，而不是全 NaN"""
-        import pandas as pd
-
-        history = self._make_history_df()
-        current_ts = pd.Timestamp("2024-01-05")
-
-        # bars 是当前截面（兼容旧 on_bar 入参）
-        bars = history.filter(history["timestamp"] == current_ts)
-
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="equal"),
-            factors={"prev_close": "shift(close, 1)"},
-            signals=[{"type": "rank", "by": "prev_close", "top": 2}],
-        )
-        strategy = DSLStrategy("test", dsl)
-        ctx = self._make_context(history, current_ts)
-
-        signal_event = strategy.on_bar(bars, ctx)
-
-        # 关键断言：on_bar 不是返回 None（因子能算出真实 prev_close）
-        assert signal_event is not None, (
-            "shift 因子在历史窗口下应能算出值，进而产生信号；"
-            "之前 bug：on_bar 截面单行 → shift 全 NaN → 排序后 selected 空 → 无信号"
-        )
-        # final_weights 包含 2 个标的
-        assert len(signal_event.signals) == 2
-
-    def test_static_factor_still_works(self):
-        """不需要历史的因子（close * 1.0）仍正常工作"""
-        import pandas as pd
-
-        history = self._make_history_df()
-        current_ts = pd.Timestamp("2024-01-05")
-        bars = history.filter(history["timestamp"] == current_ts)
-
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="equal"),
-            factors={"alpha": "close * 1.0"},
-            signals=[{"type": "rank", "by": "alpha", "top": 1}],
-        )
-        strategy = DSLStrategy("test", dsl)
-        ctx = self._make_context(history, current_ts)
-
-        signal_event = strategy.on_bar(bars, ctx)
-        assert signal_event is not None
-        # 当前时刻 close: A=14, B=24，B 更高，rank top 1 选 B
-        assert "B" in signal_event.signals
-        assert strategy.factor_failures == []
-
-    def test_history_fetch_failure_falls_back(self):
-        """context.get_history_df 抛异常时应回退到 bars 截面，并记录到 step_failures"""
-        import pandas as pd
-
-        history = self._make_history_df()
-        current_ts = pd.Timestamp("2024-01-05")
-        bars = history.filter(history["timestamp"] == current_ts)
-
-        class _BrokenCtx:
-            current_timestamp = current_ts
-
-            def get_history_df(self):
-                raise RuntimeError("data layer down")
-
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="equal"),
-            factors={"alpha": "close * 1.0"},
-            signals=[{"type": "rank", "by": "alpha", "top": 1}],
-        )
-        strategy = DSLStrategy("test", dsl)
-
-        signal_event = strategy.on_bar(bars, _BrokenCtx())
-
-        # 静态因子在 bars 兜底路径上也能算
-        assert signal_event is not None
-        # 历史拉取失败必须可观测
-        assert any(
-            f["type"] == "history_fetch" for f in strategy.step_failures
-        ), "历史拉取失败必须写入 step_failures"
+        self.weights = weights or _StubWeights(method="equal")
 
 
 class _StubWeights:
-    def __init__(self, method: str = "equal", signal_field: str = ""):
+    """权重配置桩（ADR-009 收尾：仅 equal）"""
+
+    def __init__(self, method: str = "equal"):
         self.method = method
-        self.signal_field = signal_field
 
 
-class _StubDSLWithWeights:
-    def __init__(self, weights, factors=None, signals=None):
-        self.name = "stub"
-        self.factors = factors or {}
-        self.signals = signals or []
-        self.weights = weights
+def _make_history_panel() -> pl.DataFrame:
+    """构造 5 个 bar × 2 symbol 的 polars 历史面板（算子路径输入）。"""
+    rows = []
+    for day in range(1, 6):
+        for sym, base in [("A", 10.0), ("B", 20.0)]:
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp(f"2024-01-0{day}"),
+                    "symbol": sym,
+                    "open": base + day - 1,
+                    "high": base + day,
+                    "low": base + day - 1.5,
+                    "close": base + day,  # A: 11..15, B: 21..25
+                    "volume": 1000.0,
+                }
+            )
+    return pl.DataFrame(rows)
 
 
-class TestDSLWeightFailureObservability:
-    """DSLStrategy._compute_weights 静默退化必须写入 step_failures"""
+class _StubContext:
+    """模拟 VisibilityContext：暴露 get_history_df 和 current_timestamp。"""
 
-    def _make_df(self) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "symbol": ["000001", "000002"],
-                "close": [10.0, 20.0],
-                "score": [0.5, 0.8],
-            }
-        ).set_index("symbol")
+    def __init__(self, history_df: pl.DataFrame, current_ts):
+        self._df = history_df
+        self.current_timestamp = current_ts
 
-    def test_unknown_method_records_failure(self):
-        """LLM 写错 weights.method 必须可观测"""
-        dsl = _StubDSLWithWeights(weights=_StubWeights(method="weird"))
-        strategy = DSLStrategy("t", dsl)
-        df = self._make_df()
+    def get_history_df(self) -> pl.DataFrame:
+        return self._df
 
-        result = strategy._compute_weights(df, ["000001"])
 
-        assert result == {}
-        assert any(
-            "未知 weights.method" in f["error"] for f in strategy.step_failures
+class _BrokenContext:
+    """模拟 get_history_df 抛异常的 context。"""
+
+    def __init__(self, current_ts):
+        self.current_timestamp = current_ts
+
+    def get_history_df(self) -> pl.DataFrame:
+        raise RuntimeError("data layer down")
+
+
+class TestDSLStrategyOperatorPathFailureObservability:
+    """DSLStrategy 算子路径失败可观测性测试
+
+    防止"算子执行链静默失败 → on_bar 返回 None → 业绩 0 但 success=True"的假象。
+    ADR-009 收尾后失败模式收敛为三类：
+    - history_fetch：context.get_history_df 抛异常
+    - operator_execute：算子执行器抛异常
+    - weights：_equal_weights 收到空 selected
+    """
+
+    def test_history_fetch_failure_records_step_failure(self):
+        """context.get_history_df 抛异常时，必须记入 step_failures 并返回 None"""
+        current_ts = pd.Timestamp("2024-01-05")
+        dsl = _StubDSL(
+            operator_factors=[
+                {
+                    "op": "returns",
+                    "alias": "mom",
+                    "params": {"field": "close", "period": 1},
+                }
+            ],
+            signals=[
+                {
+                    "type": "operator",
+                    "op": "rank_top",
+                    "params": {"field": "mom", "top": 1},
+                },
+            ],
+        )
+        strategy = DSLStrategy("test", dsl)
+
+        signal_event = strategy.on_bar(pl.DataFrame(), _BrokenContext(current_ts))
+
+        assert signal_event is None
+        assert any(f["type"] == "history_fetch" for f in strategy.step_failures), (
+            "history_fetch 失败必须写入 step_failures"
         )
 
-    def test_equal_method_empty_selected_records_failure(self):
-        """method=equal 但 selected 为空（信号步骤没选出标的）必须可观测"""
-        dsl = _StubDSLWithWeights(weights=_StubWeights(method="equal"))
+    def test_operator_execute_failure_records_step_failure(self):
+        """算子执行器抛异常时，必须记入 step_failures 并返回 None"""
+        current_ts = pd.Timestamp("2024-01-05")
+        history = _make_history_panel()
+        # 用一个不存在的算子 op 构造 executor（绕开解析期校验，直接注入坏 executor）
+        dsl = _StubDSL()
+        strategy = DSLStrategy("test", dsl)
+
+        class _RaisingExecutor:
+            def execute(self, panel, ts):
+                raise RuntimeError("operator boom")
+
+        strategy._op_executor = _RaisingExecutor()  # type: ignore[attr-defined]
+
+        signal_event = strategy.on_bar(
+            history.head(1), _StubContext(history, current_ts)
+        )
+
+        assert signal_event is None
+        assert any(f["type"] == "operator_execute" for f in strategy.step_failures), (
+            "operator_execute 失败必须写入 step_failures"
+        )
+
+    def test_empty_selected_records_weights_failure(self):
+        """_equal_weights([]) 必须记入 step_failures（selected 为空 = 信号步骤没选出标的）"""
+        dsl = _StubDSL()
         strategy = DSLStrategy("t", dsl)
 
-        result = strategy._compute_weights(self._make_df(), [])
+        result = strategy._equal_weights([])
 
         assert result == {}
         assert any("selected 为空" in f["error"] for f in strategy.step_failures)
 
-    def test_signal_method_missing_field_records_failure(self):
-        """method=signal 但 signal_field 不在 df.columns 必须可观测"""
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="signal", signal_field="ghost_field")
+    def test_clean_strategy_has_no_failures(self):
+        """正常算子路径：history 可取、算子可执行、selected 非空 → 无 step_failures"""
+        current_ts = pd.Timestamp("2024-01-05")
+        history = _make_history_panel()
+        dsl = _StubDSL(
+            operator_factors=[
+                {
+                    "op": "returns",
+                    "alias": "mom",
+                    "params": {"field": "close", "period": 1},
+                }
+            ],
+            signals=[
+                {
+                    "type": "operator",
+                    "op": "filter_threshold",
+                    "params": {"field": "mom", "op": ">", "value": 0.0},
+                },
+                {
+                    "type": "operator",
+                    "op": "rank_top",
+                    "params": {"field": "mom", "top": 2, "ascending": False},
+                },
+            ],
         )
-        strategy = DSLStrategy("t", dsl)
+        strategy = DSLStrategy("test", dsl)
 
-        result = strategy._compute_weights(self._make_df(), ["000001"])
-
-        assert result == {}
-        assert any(
-            "ghost_field" in f["error"] for f in strategy.step_failures
+        signal_event = strategy.on_bar(
+            history.head(1), _StubContext(history, current_ts)
         )
 
-    def test_signal_method_zero_total_records_failure(self):
-        """method=signal 但 signal_field 在 selected 上的正部和为 0 必须可观测"""
-        df = pd.DataFrame(
-            {"symbol": ["A", "B"], "score": [-1.0, -2.0]}
-        ).set_index("symbol")
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="signal", signal_field="score")
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        result = strategy._compute_weights(df, ["A", "B"])
-
-        assert result == {}
-        assert any("正部和为 0" in f["error"] for f in strategy.step_failures)
-
-    def test_signal_method_happy_path(self):
-        """method=signal 正常路径权重和为 1，无 step_failures"""
-        dsl = _StubDSLWithWeights(
-            weights=_StubWeights(method="signal", signal_field="score")
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        result = strategy._compute_weights(self._make_df(), ["000001", "000002"])
-
-        assert result
-        assert abs(sum(result.values()) - 1.0) < 1e-9
+        assert signal_event is not None
         assert strategy.step_failures == []
 
 
 class TestBuildStrategyDiagnosticsAccumulation:
-    """_build_strategy_diagnostics 跨 bar 累积 → 必须按 unique 判断退化
+    """_build_strategy_diagnostics 跨 bar 累积 → 必须按 unique 标签判断退化
 
-    实测 e2e 暴露 'step_failures=1043/6' 的字段错位 bug：跨 bar 累积让
-    len(step_failures) == total_steps 在多 bar 下永远 False。
+    ADR-009 收尾后诊断字段：
+    - ``failed_factor_aliases``：factor_failures 按 alias 去重（算子路径不再写入，留空）
+    - ``failed_step_labels``：step_failures 按 step 标签去重（operator_execute /
+      on_bar history / method=equal）
+    - ``degenerate``：trade_count == 0
+    - ``metrics_unreliable``：degenerate 或 任何 step/factor 失败
     """
 
-    def test_cross_bar_accumulated_failures_detected_via_unique(self):
-        """模拟 100 bar × 6 个 step 全失败 → 600 条记录，但 unique step index 只有 6"""
+    def test_cross_bar_accumulated_step_failures_detected_via_unique_label(self):
+        """模拟 100 bar × 同一 step 标签失败 → 100 条记录，但 unique label 只有 1"""
         svc = _make_service()
-        # 模拟 strategy 累积了 600 条失败（100 bar × 6 step）
         strategy_obj = type("S", (), {})()
         strategy_obj.factor_failures = []
         strategy_obj.step_failures = [
-            {"index": str(i % 6), "type": "filter", "step": "x", "error": "boom"}
-            for i in range(600)
+            {"type": "operator_execute", "step": "operator_executor", "error": "boom"}
+            for _ in range(100)
         ]
 
-        # DSL 定义：6 个 signal step
         dsl = type("D", (), {})()
-        dsl.factors = {}
-        dsl.signals = [{"type": "filter"} for _ in range(6)]
+        dsl.signals = [{"type": "operator"}]
 
-        # result 0 trade
         result = type("R", (), {"trade_count": 0})()
 
         diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
 
-        # 旧 bug：len(step_failures) == total_steps → 600 == 6 永假；
-        # 新逻辑：unique step index 集合长度 == 6 → all_steps_failed 为 True
-        assert len(diag["step_failures"]) == 600
-        assert set(diag["failed_step_indices"]) == {"0", "1", "2", "3", "4", "5"}
+        assert len(diag["step_failures"]) == 100
+        assert diag["failed_step_labels"] == ["operator_executor"]
+        # trade_count=0 → degenerate=True
         assert diag["degenerate"] is True
+        assert diag["metrics_unreliable"] is True
 
-    def test_partial_step_failures_not_degenerate_by_step_metric(self):
-        """只有部分 step 失败 → 不应仅基于 step 维度标记 degenerate
-        （但 trade_count=0 仍可触发 degenerate 兜底）
-        """
+    def test_partial_step_failures_with_trades_not_degenerate(self):
+        """部分 step 失败 + trade_count > 0 → degenerate=False 但 metrics_unreliable=True"""
         svc = _make_service()
         strategy_obj = type("S", (), {})()
         strategy_obj.factor_failures = []
-        # 只有 step 0 / 1 失败，2 / 3 / 4 / 5 没失败过
         strategy_obj.step_failures = [
-            {"index": "0", "type": "filter", "step": "x", "error": "e"},
-            {"index": "1", "type": "rank", "step": "y", "error": "e"},
-        ] * 50  # 100 条记录但只有 2 个 unique index
+            {"type": "history_fetch", "step": "on_bar history", "error": "e"},
+        ]
 
         dsl = type("D", (), {})()
-        dsl.factors = {}
-        dsl.signals = [{"type": "filter"} for _ in range(6)]
+        dsl.signals = [{"type": "operator"}, {"type": "operator"}]
 
-        # 假设确实成交了（trade_count > 0）→ 不应 degenerate
         result = type("R", (), {"trade_count": 50})()
         diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
 
-        assert set(diag["failed_step_indices"]) == {"0", "1"}
-        # 2/6 失败 + trade_count=50 → degenerate=False
+        # 1/2 step 失败，trade_count=50 → degenerate=False
         assert diag["degenerate"] is False
+        # 但 metrics_unreliable 必须为 True：step 失败意味着选股逻辑残缺
+        assert diag["metrics_unreliable"] is True
 
     def test_factor_failures_use_unique_alias(self):
-        """factor_failures 同样按 alias 去重判断"""
+        """factor_failures 按 alias 去重（算子路径不再写入，但诊断逻辑保留兼容）"""
         svc = _make_service()
         strategy_obj = type("S", (), {})()
-        # 200 条记录，但只有 3 个 unique alias
         strategy_obj.factor_failures = [
-            {"alias": f"f{i % 3}", "expr": "x", "error": "boom"}
-            for i in range(200)
+            {"alias": f"f{i % 3}", "expr": "x", "error": "boom"} for i in range(200)
         ]
         strategy_obj.step_failures = []
 
         dsl = type("D", (), {})()
-        # DSL 定义 3 个 factor
-        dsl.factors = {"f0": "...", "f1": "...", "f2": "..."}
-        dsl.signals = [{"type": "filter"}]
+        dsl.signals = [{"type": "operator"}]
 
         result = type("R", (), {"trade_count": 100})()
         diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
 
         assert set(diag["failed_factor_aliases"]) == {"f0", "f1", "f2"}
-        # 3/3 factor 都失败过 → degenerate=True（即使 trade_count > 0）
-        assert diag["degenerate"] is True
-
-
-class TestInflatedReturnBugFix:
-    """虚高 bug 回归测试
-
-    复现集成测试发现的生产 bug：因子引用不存在的 volatility 字段 →
-    filter step 异常 → selected 保持初始值（全部股票）→ 策略退化成
-    "从全部股票里选 top N" → 牛市行情下产生虚高收益。
-
-    修复后：filter/rank step 失败时 selected 必须置空（保守不选），
-    且 metrics_unreliable 标志必须为 True，让上层（监督器/反思）能识别
-    指标不可信。
-    """
-
-    def _make_df(self) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "symbol": ["A", "B", "C", "D"],
-                "close": [10.0, 20.0, 30.0, 40.0],
-            }
-        ).set_index("symbol")
-
-    def test_filter_step_failure_empties_selected(self):
-        """filter 引用不存在字段失败时，selected 必须为 []（不是全部股票）"""
-        dsl = _StubDSL(
-            signals=[
-                {"type": "filter", "condition": "volatility > 0.2"},  # volatility 不存在
-            ]
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        selected = strategy._execute_signal_steps(self._make_df())
-
-        # 核心：selected 不能是全部股票 ["A","B","C","D"]，必须是 []
-        assert selected == [], (
-            "filter step 失败时 selected 必须置空，否则策略退化为'从全部股票里选 top N'"
-            "产生虚高收益"
-        )
-        # 失败必须可观测
-        assert any(f["type"] == "filter" for f in strategy.step_failures)
-
-    def test_filter_failure_breaks_subsequent_rank(self):
-        """filter 失败后必须 break，不能让后续 rank 从全量 df 虚选 top N"""
-        dsl = _StubDSL(
-            signals=[
-                {"type": "filter", "condition": "volatility > 0.2"},  # 失败
-                {"type": "rank", "by": "close", "top": 2},  # 不应执行
-            ]
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        selected = strategy._execute_signal_steps(self._make_df())
-
-        # 必须 break：selected 为 []，不是 rank 选出的 top 2
-        assert selected == [], (
-            "filter 失败后必须终止后续步骤，否则 rank 从全量股票虚选 top N 产生虚高收益"
-        )
-        # 只有 filter 失败，rank 没执行（不在 step_failures 里）
-        assert len(strategy.step_failures) == 1
-        assert strategy.step_failures[0]["type"] == "filter"
-
-    def test_rank_step_missing_field_returns_empty(self):
-        """rank 引用不存在字段时静默返回 []（不抛异常，但选股结果为空）"""
-        dsl = _StubDSL(
-            signals=[
-                {"type": "rank", "by": "momentum", "top": 2},  # momentum 不存在
-            ]
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        selected = strategy._execute_signal_steps(self._make_df())
-
-        # rank 缺字段时 _apply_rank_step 返回 []，不抛异常
-        assert selected == [], "rank 缺字段时必须返回空列表（保守不选）"
-        # 没有异常 → step_failures 为空（静默退化，由 metrics_unreliable 兜底）
-        assert strategy.step_failures == []
-
-    def test_expression_step_failure_keeps_selected(self):
-        """expression step 失败不影响 selected（它不是选股步骤，continue 不 break）"""
-        dsl = _StubDSL(
-            signals=[
-                {"type": "rank", "by": "close", "top": 2},
-                {"type": "expression", "formula": "ghost_field * 2", "alias": "x"},
-            ]
-        )
-        strategy = DSLStrategy("t", dsl)
-
-        selected = strategy._execute_signal_steps(self._make_df())
-
-        # rank 成功选了 2 只，expression 失败不影响 selected
-        assert len(selected) == 2
-        assert any(f["type"] == "expression" for f in strategy.step_failures)
+        # 3 个 factor 都失败过 → metrics_unreliable=True
+        assert diag["metrics_unreliable"] is True
 
     def test_metrics_unreliable_when_any_step_fails(self):
         """任何 step 失败 → metrics_unreliable=True（即使 trade_count > 0）"""
@@ -537,52 +317,91 @@ class TestInflatedReturnBugFix:
         strategy_obj = type("S", (), {})()
         strategy_obj.factor_failures = []
         strategy_obj.step_failures = [
-            {"index": "0", "type": "filter", "step": "x", "error": "boom"},
+            {"type": "weights", "step": "method=equal", "error": "boom"},
         ]
         dsl = type("D", (), {})()
-        dsl.factors = {}
-        dsl.signals = [{"type": "filter"}, {"type": "rank"}]
+        dsl.signals = [{"type": "operator"}, {"type": "operator"}]
         result = type("R", (), {"trade_count": 100})()
 
         diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
 
-        # 1/2 step 失败，trade_count=100 → degenerate=False
         assert diag["degenerate"] is False
-        # 但 metrics_unreliable 必须为 True：filter 失败意味着选股逻辑残缺
-        assert diag["metrics_unreliable"] is True
-
-    def test_metrics_unreliable_when_any_factor_fails(self):
-        """任何 factor 失败 → metrics_unreliable=True"""
-        svc = _make_service()
-        strategy_obj = type("S", (), {})()
-        strategy_obj.factor_failures = [
-            {"alias": "volatility", "expr": "x", "error": "boom"},
-        ]
-        strategy_obj.step_failures = []
-        dsl = type("D", (), {})()
-        dsl.factors = {"volatility": "...", "momentum": "..."}
-        dsl.signals = [{"type": "rank", "by": "close"}]
-        result = type("R", (), {"trade_count": 50})()
-
-        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
-
-        # 1/2 factor 失败，trade_count=50 → degenerate=False
-        assert diag["degenerate"] is False
-        # 但 metrics_unreliable 必须为 True
         assert diag["metrics_unreliable"] is True
 
     def test_metrics_reliable_when_clean(self):
-        """无任何失败 → metrics_unreliable=False"""
+        """无任何失败 + trade_count > 0 → metrics_unreliable=False"""
         svc = _make_service()
         strategy_obj = type("S", (), {})()
         strategy_obj.factor_failures = []
         strategy_obj.step_failures = []
         dsl = type("D", (), {})()
-        dsl.factors = {"f1": "..."}
-        dsl.signals = [{"type": "rank"}]
+        dsl.signals = [{"type": "operator"}]
         result = type("R", (), {"trade_count": 100})()
 
         diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
 
         assert diag["degenerate"] is False
         assert diag["metrics_unreliable"] is False
+
+    def test_degenerate_when_zero_trades_even_without_failures(self):
+        """trade_count=0 + 无失败 → degenerate=True（策略啥都没干）"""
+        svc = _make_service()
+        strategy_obj = type("S", (), {})()
+        strategy_obj.factor_failures = []
+        strategy_obj.step_failures = []
+        dsl = type("D", (), {})()
+        dsl.signals = [{"type": "operator"}]
+        result = type("R", (), {"trade_count": 0})()
+
+        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
+
+        assert diag["degenerate"] is True
+        assert diag["metrics_unreliable"] is True
+
+
+class TestInflatedReturnBugFixOperatorPath:
+    """虚高 bug 回归测试（ADR-009 收尾：算子路径版）
+
+    复现原生产 bug 的精神：选股逻辑残缺时，selected 必须置空（保守不选），
+    且 metrics_unreliable=True，让上层识别指标不可信。
+
+    算子路径下 filter_threshold 自然产生 0 行 → selected=[]（无虚高风险），
+    此测试验证该保护链路在 DSLStrategy 层的行为可观测。
+    """
+
+    def test_filter_to_zero_rows_produces_empty_selected_and_weights_failure(self):
+        """filter_threshold 过滤后 0 行 → selected=[] → _equal_weights 记 failure"""
+        current_ts = pd.Timestamp("2024-01-05")
+        history = _make_history_panel()
+        # mom 永远 > 0（价格递增），filter value=999 永不成立 → 0 行
+        dsl = _StubDSL(
+            operator_factors=[
+                {
+                    "op": "returns",
+                    "alias": "mom",
+                    "params": {"field": "close", "period": 1},
+                }
+            ],
+            signals=[
+                {
+                    "type": "operator",
+                    "op": "filter_threshold",
+                    "params": {"field": "mom", "op": ">", "value": 999.0},
+                },
+                {
+                    "type": "operator",
+                    "op": "rank_top",
+                    "params": {"field": "mom", "top": 2, "ascending": False},
+                },
+            ],
+        )
+        strategy = DSLStrategy("t", dsl)
+
+        signal_event = strategy.on_bar(
+            history.head(1), _StubContext(history, current_ts)
+        )
+
+        # filter 过滤后 0 行 → selected=[] → 无信号
+        assert signal_event is None
+        # _equal_weights([]) 记录了 weights failure
+        assert any("selected 为空" in f["error"] for f in strategy.step_failures)

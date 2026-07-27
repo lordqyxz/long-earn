@@ -24,7 +24,7 @@ from long_earn.strategy_optimization import (
     OptimizationPipeline,
 )
 
-# 由 operator_dev 研发出的新因果算子：已实现波动率
+# 由 operator_dev 研发出的新因果算子：已实现波动率（独立测试名，避免与目录算子冲突）
 _REALIZED_VOL = '''
 import polars as pl
 from typing import ClassVar
@@ -38,8 +38,8 @@ class P(OperatorParams):
 
 
 @operator
-class realized_vol(Operator):
-    name: ClassVar[str] = "realized_vol"
+class e2e_volatility(Operator):
+    name: ClassVar[str] = "e2e_volatility"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = []
     params_cls: ClassVar[type[OperatorParams]] = P
@@ -49,7 +49,7 @@ class realized_vol(Operator):
         expr = (
             (pl.col(params.field) / pl.col(params.field).shift(1) - 1)
             .pow(2).rolling_mean(params.window).sqrt()
-            .over("symbol").alias("realized_vol")
+            .over("symbol").alias("e2e_volatility")
         )
         return temporal_series(panel, expr)
 '''
@@ -118,8 +118,11 @@ def _optimize(baseline_sharpe: float, optimized_sharpe: float) -> bool:
 
 @pytest.fixture(autouse=True)
 def _cleanup():
+    # 测试前清理：避免前一轮测试残留导致 spec_review 直接走 resolved 分支
+    OPERATOR_REGISTRY.pop("e2e_volatility", None)
+    OPERATOR_REGISTRY.pop("leak_op", None)
     yield
-    OPERATOR_REGISTRY.pop("realized_vol", None)
+    OPERATOR_REGISTRY.pop("e2e_volatility", None)
     OPERATOR_REGISTRY.pop("leak_op", None)
 
 
@@ -132,9 +135,9 @@ class TestAutoEvolutionSystem:
 
     def test_operator_rd_produces_correct_causal_operator(self, small_causality_panel):
         """研发正确算子：注册后再次独立过因果性证明。"""
-        result = _develop("realized_vol", _REALIZED_VOL)
-        assert result["registered_names"] == ["realized_vol"]
-        op = OPERATOR_REGISTRY["realized_vol"]
+        result = _develop("e2e_volatility", _REALIZED_VOL)
+        assert result["registered_names"] == ["e2e_volatility"]
+        op = OPERATOR_REGISTRY["e2e_volatility"]
         assert is_causal(op, type(op).params_cls(), small_causality_panel) is True
 
     def test_system_rejects_future_function_operator(self):
@@ -148,6 +151,6 @@ class TestAutoEvolutionSystem:
 
     def test_end_to_end_evolution_loop(self):
         """完整闭环：研发新算子 → 用它优化策略 → 验收。"""
-        assert _develop("realized_vol", _REALIZED_VOL)["registered_names"] == ["realized_vol"]
-        assert "realized_vol" in OPERATOR_REGISTRY
+        assert _develop("e2e_volatility", _REALIZED_VOL)["registered_names"] == ["e2e_volatility"]
+        assert "e2e_volatility" in OPERATOR_REGISTRY
         assert _optimize(baseline_sharpe=1.2, optimized_sharpe=2.1) is True

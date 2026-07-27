@@ -2,12 +2,14 @@
 
 子命令:
     research   策略研究循环（多轮 Reflexion 研发）
+    optimize   离线策略优化（AcceptanceGate 验收，ADR-009 收尾）
     download   下载行情与财务数据到 DuckDB 缓存
     agent      主 Agent 调用（意图路由到子图）
     web        启动回测可视化 Web 服务
 
 用法:
     long-earn research "基于净利润增长和ROE的选股策略"
+    long-earn optimize --suggestions "增加波动率过滤,降低换手率"
     long-earn download --universe all_a
     long-earn agent "分析净利润增长策略"
     long-earn web --port 8090
@@ -18,11 +20,10 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
 import typer
-from loguru import logger
 from dotenv import load_dotenv
+from loguru import logger
 
 load_dotenv()
 
@@ -56,7 +57,7 @@ _DEFAULT_IDEA = "研究一个基于净利润增长和ROE的选股策略，要求
 
 @app.command()
 def research(
-    idea: Optional[str] = typer.Argument(
+    idea: str | None = typer.Argument(
         None,
         help="初始交易策略或交易思路（缺省时使用默认思路）",
     ),
@@ -109,7 +110,7 @@ def research(
 
 def _print_research_banner(
     idea: str,
-    config: "object",
+    config: object,
     history_window: str,
     recent_window: str,
 ) -> None:
@@ -152,6 +153,120 @@ def _confirm_start(yes: bool) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer.strip().lower() != "q"
+
+
+# ── optimize: 离线策略优化 ───────────────────────────────────────
+
+
+@app.command()
+def optimize(
+    strategy_yaml: str = typer.Option(
+        "best_strategy.yaml",
+        "--strategy-yaml",
+        help="基线策略 YAML 文件路径（默认 best_strategy.yaml）",
+    ),
+    suggestions: str = typer.Option(
+        "",
+        "--suggestions",
+        "-s",
+        help="优化建议，逗号分隔（如 '增加波动率过滤,降低换手率'），空则用默认建议",
+    ),
+    max_iterations: int = typer.Option(
+        1, "--max-iterations", help="最大优化迭代次数（每次迭代 = optimize + backtest + gate）"
+    ),
+    yes: bool = typer.Option(
+        False, "-y", "--yes", help="跳过启动确认提示，直接开始优化"
+    ),
+) -> None:
+    """离线策略优化 —— 对已有策略跑 optimize→backtest→AcceptanceGate 验收循环。
+
+    ADR-009 收尾：暴露 OptimizationPipeline 给研究员手动驱动，
+    无需走完整 HTR 循环。AcceptanceGate 严格校验 sharpe 提升，未通过则保留原策略。
+    """
+    from pathlib import Path
+
+    from long_earn.config import AppConfig
+    from long_earn.context_init import initialize_context
+    from long_earn.core.storage import best_strategy_path
+    from long_earn.strategy_optimization import (
+        AcceptanceGate,
+        LLMStrategyOptimizer,
+        OptimizationPipeline,
+    )
+    from long_earn.strategy_rd.agents.strategy_develop_agent import (
+        StrategyDevelopAgent,
+    )
+
+    yaml_path = Path(strategy_yaml)
+    if not yaml_path.exists():
+        typer.echo(f"策略文件不存在: {yaml_path}", err=True)
+        raise typer.Exit(code=1)
+
+    base_yaml = yaml_path.read_text(encoding="utf-8")
+    suggestion_list = (
+        [s.strip() for s in suggestions.split(",") if s.strip()]
+        if suggestions
+        else ["在保留主逻辑前提下提升 sharpe"]
+    )
+
+    typer.echo("\n" + "=" * 60)
+    typer.echo(" 离线策略优化 / Offline Strategy Optimization")
+    typer.echo("=" * 60)
+    typer.echo(f"  基线策略 : {yaml_path}")
+    typer.echo(f"  优化建议 : {suggestion_list}")
+    typer.echo(f"  迭代次数 : {max_iterations}")
+    typer.echo("=" * 60 + "\n")
+
+    if not _confirm_start(yes):
+        typer.echo("已取消。")
+        raise typer.Exit()
+
+    config = AppConfig.from_env()
+    config.backtest_start_date = config.train_start_date
+    config.backtest_end_date = config.train_end_date
+    ctx = initialize_context(config)
+
+    optimizer = LLMStrategyOptimizer(ctx)
+    pipeline = OptimizationPipeline(
+        optimizer=optimizer,
+        backtest_service=ctx.backtest_service,
+        gate=AcceptanceGate(),
+        logger=ctx.logger,
+    )
+    develop_agent = StrategyDevelopAgent(context=ctx)
+
+    # 离线优化基线策略字典（minimal — optimizer 内部会读取完整 strategy）
+    base_strategy_dict = {"name": "baseline", "source_yaml": str(yaml_path)}
+    baseline_backtest: dict | None = None
+
+    for i in range(max_iterations):
+        ctx.logger.info(f"[optimize] 第 {i + 1}/{max_iterations} 轮迭代")
+        outcome = pipeline.run(
+            base_strategy=base_strategy_dict,
+            base_strategy_yaml=base_yaml,
+            improvement_suggestions=suggestion_list,
+            baseline_backtest=baseline_backtest,
+        )
+
+        if outcome.accepted and outcome.optimized_strategy:
+            # 通过验收：用 develop_agent 把优化版 strategy dict 编译为 YAML 并落盘
+            optimized_yaml = develop_agent.develop_strategy(outcome.optimized_strategy)
+            ctx.logger.info(
+                f"[optimize] 第 {i + 1} 轮通过 AcceptanceGate: "
+                f"{outcome.acceptance.baseline_sharpe} → {outcome.acceptance.optimized_sharpe}"
+            )
+            best_path = best_strategy_path()
+            best_path.write_text(optimized_yaml, encoding="utf-8")
+            typer.echo(f"第 {i + 1} 轮优化通过，已落盘到 {best_path}")
+            base_yaml = optimized_yaml
+            baseline_backtest = outcome.optimized_backtest
+        else:
+            ctx.logger.warning(
+                f"[optimize] 第 {i + 1} 轮未通过 AcceptanceGate: {outcome.acceptance.reason}"
+            )
+            typer.echo(f"第 {i + 1} 轮未通过验收：{outcome.acceptance.reason}")
+
+    typer.echo("\n优化结束。")
 
 
 # ── download: 数据下载 ───────────────────────────────────────────

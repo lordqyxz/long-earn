@@ -62,6 +62,17 @@ class Operator(ABC):
     name: ClassVar[str] = ""
     category: ClassVar[str] = ""
     inputs: ClassVar[list[str]] = []
+    """静态声明的依赖列名（如 ``["close"]``）。
+
+    ADR-014 任务3：连接器据此按需取数。参数驱动字段（如 ``params.field``）
+    通过 ``field_params`` 标注，连接器解析 params 后合并到实际字段需求集。
+    """
+    field_params: ClassVar[list[str]] = []
+    """``params`` 中承载列名的键（如 ``["field"]``）。
+
+    ADR-014 任务3：连接器解析 params 时，把这些键的值并入 ``inputs`` 得到
+    完整字段需求集。空列表表示无参数驱动字段。
+    """
     params_cls: ClassVar[type[OperatorParams]] = OperatorParams
     causal: ClassVar[bool] = True
     """恒为 True：算子目录禁止非因果算子。"""
@@ -96,6 +107,26 @@ class Operator(ABC):
     def param_schema(cls) -> dict:
         """返回参数 JSON Schema（供 LLM function calling / 目录展示）。"""
         return cls.params_cls.model_json_schema()
+
+    @classmethod
+    def required_fields(cls, params: OperatorParams | None = None) -> list[str]:
+        """算子实际依赖的字段集（静态 inputs + 参数驱动字段）。
+
+        ADR-014 任务3：供连接器按需取数。合并 ``inputs``（静态声明）与
+        ``field_params`` 标注的 params 键值（如 ``params.field``）。
+        """
+        fields = list(cls.inputs)
+        if params is not None and cls.field_params:
+            for key in cls.field_params:
+                val = getattr(params, key, None)
+                if isinstance(val, str) and val not in fields:
+                    fields.append(val)
+                # compose 算子 lhs/rhs 可能是列名或标量
+                elif isinstance(val, (list, tuple)):
+                    for v in val:
+                        if isinstance(v, str) and v not in fields:
+                            fields.append(v)
+        return fields
 
 
 VALID_CATEGORIES: frozenset[str] = frozenset(

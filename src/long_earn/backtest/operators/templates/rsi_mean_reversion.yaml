@@ -1,0 +1,36 @@
+# RSI 均值回归策略（声明式算子 DSL 版）
+# 替代旧 RSIMeanReversionStrategy：用 RSI(14) 算子，filter RSI < 30（超卖）
+# 注：声明式版本不复刻"连续超卖天数"状态机，仅表达"当前 RSI 进入超卖区"
+strategy:
+  name: RSIMeanReversion
+  description: RSI 均值回归 — RSI(14) < 30 时超卖反弹
+  universe:
+    type: main_board+gem
+    rebalance_freq: 20D
+  start_date: 2024-01-01
+  end_date: 2024-12-31
+  operator_factors:
+    - op: rsi
+      alias: rsi_14
+      params:
+        field: close
+        window: 14
+  signals:
+    - type: operator
+      op: filter_threshold
+      params:
+        field: rsi_14
+        op: "<"
+        value: 30
+    - type: operator
+      op: rank_top
+      params:
+        field: rsi_14
+        top: 10
+        ascending: true
+  weights:
+    method: equal
+  risk_control:
+    max_position_per_stock: 0.2
+    stop_loss: 0.1
+    max_drawdown_limit: 0.2

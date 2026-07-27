@@ -5,9 +5,10 @@
 
 import json
 import re
+from typing import Any
 
 
-def parse_llm_json(text: str) -> dict:
+def parse_llm_json(text: str, default: Any = None) -> dict:
     """从 LLM 响应中解析 JSON
 
     自动处理以下常见格式：
@@ -17,12 +18,15 @@ def parse_llm_json(text: str) -> dict:
 
     Args:
         text: LLM 返回的原始文本
+        default: 解析失败时的兜底返回值。``None``（默认）时抛
+            ``json.JSONDecodeError``；非 None 时返回该值（让调用方
+            决定容错策略，例如 HTR observe 节点传 ``{}`` 让循环继续）。
 
     Returns:
         解析后的字典
 
     Raises:
-        json.JSONDecodeError: 无法解析为有效 JSON
+        json.JSONDecodeError: 无法解析为有效 JSON 且 ``default is None``
     """
     content = text.strip()
 
@@ -40,7 +44,12 @@ def parse_llm_json(text: str) -> dict:
     # 尝试提取第一个 { ... } 块
     brace_match = re.search(r"\{.*\}", content, re.DOTALL)
     if brace_match:
-        return json.loads(brace_match.group(0))
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
 
-    # 全部失败，抛出原始错误
+    # 全部失败
+    if default is not None:
+        return default
     raise json.JSONDecodeError("Expecting value", text, 0)

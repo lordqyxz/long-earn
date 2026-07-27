@@ -23,6 +23,8 @@ from long_earn.backtest.operators.base import (
 EXPECTED_OPS = {
     "shift", "returns", "windowed", "filter_threshold", "rank_top",
     "arithmetic", "sma", "ema", "rsi", "macd", "bollinger",
+    # operator_dev 自主研发写盘算子（htr_subgraph 接入后由 LLM 生成）
+    "log_return", "realized_vol",
 }
 
 
@@ -47,9 +49,16 @@ class TestLoader:
 
     def test_list_operators_schema(self):
         entry = list_operators()["shift"]
-        assert set(entry) == {"category", "inputs", "params_schema", "min_history"}
+        assert set(entry) == {
+            "category",
+            "inputs",
+            "field_params",
+            "params_schema",
+            "min_history",
+        }
         assert entry["category"] == "factor"
         assert entry["params_schema"]["type"] == "object"
+        assert entry["field_params"] == ["field"]
 
 
 class TestContractValidation:

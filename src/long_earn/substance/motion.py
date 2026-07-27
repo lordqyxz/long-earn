@@ -1,6 +1,9 @@
 """运动层 — 施加在物质上的运算，不持久化，只产出新物质或变更状态。
 
-activate: WorldInfo 激活引擎（关键词触发 + 递归激活 + 预算控制）
+activate: WorldInfo 激活引擎（ADR-014 阶段 D 改造：图遍历优先）
+  - 旧实现：关键词首轮 + 关键词递归（O(N²) 且漏召回）
+  - 新实现：关键词首轮入图种子 + OntologyGraph 图遍历扩展跨域关联
+  - 无 OntologyGraph 时降级到旧关键词递归（向后兼容）
 decay: 按 form 配不同半衰期的衰减
 detect_conflicts: 可配置词库的冲突检测
 compress: 修复聚类算法的记忆压缩
@@ -10,12 +13,15 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from long_earn.substance.model import Substance, SubstanceForm
 from long_earn.substance.store import SubstanceStore
+
+if TYPE_CHECKING:
+    from long_earn.ontology.graph import OntologyGraph
 
 # ── 默认半衰期映射（按 form 配不同半衰期）────────────────────
 DEFAULT_HALF_LIFE_MAP: dict[SubstanceForm, float] = {
@@ -119,38 +125,94 @@ def _resolve_conflict_groups(activated: dict[str, Substance]) -> dict[str, Subst
     return activated
 
 
-def activate(
+def activate(  # noqa: PLR0913
     text: str,
     store: SubstanceStore,
     budget: int = 2000,
     max_recursion: int = 3,
     visible_at: datetime | None = None,
+    graph: OntologyGraph | None = None,
+    graph_max_depth: int = 3,
 ) -> list[Substance]:
-    """WorldInfo 激活引擎 — 关键词触发 → filter_logic 过滤 → conflict_group 互斥 → 递归扫描 → 预算截断。
+    """WorldInfo 激活引擎 — ADR-014 阶段 D：图遍历优先。
+
+    流程（graph 非 None 时）：
+    1. 关键词首轮命中（入图种子，保留 _activate_first_round）
+    2. 从首轮命中物质 sid 出发，OntologyGraph.traverse 沿边扩展跨域关联物质
+    3. 对新加入物质检查 PIT 可见性（is_visible_at）
+    4. conflict_group 互斥
+    5. 衰减排序 + 预算截断
+
+    流程（graph 为 None 时，向后兼容）：
+    1. 关键词首轮 + 关键词递归（旧 _activate_recursive）
+    2. conflict_group 互斥 + 预算截断
 
     Args:
         text: 输入文本（如用户查询或新闻事件）
         store: 物质存储
         budget: token 预算（返回物质数上限）
-        max_recursion: 递归激活深度
+        max_recursion: 递归激活深度（仅旧路径用）
         visible_at: 时间过滤时刻
+        graph: OntologyGraph（可选，有则图遍历扩展替代关键词递归）
+        graph_max_depth: 图遍历深度（仅 graph 路径用）
 
     Returns:
-        激活的物质列表（按 insertion_order 降序）
+        激活的物质列表（按 insertion_order × decay_factor 降序）
     """
     when = visible_at or datetime.now()
     store._ensure_index()
 
     activated = _activate_first_round(store, text, when)
-    activated = _activate_recursive(activated, store, max_recursion, when)
+
+    if graph is not None:
+        activated = _activate_via_graph(activated, store, graph, graph_max_depth, when)
+    else:
+        activated = _activate_recursive(activated, store, max_recursion, when)
+
     activated = _resolve_conflict_groups(activated)
 
+    # 图遍历路径用：按 insertion_order × decay_factor 排序（图路径权重反映关联强度）
     sorted_substances = sorted(
-        activated.values(), key=lambda x: x.insertion_order, reverse=True
+        activated.values(),
+        key=lambda x: x.insertion_order * x.decay_factor(when),
+        reverse=True,
     )
     result = sorted_substances[:budget]
-    logger.debug(f"激活 {len(result)} 条物质 (候选 {len(activated)})")
+    logger.debug(
+        f"激活 {len(result)} 条物质 (候选 {len(activated)}, "
+        f"路径={'graph' if graph is not None else 'keyword'})"
+    )
     return result
+
+
+def _activate_via_graph(
+    activated: dict[str, Substance],
+    store: SubstanceStore,
+    graph: OntologyGraph,
+    max_depth: int,
+    when: datetime,
+) -> dict[str, Substance]:
+    """图遍历扩展：从首轮命中物质 sid 出发，沿 OntologyGraph 边扩展跨域关联物质。
+
+    替代旧 _activate_recursive 的关键词递归——跨域链路（事件A→影响公司B→
+    公司B相关策略经验C）走图边而非文本共现，召回更全且可溯源。
+    """
+    for sid in list(activated.keys()):
+        paths = graph.traverse(
+            sid,
+            max_depth=max_depth,
+            min_weight=0.0,
+            direction="both",
+            visible_at=when,
+        )
+        for p in paths:
+            if p.sid in activated:
+                continue
+            sub = store.get_by_sid(p.sid)
+            if sub is None or not sub.is_visible_at(when):
+                continue
+            activated[p.sid] = sub
+    return activated
 
 
 def decay(

@@ -179,17 +179,23 @@ class HypothesisTree:
     def update_evidence(  # noqa: PLR0913
         self,
         node_id: str,
-        dev_score: float = 0.0,
+        dev_score: float | None = None,
         oos_score: float | None = None,
         backtest_result: dict[str, Any] | None = None,
         insight: str = "",
         status: NodeStatus = NodeStatus.VALIDATED,
     ) -> None:
-        """更新节点的实验证据。"""
+        """更新节点的实验证据。
+
+        仅更新显式传入的字段，未传字段保持原值（patch 语义，非 replace）。
+        多个调用方（_evaluate_oos_and_merge / _backpropagate_node 的 FAILED 分支）
+        只想更新 status 或 oos_score 而保留 dev_score，故 dev_score 默认 None。
+        """
         node = self._nodes.get(node_id)
         if node is None:
             raise ValueError(f"节点不存在: {node_id}")
-        node.dev_score = dev_score
+        if dev_score is not None:
+            node.dev_score = dev_score
         if oos_score is not None:
             node.oos_score = oos_score
         if backtest_result is not None:

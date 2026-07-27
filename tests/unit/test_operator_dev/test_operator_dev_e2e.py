@@ -144,6 +144,10 @@ def _run(name: str, source: str, *, refined: str | None = None) -> dict:
 
 @pytest.fixture(autouse=True)
 def _cleanup_registry():
+    # 测试前清理：log_return 已写盘，bootstrap 启动时自动注册，
+    # 需先移除以模拟"新算子不在目录"场景，否则 _spec_review_node 会直接走 resolved 分支。
+    for name in ("log_return", *_BLOCKED_OPS):
+        OPERATOR_REGISTRY.pop(name, None)
     yield
     for name in ("log_return", *_BLOCKED_OPS):
         OPERATOR_REGISTRY.pop(name, None)

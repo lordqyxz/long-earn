@@ -63,7 +63,7 @@ class TestPromptMigration:
             pytest.skip(f"加载失败（可能是 frontmatter 格式）: {e}")
 
         # 用空串填充所有变量（jinja2 默认缺失变量也输出空串，这里显式传）
-        kwargs = {v: "" for v in template.input_variables}
+        kwargs = dict.fromkeys(template.input_variables, "")
         try:
             result = template.format(**kwargs)
         except Exception as e:

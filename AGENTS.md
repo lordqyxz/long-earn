@@ -1,134 +1,35 @@
 # long\_earn
 
-自我进化的量化交易系统（v1.1.0）。基于 LangGraph 的证券交易顾问智能体，支持策略研发、股票分析和实时行情监控。
+自我进化的量化交易系统。基于 LangGraph 的证券交易顾问智能体，支持策略研发、股票分析和实时行情监控。
 
-## 常用命令
+> **代码是第一真相**：本文档只记录稳定的开发规范与铁律约束。具体的目录结构、文件清单、字段数量、用例计数、行号引用、已知偏离等动态内容以代码本身为准，不在本文档维护。如需了解某模块的实现细节，请直接阅读对应源码。
 
-```sh
-uv sync                                    # 安装依赖
-uv run python -m long_earn                 # 运行项目
-uv run pytest tests/ -v                    # 运行全部测试（含根级测试文件）
-uv run pytest tests/unit/ -v               # 仅运行单元测试
-uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
-uv run ruff check .                        # 代码检查（lint + 复杂度）
-uv run ruff format .                       # 代码格式化
-uv run lint-imports                        # 架构依赖校验
-uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 DuckDB 缓存（需 miniQMT 连接）
-uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
-```
+---
 
-> **缓存保护约定**：`<数据目录>/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
+## 一、项目定位
 
-类型检查用 Serena LSP，见下方「质量门槛」。
+Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
 
-### 质量门槛（按强弱排序）
+- **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
+- **策略研发** — 基于 HTR 假设树精炼的闭环研发：观察 → 构思 → 选择 → 调度 → 回测 → 决策（ADR-010）
+- **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012）
+- **自我进化** — 策略经验沉淀到物质-运动统一架构记忆系统（ADR-007），后续研发可检索历史经验
+- **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL 描述策略，支持进程级并行回测（ADR-005 + ADR-008）
+- **实时行情监控** — 实时行情 Provider（miniqmt→ciccwm 降级）+ 价格阈值告警（ADR-011）
 
-1. **Serena LSP 单文件零错**（**首要、唯一类型检查工具**）：编辑任何代码符号后，必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是最快、最聚焦的反馈回路，也是本项目**唯一**的类型检查手段。
-2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
-3. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
-4. **`uv run pytest tests/unit/`**：单元测试全绿。
+---
 
-> 不使用 mypy / pyright CLI：以 Serena LSP 单文件诊断为准，避免双工具冲突与配置分裂。
+## 二、架构与设计原则
 
-### 架构与设计原则
+### 2.1 整洁架构与领域划分
 
-- **整洁架构 (Clean Architecture)**：依赖方向单向收敛——`tools` → `services` → `domain`，外层可知内层，内层不知外层。
-- **DDD 辅助**：`backtest/domain/` 承载领域模型（实体、值对象、领域异常）；`services/` 是应用服务（编排领域行为 + 跨上下文事务）；`backtest/engine/` 是领域服务（纯计算）；`data/` 是基础设施（数据提供者实现）。
-- **依赖注入容器**：`RuntimeContext` 是 DI Container，下游组件接收**已构造完毕**的服务实例（非 `Service | None`）。允许 `Service | None` 仅限**容器初始化中间态**；业务节点接受非空依赖。
+**整洁架构**：依赖方向单向收敛——`tools` → `services` → `domain`，外层可知内层，内层不知外层。
 
-## 架构
+**DDD 划界上下文，而非分层**：每个 `src/long_earn/<上下文>/` 目录是一个独立业务领域（`backtest` / `strategy_rd` / `stock_analysis` / `substance` / `event_inference` / `operator_dev` / `ontology` / `skills`），拥有自己的领域模型与通用语言，跨上下文通过服务接口通信。上下文内部可分层落地（如 `backtest/` 下 `domain` 领域模型 + `engine` 领域服务 + `data` 基础设施），分层是手段，领域边界才是目的。
 
-```txt
-long_earn/
-├── src/long_earn/           # 主项目源码
-│   ├── backtest/            # 内嵌回测引擎
-│   │   ├── domain/          #   领域模型（实体、值对象、异常）
-│   │   ├── engine/          #   事件驱动回测引擎 + AST 安全求值器 + 并行编排 + 参数网格 + 共享数据底座
-│   │   ├── operators/       #   算子框架（factor/filter/rank/compose/technical + 因果检测）
-│   │   └── data/            #   数据提供（当前阶段聚焦 miniqmt 单一数据源：DuckDB 缓存 → miniqmt；ciccwm/akshare 降级分支已屏蔽，ciccwm 情报接口独立保留）
-│   ├── core/                # 核心工具（prompt_loader `{{ var }}` jinja2、ChatPromptTemplate、llm_utils、storage 统一存储路径辅助）
-│   ├── substance/           # 物质-运动统一架构（Substance + Motion，ADR-007，已实施）
-│   │   └── indices/         #   RetrievalIndex（keyword+semantic 双通道）+ GraphIndex（邻接表）
-│   ├── operator_dev/        # 算子研发子图（sandbox + backlog + spec + agents）
-│   ├── event_inference/     # 新闻事件推理引擎（ADR-007 Phase 2）
-│   │   ├── collectors/      #   多源采集器（Kimi / ciccwm 热榜 / ciccwm 专题）
-│   │   └── agents/          #   事件抽取 + 影响传播 Agent（含 .md prompt）
-│   ├── strategy_optimization/ # 策略优化 pipeline（acceptance / optimizer）
-│   ├── services/            # 服务接口与实现
-│   ├── monitoring/          # 实时监控（价格阈值告警，ADR-011）
-│   ├── state.py             # 主图状态定义
-│   ├── strategy_rd/         # 策略研发子图（含 HTR 六步循环，ADR-010）
-│   │   └── agents/          # 策略研发 Agent（含同目录 .md prompt）
-│   ├── stock_analysis/      # 股票分析子图（5 视角并行，ADR-011）
-│   │   └── agents/          # 多视角分析师 Agent（含同目录 .md prompt）
-│   ├── dashboard/           # 可视化仪表盘（分析器 + API + 前端）
-│   │   └── templates/       #   HTML 仪表盘模板
-│   ├── tools/               # 工具函数（回测、知识库、股票信息）
-│   └── utils/               # 通用工具（llm_factory, logger）
-├── tests/                   # 测试
-│   ├── unit/                # 单元测试
-│   │   ├── test_backtest/  # 回测引擎测试（含并行 / 参数网格 / 渲染器）
-│   │   ├── test_substance/ # 物质-运动架构测试
-│   │   ├── test_services/  # 服务层测试
-│   │   ├── test_strategy_rd/ # 策略研发测试
-│   │   ├── test_event_inference/ # 事件推理测试
-│   │   └── test_config.py  # 配置测试
-│   └── integration/         # 集成测试
-├── docs/                    # 文档
-│   ├── adr/                 # 架构决策记录（ADR-001 ~ 011）
-│   └── research/            # 调研文档
-├── scripts/                 # 一次性脚本（独立回测、数学验证），不属于主包
-└── langgraph.json           # LangGraph 部署配置
-```
+**依赖注入容器**：`RuntimeContext` 是 DI Container，下游组件接收**已构造完毕**的服务实例（非 `Service | None`）。允许 `Service | None` 仅限**容器初始化中间态**；业务节点接受非空依赖。具体字段清单见 `src/long_earn/config.py` 中 `RuntimeContext` 定义。
 
-依赖注入架构，所有服务通过 `RuntimeContext` 传递：
-
-```
-AppConfig.from_env()
-    ↓
-create_runtime_context(config) / initialize_context(config)
-    ↓
-RuntimeContext(dataclass)
-    ├── llm_service: LLMService (Protocol)
-    ├── memory: MemoryService (Protocol)        # 委托 SubstanceStore（ADR-007）
-    ├── stock_service: StockService (Protocol)
-    ├── backtest_service: BacktestService (Protocol)
-    ├── logger: LoggerService
-    ├── monitoring: MonitoringService
-    ├── config: AppConfig
-    ├── data_provider: DataProvider | None              # 第一组接口：历史面板（行情/财务）
-    ├── market_intelligence: MarketIntelligenceProvider | None  # 第二组接口：市场情报（ciccwm 独占）
-    ├── realtime_provider: RealtimeDataProvider | None  # 第三组接口：实时行情（ADR-011）
-    └── operator_backlog: OperatorBacklog | None        # 算子缺口队列（ADR-009）
-```
-
-数据层三组接口（ADR-006/009/011，面向业务分离）：
-
-| 接口 | 职责 | 降级链 | 实现者 |
-|------|------|--------|--------|
-| `DataProvider` | 历史面板（行情/财务） | DuckDB→miniqmt→ciccwm→akshare（行情）/ 仅 miniqmt（财务） | miniqmt/ciccwm/akshare/Composite |
-| `MarketIntelligenceProvider` | 市场情报（资金流向/排行/板块/资讯） | 无降级，ciccwm 独占 | ciccwm |
-| `RealtimeDataProvider` | 实时行情（快照/订阅） | miniqmt→ciccwm | miniqmt/ciccwm/Composite |
-
-主图（`agent.py`）路由到子图：
-
-- **strategy\_rd**：策略研发（start → init\_iteration → initial\_retrieval → adaptive\_retrieval 循环 → develop → backtest → 代码修复循环（最多3次）→ reflection → save\_experience → supervisor → optimize 循环）
-- **stock\_analysis**：股票分析（4 视角并行分析后汇总）
-- **event\_inference**：新闻事件推理（collect → extract → propagate → conflict → save 五步循环，落库 EVENT/RELATION 物质）
-
-## 编码规范
-
-- Python 3.13 严格版本（`requires-python = "==3.13.*"`）
-- 所有函数和参数必须添加类型注解
-- **尽量避免使用 `Any` 类型**：内部数据结构用 `@dataclass`（`from dataclasses import dataclass`）建模，外部/动态数据用 Pydantic 模型建模；`Any` 仅作为最后兜底（如第三方库返回值、JSON 反序列化中间态），并注释说明原因
-- `str` 类型参数默认值 `""`
-- 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
-- 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见上文「质量门槛」）
-- 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
-- 中文注释和文档字符串
-- **日志统一使用 loguru**：禁止 `import logging` / `logging.getLogger`；所有模块直接 `from loguru import logger`。日志格式由 `LoggerServiceImpl` 统一配置（带颜色、时间、模块名、函数名、行号）。脚本入口需 `logger.remove()` 后 `logger.add(sys.stderr, ...)` 配置，格式与 `LoggerServiceImpl` 一致。
-
-### 依赖注入
+### 2.2 依赖注入
 
 所有 Agent 和子图必须通过 `context` 参数初始化：
 
@@ -141,16 +42,54 @@ agent = StrategyResearchAgent(context=context)
 agent = StrategyResearchAgent()
 ```
 
-### 节点返回值
+### 2.3 关键架构约束
 
-LangGraph 节点只需返回要更新的 key，不需要返回完整状态：
+- **服务接口**：定义为 `Protocol` 类（`services/__init__.py`），具体实现在各 `*_service.py` 中。测试中用 Mock 替代真实服务，无需 API 调用。
+- **上下文初始化**：`create_runtime_context()` 创建服务实例但不初始化记忆；`initialize_context()` 包含完整初始化（额外调用 `memory.initialize()` 加载记忆）。
+- **import-linter 合约**：`backtest.data` 不依赖上层模块，`services` 不依赖 `tools`，`substance` 不依赖上层，`core` 不依赖上层。
+- **统一存储位置**：所有生成数据（回测缓存、记忆库、假设树、策略研发产物）的落盘路径由 `core/storage.py` 统一裁决，唯一控制变量为 `LONG_EARN_DATA_DIR` 环境变量（默认 `D:/dev/long-earn-data`，repo 同级 `long-earn-data`）。各模块通过 `core/storage.py` 提供的辅助函数获取路径，不得自行 `Path.home()` 或硬编码。`AppConfig` 的存储相关字段从 `core.storage` 派生。
+
+### 2.4 核心能力基线
+
+> 「质量门槛」（见第四节）是代码层硬性检查；「能力基线」是系统层验证标准——任何修改不得破坏既有基线，发现偏离须在 TODO.md 登记并按威胁程度排期修复。基线的具体阈值、验证位置、已知偏离以代码为准（见 `tests/unit/` 与对应源码），本节只记录四个核心维度的目标：
+
+1. **策略生成与持续进化**：HTR 六步循环能产出可回测的策略 YAML，并通过 held-out OOS 合并门保证策略质量单调提升。
+2. **回测金融级可靠性**：事件驱动引擎在架构层面绝对杜绝未来函数，撮合/风控/审计可追溯、可重放。详见 [ADR-005](docs/adr/005-event-driven-backtest.md)。
+3. **数据利用充分性**：DuckDB 缓存 + 多源降级链覆盖全部业务所需数据，PIT 对齐严格，缓存加速可观测。
+4. **多核 CPU 利用**：并行回测编排 + 共享数据底座 + 子进程隔离下载，发挥多核优势。
+
+---
+
+## 三、编码规范
+
+### 3.1 基本规则
+
+- Python 3.13 严格版本（`requires-python = "==3.13.*"`）
+- 所有函数和参数必须添加类型注解
+- **尽量避免使用 `Any` 类型**：内部数据结构用 `@dataclass`（`from dataclasses import dataclass`）建模，外部/动态数据用 Pydantic 模型建模；`Any` 仅作为最后兜底（如第三方库返回值、JSON 反序列化中间态），并注释说明原因
+- `str` 类型参数默认值 `""`
+- 中文注释和文档字符串
+
+### 3.2 代码风格与检查
+
+- 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
+- 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
+- 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见第四节「质量门槛」）
+
+### 3.3 日志
+
+**日志统一使用 loguru**：禁止 `import logging` / `logging.getLogger`；所有模块直接 `from loguru import logger`。日志格式由 `LoggerServiceImpl` 统一配置（带颜色、时间、模块名、函数名、行号）。脚本入口需 `logger.remove()` 后 `logger.add(sys.stderr, ...)` 配置，格式与 `LoggerServiceImpl` 一致。
+
+### 3.4 LangGraph 节点
+
+节点只需返回要更新的 key，不需要返回完整状态：
 
 ```python
 def my_node(state: State, context: RuntimeContext):
     return {"result": "..."}  # 自动合并到全局状态
 ```
 
-### Prompt 管理
+### 3.5 Prompt 管理
 
 使用 `MarkdownPromptTemplate` 加载 `.md` 文件。变量使用 jinja2 `{{ variable }}` 语法（ADR-011）；底层由 langchain `PromptTemplate(template_format='jinja2')` 渲染，默认不 HTML 转义（消费者是 LLM 不是浏览器），与 JSON `{}` 不冲突。frontmatter 可选，支持 `version`/`description` 字段；多消息结构用 frontmatter `messages` 字段 + `MarkdownChatPromptTemplate`（ADR-011 阶段 4）。
 
@@ -162,40 +101,27 @@ prompt = prompt_template.format(query=query)
 
 **禁止**：不再使用 `${var}` 占位符或 `core/render.py` 自定义渲染器（ADR-008 A 部分已被 ADR-011 废弃）。CI grep 卡口防止回退。
 
-**约定**：每个 Agent 的 prompt `.md` 文件与该 Agent 的 `.py` 文件放在同一目录下（例如 `strategy_research_agent.py` 与 `strategy_research_prompt.md` 同在 `agents/` 目录）。
+**约定**：每个 Agent 的 prompt `.md` 文件与该 Agent 的 `.py` 文件放在同一目录下（例如 `strategy_research_agent.py` 与 `strategy_research_prompt.md` 同在 `agents/` 目录）。`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名。
 
-## Gotchas
+---
 
-- **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
-- **记忆系统**：基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，ADR-007 Phase 4）。旧 `memory/` 模块（ADR-004）已删除。
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载（沪深A股 5208 只 + 沪深ETF 1635 只，最长历史至最新交易日；A股含财务数据，ETF 仅行情）。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
-- **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
-- **数据层三组接口**：`DataProvider`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。universe 股票池已纳入 `DataProvider.get_symbols` 降级链。符号转换统一在 `backtest/data/symbol.py`。**财务接口统一到 miniqmt**（ADR-007 Phase 2/3）：akshare/ciccwm 的财务方法已删除，仅 `MiniQmtDataProvider.get_financial_panel` 实现；四表合并全量 18 字段（Income + Balance + CashFlow + Pershareindex），Pershareindex 预计算值优先（roe/gross_margin/yoy），手算仅兜底。缓存表 `financial_quarterly` 22 列（DROP + CREATE，`announce_date` NOT NULL）。
-- **Prompt 文件路径**：`MarkdownPromptTemplate` 基于 `caller_file` 解析相对路径，移动 `.md` 文件后需同步修改对应 Agent 中的文件名
-- **表达式安全**：回测引擎使用 AST 白名单求值器 (`backtest/engine/evaluator.py`)，不使用 `eval()`。详见 [ADR-003](docs/adr/003-ast-safe-evaluator.md)。算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)）以 `prove_causality` 因果性数学证明替代表达式白名单，作为新策略的主执行路径；旧表达式路径向后兼容保留。
-- **集成测试需 `.env`**：运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见下方环境变量表）
+## 四、质量门槛与测试
 
-## 架构决策记录 (ADR)
+### 4.1 质量门槛（按强弱排序）
 
-- [ADR-001](docs/adr/001-yaml-dsl-strategy.md): YAML DSL 策略描述替代 Python/qlib
-- [ADR-002](docs/adr/002-partial-node-injection.md): `functools.partial` 替代闭包进行节点注入
-- [ADR-003](docs/adr/003-ast-safe-evaluator.md): AST 白名单表达式求值替代 `eval()`
-- [ADR-004](docs/adr/004-memory-system.md): numpy/pandas 三级记忆系统替代 Qdrant 向量数据库（Superseded by ADR-007）
-- [ADR-005](docs/adr/005-event-driven-backtest.md): 事件驱动回测框架替代向量化引擎。优先保证可信性（杜绝未来函数）与复杂策略表达力，速度为次要目标。
-- [ADR-006](docs/adr/006-ciccwm-data-provider.md): 引入 ciccwm 财经数据 Provider（Accepted）。纯 HTTP、零本地依赖的第四数据源，补齐财务报表 / 资金流向 / 排行 / 关联板块 / 热榜资讯能力；已实现 `ciccwm_client.py` + `ciccwm_provider.py`。**当前阶段行情/财务降级分支已屏蔽**（聚焦 miniqmt），ciccwm 的 `MarketIntelligenceProvider`（资金流向/排行/板块/资讯）仍独立保留，通过 `context.market_intelligence` 获取。
-- [ADR-007](docs/adr/007-unified-substance-architecture.md): 物质-运动统一架构（**Phase 1-2 已实施**）。`Substance`（Pydantic）统一事件/关系/知识/策略经验为"物质"，`motion` 函数为"运动"（不持久化）；双索引（RetrievalIndex keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle。旧 `memory/`（ADR-004 v2.0）已删除。`MemoryService` Protocol 破坏性收窄 8 → 4 方法（删僵尸方法 `reflect`/`relate`/`remember`/`recall` + `tier` 死参；`save_experience` 收 `StrategyExperience` 值对象，`search_experience` 返回 `list[StrategyExperience]`，消灭 markdown 往返 regex 契约）；否决拆 `KnowledgeService` + `ExperienceService`（Substance 模型下无本质区别，仅 metadata 标签差异）。
-- [ADR-008](docs/adr/008-parallel-backtest-and-unified-templating.md): 并行回测 + 统一模板渲染（**已实施**）。`${var}` 占位符语法（跨语言可移植）+ 纯函数渲染器解耦 LangChain + 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格（标量插值 + 对象层变换）。删除 80 行转义逻辑；32 核并行回测；`BacktestService.run_grid` / `run_walk_forward_parallel`。**A 部分（`${var}` 语法 + 纯函数渲染器）已被 ADR-011 废弃**，B 部分（并行回测编排）继续有效。
-- [ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md): 算子目录 + 算子研发子图（**核心链路已实施**）。类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）替代 ADR-003 自由表达式 DSL；`prove_causality` 因果性数学证明（未来扰动不变性）作算子上线硬约束；operator_dev 异步闭环（spec→审计→因果证明→注册）+ strategy_optimization 验收（sharpe 严格提升）。gap_detector 已接入 strategy_rd（reflection→gap_detector→save_experience）。**后续**：register 写盘 / 主图挂载 / 退役 evaluator。
-- [ADR-010](docs/adr/010-hypothesis-tree-refinement.md): 假设树精炼 HTR（**已实施**）。将 `strategy_rd` 子图从线性进化循环升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门。**混合持久化**：树本体独立 JSON Store，摘要回写 ADR-007 SubstanceStore 做 hot-start。Phase 1-5 全部完成：假设树领域模型 + 六步循环子图 + held-out 验证门 + 洞察传播记忆增强 + LangGraph Send 并行 fan-out。
-- [ADR-011](docs/adr/011-unified-mustache-prompt-templating.md): 统一 jinja2 + ChatPromptTemplate 提示词模板（**已实施**）。`${var}` → `{{ var }}`（jinja2，默认不 HTML 转义，与 JSON `{}` 不冲突）；`core/render.py` 自定义渲染器删除，委托 langchain `PromptTemplate(template_format='jinja2')`；多消息结构用 `MarkdownChatPromptTemplate`（frontmatter `messages` 字段）。ADR-008 A 部分被废弃。Phase 1-5 全部完成。
-- [ADR-012](docs/adr/012-persona-subgraph-skill-pack.md): 大师智能节点可复用技能包（**已实施**）。4 交易大师（巴菲特/芒格/费雪/彼得林奇）+ 扩展示例（利弗莫尔）升级为 `MasterPersona` Protocol + `PersonaRegistry` 注册表，支持 4 种 mode（stock_analysis / strategy_review / strategy_generate / result_synthesis）；`strategy_rd` 策略生成与反思通过 `PersonaRegistry.create_all()` 自动调用全部大师；新增大师只需 1 类 + N prompt + `__init__.py` import。Phase 1-4 全部完成。
+1. **Serena LSP 单文件零错**（**首要、唯一类型检查工具**）：编辑任何代码符号后，必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是最快、最聚焦的反馈回路，也是本项目**唯一**的类型检查手段。
+2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
+3. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
+4. **`uv run pytest tests/unit/`**：单元测试全绿。
 
-## 测试说明
+> 不使用 mypy / pyright CLI：以 Serena LSP 单文件诊断为准，避免双工具冲突与配置分裂。
 
-- **单元测试**：`tests/unit/` 下按模块组织（test\_backtest/、test\_substance/、test\_services/、test\_strategy\_rd/、test\_event\_inference/）
+### 4.2 测试组织
+
+- **单元测试**：`tests/unit/` 下按模块组织
 - **集成测试**：`tests/integration/` 需配置 `.env` 环境变量
 
-### 测试编写原则
+### 4.3 测试编写原则
 
 测试只写在两个地方：
 
@@ -212,83 +138,9 @@ prompt = prompt_template.format(query=query)
 - 实现细节（日志调用、属性赋值、`repr()` 格式）
 - 需要大量 mock 链的端到端子图流程（属于集成测试范畴）
 
-### 核心引擎测试 (tests/unit/test_backtest/test_engine.py)
+---
 
-引擎测试覆盖关键链路而非内部实现细节，使用 `unittest.TestCase`：
-
-| 测试类 | 覆盖点 | 用例数 |
-|--------|--------|--------|
-| `TestEngineInit` | 构造函数默认值和自定义参数 | 2 |
-| `TestEngineRun` | run() 主流程、空数据处理、异常捕获 | 3 |
-| `TestRiskChecks` | 止损触发、最大回撤触发、风控关闭场景 | 3 |
-| `TestWalkForward` | Walk-Forward 折叠结构和平均指标 | 1 |
-| `TestAuditTrail` | 审计跟踪记录事件类型完整性 | 1 |
-
-通过 `MockDataProvider` + 内联策略桩（`_SimpleStrategy` / `_EmptyStrategy` / `_RaisingStrategy`）注入测试数据，避免对外部数据源的依赖。
-
-## 回测引擎（事件驱动）
-
-回测引擎已从向量化架构迁移至 **事件驱动 (Event-Driven)** 架构，旨在实现与 LLM Agent 的共同进化。
-
-**核心设计哲学：**
-- **Agent 友好度 (Agent-Centric)**：接口设计优先考虑 LLM 的认知成本和生成正确率（杜绝索引幻觉），而非传统量化框架习惯。
-- **金融级可信 (Financial Fidelity)**：通过严格的事件流控制时间线，在架构层面绝对杜绝“未来函数”。
-- **复杂表达力 (Expressiveness)**：支持状态化策略，允许 Agent 定义复杂的执行逻辑和动态风控。
-
-**引擎结构：**
-```txt
-src/long_earn/backtest/
-├── __init__.py              # 对外暴露 BacktestResult, EventEngine 等
-├── models.py                # BacktestResult Pydantic 模型
-├── domain/
-│   ├── entities.py          # 领域实体（Portfolio, Event, Order）
-│   └── exceptions.py        # 领域异常层次
-├── engine/
-│   ├── core.py              # 事件循环核心 (Event Loop)
-│   ├── dsl.py               # 状态化策略 DSL 解析器
-│   ├── evaluator.py         # AST 安全求值器
-│   └── broker.py            # 模拟撮合与成本计算 (Slippage, Commission)
-└── data/
-    ├── __init__.py
-    ├── cache.py             # DuckDB 本地缓存
-    ├── provider.py          # 三组 Protocol + CompositeDataProvider（降级链编排）
-    ├── miniqmt_provider.py  # xtquant.xtdata 数据获取封装
-    ├── ciccwm_client.py     # ciccwm HTTP 客户端 + 鉴权
-    ├── ciccwm_provider.py   # ciccwm 数据提供者（DataProvider + MarketIntelligenceProvider）
-    ├── akshare_provider.py  # akshare 降级数据提供者
-    ├── realtime.py          # 实时行情 Provider（ADR-011，第三组接口）
-    ├── polars_adapter.py    # pandas→polars 适配（to_polars_panel 纯函数）
-    ├── symbol.py            # 统一证券代码符号转换
-    └── universe.py          # 股票池管理
-```
-
-- **状态化策略**：LLM 生成定义 `init()` 和 `on_bar()` 的状态机逻辑，引擎通过事件流驱动执行。
-- **数据隔离**：策略仅能通过 `engine.current_data` 访问当前时刻数据，确保回测真实性。
-- **DuckDB 缓存**：`<数据目录>/backtest_cache.duckdb`，优化大规模数据的喂入速度。全量下载通过 `uv run python scripts/download_data.py`（默认下载沪深A股+ETF 全历史行情+A股财务数据，需 miniQMT 连接）。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
-
-## 记忆系统
-
-基于物质-运动统一架构（[ADR-007](docs/adr/007-unified-substance-architecture.md)），事件/关系/知识/策略经验统一为 `Substance`：
-
-```txt
-src/long_earn/substance/
-├── __init__.py              # 导出 Substance, SubstanceForm, SubstanceStore
-├── model.py                 # Substance(Pydantic) + SubstanceForm + FilterLogic
-├── store.py                 # SubstanceStore（统一存储 + 索引协调 + 时间过滤）
-├── motion.py                # 运动层（activate/decay/conflict/compress）
-├── persistence.py           # JSONL 读写（Pydantic 序列化）
-└── indices/
-    ├── retrieval.py         # RetrievalIndex（keyword 通道 + semantic 通道 + 融合）
-    └── graph.py             # GraphIndex（dict 邻接表 + BFS 返回路径）
-```
-
-- **物质 (Substance)**：统一存在基类，`form` 区分 event/relation/knowledge/strategy/backtest。关系是一等物质（有完整 provenance）。
-- **运动 (motion)**：施加在物质上的运算（activate/decay/conflict/compress），不持久化，只产出新物质。
-- **双索引**：RetrievalIndex（WorldInfo 关键词触发 + TF-IDF/embedding 语义相似度双通道融合）+ GraphIndex（邻接表图遍历）。
-- **持久化**：`<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全，schema 版本号 2，ADR-007 Phase 4）。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制。
-- **防未来函数**：`visible_from` 字段，回测引擎查询时仅 `visible_from ≤ current_bar_date` 的物质可见。
-
-## 量化数据分割规范（必须遵守）
+## 五、量化数据分割规范（铁律）
 
 > **此规范是量化分析的铁律，防止过拟合和前视偏差。所有策略研发、回测、优化必须严格遵守。**
 
@@ -303,40 +155,67 @@ src/long_earn/substance/
 ### 规则
 
 1. **训练集可反复使用**：策略研发、因子筛选、参数网格寻优、ToT 反思等全部在训练集上进行。
-2. **测试集仅在合并门触碰**：ADR-010 HTR 的 `_decide` 节点对 best dev 候选跑 Walk-Forward OOS，`oos_score > current_best + threshold` 才合并。测试集**不得**用于参数调优或日常回测。
-3. **验证集最后触碰一次**：`strategy_research_loop.py` 的 `evaluate_recent_performance` 使用验证集做最终评估，**整个研发过程中仅此一次**。验证集业绩是系统对外报告的唯一指标。
+2. **测试集仅在合并门触碰**：HTR 的 `_decide` 节点对 best dev 候选跑 Walk-Forward OOS，`oos_score > current_best + threshold` 才合并。测试集**不得**用于参数调优或日常回测。
+3. **验证集最后触碰一次**：最终评估使用验证集，**整个研发过程中仅此一次**。验证集业绩是系统对外报告的唯一指标。
 4. **比例参考**：训练 ~55%、测试 ~30%、验证 ~15%（按时间跨度）。可根据数据量调整，但三段必须分离。
 5. **禁止前视偏差**：训练集策略不得隐式或显式地"偷看"测试集/验证集的结果来调整参数。HTR 的 held-out 门就是此规则的系统级保证。
 
-### 配置
+`AppConfig` 提供 `train_start_date` / `train_end_date` / `test_start_date` / `test_end_date` / `validation_start_date` / `validation_end_date` 字段，从环境变量读取。具体字段定义与默认值见 `src/long_earn/config.py`。
 
-`AppConfig` 新增 `train_start_date` / `train_end_date` / `test_start_date` / `test_end_date` / `validation_start_date` / `validation_end_date` 字段，从环境变量读取。`strategy_research_loop.py` 和 HTR 子图从 config 读取这些日期，不再硬编码。
+---
 
-## 环境变量
+## 六、关键 Gotchas
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| LLM_TYPE | ollama | LLM 类型（ollama/dashscope/openai）|
-| LLM_MODEL | qwen3.5:cloud | 模型名称 |
-| LLM_BASE_URL | http://localhost:11434 | API 基础 URL |
-| DASHSCOPE_API_KEY | — | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填）|
-| OPENAI_API_KEY | — | OpenAI API Key（LLM_TYPE=openai 时必填）|
-| **LONG_EARN_DATA_DIR** | **D:/dev/long-earn-data** | **统一数据根目录（唯一存储位置控制变量，派生全部生成数据路径）** |
-| INIT_DIR | ./init | 知识库初始化目录 |
-| BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
-| BACKTEST_END_DATE | 2023-12-31 | 回测默认结束日期 |
-| TRAIN_START | 2022-01-01 | 训练集起始（量化数据分割规范）|
-| TRAIN_END | 2024-12-31 | 训练集结束 |
-| TEST_START | 2025-01-01 | 测试集起始（Walk-Forward OOS）|
-| TEST_END | 2026-03-24 | 测试集结束 |
-| VALIDATION_START | 2026-03-25 | 验证集起始（前瞻验证）|
-| VALIDATION_END | 2026-06-25 | 验证集结束 |
-| MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
-| STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔）|
-| STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔）|
-| EVENT_INFERENCE_KEYWORDS | 新闻,事件,热点,资讯,利好,利空 | 事件推理路由关键词（逗号分隔）|
+> 这些是容易踩坑、不符合直觉、或必须牢记的实现事实。
 
-### LLM 服务启动
+### 6.1 回测引擎
+
+- **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
+- **仅支持多头、不支持做空**：`Portfolio` 仅维护 `cash` + 多头 `positions`，无 `short_positions`；DSL `weights` 仅支持 `equal`。弱市下唯一可用风控是"空仓 + 止损 + 最大回撤清仓"，无法对冲/做空/动态降仓。
+- **表达式安全（已退役）**：ADR-003 的 AST 白名单求值器已于 2026-07 收尾时删除（Superseded by ADR-009）。所有策略走算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)），以 `prove_causality` 因果性数学证明 + 算子目录白名单共同保证无未来函数。DSL 解析期强制拒绝旧式 `factors` 字段与 `filter`/`rank`/`expression` 信号类型。
+
+### 6.2 数据层
+
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **数据层三组接口**：`DataConnector`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。具体能力清单与方法签名以 `services/__init__.py` 与 `backtest/data/connector.py` 代码为准。
+- **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
+
+### 6.3 记忆系统
+
+- 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全）。旧 `memory/` 模块（ADR-004）已删除。
+
+### 6.4 集成测试
+
+- 运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见第八节）。
+
+---
+
+## 七、常用命令
+
+```sh
+uv sync                                    # 安装依赖
+uv run python -m long_earn                 # 运行项目
+uv run pytest tests/ -v                    # 运行全部测试（含根级测试文件）
+uv run pytest tests/unit/ -v               # 仅运行单元测试
+uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env 配置）
+uv run ruff check .                        # 代码检查（lint + 复杂度）
+uv run ruff format .                       # 代码格式化
+uv run lint-imports                        # 架构依赖校验
+uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 DuckDB 缓存（需 miniQMT 连接）
+uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
+```
+
+> **缓存保护约定**：`<数据目录>/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
+
+---
+
+## 八、环境变量与外部服务
+
+### 8.1 环境变量
+
+环境变量文档**自包含在** `src/long_earn/config.py` 的 `AppConfig` 类 docstring 中（业务配置 / 运行时控制 / 第三方 API Key 三类），不在本文件重复维护。新增环境变量时同步更新该 docstring。
+
+### 8.2 LLM 服务启动
 
 默认使用 Ollama 作为 LLM 后端。启动方式：
 
@@ -353,107 +232,14 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 
 切换到 DashScope / OpenAI 时无需运行 Ollama，仅需在 `.env` 配置对应 API Key。
 
-## 关键约束
+---
 
-- 服务接口定义为 `Protocol` 类（`services/__init__.py`），具体实现在各 `*_service.py` 中
-- `context_init.py` 中 `initialize_context()` 会额外调用 `memory.initialize()` 加载记忆
-- `create_runtime_context()` 创建服务实例但不初始化记忆；`initialize_context()` 包含完整初始化
-- 测试中使用 Mock 替代真实服务，无需 API 调用
-- import-linter 合约：`backtest.data` 不依赖上层模块，`services` 不依赖 `tools`，`substance` 不依赖上层，`core` 不依赖上层
-- **统一存储位置**：所有生成数据（回测缓存、记忆库、假设树、策略研发产物）的落盘路径由 `core/storage.py` 统一裁决，唯一控制变量为 `LONG_EARN_DATA_DIR` 环境变量（默认 `D:/dev/long-earn-data`，repo 同级 `long-earn-data`）。各模块通过 `backtest_cache_path()` / `substances_db_path()` / `hypothesis_tree_dir()` / `strategy_results_path()` / `best_strategy_path()` 获取路径，不得自行 `Path.home()` 或硬编码。`AppConfig` 的 `data_dir` / `memory_path` / `backtest_cache_path` / `hypothesis_tree_dir` / `strategy_results_path` / `best_strategy_path` 字段从 `core.storage` 派生，供配置注入使用。
+## 九、架构决策记录 (ADR)
 
-## 关键文件
+ADR 索引与详细说明见 [docs/adr/README.md](docs/adr/README.md)。
 
-| 用途 | 路径 |
-|------|------|
-| 入口 | `src/long_earn/__main__.py` |
-| 主图 | `src/long_earn/agent.py` |
-| 主图状态 | `src/long_earn/state.py` |
-| 配置 & RuntimeContext | `src/long_earn/config.py` |
-| **统一存储路径辅助（ADR-007 Phase 4）** | `src/long_earn/core/storage.py` |
-| 上下文初始化 | `src/long_earn/context_init.py` |
-| Prompt 加载器 | `src/long_earn/core/prompt_loader.py` |
-| LLM 工具 | `src/long_earn/core/llm_utils.py` |
-| 服务接口 | `src/long_earn/services/__init__.py` |
-| 回测服务实现 | `src/long_earn/services/backtest_service.py` |
-| 记忆服务实现 | `src/long_earn/services/memory_service.py` |
-| LLM 服务实现 | `src/long_earn/services/llm_service.py` |
-| 股票信息服务 | `src/long_earn/services/stock_service.py` |
-| 记忆存储（ADR-007 物质-运动架构） | `src/long_earn/substance/store.py` |
-| 物质模型 | `src/long_earn/substance/model.py` |
-| 运动层（激活/衰减/冲突/压缩） | `src/long_earn/substance/motion.py` |
-| 检索索引（keyword+semantic） | `src/long_earn/substance/indices/retrieval.py` |
-| 图索引（邻接表） | `src/long_earn/substance/indices/graph.py` |
-| 持久化（JSONL） | `src/long_earn/substance/persistence.py` |
-| 领域实体 & 值对象 | `src/long_earn/backtest/domain/entities.py` |
-| 领域异常 | `src/long_earn/backtest/domain/exceptions.py` |
-| 抽象接口 (AuditProvider) | `src/long_earn/backtest/domain/interfaces.py` |
-| 回测引擎核心 | `src/long_earn/backtest/engine/core.py` |
-| 策略基类 (BaseStrategy) | `src/long_earn/backtest/engine/strategy.py` |
-| 可见性守护 (防未来函数) | `src/long_earn/backtest/engine/visibility.py` |
-| 撮合经纪人 (Broker) | `src/long_earn/backtest/engine/broker.py` |
-| 投资组合管理 (Portfolio) | `src/long_earn/backtest/engine/portfolio.py` |
-| 审计日志 (Audit) | `src/long_earn/backtest/engine/audit.py` |
-| 可观测性 (Telemetry) | `src/long_earn/backtest/engine/telemetry.py` |
-| ML 策略 & 特征工程 | `src/long_earn/backtest/engine/ml_strategy.py` |
-| YAML DSL 解析器 | `src/long_earn/backtest/engine/dsl.py` |
-| 安全表达式求值器 | `src/long_earn/backtest/engine/evaluator.py` |
-| 审计提供者 | `src/long_earn/backtest/engine/audit.py` |
-| 并行编排层 | `src/long_earn/backtest/engine/parallel.py` |
-| 参数网格 | `src/long_earn/backtest/engine/param_grid.py` |
-| 共享数据底座 (SharedMemory) | `src/long_earn/backtest/engine/shared_data.py` |
-| 算子框架基类 | `src/long_earn/backtest/operators/base.py` |
-| 因果检测 | `src/long_earn/backtest/operators/causality.py` |
-| 算子目录策略执行器 | `src/long_earn/backtest/engine/operator_executor.py` |
-| 算子研发子图 | `src/long_earn/operator_dev/subgraph.py` |
-| 事件推理子图 | `src/long_earn/event_inference/subgraph.py` |
-| 事件推理状态 | `src/long_earn/event_inference/state.py` |
-| 采集器基类 | `src/long_earn/event_inference/collectors/base.py` |
-| Kimi 采集器 | `src/long_earn/event_inference/collectors/kimi_collector.py` |
-| ciccwm 采集器 | `src/long_earn/event_inference/collectors/ciccwm_collector.py` |
-| 事件抽取/传播 Agent | `src/long_earn/event_inference/agents/__init__.py` |
-| 事件抽取 Prompt | `src/long_earn/event_inference/agents/extract_prompt.md` |
-| 影响传播 Prompt | `src/long_earn/event_inference/agents/propagate_prompt.md` |
-| 策略优化 pipeline | `src/long_earn/strategy_optimization/pipeline.py` |
-| 数据模型 | `src/long_earn/backtest/models.py` |
-| 数据提供者 | `src/long_earn/backtest/data/provider.py` |
-| 实时行情 Provider（ADR-011） | `src/long_earn/backtest/data/realtime.py` |
-| pandas→polars 适配 | `src/long_earn/backtest/data/polars_adapter.py` |
-| 统一符号转换 | `src/long_earn/backtest/data/symbol.py` |
-| ciccwm HTTP 客户端 | `src/long_earn/backtest/data/ciccwm_client.py` |
-| ciccwm 数据提供者 | `src/long_earn/backtest/data/ciccwm_provider.py` |
-| miniqmt 数据封装 | `src/long_earn/backtest/data/miniqmt_provider.py` |
-| DuckDB 缓存 | `src/long_earn/backtest/data/cache.py` |
-| 股票池管理 | `src/long_earn/backtest/data/universe.py` |
-| 全量数据下载脚本 | `scripts/download_data.py` |
-| 价格阈值告警（ADR-011） | `src/long_earn/monitoring/realtime_alert.py` |
-| Dashboard 分析器 | `src/long_earn/dashboard/analyzer.py` |
-| Dashboard API 服务 | `src/long_earn/dashboard/api.py` |
-| Dashboard HTML 模板 | `src/long_earn/dashboard/templates/dashboard.html` |
-| 策略研发子图 | `src/long_earn/strategy_rd/subgraph.py` |
-| 策略研发状态 | `src/long_earn/strategy_rd/state.py` |
-| 知识检索 Mixin | `src/long_earn/strategy_rd/agents/mixins.py` |
-| 策略开发 Agent | `src/long_earn/strategy_rd/agents/strategy_develop_agent.py` |
-| 策略研发 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_prompt.md` |
-| 代码修复 Prompt | `src/long_earn/strategy_rd/agents/strategy_develop_refine_prompt.md` |
-| 策略研究 Prompt 模块 | `src/long_earn/strategy_rd/agents/strategy_research_prompt.py` |
-| 策略研究 Prompt | `src/long_earn/strategy_rd/agents/strategy_research_prompt.md` |
-| 策略研究 Agent | `src/long_earn/strategy_rd/agents/strategy_research_agent.py` |
-| 监督器 Prompt 模块 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_prompt.py` |
-| 监督器 Prompt | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_prompt.md` |
-| 继续迭代 Prompt | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor_continue_prompt.md` |
-| 策略监督器 | `src/long_earn/strategy_rd/agents/strategy_rd_supervisor.py` |
-| 股票分析子图 | `src/long_earn/stock_analysis/subgraph.py` |
-| 股票分析状态 | `src/long_earn/stock_analysis/state.py` |
-| 资金流向分析师（ADR-011） | `src/long_earn/stock_analysis/agents/fund_flow_analyst.py` |
-| 知识库工具 | `src/long_earn/tools/store.py` |
-| 回测分析器 | `src/long_earn/tools/backtest_analyzer.py` |
-| 可视化 API | `src/long_earn/tools/visualization_api.py` |
-| Kimi 网页搜索 | `src/long_earn/tools/kimi_web_search.py` |
-| 文本分割工具 | `src/long_earn/tools/md_splitter.py` |
-| LangGraph 部署配置 | `langgraph.json` |
-| 环境变量模板 | `.env.example` |
+---
 
-## 待办清单
+## 十、待办清单
 
-详见 [TODO.md](TODO.md) — 按重要性 + 威胁程度统一排序，合并功能开发待办与合规审计（47 项风险点）。
+详见 [TODO.md](TODO.md) — 按重要性 + 威胁程度统一排序，合并功能开发待办与合规审计。
