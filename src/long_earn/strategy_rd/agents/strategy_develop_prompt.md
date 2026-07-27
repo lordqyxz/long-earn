@@ -111,7 +111,7 @@ strategy:
    若直接用原始字段（如 `net_profit_yoy`）做过滤/排序，可省略 `operator_factors`
 2. `windowed` 算子支持 `agg: mean/std/min/max/median/sum`，是表达滚动窗口的核心算子
 3. `shift` 算子做时序位移，`returns` 算子算区间收益率（动量）
-4. `arithmetic` 算子做两列四则运算（lhs/rhs 可以是列名或数值，op 支持 +-*/）
+4. `arithmetic` 算子做两列四则运算：`op` **必须**是符号 `+`/`-`/`*`/`/` 之一（**严禁**英文单词 `add`/`subtract`/`multiply`/`divide`，否则 Pydantic Literal 校验直接拒绝）；`lhs` 必须是列名（字符串），`rhs` 可以是列名或数值（标量）
 5. signals 中 `type: operator` 的步骤按声明顺序执行：先 filter_threshold 过滤，再 rank_top 选股
 6. **因果性硬约束**：每个算子上线前均通过 `prove_causality`（未来扰动不变性）证明，
    策略层无需担心未来函数；输入面板由 VisibilityGuard 保证 `timestamp <= 当前时刻`
@@ -248,6 +248,38 @@ strategy:
 > 注意：所有信号步骤必须用 `type: operator`。旧式 `type: filter`/`type: rank`/
 > `type: expression` 已退役，解析期会被拒绝。需要滚动窗口、技术指标、
 > 复合运算时用 `operator_factors` 声明算子因子列，signals 中引用其 alias。
+
+### 示例 5：算术组合策略（OCF 质量筛选，展示 `arithmetic` 算子正确用法）
+
+```yaml
+strategy:
+  name: OcfQualityStrategy
+  description: 经营现金流大于净利润的质量筛选策略（arithmetic 算子组合）
+  universe:
+    type: main_board+gem
+    rebalance_freq: 20D
+  start_date: 2022-01-01
+  end_date: 2024-12-31
+  operator_factors:
+    - op: arithmetic
+      alias: ocf_quality
+      params: { lhs: ocf, rhs: net_profit, op: "-" }
+  signals:
+    - type: operator
+      op: filter_threshold
+      params: { field: ocf_quality, op: ">", value: 0 }
+    - type: operator
+      op: rank_top
+      params: { field: roe_weighted, ascending: false, top: 10 }
+  weights:
+    method: equal
+```
+
+> **`arithmetic` 算子 op 取值规范（高频踩坑点）**：
+> `op` 字段**必须**是符号 `+` / `-` / `*` / `/`，**严禁**英文单词
+> `add` / `subtract` / `multiply` / `divide`（Pydantic Literal 校验会直接拒绝，
+> 导致整个策略解析失败）。`lhs` 必须是列名，`rhs` 可以是列名或标量数值
+> （如 `rhs: 15.87` 做年化乘子）。
 
 ## 输出格式
 

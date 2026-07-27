@@ -17,10 +17,34 @@ RhsType = str | int | float
 
 
 class ArithmeticParams(OperatorParams):
-    lhs: str
+    # lhs 接受联合类型，让 validator 给出友好错误信息（而非 Pydantic 默认
+    # 英文 "Input should be a valid string"）。LLM 高频错误：lhs=1 / lhs=0.0
+    lhs: str | int | float
     rhs: RhsType
     op: ArithOp = "/"
     alias: str = "compose"
+
+    @field_validator("lhs")
+    @classmethod
+    def _reject_scalar_lhs(cls, v: str | int | float) -> str:
+        """拒绝数字标量作为 lhs（LLM 高频错误：``lhs: 1`` 或 ``lhs: 0.0``）。
+
+        ``lhs`` 必须是已定义的列名（字符串），标量运算请放在 ``rhs``。
+        列名含数字（如 ``"close_1d"``、``"ret_20"``）不受影响 —— 这些
+        字符串无法被 ``float()`` 整体解析。
+        """
+        if isinstance(v, (int, float)):
+            raise ValueError(
+                f"lhs 必须是列名，不能是数字标量 {v!r}（标量请放在 rhs）"
+            )
+        # 字符串形式的纯数字（如 "15.87"）也拒绝
+        try:
+            float(v)
+        except ValueError:
+            return v  # 不是数字 → 合法列名
+        raise ValueError(
+            f"lhs 必须是列名，不能是数字 {v!r}（标量请放在 rhs）"
+        )
 
     @field_validator("rhs")
     @classmethod
@@ -60,6 +84,8 @@ class Arithmetic(Operator):
         assert isinstance(params, ArithmeticParams)
         if params.op not in _OPS:
             raise ValueError(f"arithmetic.op={params.op!r} 非法，允许: {sorted(_OPS)}")
+        # validator 保证 lhs 必为列名（str），此处断言 narrow 类型
+        assert isinstance(params.lhs, str)
         lhs_expr = pl.col(params.lhs)
         # rhs 是标量 → 直接用 Python 值；是字符串 → 当列名
         if isinstance(params.rhs, (int, float)):
