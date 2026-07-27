@@ -16,6 +16,7 @@ from langgraph.types import Send
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
 from long_earn.strategy_rd.hypothesis_tree import (
+    HypothesisNode,
     HypothesisTree,
     NodeStatus,
 )
@@ -50,6 +51,9 @@ HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
 HTR_BRANCHING_FACTOR = 3
 HTR_MERGE_THRESHOLD = 0.05
+
+# 已尝试假设摘要截断长度（避免 ideate prompt 膨胀）
+_TRUNCATE_HYPOTHESIS_LEN = 120
 
 # ADR-014 任务4：默认 universe 与股票数量上限
 # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
@@ -345,6 +349,49 @@ def _enhance_child_insights(
     return child_insights
 
 
+def _collect_tried_directions(
+    tree: HypothesisTree,
+    parent: HypothesisNode | None,
+    logger: LoggerService | None,
+) -> str:
+    """收集 parent 的已尝试子节点方向（failed/pruned）。
+
+    监督报告指出 8 个子节点假设同质化严重（全部"多因子复合+行业中性化"），
+    反向传播未能引导 LLM 探索新方向。本函数把 parent 下所有 failed/pruned
+    子节点的假设摘要注入 ideate prompt 的 ``pruned_directions`` 变量，
+    让 LLM 显式避开已失败方向。
+
+    Returns:
+        格式化的方向列表字符串（每行一个方向），无已尝试方向时返回 ``"无"``。
+    """
+    if parent is None:
+        return "无"
+
+    tried: list[str] = []
+    for child_id in parent.children_ids:
+        child = tree.get_node(child_id)
+        if child is None:
+            continue
+        if child.status in (NodeStatus.FAILED, NodeStatus.PRUNED):
+            hypothesis = child.hypothesis.strip()
+            if not hypothesis:
+                continue
+            # 截断长假设避免 prompt 膨胀
+            if len(hypothesis) > _TRUNCATE_HYPOTHESIS_LEN:
+                hypothesis = hypothesis[: _TRUNCATE_HYPOTHESIS_LEN - 3] + "..."
+            tried.append(f"- [{child.status.value}] {hypothesis}")
+
+    if not tried:
+        return "无"
+
+    if logger:
+        logger.info(
+            f"[HTR-ideate] 检测到 {len(tried)} 个已尝试/失败方向，"
+            f"将注入 ideate prompt 避免重复"
+        )
+    return "\n".join(tried)
+
+
 def _ideate_node(
     state: State,
     research_agent: StrategyResearchAgent,
@@ -362,6 +409,11 @@ def _ideate_node(
 
     parent = tree.best_node() or tree.root
     parent_hypothesis = parent.hypothesis if parent else ""
+
+    # 收集 parent 的已尝试子节点方向（failed/pruned）—— 避免 LLM 重复生成
+    # 同质化假设。监督报告显示 8 个子节点全部围绕"多因子复合+行业中性化"，
+    # 反向传播未能引导 LLM 探索新方向，需显式注入已尝试方向。
+    tried_directions = _collect_tried_directions(tree, parent, logger)
 
     # 从 state 获取上一轮的观察结果
     observations_raw = state.get("result", "")
@@ -415,11 +467,16 @@ def _ideate_node(
         logger.info(
             f"[HTR-ideate] 大师策略生成建议完成: {len(master_hints)} 位提供视角"
         )
+    if logger and tried_directions != "无":
+        logger.info(
+            f"[HTR-ideate] 注入已尝试方向避免重复: {len(tried_directions.splitlines())} 个"
+        )
 
     hypotheses = research_agent.ideate(
         observations=observations,
         parent_hypothesis=parent_hypothesis,
         child_insights=child_insights,
+        pruned_directions=tried_directions,
         branching_factor=HTR_BRANCHING_FACTOR,
         master_hints=master_hints if master_hints else None,
     )
@@ -1180,6 +1237,11 @@ def _gap_detector_node(
     strategy_yaml = state.get("strategy_yaml", "") or state.get(
         "optimized_strategy_yaml", ""
     ) or ""
+
+    # 所有策略被 AcceptanceGate 拒绝时 strategy_yaml 为空，
+    # 此时无 reference_strategy 可用，跳过缺口检测（避免 OperatorSpec 非空校验崩溃）
+    if not strategy_yaml:
+        return {"operator_gaps": []}
 
     # 已注册算子名集合
     try:
