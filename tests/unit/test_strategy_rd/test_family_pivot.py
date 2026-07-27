@@ -150,3 +150,63 @@ class TestOperatorCatalogInjection:
         catalog = _format_operator_catalog()
         assert isinstance(catalog, str)
         assert len(catalog) > 0
+
+
+class TestQDDiversitySelection:
+    """ADR-015 B3: Quality-Diversity 行为描述符多样性选择。
+
+    三级降级：strict（direction+family 双重不同）→ direction-only → full fallback。
+    防止 HTR fan-out 选出全同家族假设，陷入局部最优。
+    """
+
+    def _make_agent(self):
+        ctx = _make_mock_context()
+        return StrategyResearchAgent(context=ctx)
+
+    def test_strict_diversity_all_unique(self):
+        """direction+family 全不同时，strict 轮即填满。"""
+        agent = self._make_agent()
+        hyps = [
+            {"hypothesis": "A", "direction": "收益增强", "family": "momentum"},
+            {"hypothesis": "B", "direction": "风险控制", "family": "mean_reversion"},
+            {"hypothesis": "C", "direction": "收益稳定性", "family": "value"},
+        ]
+        selected = agent._select_with_diversity(hyps, max_select=3)
+        assert len(selected) == 3
+        assert {s["hypothesis"] for s in selected} == {"A", "B", "C"}
+
+    def test_direction_only_fallback_when_family_repeats(self):
+        """family 重复但 direction 不同 → strict 选首个，direction-only 补齐。"""
+        agent = self._make_agent()
+        # 前两个 family 相同（momentum），但 direction 不同
+        hyps = [
+            {"hypothesis": "A", "direction": "收益增强", "family": "momentum"},
+            {"hypothesis": "B", "direction": "风险控制", "family": "momentum"},
+            {"hypothesis": "C", "direction": "收益稳定性", "family": "value"},
+        ]
+        selected = agent._select_with_diversity(hyps, max_select=3)
+        assert len(selected) == 3
+        # A（strict）+ B（direction-only，family 重复但 direction 新）+ C（strict）
+        assert {s["hypothesis"] for s in selected} == {"A", "B", "C"}
+
+    def test_full_fallback_when_direction_repeats(self):
+        """direction+family 都重复 → 降级为全选，不丢失 LLM 产出。"""
+        agent = self._make_agent()
+        hyps = [
+            {"hypothesis": "A", "direction": "收益增强", "family": "momentum"},
+            {"hypothesis": "B", "direction": "收益增强", "family": "momentum"},
+        ]
+        selected = agent._select_with_diversity(hyps, max_select=2)
+        # strict 仅选 A（direction+family 都重复），direction-only 无新 direction，
+        # fallback 降级全选 → B 也被纳入
+        assert len(selected) == 2
+        assert {s["hypothesis"] for s in selected} == {"A", "B"}
+
+    def test_select_fewer_than_max_when_pool_small(self):
+        """候选池小于 max_select 时只返回候选池大小。"""
+        agent = self._make_agent()
+        hyps = [
+            {"hypothesis": "A", "direction": "收益增强", "family": "momentum"},
+        ]
+        selected = agent._select_with_diversity(hyps, max_select=3)
+        assert len(selected) == 1

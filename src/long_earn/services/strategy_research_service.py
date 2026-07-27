@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
 from long_earn.strategy_rd.htr_subgraph import (
@@ -93,8 +94,6 @@ class StrategyResearchService:
         # - history = 完整训练集（train_start ~ train_end）
         # - recent = 训练集最后 6 个月（开发期不得触碰测试集/验证集；
         #   测试集仅供 HTR _decide 节点合并门触碰，验证集仅最终评估一次）
-        from datetime import date, timedelta
-
         self.history_start = config.train_start_date
         self.history_end = config.train_end_date
         train_end_date = date.fromisoformat(config.train_end_date)

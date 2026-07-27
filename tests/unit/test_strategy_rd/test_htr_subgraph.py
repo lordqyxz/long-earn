@@ -432,7 +432,7 @@ class TestParallelFanOutGraphInvoke:
             return_value={"insight": "测试洞察"},
         ), patch(
             "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.decide",
-            return_value="stop",  # 单轮停止
+            return_value={"action": "stop"},  # ADR-015 B4: decide 返回 dict
         ):
             graph = create_htr_subgraph(context)
             result = graph.invoke(

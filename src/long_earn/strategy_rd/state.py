@@ -26,6 +26,8 @@ class State(TypedDict, total=False):
     backtest_result: dict[str, Any] | None
     reflection: str | None
     improvement_suggestions: list[str] | None
+    # ADR-015 B3: 保留完整 hypotheses dict（含 family 字段），避免 _select_node 重建时丢失
+    improvement_hypotheses: list[dict[str, Any]] | None
     optimized_strategy: dict[str, Any] | None
     optimized_strategy_yaml: str | None
     # Deprecated: 保留以兼容旧代码
@@ -69,6 +71,11 @@ class State(TypedDict, total=False):
     run_id: str | None
     oos_threshold: float
     oos_n_splits: int
+    # ADR-015 B4: Arbor 三动作 — Coordinator 指定下一轮 ideate 的 parent
+    # None 时退化为 tree.best_node()（向后兼容）；非 None 时在指定节点展开新分支
+    next_parent_id: str | None
+    # ADR-015 B4: Coordinator 指定要剪枝的子树根节点 ID（级联剪枝）
+    prune_target_id: str | None
 
 
 StrategyResearchState = State

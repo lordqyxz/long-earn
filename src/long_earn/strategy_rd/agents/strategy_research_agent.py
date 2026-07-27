@@ -978,6 +978,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         pruned_directions: str = "",
         branching_factor: int = 3,
         master_hints: "dict[str, PersonaResult] | None" = None,
+        family_state: str = "",
     ) -> list[dict[str, Any]]:
         """假设生成 — 基于观察结果生成改进假设。
 
@@ -985,6 +986,8 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             master_hints: name -> PersonaResult 映射，由 HTR _ideate_node
                 调用 4 个大师 strategy_generate mode 得到。None 或空 dict 时
                 行为与原 ideate 完全一致（向后兼容）。
+            family_state: ADR-015 B5 策略家族状态。空字符串时无家族感知；
+                非空时注入 ideate prompt，引导 LLM 生成异族策略假设。
         """
         master_hints_context = self._format_master_hints(master_hints)
         if master_hints_context and self.logger:
@@ -1000,6 +1003,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                 "pruned_directions",
                 "branching_factor",
                 "master_hints_context",
+                "family_state",
             ],
             __file__,
         )
@@ -1010,6 +1014,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             pruned_directions=pruned_directions or "无",
             branching_factor=str(branching_factor),
             master_hints_context=master_hints_context or "无",
+            family_state=family_state or "正常（当前家族未失效）",
         )
         response = self.llm_service.invoke(prompt)
         # LLM 偶发返回空内容或非 JSON 时容错：返回空假设列表让 select 节点处理，
@@ -1028,22 +1033,97 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         """选择阶段 — 从假设列表中选择最优的几个进行验证。
 
         Phase 2 串行模式：默认只选 1 个。Phase 5 并行模式可扩展。
+
+        ADR-015 B2: 修复多样性逻辑——旧实现 ``direction not in seen OR len < max_select``
+        当 ``max_select >= K`` 时全选，``seen_directions`` 完全失效。新实现采用 strict
+        set 语义：强制要求每个被选候属不同 direction，候选不足时降级为全选并记录警告，
+        避免监督报告所述"8 个子节点全部多因子复合+行业中性化"同质化问题。
+
+        ADR-015 B3: QD behavioral_descriptor — 进一步用 family 字段做多样性约束。
+        优先选择 family 不同的候选（动量/均值回归/价值/波动率/事件驱动/算子路径），
+        避免同族策略过度集中。direction 和 family 双重约束。
         """
         if not hypotheses:
             return []
-        # 简单策略：按方向多样性选择（避免全部选同一方向）
+        if max_select <= 1:
+            # 串行模式：取第一个（保持原行为）
+            selected = [hypotheses[0]]
+        else:
+            selected = self._select_with_diversity(hypotheses, max_select)
+        if self.logger:
+            self.logger.info(
+                f"[HTR-选择] 从 {len(hypotheses)} 个假设中选 {len(selected)} 个"
+            )
+        return selected
+
+    def _select_with_diversity(
+        self,
+        hypotheses: list[dict[str, Any]],
+        max_select: int,
+    ) -> list[dict[str, Any]]:
+        """ADR-015 B2+B3: 并行模式多样性选择（direction + family 双重约束）。"""
+        selected = self._select_strict_diversity(hypotheses, max_select)
+        if len(selected) >= max_select:
+            return selected
+        selected = self._select_direction_only(hypotheses, selected, max_select)
+        if len(selected) >= max_select:
+            return selected
+        return self._select_fallback(hypotheses, selected, max_select)
+
+    def _select_strict_diversity(
+        self,
+        hypotheses: list[dict[str, Any]],
+        max_select: int,
+    ) -> list[dict[str, Any]]:
+        """第一轮：direction + family 都不同。"""
         selected: list[dict[str, Any]] = []
         seen_directions: set[str] = set()
+        seen_families: set[str] = set()
         for h in hypotheses:
             direction = h.get("direction", "")
-            if direction not in seen_directions or len(selected) < max_select:
+            family = h.get("family", "")
+            if direction not in seen_directions and family not in seen_families:
+                selected.append(h)
+                seen_directions.add(direction)
+                seen_families.add(family)
+            if len(selected) >= max_select:
+                break
+        return selected
+
+    def _select_direction_only(
+        self,
+        hypotheses: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        max_select: int,
+    ) -> list[dict[str, Any]]:
+        """第二轮：direction 不同即可（family 可重复）。"""
+        seen_directions = {h.get("direction", "") for h in selected}
+        for h in hypotheses:
+            if h in selected:
+                continue
+            direction = h.get("direction", "")
+            if direction not in seen_directions:
                 selected.append(h)
                 seen_directions.add(direction)
             if len(selected) >= max_select:
                 break
+        return selected
+
+    def _select_fallback(
+        self,
+        hypotheses: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        max_select: int,
+    ) -> list[dict[str, Any]]:
+        """第三轮：降级为全选（保留原假设数量，不丢失 LLM 产出）。"""
+        for h in hypotheses:
+            if h not in selected:
+                selected.append(h)
+            if len(selected) >= max_select:
+                break
         if self.logger:
-            self.logger.info(
-                f"[HTR-选择] 从 {len(hypotheses)} 个假设中选 {len(selected)} 个"
+            self.logger.warning(
+                f"[HTR-选择] 候选多样性不足，降级为选 {len(selected)} 个"
             )
         return selected
 
@@ -1089,12 +1169,21 @@ class StrategyResearchAgent(KnowledgeContextMixin):
     def decide(
         self,
         tree_state: dict[str, Any],
-    ) -> str:
-        """决策阶段 — 基于树状态决定下一步行动（merge/continue/stop）。
+    ) -> dict[str, Any]:
+        """决策阶段 — 基于树状态决定下一步行动。
 
         ADR-014 任务2：``tree_state["similar_experiences"]`` 由 HTR 的
         ``_decide_node`` 通过 Connector 经验图谱查询填入，非空时 LLM
         能参考历史相似策略的 sharpe 表现做合并/停止决策。
+
+        ADR-015 B4: 支持 Arbor 三动作 — 返回 dict 含 action + next_parent_id
+        + prune_target_id。action ∈ {merge, continue, stop, expand, prune}。
+        expand 时 next_parent_id 指定下一轮 ideate 的 parent（回溯探索）；
+        prune 时 prune_target_id 指定要剪枝的子树根（级联剪枝）。
+
+        Returns:
+            ``{"action": str, "next_parent_id": str, "prune_target_id": str}``。
+            next_parent_id / prune_target_id 仅在对应 action 时有效，否则为空。
         """
         prompt_template = MarkdownPromptTemplate(
             "decide_prompt.md",
@@ -1102,7 +1191,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                 "node_count", "max_depth", "current_best_oos",
                 "best_dev_score", "best_oos_score",
                 "cycles_used", "max_cycles",
-                "similar_experiences",
+                "similar_experiences", "frontier_summary",
             ],
             __file__,
         )
@@ -1115,12 +1204,30 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             cycles_used=str(tree_state.get("cycles_used", 0)),
             max_cycles=str(tree_state.get("max_cycles", 10)),
             similar_experiences=tree_state.get("similar_experiences", "无"),
+            frontier_summary=tree_state.get("frontier_summary", "无"),
         )
         response = self.llm_service.invoke(prompt)
         # LLM 偶发返回空内容或非 JSON 时容错：默认 continue 让循环继续，
         # 避免单次 LLM 失败直接终止整轮 HTR。
         result = parse_llm_json(response.content, default={"action": "continue"})
-        action = result.get("action", "continue") if isinstance(result, dict) else "continue"
+        if not isinstance(result, dict):
+            result = {"action": "continue"}
+        action = str(result.get("action", "continue"))
+        # 仅接受合法 action，未知值降级为 continue
+        valid_actions = {"merge", "continue", "stop", "expand", "prune"}
+        if action not in valid_actions:
+            action = "continue"
+        next_parent_id = str(result.get("next_parent_id", "") or "")
+        prune_target_id = str(result.get("prune_target_id", "") or "")
         if self.logger:
-            self.logger.info(f"[HTR-决策] action={action}")
-        return action
+            extra = ""
+            if action == "expand" and next_parent_id:
+                extra = f", next_parent_id={next_parent_id}"
+            elif action == "prune" and prune_target_id:
+                extra = f", prune_target_id={prune_target_id}"
+            self.logger.info(f"[HTR-决策] action={action}{extra}")
+        return {
+            "action": action,
+            "next_parent_id": next_parent_id,
+            "prune_target_id": prune_target_id,
+        }

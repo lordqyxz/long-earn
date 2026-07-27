@@ -33,6 +33,9 @@ class HypothesisNode:
         parent_id: 父节点 ID（根节点为 None）。
         hypothesis: 假设描述（"加动量过滤", "调止损参数"等）。
         direction: 改进方向（收益增强/风险控制/收益稳定性）。
+        family: ADR-015 B3 策略家族（momentum/mean_reversion/value/
+            volatility/event_driven/operator_path），用于 QD 多样性约束。
+            空字符串表示未分类。
         status: 节点当前状态。
         strategy_ref: 指向策略 dict 的引用 key。
         dev_score: 训练集回测得分（如 sharpe）。
@@ -48,6 +51,7 @@ class HypothesisNode:
     parent_id: str | None = None
     hypothesis: str = ""
     direction: str = ""
+    family: str = ""
     status: NodeStatus = NodeStatus.PENDING
     strategy_ref: str = ""
     dev_score: float = 0.0
@@ -63,8 +67,22 @@ class HypothesisNode:
         return len(self.children_ids) == 0
 
     def is_frontier(self) -> bool:
-        """是否前沿节点（pending/running 状态的叶节点）。"""
-        return self.is_leaf() and self.status in (NodeStatus.PENDING, NodeStatus.RUNNING)
+        """是否前沿节点（可被选作下一轮探索 parent 的叶节点）。
+
+        ADR-015 B1: 旧实现要求 status ∈ {PENDING, RUNNING}，但 _executor_node
+        跑完默认置 VALIDATED → frontier 永远空，Arbor 的"前沿控制"机制失效。
+        新实现包含 VALIDATED/MERGED 状态——已验证但未被充分展开的叶节点
+        仍可作探索候选，供 Coordinator 选择回溯探索。
+        排除 FAILED/PRUNED（失败/剪枝节点不再展开）。
+        """
+        if not self.is_leaf():
+            return False
+        return self.status in (
+            NodeStatus.PENDING,
+            NodeStatus.RUNNING,
+            NodeStatus.VALIDATED,
+            NodeStatus.MERGED,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict（JSON 可序列化）。"""
@@ -73,6 +91,7 @@ class HypothesisNode:
             "parent_id": self.parent_id,
             "hypothesis": self.hypothesis,
             "direction": self.direction,
+            "family": self.family,
             "status": str(self.status.value),
             "strategy_ref": self.strategy_ref,
             "dev_score": self.dev_score,
@@ -92,6 +111,7 @@ class HypothesisNode:
             parent_id=data.get("parent_id"),
             hypothesis=data.get("hypothesis", ""),
             direction=data.get("direction", ""),
+            family=data.get("family", ""),
             status=NodeStatus(data.get("status", "pending")),
             strategy_ref=data.get("strategy_ref", ""),
             dev_score=data.get("dev_score", 0.0),
@@ -157,8 +177,14 @@ class HypothesisTree:
         hypothesis: str,
         direction: str = "",
         strategy_ref: str = "",
+        family: str = "",
     ) -> str:
-        """在 parent_id 下创建子假设节点，返回新节点 ID。"""
+        """在 parent_id 下创建子假设节点，返回新节点 ID。
+
+        Args:
+            family: ADR-015 B3 策略家族（momentum/mean_reversion/value/...），
+                用于 QD 多样性约束。空字符串表示未分类。
+        """
         parent = self._nodes.get(parent_id)
         if parent is None:
             raise ValueError(f"父节点不存在: {parent_id}")
@@ -169,6 +195,7 @@ class HypothesisTree:
             parent_id=parent_id,
             hypothesis=hypothesis,
             direction=direction,
+            family=family,
             strategy_ref=strategy_ref,
             depth=parent.depth + 1,
         )
@@ -231,7 +258,11 @@ class HypothesisTree:
             self.prune_subtree(child_id)
 
     def frontier(self) -> list[HypothesisNode]:
-        """获取前沿节点（pending/running 状态的叶节点）。"""
+        """获取前沿节点（可探索的叶节点）。
+
+        ADR-015 B1: 包含 PENDING/RUNNING/VALIDATED/MERGED 状态的叶节点。
+        排除 FAILED/PRUNED 与非叶节点。
+        """
         return [
             n
             for n in self._nodes.values()

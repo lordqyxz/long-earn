@@ -18,6 +18,7 @@ ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完�
 | [ADR-012](012-persona-subgraph-skill-pack.md) | 大师智能节点技能包 | `MasterPersona` Protocol + `PersonaRegistry`，支持 stock_analysis / strategy_review / strategy_generate / result_synthesis 多 mode |
 | [ADR-013](013-backtest-accuracy-principles.md) | 回测引擎准确性原则与陷阱清单 | 七维分类框架（数据正确性/时序偏差/交易执行/市场微观结构/投资组合与风控/指标计算/工程与审计）+ 检测方法论 + 防护状态总览 |
 | [ADR-014](014-ontology-connector.md) | 本体论连接器 + DataConnector 全能力接入 | `Connector.get_concept` 作为上层唯一数据访问入口，aspect 字符串经 `ConceptResolver` 解析为 `ResolutionKind` |
+| [ADR-015](015-statistical-overfitting-gates.md) | 统计过拟合门与反馈闭环修复 | 三道统计门（Walk-Forward 稳定性 / DSR / PBO）+ 失败信号上行 + select 多样性修复；防 Q1/Q2 窗口不一致与 selection bias |
 
 ## 已废弃 / 已退役
 

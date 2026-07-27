@@ -84,6 +84,32 @@ class TestHypothesisTree:
         frontier = tree.frontier()
         assert len(frontier) == 2
 
+    def test_frontier_includes_validated_and_merged_leaves(self):
+        """ADR-015 B1: VALIDATED/MERGED 叶节点也是前沿候选。
+
+        旧实现要求 status ∈ {PENDING, RUNNING}，但 _executor_node 跑完默认
+        置 VALIDATED → frontier 永远空，Arbor 回溯探索机制失效。
+        新实现包含 VALIDATED/MERGED，排除 FAILED/PRUNED。
+        """
+        tree = self._make_tree()
+        c1 = tree.add_child("root", "已验证假设")
+        c2 = tree.add_child("root", "已合并假设")
+        c3 = tree.add_child("root", "失败假设")
+        c4 = tree.add_child("root", "剪枝假设")
+
+        # 把各子节点置为目标状态
+        tree.get_node(c1).status = NodeStatus.VALIDATED
+        tree.get_node(c2).status = NodeStatus.MERGED
+        tree.get_node(c3).status = NodeStatus.FAILED
+        tree.get_node(c4).status = NodeStatus.PRUNED
+
+        frontier_ids = {n.id for n in tree.frontier()}
+        # VALIDATED + MERGED 入选，FAILED + PRUNED 排除
+        assert c1 in frontier_ids
+        assert c2 in frontier_ids
+        assert c3 not in frontier_ids
+        assert c4 not in frontier_ids
+
     def test_best_node(self):
         tree = self._make_tree()
         c1 = tree.add_child("root", "假设A")

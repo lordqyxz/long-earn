@@ -95,12 +95,22 @@ class OperatorStrategyExecutor:
     ) -> None:
         self.factor_specs = factor_specs
         self.signal_specs = signal_specs
+        # ADR-015 C2: 空信号 WARNING 日志采样计数器，避免长回测日志爆炸
+        self._empty_signal_count = 0
+        self._empty_cross_count = 0
+
+    # ADR-015 C2: 每 N 次空信号才打印一次 WARNING，防止日志爆炸
+    _EMPTY_SIGNAL_LOG_INTERVAL = 100
+    _EMPTY_CROSS_LOG_INTERVAL = 100
 
     def execute(self, panel: pl.DataFrame, current_timestamp: datetime) -> list[str]:
         """执行算子链，返回当前时刻选中的 symbol 列表。
 
         P2-01：filter 结果使 selected_df 变为 0 时记录 failure 日志，
         与表达式路径对齐（服务层 _equal_weights 也会记 step_failures）。
+
+        ADR-015 C2: 空信号 WARNING 每 ``_EMPTY_SIGNAL_LOG_INTERVAL`` 次才打印一次，
+        避免长回测（数万个 timestamp）日志爆炸。首次与每 N 次打印。
         """
         if panel.height == 0:
             logger.debug("OperatorStrategyExecutor: 输入面板为空，无选中标的")
@@ -119,19 +129,27 @@ class OperatorStrategyExecutor:
             selected_df = _apply_signal_result(selected_df, result)
 
         if selected_df.height == 0:
-            logger.warning(
-                "OperatorStrategyExecutor: signal 算子过滤后 selected_df 为空"
-                f"（timestamp={current_timestamp}），记录 failure"
-            )
+            self._empty_signal_count += 1
+            if self._empty_signal_count == 1 or (
+                self._empty_signal_count % self._EMPTY_SIGNAL_LOG_INTERVAL == 0
+            ):
+                logger.warning(
+                    "OperatorStrategyExecutor: signal 算子过滤后 selected_df 为空"
+                    f"（timestamp={current_timestamp}），累计 {self._empty_signal_count} 次"
+                )
             return []
 
         # 3) 取当前时刻截面 → 选中标的
         cross = selected_df.filter(pl.col("timestamp") == current_timestamp)
         if cross.height == 0:
-            logger.warning(
-                "OperatorStrategyExecutor: 当前时刻截面无选中标的"
-                f"（timestamp={current_timestamp}），可能数据未覆盖该时刻"
-            )
+            self._empty_cross_count += 1
+            if self._empty_cross_count == 1 or (
+                self._empty_cross_count % self._EMPTY_CROSS_LOG_INTERVAL == 0
+            ):
+                logger.warning(
+                    "OperatorStrategyExecutor: 当前时刻截面无选中标的"
+                    f"（timestamp={current_timestamp}），累计 {self._empty_cross_count} 次"
+                )
             return []
         return cross["symbol"].unique().to_list()
 

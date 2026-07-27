@@ -20,6 +20,14 @@ from long_earn.strategy_optimization.optimizer import (
     LLMStrategyOptimizer,
     StrategyOptimizer,
 )
+from long_earn.strategy_optimization.overfit_gates import (
+    BacktestOverfitGate,
+    DeflatedSharpeGate,
+    DeflatedSharpeResult,
+    PBOResult,
+    StabilityResult,
+    WalkForwardStabilityGate,
+)
 from long_earn.strategy_optimization.pipeline import (
     OptimizationOutcome,
     OptimizationPipeline,
@@ -29,10 +37,16 @@ from long_earn.strategy_optimization.pipeline import (
 __all__ = [
     "AcceptanceGate",
     "AcceptanceResult",
+    "BacktestOverfitGate",
+    "DeflatedSharpeGate",
+    "DeflatedSharpeResult",
     "FakeStrategyOptimizer",
     "LLMStrategyOptimizer",
     "OptimizationOutcome",
     "OptimizationPipeline",
+    "PBOResult",
+    "StabilityResult",
     "StrategyOptimizer",
+    "WalkForwardStabilityGate",
     "optimize_strategy",
 ]

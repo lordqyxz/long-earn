@@ -45,7 +45,13 @@ from long_earn.skills.personas import PersonaRegistry
 from long_earn.skills.personas.protocol import PersonaContext, PersonaResult
 
 # ADR-009 收尾：训练集门（AcceptanceGate）— 优化版 sharpe 严格提升才接受
+# ADR-015: 统计过拟合门 — Walk-Forward 稳定性 + DSR + PBO
 from long_earn.strategy_optimization.acceptance import AcceptanceGate
+from long_earn.strategy_optimization.overfit_gates import (
+    BacktestOverfitGate,
+    DeflatedSharpeGate,
+    WalkForwardStabilityGate,
+)
 
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
@@ -354,12 +360,15 @@ def _collect_tried_directions(
     parent: HypothesisNode | None,
     logger: LoggerService | None,
 ) -> str:
-    """收集 parent 的已尝试子节点方向（failed/pruned）。
+    """收集 parent 的已尝试子节点方向（failed/pruned）+ 失败原因。
 
     监督报告指出 8 个子节点假设同质化严重（全部"多因子复合+行业中性化"），
     反向传播未能引导 LLM 探索新方向。本函数把 parent 下所有 failed/pruned
     子节点的假设摘要注入 ideate prompt 的 ``pruned_directions`` 变量，
     让 LLM 显式避开已失败方向。
+
+    ADR-015 A1: 扩展输出，包含 dev_score / oos_score / 失败原因（rejection_reason
+    或 step_failures），让 LLM 反思时能看到"为什么失败"而非只看到"该方向失败"。
 
     Returns:
         格式化的方向列表字符串（每行一个方向），无已尝试方向时返回 ``"无"``。
@@ -368,18 +377,40 @@ def _collect_tried_directions(
         return "无"
 
     tried: list[str] = []
-    for child_id in parent.children_ids:
-        child = tree.get_node(child_id)
-        if child is None:
+    # 递归收集 parent 下所有 FAILED/PRUNED 子孙节点（不只直接子节点）
+    failed_nodes = _collect_failed_descendants(tree, parent)
+
+    for child in failed_nodes:
+        hypothesis = child.hypothesis.strip()
+        if not hypothesis:
             continue
-        if child.status in (NodeStatus.FAILED, NodeStatus.PRUNED):
-            hypothesis = child.hypothesis.strip()
-            if not hypothesis:
-                continue
-            # 截断长假设避免 prompt 膨胀
-            if len(hypothesis) > _TRUNCATE_HYPOTHESIS_LEN:
-                hypothesis = hypothesis[: _TRUNCATE_HYPOTHESIS_LEN - 3] + "..."
-            tried.append(f"- [{child.status.value}] {hypothesis}")
+        # 截断长假设避免 prompt 膨胀
+        if len(hypothesis) > _TRUNCATE_HYPOTHESIS_LEN:
+            hypothesis = hypothesis[: _TRUNCATE_HYPOTHESIS_LEN - 3] + "..."
+
+        # 构造失败原因摘要
+        reason_parts: list[str] = []
+        if child.dev_score != 0.0:
+            reason_parts.append(f"dev_sharpe={child.dev_score:.2f}")
+        if child.oos_score is not None:
+            reason_parts.append(f"oos_sharpe={child.oos_score:.2f}")
+        if child.insight:
+            # insight 现在含失败原因（A1 改动）
+            insight_brief = child.insight[:80]
+            reason_parts.append(f"原因:{insight_brief}")
+
+        # 从 backtest_result 提取 step_failures（如存在）
+        backtest_result = child.backtest_result or {}
+        diag = backtest_result.get("strategy_diagnostics", {}) or {}
+        step_failures = diag.get("step_failures", []) or []
+        if step_failures:
+            first_failure = step_failures[0] if isinstance(step_failures[0], dict) else {}
+            step_error = str(first_failure.get("error", ""))[:60]
+            if step_error:
+                reason_parts.append(f"step_error:{step_error}")
+
+        reason_str = " | ".join(reason_parts) if reason_parts else "无详情"
+        tried.append(f"- [{child.status.value}] {hypothesis} ({reason_str})")
 
     if not tried:
         return "无"
@@ -390,6 +421,27 @@ def _collect_tried_directions(
             f"将注入 ideate prompt 避免重复"
         )
     return "\n".join(tried)
+
+
+def _collect_failed_descendants(
+    tree: HypothesisTree,
+    node: HypothesisNode,
+) -> list[HypothesisNode]:
+    """递归收集 node 下所有 FAILED/PRUNED 子孙节点。
+
+    ADR-015 A1: 旧实现只看 parent 直接子节点，无法感知孙子节点的失败。
+    本函数递归遍历整棵子树，让 LLM 看到完整的失败历史。
+    """
+    failed: list[HypothesisNode] = []
+    for child_id in node.children_ids:
+        child = tree.get_node(child_id)
+        if child is None:
+            continue
+        if child.status in (NodeStatus.FAILED, NodeStatus.PRUNED):
+            failed.append(child)
+        # 即使子节点已失败，也递归收集孙子节点（可能含更具体的失败原因）
+        failed.extend(_collect_failed_descendants(tree, child))
+    return failed
 
 
 def _ideate_node(
@@ -407,7 +459,25 @@ def _ideate_node(
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
 
-    parent = tree.best_node() or tree.root
+    # ADR-015 B4: Arbor expand 动作 — Coordinator 指定下一轮的 parent
+    # None 时退化为 tree.best_node()（向后兼容）
+    next_parent_id = state.get("next_parent_id")
+    if next_parent_id:
+        parent = tree.get_node(next_parent_id)
+        if parent is None:
+            if logger:
+                logger.warning(
+                    f"[HTR-ideate] next_parent_id={next_parent_id} 不存在，"
+                    f"退化为 best_node()"
+                )
+            parent = tree.best_node() or tree.root
+        elif logger:
+            logger.info(
+                f"[HTR-ideate] Arbor expand: 在指定节点 {next_parent_id} "
+                f"(hypothesis={parent.hypothesis[:40]}) 下展开新分支"
+            )
+    else:
+        parent = tree.best_node() or tree.root
     parent_hypothesis = parent.hypothesis if parent else ""
 
     # 收集 parent 的已尝试子节点方向（failed/pruned）—— 避免 LLM 重复生成
@@ -472,6 +542,10 @@ def _ideate_node(
             f"[HTR-ideate] 注入已尝试方向避免重复: {len(tried_directions.splitlines())} 个"
         )
 
+    # ADR-015 B5: 家族失效检测 — 连续 _FAMILY_STAGNATION_THRESHOLD 轮无改善
+    # 时标记家族失效，引导 ideate 生成异族策略
+    family_state = _detect_family_stagnation(state, logger)
+
     hypotheses = research_agent.ideate(
         observations=observations,
         parent_hypothesis=parent_hypothesis,
@@ -479,9 +553,61 @@ def _ideate_node(
         pruned_directions=tried_directions,
         branching_factor=HTR_BRANCHING_FACTOR,
         master_hints=master_hints if master_hints else None,
+        family_state=family_state,
     )
 
-    return {"improvement_suggestions": [h.get("hypothesis", "") for h in hypotheses]}
+    # ADR-015 B3: 同时保留完整 hypotheses dict（含 family 字段）和向后兼容的 suggestions
+    return {
+        "improvement_suggestions": [h.get("hypothesis", "") for h in hypotheses],
+        "improvement_hypotheses": hypotheses,
+    }
+
+
+# ADR-015 B5: 家族失效检测阈值（连续 N 轮无改善触发家族切换）
+_FAMILY_STAGNATION_THRESHOLD = 3
+
+
+def _detect_family_stagnation(
+    state: State,
+    logger: LoggerService | None,
+) -> str:
+    """检测当前策略家族是否连续多轮无改善。
+
+    ADR-015 B5: 旧 subgraph.py 的家族失效检测在 HTR 子图迁移时丢失，
+    ``history_return`` / ``round_history`` 成为死代码。本函数重新激活，
+    通过 round_history 统计连续无改善轮数，达到阈值时返回家族失效信号。
+
+    Returns:
+        空字符串（家族正常）/ "家族失效（连续 N 轮无改善，请生成异族策略）"。
+    """
+    round_history = state.get("round_history") or []
+    if not round_history:
+        return ""
+
+    # 取最近 N 轮的 recent_return，统计连续无改善
+    recent_returns = [
+        float(r.get("recent_return", 0.0))
+        for r in round_history[-_FAMILY_STAGNATION_THRESHOLD:]
+        if isinstance(r, dict)
+    ]
+    if len(recent_returns) < _FAMILY_STAGNATION_THRESHOLD:
+        return ""
+
+    # 连续无改善：每轮 recent_return <= 前一轮（或都为负）
+    stagnant = all(r <= 0 for r in recent_returns) or all(
+        recent_returns[i] <= recent_returns[i - 1]
+        for i in range(1, len(recent_returns))
+    )
+    if not stagnant:
+        return ""
+
+    msg = (
+        f"家族失效（连续 {len(recent_returns)} 轮无改善，"
+        f"recent_returns={recent_returns}，请生成异族策略假设）"
+    )
+    if logger:
+        logger.warning(f"[HTR-ideate] {msg}")
+    return msg
 
 
 def _select_node(
@@ -500,13 +626,24 @@ def _select_node(
     tree = HypothesisTree.deserialize(tree_data)
 
     # 从 ideate 的结果构造假设列表
-    suggestions = state.get("improvement_suggestions", []) or []
-    hypotheses = [{"hypothesis": s, "direction": ""} for s in suggestions]
+    # ADR-015 B3: 优先使用 improvement_hypotheses（含 family 字段），
+    # 退化到 improvement_suggestions（向后兼容）
+    hypotheses = state.get("improvement_hypotheses") or []
+    if not hypotheses:
+        suggestions = state.get("improvement_suggestions", []) or []
+        hypotheses = [{"hypothesis": s, "direction": ""} for s in suggestions]
 
     selected = research_agent.select(hypotheses, max_select=max_select)
 
     # 将选中的假设添加到树中
-    parent = tree.best_node() or tree.root
+    # ADR-015 B4: 使用 next_parent_id（与 _ideate_node 保持一致）
+    next_parent_id = state.get("next_parent_id")
+    if next_parent_id:
+        parent = tree.get_node(next_parent_id)
+        if parent is None:
+            parent = tree.best_node() or tree.root
+    else:
+        parent = tree.best_node() or tree.root
     parent_id = parent.id if parent else "root"
 
     selected_ids: list[str] = []
@@ -515,6 +652,7 @@ def _select_node(
             parent_id=parent_id,
             hypothesis=h.get("hypothesis", ""),
             direction=h.get("direction", ""),
+            family=h.get("family", ""),
         )
         selected_ids.append(node_id)
 
@@ -652,6 +790,7 @@ def _executor_node(  # noqa: PLR0913
                             "node_id": node_id,
                             "rejected": True,
                             "rejection_reason": acceptance.reason,
+                            "backtest_result": backtest_result,  # ADR-015 A1
                             "optimized_strategy": optimized,
                         }
                     )
@@ -747,6 +886,7 @@ def _executor_single_node(  # noqa: PLR0913
                     "node_id": node_id,
                     "rejected": True,
                     "rejection_reason": acceptance.reason,
+                    "backtest_result": backtest_result,  # ADR-015 A1: 保留失败回测结果
                     "optimized_strategy": optimized,
                 }
                 return {"executor_results": [result]}
@@ -795,8 +935,16 @@ def _backpropagate_node(
 
         # tree evidence/status 更新（从 _executor_node/_executor_single_node 迁移来）
         # 并行 fan-out 时各 executor 不写 tree，此处单点更新避免 last_value 覆盖。
+        # ADR-015 A1: rejected 节点也保留 backtest_result + rejection_reason，
+        # 让下游 _collect_tried_directions 能把失败原因传给 ideate prompt
         if r.get("rejected") or r.get("error"):
-            tree.update_evidence(node_id=node_id, status=NodeStatus.FAILED)
+            rejection_reason = r.get("rejection_reason", "") or r.get("error", "")
+            tree.update_evidence(
+                node_id=node_id,
+                status=NodeStatus.FAILED,
+                backtest_result=r.get("backtest_result", {}) or {},
+                insight=f"失败原因: {rejection_reason}" if rejection_reason else "",
+            )
         else:
             dev_score = float(r.get("dev_score", 0.0))
             tree.update_evidence(
@@ -851,6 +999,30 @@ def _backpropagate_node(
     return {"hypothesis_tree": tree.serialize()}
 
 
+def _collect_historical_sharpes(
+    tree: HypothesisTree,
+) -> tuple[list[float], list[float]]:
+    """收集 HTR 历史所有候选策略的 (dev_sharpe, oos_sharpe) 配对。
+
+    ADR-015 S3: PBO 门需要历史候选 sharpe 列表计算 CSCV。
+    只收集有 oos_score 的节点（FAILED 节点 oos_score 为 None 跳过）。
+
+    Returns:
+        (is_sharpes, oos_sharpes) 两个并列列表。无有效数据时返回 ([], [])。
+    """
+    is_sharpes: list[float] = []
+    oos_sharpes: list[float] = []
+    for node in tree.all_nodes():
+        if node.id == "root":
+            continue
+        if node.oos_score is None:
+            continue
+        # dev_score 作为 IS sharpe（训练集回测）
+        is_sharpes.append(float(node.dev_score))
+        oos_sharpes.append(float(node.oos_score))
+    return is_sharpes, oos_sharpes
+
+
 def _evaluate_oos_and_merge(  # noqa: PLR0913
     tree: HypothesisTree,
     best_result: dict[str, Any],
@@ -859,12 +1031,23 @@ def _evaluate_oos_and_merge(  # noqa: PLR0913
     oos_n_splits: int,
     oos_threshold: float,
     logger: LoggerService,
+    stability_gate: WalkForwardStabilityGate | None = None,
+    dsr_gate: DeflatedSharpeGate | None = None,
 ) -> str:
-    """对最佳候选跑 OOS 验证并决定 merge/continue。"""
+    """对最佳候选跑 OOS 验证并决定 merge/continue。
+
+    ADR-015: 接入三道统计过拟合门（S1 稳定性 + S2 DSR），串联在 OOS 平均 sharpe
+    通过后追加调用。S3 PBO 在 _decide_node 中单独调用（需历史候选 sharpe 列表）。
+
+    Args:
+        stability_gate: Walk-Forward 稳定性门。None 时跳过 S1（向后兼容）。
+        dsr_gate: DSR 门。None 时跳过 S2（向后兼容）。
+    """
     best_node_id = best_result.get("node_id", "")
     best_yaml = best_result.get("strategy_yaml", "")
 
     oos_score: float | None = None
+    oos_result: dict[str, Any] = {}
     if best_yaml and not best_result.get("error"):
         try:
             oos_result = backtest_service.run_oos(
@@ -881,71 +1064,170 @@ def _evaluate_oos_and_merge(  # noqa: PLR0913
     if best_node_id and oos_score is not None:
         tree.update_evidence(node_id=best_node_id, oos_score=oos_score)
 
-    if oos_score is not None and (
+    # OOS 平均 sharpe 未超过阈值 → 直接 continue
+    if oos_score is None or not (
         current_best_oos is None or oos_score > current_best_oos + oos_threshold
     ):
-        tree.update_evidence(node_id=best_node_id, status=NodeStatus.MERGED)
-        tree.current_best_id = best_node_id
-        if logger:
-            logger.info(
-                f"[HTR-合并] 节点 {best_node_id} 合并 "
-                f"(oos={oos_score:.2f} > best={current_best_oos})"
-            )
-        return "merge"
-    return "continue"
+        return "continue"
+
+    # ADR-015 S1: Walk-Forward 稳定性门
+    if not _check_stability_gate(stability_gate, oos_result, best_node_id, logger):
+        return "continue"
+
+    # ADR-015 S2: Deflated Sharpe Ratio 门
+    if not _check_dsr_gate(dsr_gate, oos_score, tree, best_result, best_node_id, logger):
+        return "continue"
+
+    # 全部门通过 → 合并
+    tree.update_evidence(node_id=best_node_id, status=NodeStatus.MERGED)
+    tree.current_best_id = best_node_id
+    if logger:
+        logger.info(
+            f"[HTR-合并] 节点 {best_node_id} 合并 "
+            f"(oos={oos_score:.2f} > best={current_best_oos})"
+        )
+    return "merge"
 
 
-def _decide_node(  # noqa: PLR0913
-    state: State,
-    research_agent: StrategyResearchAgent,
-    backtest_service: BacktestService,
-    connector: Connector | None,
+def _check_stability_gate(
+    gate: WalkForwardStabilityGate | None,
+    oos_result: dict[str, Any],
+    node_id: str,
     logger: LoggerService,
-    max_cycles: int = HTR_MAX_CYCLES,
-) -> dict:
-    """决策阶段 — 决定 merge/continue/stop。
+) -> bool:
+    """S1 Walk-Forward 稳定性门检查。返回 True 表示通过/跳过。"""
+    if gate is None or not oos_result:
+        return True
+    fold_results = oos_result.get("fold_results", []) or []
+    stability = gate.evaluate(fold_results)
+    if not stability.passed:
+        if logger:
+            logger.warning(
+                f"[HTR-OOS] 节点 {node_id} 被 S1 稳定性门拒绝: {stability.reason}"
+            )
+        return False
+    if logger:
+        logger.info(
+            f"[HTR-OOS] 节点 {node_id} 通过 S1 稳定性门: {stability.reason}"
+        )
+    return True
 
-    Phase 3: 对本轮最佳 dev 候选跑 Walk-Forward OOS，
-    oos_score > current_best_oos + threshold → merge。
 
-    ADR-014 任务2：注入 Connector 时，用图谱查相似失败案例注入 tree_state，
-    LLM 决策时能看到"历史上类似假设的失败原因"。
+def _check_dsr_gate(  # noqa: PLR0913
+    gate: DeflatedSharpeGate | None,
+    oos_score: float | None,
+    tree: HypothesisTree,
+    best_result: dict[str, Any],
+    node_id: str,
+    logger: LoggerService,
+) -> bool:
+    """S2 Deflated Sharpe Ratio 门检查。返回 True 表示通过/跳过。"""
+    if gate is None or oos_score is None:
+        return True
+    n_trials = max(tree.node_count - 1, 1)
+    backtest_result = best_result.get("backtest_result", {}) or {}
+    n_obs = int(backtest_result.get("trading_days", 252)) or 252
+    dsr_result = gate.evaluate(
+        observed_sharpe=oos_score,
+        n_trials=n_trials,
+        n_observations=n_obs,
+    )
+    if not dsr_result.passed:
+        if logger:
+            logger.warning(
+                f"[HTR-OOS] 节点 {node_id} 被 S2 DSR 门拒绝: {dsr_result.reason}"
+            )
+        return False
+    if logger:
+        logger.info(
+            f"[HTR-OOS] 节点 {node_id} 通过 S2 DSR 门: {dsr_result.reason}"
+        )
+    return True
 
-    Args:
-        max_cycles: HTR 六步循环最大周期数（从 config.htr_max_cycles 注入），
-            达到时强制停止。默认 HTR_MAX_CYCLES=10。
+
+def _check_pbo_gate(
+    gate: BacktestOverfitGate | None,
+    tree: HypothesisTree,
+    best_node_id: str,
+    best: HypothesisNode | None,
+    logger: LoggerService,
+) -> bool:
+    """S3 PBO 概率门检查。返回 True 表示通过/跳过。
+
+    失败时回滚 merge 状态（把节点改回 VALIDATED）。
     """
-    tree_data = state.get("hypothesis_tree", {}) or {}
-    tree = HypothesisTree.deserialize(tree_data)
-    iteration = state.get("iteration", 0)
-    oos_threshold = state.get("oos_threshold", HTR_MERGE_THRESHOLD)
-    oos_n_splits = state.get("oos_n_splits", 3)
+    if gate is None:
+        return True
+    is_sharpes, oos_sharpes = _collect_historical_sharpes(tree)
+    if len(is_sharpes) < _MIN_STRATEGIES_FOR_PBO_CHECK:
+        return True  # 样本不足时跳过
+    pbo_result = gate.evaluate(is_sharpes, oos_sharpes)
+    if not pbo_result.passed:
+        if logger:
+            logger.warning(
+                f"[HTR-OOS] 节点 {best_node_id} 被 S3 PBO 门拒绝: {pbo_result.reason}"
+            )
+        # 回滚 merge：把状态改回 VALIDATED
+        tree.update_evidence(node_id=best_node_id, status=NodeStatus.VALIDATED)
+        tree.current_best_id = best.parent_id if best else None
+        return False
+    if logger:
+        logger.info(f"[HTR-OOS] 通过 S3 PBO 门: {pbo_result.reason}")
+    return True
 
-    best = tree.best_node()
-    current_best_oos = best.oos_score if best else None
 
+# PBO 检查所需的最少策略数（< 2 无法计算 CSCV）
+_MIN_STRATEGIES_FOR_PBO_CHECK = 2
+
+
+def _decide_evaluate_and_merge(  # noqa: PLR0913
+    state: State,
+    tree: HypothesisTree,
+    best: HypothesisNode | None,
+    current_best_oos: float | None,
+    backtest_service: BacktestService,
+    oos_n_splits: int,
+    oos_threshold: float,
+    logger: LoggerService,
+    stability_gate: WalkForwardStabilityGate | None,
+    dsr_gate: DeflatedSharpeGate | None,
+    pbo_gate: BacktestOverfitGate | None,
+) -> tuple[str, float | None]:
+    """OOS 评估与合并决策，含 ADR-015 三道统计门。"""
     results = state.get("executor_results", []) or []
-    oos_score: float | None = None
     if not results:
-        action = "continue"
-    else:
-        best_result = max(results, key=lambda r: r.get("dev_score", 0))
-        action = _evaluate_oos_and_merge(
-            tree,
-            best_result,
-            current_best_oos,
-            backtest_service,
-            oos_n_splits,
-            oos_threshold,
-            logger,
-        )
-        oos_score = (
-            tree.get_node(best_result.get("node_id", "")).oos_score
-            if best_result.get("node_id")
-            else None
-        )
+        return "continue", None
 
-    tree_state = {
+    best_result = max(results, key=lambda r: r.get("dev_score", 0))
+    action = _evaluate_oos_and_merge(
+        tree, best_result, current_best_oos, backtest_service,
+        oos_n_splits, oos_threshold, logger,
+        stability_gate=stability_gate, dsr_gate=dsr_gate,
+    )
+    oos_score = (
+        tree.get_node(best_result.get("node_id", "")).oos_score
+        if best_result.get("node_id")
+        else None
+    )
+
+    # ADR-015 S3: PBO 概率门（仅在 S1+S2 通过且 action == "merge" 时触发）
+    if action == "merge" and best_result.get("backtest_result"):
+        best_node_id = best_result.get("node_id", "")
+        if not _check_pbo_gate(pbo_gate, tree, best_node_id, best, logger):
+            action = "continue"
+    return action, oos_score
+
+
+def _build_tree_state(  # noqa: PLR0913
+    tree: HypothesisTree,
+    current_best_oos: float | None,
+    results: list[dict[str, Any]],
+    oos_score: float | None,
+    iteration: int,
+    max_cycles: int,
+) -> dict[str, Any]:
+    """构造 LLM 决策上下文 tree_state。"""
+    return {
         "node_count": tree.node_count,
         "max_depth": max((n.depth for n in tree.all_nodes()), default=0),
         "current_best_oos": current_best_oos,
@@ -955,13 +1237,37 @@ def _decide_node(  # noqa: PLR0913
         "max_cycles": max_cycles,
     }
 
-    # ADR-014 任务2：图谱查相似失败案例（注入 tree_state 供 LLM 决策参考）
+
+def _should_force_stop(
+    iteration: int,
+    max_cycles: int,
+    max_depth: int,
+    llm_action: str,
+) -> bool:
+    """判断是否应强制停止 HTR 循环。"""
+    return (
+        iteration >= max_cycles
+        or max_depth >= HTR_MAX_DEPTH
+        or llm_action == "stop"
+    )
+
+
+def _inject_connector_context(
+    tree_state: dict[str, Any],
+    connector: Connector | None,
+    best: HypothesisNode | None,
+    state: State,
+    logger: LoggerService,
+) -> None:
+    """注入 Connector 图谱关联信息 + universe 财务面板到 tree_state。
+
+    ADR-014 任务2/4：让 LLM 决策时看到相似失败案例与财务分布。
+    """
     if connector is not None and best and best.hypothesis:
         try:
-
             fail_result = connector.get_concept(ConceptQuery(
                 subject=best.hypothesis,
-                aspect="动量族",  # 按策略族查经验（含失败案例）
+                aspect="动量族",
                 constraints={"k": 2},
             ))
             if isinstance(fail_result.data, list) and fail_result.data:
@@ -973,8 +1279,6 @@ def _decide_node(  # noqa: PLR0913
             if logger:
                 logger.warning(f"[HTR-decide] 图谱失败案例查询失败: {e}")
 
-    # ADR-014 任务4：注入 universe 财务面板摘要，辅助 LLM 决策
-    # （历史经验 + 财务分布 一起供 LLM 参考）
     strategy_yaml = state.get("strategy_yaml", "") or ""
     universe = _parse_universe_from_yaml(strategy_yaml)
     financial_brief = _fetch_universe_financial_brief(connector, universe)
@@ -985,13 +1289,78 @@ def _decide_node(  # noqa: PLR0913
         else:
             tree_state["similar_experiences"] = f"{existing}\n{financial_brief}"
 
-    llm_action = research_agent.decide(tree_state)
+
+def _decide_node(  # noqa: PLR0913
+    state: State,
+    research_agent: StrategyResearchAgent,
+    backtest_service: BacktestService,
+    connector: Connector | None,
+    logger: LoggerService,
+    max_cycles: int = HTR_MAX_CYCLES,
+    stability_gate: WalkForwardStabilityGate | None = None,
+    dsr_gate: DeflatedSharpeGate | None = None,
+    pbo_gate: BacktestOverfitGate | None = None,
+) -> dict:
+    """决策阶段 — 决定 merge/continue/stop。
+
+    Phase 3: 对本轮最佳 dev 候选跑 Walk-Forward OOS，
+    oos_score > current_best_oos + threshold → merge。
+
+    ADR-014 任务2：注入 Connector 时，用图谱查相似失败案例注入 tree_state，
+    LLM 决策时能看到"历史上类似假设的失败原因"。
+
+    ADR-015: 接入三道统计过拟合门（S1 稳定性 + S2 DSR + S3 PBO）。
+    S1/S2 在 _evaluate_oos_and_merge 内调用；S3 PBO 在此处调用（需历史
+    候选 sharpe 列表）。
+
+    Args:
+        max_cycles: HTR 六步循环最大周期数（从 config.htr_max_cycles 注入），
+            达到时强制停止。默认 HTR_MAX_CYCLES=10。
+        stability_gate: Walk-Forward 稳定性门。None 时跳过 S1（向后兼容）。
+        dsr_gate: DSR 门。None 时跳过 S2（向后兼容）。
+        pbo_gate: PBO 门。None 时跳过 S3（向后兼容）。
+    """
+    tree_data = state.get("hypothesis_tree", {}) or {}
+    tree = HypothesisTree.deserialize(tree_data)
+    iteration = state.get("iteration", 0)
+    oos_threshold = state.get("oos_threshold", HTR_MERGE_THRESHOLD)
+    oos_n_splits = state.get("oos_n_splits", 3)
+
+    best = tree.best_node()
+    current_best_oos = best.oos_score if best else None
+
+    action, oos_score = _decide_evaluate_and_merge(
+        state, tree, best, current_best_oos, backtest_service, oos_n_splits,
+        oos_threshold, logger, stability_gate, dsr_gate, pbo_gate,
+    )
+
+    tree_state = _build_tree_state(
+        tree, current_best_oos, results=state.get("executor_results", []) or [],
+        oos_score=oos_score, iteration=iteration, max_cycles=max_cycles,
+    )
+    # ADR-015 B1/B4: 注入 frontier_summary 供 LLM 决策 expand 时参考
+    tree_state["frontier_summary"] = _build_frontier_summary(tree)
+    _inject_connector_context(tree_state, connector, best, state, logger)
+
+    llm_decision = research_agent.decide(tree_state)
+    llm_action = str(llm_decision.get("action", "continue"))
+    next_parent_id = str(llm_decision.get("next_parent_id", "") or "")
+    prune_target_id = str(llm_decision.get("prune_target_id", "") or "")
+
+    # ADR-015 B4: 处理 Arbor expand/prune 动作
+    if llm_action == "expand" and next_parent_id:
+        # expand: 在指定节点展开新分支（覆盖默认 merge/continue 决策）
+        action = "continue"
+        if logger:
+            logger.info(
+                f"[HTR-决策] Arbor expand → 在 {next_parent_id} 下展开新分支"
+            )
+    elif llm_action == "prune" and prune_target_id:
+        # prune: 剪枝指定子树
+        _arbor_prune(tree, prune_target_id, logger)
+        action = "continue"
     # 安全兜底：达到最大周期/深度 或 LLM 判定停止 → 强制停止
-    if (
-        iteration >= max_cycles
-        or tree_state["max_depth"] >= HTR_MAX_DEPTH
-        or llm_action == "stop"
-    ):
+    if _should_force_stop(iteration, max_cycles, tree_state["max_depth"], llm_action):
         action = "stop"
 
     if logger:
@@ -1002,13 +1371,75 @@ def _decide_node(  # noqa: PLR0913
         "iteration": next_iteration,
         "result": action,
         "hypothesis_tree": tree.serialize(),
+        # ADR-015 B4: 透传 Arbor expand/prune 信号给下一轮 ideate/select
+        "next_parent_id": next_parent_id if llm_action == "expand" else "",
+        "prune_target_id": "",
     }
 
 
+def _build_frontier_summary(tree: HypothesisTree) -> str:
+    """构造 frontier 摘要供 LLM 决策 expand 时参考。
+
+    ADR-015 B4: 列出所有可探索的叶节点（排除 best_node 和 root，避免 LLM
+    重复选择当前路径），最多 5 个，含节点 ID / dev_score / oos_score / hypothesis。
+    """
+    frontier = tree.frontier()
+    if not frontier:
+        return "无（无可回溯探索的叶节点）"
+    best = tree.best_node()
+    best_id = best.id if best else ""
+    # 排除 best_node 和 root，只保留真正可回溯探索的节点
+    candidates = [
+        n for n in frontier
+        if n.id not in (best_id, "root")
+    ]
+    if not candidates:
+        return "无（当前最佳节点是唯一可探索节点）"
+    # 最多 5 个，按 dev_score 降序
+    candidates.sort(key=lambda n: n.dev_score, reverse=True)
+    lines: list[str] = []
+    for n in candidates[:5]:
+        oos_str = f"{n.oos_score:.2f}" if n.oos_score is not None else "无"
+        lines.append(
+            f"- {n.id} (dev={n.dev_score:.2f}, oos={oos_str}, "
+            f"depth={n.depth}): {n.hypothesis[:50]}"
+        )
+    return "\n".join(lines)
+
+
+def _arbor_prune(
+    tree: HypothesisTree,
+    target_id: str,
+    logger: LoggerService | None,
+) -> None:
+    """Arbor prune 动作 — 级联剪枝指定子树。
+
+    ADR-015 B4: 调用 ``tree.prune_subtree`` 标记子树为 PRUNED。
+    防止后续 ideate 在已剪枝节点上展开新分支。
+    """
+    node = tree.get_node(target_id)
+    if node is None:
+        if logger:
+            logger.warning(
+                f"[HTR-决策] Arbor prune 失败: 节点 {target_id} 不存在"
+            )
+        return
+    tree.prune_subtree(target_id)
+    if logger:
+        logger.info(
+            f"[HTR-决策] Arbor prune → 子树 {target_id} "
+            f"(hypothesis={node.hypothesis[:40]}) 已剪枝"
+        )
+
+
 def _decide_cond(state: State) -> str:
-    """决策路由：merge → save_tree → END; continue → observe; stop → save_tree → END。"""
+    """决策路由。
+
+    ADR-015 B4: expand/prune 动作路由回 observe（继续探索），
+    与 continue 一致；merge/stop → save_tree → END。
+    """
     action = state.get("result", "continue")
-    if action == "continue":
+    if action in ("continue", "expand", "prune"):
         return "observe"
     return "save_tree"
 
@@ -1098,6 +1529,10 @@ def create_htr_subgraph(
     )
     # ADR-010: max_cycles 可配置（HTR_MAX_CYCLES），控制 HTR 循环最大周期数
     htr_max_cycles = max(1, getattr(context.config, "htr_max_cycles", HTR_MAX_CYCLES))
+    # ADR-015: 三道统计过拟合门（默认全部启用）
+    stability_gate = WalkForwardStabilityGate()
+    dsr_gate = DeflatedSharpeGate()
+    pbo_gate = BacktestOverfitGate()
     workflow.add_node(
         "decide",
         partial(
@@ -1107,6 +1542,9 @@ def create_htr_subgraph(
             connector=connector,
             logger=logger,
             max_cycles=htr_max_cycles,
+            stability_gate=stability_gate,
+            dsr_gate=dsr_gate,
+            pbo_gate=pbo_gate,
         ),
     )
     workflow.add_node(
