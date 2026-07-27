@@ -273,7 +273,32 @@ class EventDrivenBacktestEngine:
                     {"message": "加载数据为空", "symbols_count": len(symbols)},
                     db_audit,
                 )
-                return BacktestResult(success=False, message="加载数据为空")
+                # 补全 RUN_END：监督报告判据 3 要求 RUN_START/RUN_END 配对，
+                # 原 DATA_EMPTY 路径直接 return 导致 RUN_END 缺失，审计日志
+                # 不配对（如 7/26 HTR 中 2 个节点只有 RUN_START 无 RUN_END）。
+                empty_result = BacktestResult(
+                    success=False, message="加载数据为空"
+                )
+                self._log_audit(
+                    "RUN_END",
+                    str(uuid.uuid4()),
+                    run_id,
+                    "Engine",
+                    "FAILED",
+                    {
+                        "success": False,
+                        "total_return": 0.0,
+                        "sharpe_ratio": 0.0,
+                        "max_drawdown": 0.0,
+                        "trade_count": 0,
+                        "trading_days": 0,
+                        "metrics_unreliable": True,
+                        "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
+                    },
+                    db_audit,
+                    latency_ms=(time.perf_counter() - run_start_ts) * 1000,
+                )
+                return empty_result
 
             guard = VisibilityGuard(full_data)
             portfolio = Portfolio(cost_config=self.cost_config)
@@ -315,6 +340,9 @@ class EventDrivenBacktestEngine:
             )
 
             # RUN_END：记录回测结果摘要（成功/失败都要记）
+            # metrics_unreliable 补全：监督报告判据 4 需机器可验证，原 payload
+            # 仅 7 字段，遗漏了 metrics_unreliable 标志。审计日志 payload 是 JSON
+            # 列，新增字段无需改 schema（DuckDBAuditProvider 整包序列化）。
             self._log_audit(
                 "RUN_END",
                 str(uuid.uuid4()),
@@ -328,6 +356,7 @@ class EventDrivenBacktestEngine:
                     "max_drawdown": result.max_drawdown,
                     "trade_count": result.trade_count,
                     "trading_days": result.trading_days,
+                    "metrics_unreliable": metrics_unreliable,
                     "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
                 },
                 db_audit,
