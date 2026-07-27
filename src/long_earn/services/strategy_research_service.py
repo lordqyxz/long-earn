@@ -89,10 +89,18 @@ class StrategyResearchService:
         self.logger = ctx.logger
 
         config = ctx.config
+        # 铁律 #1/#2/#3：开发阶段只允许使用训练集。
+        # - history = 完整训练集（train_start ~ train_end）
+        # - recent = 训练集最后 6 个月（开发期不得触碰测试集/验证集；
+        #   测试集仅供 HTR _decide 节点合并门触碰，验证集仅最终评估一次）
+        from datetime import date, timedelta
+
         self.history_start = config.train_start_date
-        self.history_end = config.test_end_date
-        self.recent_start = config.validation_start_date
-        self.recent_end = config.validation_end_date
+        self.history_end = config.train_end_date
+        train_end_date = date.fromisoformat(config.train_end_date)
+        recent_start_date = train_end_date - timedelta(days=183)
+        self.recent_start = recent_start_date.isoformat()
+        self.recent_end = config.train_end_date
 
     # ── 单轮子图执行 ──────────────────────────────────────────────
 

@@ -20,6 +20,7 @@ checkpoint 机制（默认启用）：
 用法:
     uv run python scripts/find_best_strategy.py
     uv run python scripts/find_best_strategy.py --max-rounds 3 -y
+    uv run python scripts/find_best_strategy.py --max-iterations 8 -y  # HTR 循环上限=8
     uv run python scripts/find_best_strategy.py --auto-window -y  # 动态窗口（覆盖 config）
     uv run python scripts/find_best_strategy.py --reset-checkpoint -y  # 清旧 checkpoint 重跑
 """
@@ -29,11 +30,21 @@ from __future__ import annotations
 import sys
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+# 关键：加载 .env，让 HTR_MAX_CYCLES / LONG_EARN_SKIP_CACHE_SYNC / HTR_MAX_SELECT
+# 等环境变量生效。缺失此调用会导致 .env 配置被忽略，HTR 用默认值或卡在数据同步。
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+
 import duckdb  # noqa: E402
+
+if TYPE_CHECKING:
+    from long_earn.config import RuntimeContext
 
 
 def probe_data_coverage() -> dict:
@@ -99,6 +110,105 @@ def derive_windows(coverage: dict) -> dict:
         "train_end": train_end.isoformat(),
         "recent_start": recent_start.isoformat(),
         "recent_end": recent_end.isoformat(),
+    }
+
+
+def validate_best_strategy_dual_quarter(
+    strategy_yaml: str,
+    ctx: RuntimeContext,
+    q1_start: str = "2026-01-01",
+    q1_end: str = "2026-03-31",
+    q2_start: str = "2026-04-01",
+    q2_end: str = "2026-06-30",
+    min_return_threshold: float = 0.0,
+) -> dict:
+    """对最佳策略做双季度前瞻验证。
+
+    铁律 #3：验证集仅最终评估时触碰一次。本函数在 HTR 研发循环完成后调用，
+    分别对 Q1 2026 和 Q2 2026 两个独立窗口跑前瞻回测。
+    两个窗口的 total_return 都需 > min_return_threshold 才算通过。
+
+    Args:
+        strategy_yaml: 最佳策略 YAML
+        ctx: RuntimeContext（提供 backtest_service）
+        q1_start/q1_end: Q1 2026 窗口
+        q2_start/q2_end: Q2 2026 窗口
+        min_return_threshold: 收益阈值（默认 0.0，即不亏损）
+
+    Returns:
+        dict: {
+            "q1_return": float, "q1_sharpe": float, "q1_drawdown": float,
+            "q2_return": float, "q2_sharpe": float, "q2_drawdown": float,
+            "passed": bool,  # 两个窗口都达标才 True
+            "reason": str,
+        }
+    """
+    backtest = ctx.require_backtest()
+
+    print()
+    print("=" * 64)
+    print("双季度前瞻验证（Q1 2026 + Q2 2026）")
+    print("=" * 64)
+    print(f"  Q1 窗口: {q1_start} ~ {q1_end}")
+    print(f"  Q2 窗口: {q2_start} ~ {q2_end}")
+    print(f"  收益阈值: {min_return_threshold:.4f}")
+    print("-" * 64)
+
+    def _run_quarter(name: str, start: str, end: str) -> dict:
+        print(f"  正在回测 {name} ({start} ~ {end})...")
+        report = backtest.run(
+            strategy_yaml=strategy_yaml,
+            start_date=start,
+            end_date=end,
+        )
+        if "error" in report:
+            print(f"  {name} 回测失败: {report['error']}")
+            return {"return": -999.0, "sharpe": -999.0, "drawdown": -999.0}
+        ret = float(report.get("total_return", -999.0))
+        sharpe = float(report.get("sharpe_ratio", -999.0))
+        drawdown = float(report.get("max_drawdown", -999.0))
+        print(
+            f"  {name}: return={ret:.4f}, sharpe={sharpe:.2f}, "
+            f"drawdown={drawdown:.4f}"
+        )
+        return {"return": ret, "sharpe": sharpe, "drawdown": drawdown}
+
+    q1 = _run_quarter("Q1 2026", q1_start, q1_end)
+    q2 = _run_quarter("Q2 2026", q2_start, q2_end)
+
+    q1_pass = q1["return"] > min_return_threshold
+    q2_pass = q2["return"] > min_return_threshold
+    passed = q1_pass and q2_pass
+
+    print("-" * 64)
+    if passed:
+        print(
+            f"  ✅ 双季度验证通过：Q1={q1['return']:.4f}, Q2={q2['return']:.4f} "
+            f"均 > {min_return_threshold:.4f}"
+        )
+        reason = "两个季度收益均达标"
+    else:
+        failed = []
+        if not q1_pass:
+            failed.append(f"Q1={q1['return']:.4f}")
+        if not q2_pass:
+            failed.append(f"Q2={q2['return']:.4f}")
+        print(
+            f"  ❌ 双季度验证未通过：{', '.join(failed)} 未达阈值 "
+            f"{min_return_threshold:.4f}"
+        )
+        reason = f"未达标窗口: {', '.join(failed)}"
+    print("=" * 64)
+
+    return {
+        "q1_return": q1["return"],
+        "q1_sharpe": q1["sharpe"],
+        "q1_drawdown": q1["drawdown"],
+        "q2_return": q2["return"],
+        "q2_sharpe": q2["sharpe"],
+        "q2_drawdown": q2["drawdown"],
+        "passed": passed,
+        "reason": reason,
     }
 
 
@@ -174,9 +284,10 @@ def main() -> None:  # noqa: PLR0912
         config.backtest_start_date = w["train_start"]
         config.backtest_end_date = w["train_end"]
 
-    # 始终确保回测区间默认为训练集
+    # 始终确保 HTR dev 回测区间严格限定在训练集（铁律 #1/#2：dev/参数寻优只能用训练集，
+    # 测试集仅供 _decide 节点合并门触碰，验证集仅最终评估一次）
     config.backtest_start_date = config.train_start_date
-    config.backtest_end_date = config.test_end_date
+    config.backtest_end_date = config.train_end_date
 
     print()
     print("实际使用窗口")
@@ -187,7 +298,8 @@ def main() -> None:  # noqa: PLR0912
     print("=" * 64)
 
     max_rounds = 3
-    max_iterations = 2
+    # None 表示用 config.max_iterations（来自 .env 的 MAX_ITERATIONS）
+    cli_max_iterations: int | None = None
     yes = False
     use_checkpoint = "--no-checkpoint" not in sys.argv
     reset_checkpoint = "--reset-checkpoint" in sys.argv
@@ -195,8 +307,18 @@ def main() -> None:  # noqa: PLR0912
     if "--max-rounds" in sys.argv:
         idx = sys.argv.index("--max-rounds")
         max_rounds = int(sys.argv[idx + 1])
+    if "--max-iterations" in sys.argv:
+        idx = sys.argv.index("--max-iterations")
+        cli_max_iterations = int(sys.argv[idx + 1])
     if "-y" in sys.argv or "--yes" in sys.argv:
         yes = True
+
+    # CLI --max-iterations 同时覆盖 config.max_iterations 和 config.htr_max_cycles
+    # （前置约束 #4：HTR 迭代上限必须通过 CLI --max-iterations 配置，禁止硬编码）
+    if cli_max_iterations is not None:
+        config.max_iterations = cli_max_iterations
+        config.htr_max_cycles = cli_max_iterations
+    max_iterations = config.max_iterations
 
     ckpt_path = checkpoint_db_path()
     if reset_checkpoint and ckpt_path.exists():
@@ -204,10 +326,15 @@ def main() -> None:  # noqa: PLR0912
         ckpt_path.unlink()
 
     print()
-    print("checkpoint 配置")
+    print("HTR 与 checkpoint 配置")
     print("-" * 64)
-    print(f"  启用: {use_checkpoint}")
-    print(f"  路径: {ckpt_path}")
+    print(f"  max_rounds       : {max_rounds}")
+    print(f"  max_iterations   : {max_iterations}（子图 supervisor 迭代）")
+    print(f"  htr_max_cycles   : {config.htr_max_cycles}（HTR 六步循环上限）")
+    print(f"  htr_max_select   : {config.htr_max_select}（并行 fan-out）")
+    print(f"  max_workers      : {config.max_workers}（并行回测 worker 数）")
+    print(f"  checkpoint 启用  : {use_checkpoint}")
+    print(f"  checkpoint 路径  : {ckpt_path}")
     print("=" * 64)
 
     if not yes and sys.stdin.isatty():
@@ -267,6 +394,29 @@ def main() -> None:  # noqa: PLR0912
         print(summary.best_strategy_yaml[:800])
         if len(summary.best_strategy_yaml) > 800:
             print(f"... ({len(summary.best_strategy_yaml)} 字符总计)")
+
+        # 双季度前瞻验证（铁律 #3：验证集仅最终评估时触碰一次）
+        # 分别对 Q1 2026 和 Q2 2026 跑前瞻回测，两个窗口收益都需达标才算通过
+        validation = validate_best_strategy_dual_quarter(
+            strategy_yaml=summary.best_strategy_yaml,
+            ctx=ctx,
+        )
+        # 将验证结果追加到 strategy_research_results.json
+        import json
+
+        results_path = strategy_results_path()
+        if results_path.exists():
+            payload = json.loads(
+                results_path.read_text(encoding="utf-8")
+            )
+        else:
+            payload = {}
+        payload["dual_quarter_validation"] = validation
+        results_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        print(f"  双季度验证结果已写入: {results_path}")
 
 
 if __name__ == "__main__":
