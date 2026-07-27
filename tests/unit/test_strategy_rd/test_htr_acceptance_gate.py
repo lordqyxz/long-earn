@@ -165,3 +165,49 @@ def test_executor_node_skip_gate_when_none() -> None:
     )
     assert result["executor_results"][0]["dev_score"] == pytest.approx(0.5)
     assert "rejected" not in result["executor_results"][0]
+
+
+def test_executor_node_accepts_initial_baseline_when_no_baseline() -> None:
+    """基线为空（HTR 首次循环）时，接受有有效 sharpe 的策略作为初始基线。
+
+    修复 2026-07-26 run_20260726_174857 中 6 个节点全部被拒绝的问题：
+    首次循环 previous_backtest={}, baseline_sharpe=None，
+    旧逻辑要求优化版 sharpe>0 才接受，弱势市场下所有策略都是负 sharpe，
+    导致 HTR 永远无法建立基线。新逻辑接受任何有有效 sharpe 的策略。
+    """
+    state: dict[str, Any] = {
+        "hypothesis_tree": _make_tree_data(),
+        "selected_leaves": ["root"],
+        "strategy": {"name": "base"},
+        "backtest_result": {},  # 首次循环 baseline 为空
+    }
+    # 优化版 sharpe=-1.5（负值），但基线无 sharpe → 接受作为初始基线
+    result = _executor_node(
+        state,  # type: ignore[arg-type]
+        research_agent=_FakeResearchAgent({"name": "optimized"}),
+        develop_agent=_FakeDevelopAgent("strategy: name: opt"),
+        backtest_service=_FakeBacktestService(_bt(-1.5, ret=-0.1)),
+        logger=_FakeLogger(),
+        gate=AcceptanceGate(),
+    )
+    assert result["executor_results"][0]["dev_score"] == pytest.approx(-1.5)
+    assert result["executor_results"][0].get("rejected") is not True
+
+
+def test_acceptance_gate_initial_baseline_accepts_negative_sharpe() -> None:
+    """单元测试 AcceptanceGate：基线无 sharpe 时接受负 sharpe 策略。"""
+    gate = AcceptanceGate()
+    # 基线为空，优化版有负 sharpe → 接受作为初始基线
+    result = gate.evaluate(None, _bt(-0.8, ret=-0.05))
+    assert result.accepted is True
+    assert "初始基线" in result.reason
+
+
+def test_acceptance_gate_initial_baseline_rejects_no_sharpe() -> None:
+    """单元测试 AcceptanceGate：基线无 sharpe 且优化版也无 sharpe 时拒绝。"""
+    gate = AcceptanceGate()
+    # 优化版无 sharpe 字段 → 拒绝
+    optimized = {"total_return": 0.1, "strategy_diagnostics": {"degenerate": False}}
+    result = gate.evaluate(None, optimized)
+    assert result.accepted is False
+    assert "无有效 sharpe" in result.reason
