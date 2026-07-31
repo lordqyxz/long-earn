@@ -53,6 +53,12 @@ from long_earn.strategy_optimization.overfit_gates import (
     WalkForwardStabilityGate,
 )
 
+# ADR-016 阶段 2+3：executor 算子缺口逃生口 + 失败路径选择
+from long_earn.strategy_rd.escape_hatch import (
+    escape_hatch_failure_path,
+    escape_hatch_with_retry,
+)
+
 HTR_MAX_CYCLES = 10
 HTR_MAX_DEPTH = 3
 HTR_BRANCHING_FACTOR = 3
@@ -713,6 +719,7 @@ def _executor_single_wrapper(  # noqa: PLR0913
     backtest_service: BacktestService,
     logger: LoggerService,
     gate: AcceptanceGate | None = None,
+    context: RuntimeContext | None = None,
 ) -> dict:
     """Phase 5 并行执行器入口 — 从 Send payload 提取 node_id 调 _executor_single_node。"""
     node_id = state.get("_parallel_node_id", "")
@@ -726,7 +733,182 @@ def _executor_single_wrapper(  # noqa: PLR0913
         backtest_service=backtest_service,
         logger=logger,
         gate=gate,
+        context=context,
     )
+
+
+def _handle_executor_exception(  # noqa: PLR0913
+    error: Exception,
+    strategy_yaml: str,
+    optimized: dict[str, Any],
+    hypothesis: str,
+    node_id: str,
+    context: RuntimeContext | None,
+    develop_agent: StrategyDevelopAgent,
+    backtest_service: BacktestService,
+    previous_backtest: dict[str, Any],
+    gate: AcceptanceGate | None,
+    logger: LoggerService | None,
+) -> dict[str, Any]:
+    """处理 executor 异常 — 逃生口入口（ADR-016 阶段 2+3）。
+
+    阶段 2 算子缺口：
+    - 算子缺失 + 研发成功 + 重试成功 → 走 AcceptanceGate 后返回 result
+    - 算子缺失 + 研发失败/重试失败 → 返回 error result（含审计信息）
+
+    阶段 3 失败路径：
+    - 非算子缺失错误 → LLM 分类失败类型
+    - fixable → refine + 重试 backtest → 走 AcceptanceGate
+    - directional → 返回 error result（含方向性失败标记）
+    """
+    # 无 context 或无 strategy_yaml 时，不走逃生口（无法提取 reference_strategy）
+    if context is None or not strategy_yaml:
+        return {"node_id": node_id, "error": str(error)}
+
+    # ── 阶段 2：算子缺口逃生口 ──────────────────────────────────
+    # 检测算子缺口 → 同步研发 → 重试 develop + backtest
+    hatch_outcome = escape_hatch_with_retry(
+        error=error,
+        strategy_yaml=strategy_yaml,
+        optimized=optimized,
+        hypothesis=hypothesis,
+        context=context,
+        develop_func=develop_agent.develop_strategy,
+        backtest_func=lambda yaml: backtest_service.run(
+            strategy_yaml=yaml,
+            start_date="",
+            end_date="",
+        ),
+        logger=logger,
+    )
+
+    # 非算子缺失错误 → 进入阶段 3 失败路径逃生口
+    if not hatch_outcome.get("escape_hatch_triggered"):
+        return _apply_failure_path_escape_hatch(
+            error=error,
+            strategy_yaml=strategy_yaml,
+            optimized=optimized,
+            hypothesis=hypothesis,
+            node_id=node_id,
+            develop_agent=develop_agent,
+            backtest_service=backtest_service,
+            previous_backtest=previous_backtest,
+            gate=gate,
+            logger=logger,
+        )
+
+    # 算子研发失败或重试失败
+    if "error" in hatch_outcome:
+        return {
+            "node_id": node_id,
+            "error": hatch_outcome["error"],
+            "escape_hatch_triggered": True,
+        }
+
+    # 算子缺口重试成功 — 走 AcceptanceGate 校验
+    return _process_retry_success(
+        retry_yaml=hatch_outcome.get("strategy_yaml", ""),
+        retry_backtest=hatch_outcome.get("backtest_result", {}),
+        optimized=optimized,
+        node_id=node_id,
+        previous_backtest=previous_backtest,
+        gate=gate,
+        logger=logger,
+        log_prefix="[HTR-执行] 节点 {node_id} 逃生口重试成功",
+    )
+
+
+def _apply_failure_path_escape_hatch(  # noqa: PLR0913
+    error: Exception,
+    strategy_yaml: str,
+    optimized: dict[str, Any],
+    hypothesis: str,
+    node_id: str,
+    develop_agent: StrategyDevelopAgent,
+    backtest_service: BacktestService,
+    previous_backtest: dict[str, Any],
+    gate: AcceptanceGate | None,
+    logger: LoggerService | None,
+) -> dict[str, Any]:
+    """阶段 3 失败路径逃生口 — LLM 分类后选择 refine 或 prune。"""
+    failure_outcome = escape_hatch_failure_path(
+        error=error,
+        strategy_yaml=strategy_yaml,
+        optimized=optimized,
+        hypothesis=hypothesis,
+        llm_service=develop_agent.llm_service,
+        refine_func=develop_agent.refine_code,
+        backtest_func=lambda yaml: backtest_service.run(
+            strategy_yaml=yaml,
+            start_date="",
+            end_date="",
+        ),
+        logger=logger,
+    )
+
+    # directional 失败 → 直接返回错误
+    if "error" in failure_outcome:
+        return {
+            "node_id": node_id,
+            "error": failure_outcome["error"],
+            "escape_hatch_triggered": True,
+            "failure_path": failure_outcome.get("failure_path", ""),
+        }
+
+    # fixable + refine 成功 → 走 AcceptanceGate 校验
+    return _process_retry_success(
+        retry_yaml=failure_outcome.get("strategy_yaml", ""),
+        retry_backtest=failure_outcome.get("backtest_result", {}),
+        optimized=optimized,
+        node_id=node_id,
+        previous_backtest=previous_backtest,
+        gate=gate,
+        logger=logger,
+        log_prefix="[HTR-执行] 节点 {node_id} 失败路径 refine 重试成功",
+    )
+
+
+def _process_retry_success(  # noqa: PLR0913
+    retry_yaml: str,
+    retry_backtest: dict[str, Any],
+    optimized: dict[str, Any],
+    node_id: str,
+    previous_backtest: dict[str, Any],
+    gate: AcceptanceGate | None,
+    logger: LoggerService | None,
+    log_prefix: str,
+) -> dict[str, Any]:
+    """处理逃生口重试成功的结果 — 走 AcceptanceGate 校验。"""
+    if gate is not None:
+        acceptance = gate.evaluate(previous_backtest, retry_backtest)
+        if not acceptance.accepted:
+            if logger:
+                logger.warning(
+                    f"[HTR-执行] 节点 {node_id} 逃生口重试被 AcceptanceGate 拒绝: "
+                    f"{acceptance.reason}"
+                )
+            return {
+                "node_id": node_id,
+                "rejected": True,
+                "rejection_reason": acceptance.reason,
+                "backtest_result": retry_backtest,
+                "optimized_strategy": optimized,
+                "escape_hatch_triggered": True,
+            }
+
+    dev_score = float(retry_backtest.get("sharpe_ratio", 0))
+    if logger:
+        logger.info(
+            f"{log_prefix.format(node_id=node_id)} dev_score={dev_score:.2f}"
+        )
+    return {
+        "node_id": node_id,
+        "dev_score": dev_score,
+        "backtest_result": retry_backtest,
+        "strategy_yaml": retry_yaml,
+        "optimized_strategy": optimized,
+        "escape_hatch_triggered": True,
+    }
 
 
 def _executor_node(  # noqa: PLR0913
@@ -736,6 +918,7 @@ def _executor_node(  # noqa: PLR0913
     backtest_service: BacktestService,
     logger: LoggerService,
     gate: AcceptanceGate | None = None,
+    context: RuntimeContext | None = None,
 ) -> dict:
     """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。
 
@@ -743,6 +926,9 @@ def _executor_node(  # noqa: PLR0913
     ``o_sharpe > b_sharpe + eps``，未通过的候选标记 rejected 并跳过 evidence
     更新，避免无效候选进入下游 OOS 合并门浪费 held-out 测试集回测算力。
     与 _evaluate_oos_and_merge 形成双层防护：训练集门 + 测试集门。
+
+    ADR-016 阶段 2：executor 算子缺口逃生口。backtest 因算子缺失失败时，
+    在 executor 内部同步研发算子并重试，不中断六步循环。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -758,6 +944,10 @@ def _executor_node(  # noqa: PLR0913
         strategy = state.get("strategy", {}) or {}
         suggestions = [node.hypothesis]
         previous_backtest = state.get("backtest_result", {})
+
+        # 初始化变量，确保 except 块可安全引用
+        optimized: dict[str, Any] = {}
+        strategy_yaml = ""
 
         try:
             optimized = research_agent.optimize_strategy(
@@ -815,12 +1005,22 @@ def _executor_node(  # noqa: PLR0913
         except Exception as e:
             if logger:
                 logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
-            results.append(
-                {
-                    "node_id": node_id,
-                    "error": str(e),
-                }
+
+            # 逃生口 1：算子缺口检测 + 同步研发 + 重试（ADR-016 阶段 2）
+            result = _handle_executor_exception(
+                error=e,
+                strategy_yaml=strategy_yaml,
+                optimized=optimized,
+                hypothesis=node.hypothesis,
+                node_id=node_id,
+                context=context,
+                develop_agent=develop_agent,
+                backtest_service=backtest_service,
+                previous_backtest=previous_backtest,
+                gate=gate,
+                logger=logger,
             )
+            results.append(result)
 
     return {
         "executor_results": results,
@@ -840,6 +1040,7 @@ def _executor_single_node(  # noqa: PLR0913
     backtest_service: BacktestService,
     logger: LoggerService,
     gate: AcceptanceGate | None = None,
+    context: RuntimeContext | None = None,
 ) -> dict:
     """单个假设的执行器（Phase 5 并行模式 — 每个 Send 一个实例）。
 
@@ -847,6 +1048,7 @@ def _executor_single_node(  # noqa: PLR0913
     返回单个 result dict（reducer _collect_executor_results 会累加）。
 
     ADR-009 收尾：同步接入 AcceptanceGate 训练集门。
+    ADR-016 阶段 2：同步接入算子缺口逃生口。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
@@ -859,6 +1061,10 @@ def _executor_single_node(  # noqa: PLR0913
     strategy = state.get("strategy", {}) or {}
     suggestions = [node.hypothesis]
     previous_backtest = state.get("backtest_result", {})
+
+    # 初始化变量，确保 except 块可安全引用
+    optimized: dict[str, Any] = {}
+    strategy_yaml = ""
 
     try:
         optimized = research_agent.optimize_strategy(
@@ -906,7 +1112,21 @@ def _executor_single_node(  # noqa: PLR0913
     except Exception as e:
         if logger:
             logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
-        result = {"node_id": node_id, "error": str(e)}
+
+        # 逃生口 1：算子缺口检测 + 同步研发 + 重试（ADR-016 阶段 2）
+        result = _handle_executor_exception(
+            error=e,
+            strategy_yaml=strategy_yaml,
+            optimized=optimized,
+            hypothesis=node.hypothesis,
+            node_id=node_id,
+            context=context,
+            develop_agent=develop_agent,
+            backtest_service=backtest_service,
+            previous_backtest=previous_backtest,
+            gate=gate,
+            logger=logger,
+        )
 
     return {"executor_results": [result]}
 
@@ -1509,6 +1729,7 @@ def create_htr_subgraph(
             backtest_service=backtest_service,
             logger=logger,
             gate=acceptance_gate,
+            context=context,
         ),
     )
     # Phase 5: 并行执行器（每个 Send 一个实例）
@@ -1521,6 +1742,7 @@ def create_htr_subgraph(
             backtest_service=backtest_service,
             logger=logger,
             gate=acceptance_gate,
+            context=context,
         ),
     )
     workflow.add_node(
