@@ -325,21 +325,21 @@ def download(
 @app.command()
 def agent(
     query: str = typer.Argument(
-        "分析净利润增长策略", help="用户查询（意图路由到策略/股票/事件子图）"
+        "分析净利润增长策略", help="用户查询（主智能体 ReAct 调度）"
     ),
 ) -> None:
-    """主 Agent —— 分析用户查询并路由到子图。"""
-    from long_earn.agent import create_main_agent
+    """主智能体 —— ReAct 任务分解 + 工具调度（ADR-016）。"""
     from long_earn.context_init import initialize_context
+    from long_earn.master_agent import MasterAgent
 
     ctx = initialize_context()
-    main_agent = create_main_agent(ctx)
+    master_agent = MasterAgent(ctx)
 
     ctx.logger.info(f"开始处理用户查询: {query}")
     typer.echo(f"正在处理: {query}\n")
 
     try:
-        result = main_agent.invoke({"user_query": query})
+        result = master_agent.invoke(query)
         typer.echo("\n" + "=" * 60)
         typer.echo("分析结果:")
         typer.echo("=" * 60)
