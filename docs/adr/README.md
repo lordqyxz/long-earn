@@ -13,12 +13,14 @@ ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完�
 | [ADR-007](007-unified-substance-architecture.md) | 物质-运动统一架构 | `Substance`（Pydantic）统一事件/关系/知识/策略经验；双索引（keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle |
 | [ADR-008](008-parallel-backtest-and-unified-templating.md) | 并行回测 + 统一模板渲染 | 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格。**A 部分（`${var}` 语法 + 纯函数渲染器）已被 ADR-011 废弃**，B 部分（并行回测编排）继续有效 |
 | [ADR-009](009-operator-catalog-and-operator-dev-subgraph.md) | 算子目录 + 算子研发子图 | 类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）；`prove_causality` 因果性证明作算子上线硬约束；operator_dev 异步闭环 + strategy_optimization 验收 |
-| [ADR-010](010-hypothesis-tree-refinement.md) | 假设树精炼 HTR | `strategy_rd` 子图升级为 Arbor HTR 六步循环（observe→ideate→select→dispatch→backpropagate→decide）+ 持久化假设树 + Walk-Forward held-out 合并门 |
+| [ADR-010](010-hypothesis-tree-refinement.md) | 假设树精炼 HTR | `strategy_rd` 子图 Arbor HTR 六步循环 + 持久化假设树 + Walk-Forward held-out 合并门。Enhanced by ADR-015（三道统计门）+ ADR-016（executor 有限逃生口） |
 | [ADR-011](011-unified-mustache-prompt-templating.md) | 统一 jinja2 + ChatPromptTemplate | `${var}` → `{{ var }}`（默认不 HTML 转义，与 JSON `{}` 不冲突）；多消息结构用 `MarkdownChatPromptTemplate` |
 | [ADR-012](012-persona-subgraph-skill-pack.md) | 大师智能节点技能包 | `MasterPersona` Protocol + `PersonaRegistry`，支持 stock_analysis / strategy_review / strategy_generate / result_synthesis 多 mode |
 | [ADR-013](013-backtest-accuracy-principles.md) | 回测引擎准确性原则与陷阱清单 | 七维分类框架（数据正确性/时序偏差/交易执行/市场微观结构/投资组合与风控/指标计算/工程与审计）+ 检测方法论 + 防护状态总览 |
 | [ADR-014](014-ontology-connector.md) | 本体论连接器 + DataConnector 全能力接入 | `Connector.get_concept` 作为上层唯一数据访问入口，aspect 字符串经 `ConceptResolver` 解析为 `ResolutionKind` |
 | [ADR-015](015-statistical-overfitting-gates.md) | 统计过拟合门与反馈闭环修复 | 三道统计门（Walk-Forward 稳定性 / DSR / PBO）+ 失败信号上行 + select 多样性修复；防 Q1/Q2 窗口不一致与 selection bias |
+| [ADR-016](016-hierarchical-agent-architecture.md) | 分层智能体架构 | 主智能体 ReAct 任务分解 + 子图工具化 + HTR 六步骨架保留 + executor 有限逃生口（算子缺口同步闭环）+ 硬约束不降级。自我进化拆为 ADR-017 |
+| [ADR-017](017-self-evolution-capability.md) | 自我进化能力 | 经验回写/热启动/元指标/失败反思/prompt自审。全自主 + 版本追溯。状态 Deferred，前置条件：ADR-015 统计门端到端验证 + ADR-016 主智能体落地 + 稳健策略基线产出 |
 
 ## 已废弃 / 已退役
 
