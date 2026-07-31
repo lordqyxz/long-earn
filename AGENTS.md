@@ -201,6 +201,7 @@ uv run pytest tests/integration/ -v        # 仅运行集成测试（需 .env �
 uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
 uv run lint-imports                        # 架构依赖校验
+uv run python scripts/check_deprecated_syntax.py  # 退役语法 grep 卡口（检测 ${var} / 路径 2 回退）
 uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 DuckDB 缓存（需 miniQMT 连接）
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
