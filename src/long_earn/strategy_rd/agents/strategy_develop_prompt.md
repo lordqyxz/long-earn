@@ -149,8 +149,8 @@ strategy:
   universe:
     type: csi500
     rebalance_freq: 20D
-  start_date: 2020-01-01
-  end_date: 2023-12-31
+  start_date: 2022-01-01
+  end_date: 2024-12-31
   signals:
     - type: operator
       op: filter_threshold
@@ -171,8 +171,8 @@ strategy:
   universe:
     type: gem
     rebalance_freq: 20D
-  start_date: 2020-01-01
-  end_date: 2023-12-31
+  start_date: 2022-01-01
+  end_date: 2024-12-31
   operator_factors:
     - op: returns
       alias: momentum
@@ -197,8 +197,8 @@ strategy:
   universe:
     type: main_board
     rebalance_freq: 20D
-  start_date: 2020-01-01
-  end_date: 2023-12-31
+  start_date: 2022-01-01
+  end_date: 2024-12-31
   signals:
     - type: operator
       op: filter_threshold
@@ -223,7 +223,7 @@ strategy:
     type: csi1000
     rebalance_freq: 20D
   start_date: 2022-01-01
-  end_date: 2025-12-31
+  end_date: 2024-12-31
   operator_factors:
     - op: returns
       alias: momentum_20
@@ -304,7 +304,7 @@ strategy:
 {
     "strategy_name": "ProfitGrowthStrategy",
     "description": "净利润同比增长率选股策略",
-    "strategy_yaml": "strategy:\\n  name: ProfitGrowthStrategy\\n  description: 选择净利润同比增长率超过20%的股票\\n  universe:\\n    type: csi500\\n  start_date: 2020-01-01\\n  end_date: 2023-12-31\\n  signals:\\n    - type: operator\\n      op: filter_threshold\\n      params: { field: net_profit_yoy, op: '>', value: 0.2 }\\n    - type: operator\\n      op: rank_top\\n      params: { field: net_profit_yoy, ascending: false, top: 10 }\\n  weights:\\n    method: equal",
+    "strategy_yaml": "strategy:\\n  name: ProfitGrowthStrategy\\n  description: 选择净利润同比增长率超过20%的股票\\n  universe:\\n    type: csi500\\n  start_date: 2022-01-01\\n  end_date: 2024-12-31\\n  signals:\\n    - type: operator\\n      op: filter_threshold\\n      params: { field: net_profit_yoy, op: '>', value: 0.2 }\\n    - type: operator\\n      op: rank_top\\n      params: { field: net_profit_yoy, ascending: false, top: 10 }\\n  weights:\\n    method: equal",
     "explanation": "选择净利润同比增长率超过 20% 的中证500股票，按增长率排序选取前10只，等权重配置"
 }
 ```

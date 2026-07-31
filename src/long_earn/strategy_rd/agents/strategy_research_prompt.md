@@ -17,44 +17,75 @@
 ## 目标市场
 {{ target_market }}
 
-### 行情数据（日频）
-| 字段名 | 说明 |
-|--------|------|
-| open | 开盘价 |
-| high | 最高价 |
-| low | 最低价 |
-| close | 收盘价 |
-| volume | 成交量 |
+### 可用字段
 
-### 财务数据（季度，已前向填充到日级别）
-| 字段名 | 说明 |
-|--------|------|
-| net_profit_yoy | 净利润同比增长率 |
-| revenue_yoy | 营业总收入同比增长率 |
-| roe | 净资产收益率 |
-| gross_margin | 销售毛利率 |
-| eps | 每股收益 |
-| net_profit | 净利润 |
-| revenue | 营业总收入 |
+行情数据（日频，单位：价格元 / 成交量股）：
+- `open`, `high`, `low`, `close`, `volume`
+
+财务数据（季度，已前向填充到日级别，基于真实公告日 PIT 对齐，杜绝未来函数）。
+所有财务字段已按真实公告日对齐，**直接读取即可，无需关心披露延迟**。
+
+#### 利润表（Income）—— 反映经营成果
+- `revenue`: 营业总收入（元，绝对值；蓝筹数百亿~数千亿，中小盘数亿~数十亿）
+- `net_profit`: 净利润（元，绝对值；含少数股东损益）
+- `eps`: 每股收益（元/股；常见 0.1~3.0，>1.0 视为盈利较强；估值 PE 的分母）
+- `research_expenses`: 研发费用（元，绝对值；研发强度=研发费用/revenue 是科技/医药核心指标）
+
+#### 资产负债表（Balance）—— 反映财务状况
+- `total_equity`: 所有者权益合计（元，即净资产；ROE 计算的分母）
+- `total_assets`: 总资产（元；= 流动资产 + 非流动资产）
+- `total_liabilities`: 总负债（元；= 流动负债 + 非流动负债）
+
+#### 现金流量表（CashFlow）—— 反映现金流转
+- `ocf`: 经营活动现金流净额（元；= 净利润 + 折旧摊销 ± 营运资本变动；
+  OCF 持续 > 净利润代表利润质量高，反之需警惕）
+- `capex`: 资本支出（元，购建固定资产等；自由现金流 FCF = OCF - capex 是价值创造核心指标）
+
+#### 主要指标表（Pershareindex，交易所预计算值，监管口径）
+- `bps`: 每股净资产（元/股；常见 3~15；PB 估值基础）
+- `ocf_per_share`: 每股经营现金流（元/股；与 eps 对比可判断利润含金量）
+- `debt_to_assets`: 资产负债率（比率 0~1；常见 0.3~0.6，>0.7 需警惕；银行/地产偏高）
+- `net_profit_margin`: 净利率（比率 0~1；常见 0.05~0.2，>0.2 为高盈利行业）
+- `roe_weighted`: 加权净资产收益率（比率 0~1；证监会第9号规则加权，监管口径；
+  常见 0.08~0.20，>0.15 视为优质企业，巴菲特标准；**优先于 roe 使用**）
+
+#### 衍生指标（Pershareindex 预计算优先，手算兜底）
+- `net_profit_yoy`: 净利润同比增长率（比率，可负；常见 -0.2~+0.5，>0.3 视为高成长；
+  注意分母为负时口径失真）
+- `revenue_yoy`: 营业收入同比增长率（比率；常见 -0.15~+0.4；应与 net_profit_yoy 匹配）
+- `roe`: 净资产收益率（比率 0~1；预计算缺失时手算兜底，年化系数粗糙：
+  Q1×4 / Q2×2 / Q3×4÷3 / Q4×1；优先用 `roe_weighted`）
+- `gross_margin`: 销售毛利率（比率 0~1；行业差异大：软件/医药>0.7，制造业 0.2~0.4，
+  零售<0.2；稳定或提升代表定价权）
+
+#### 字段使用要点
+- **绝对值 vs 比率**：revenue/net_profit/total_* 等是绝对值（元），不适合直接跨股票比较；
+  用比率字段（roe/gross_margin/debt_to_assets/*_yoy）做横截面筛选更合理
+- **成长性筛选**：用 `filter_threshold` 串联 `revenue_yoy > 0.2` 和 `net_profit_yoy > 0.2`
+- **质量筛选**：用 `arithmetic` 算子算 `ocf - net_profit`，再 `filter_threshold > 0`
+- **估值锚定**：ROE 持续 > 0.15 + 毛利率稳定是优质企业特征
+- **规避风险**：`debt_to_assets < 0.7`（财务稳健）
 
 ### 可用股票池类型
-| 类型代码 | 说明 | 适用场景 |
-|----------|------|---------|
-| csi300 | 沪深300成分股 | 大盘蓝筹 |
-| csi500 | 中证500成分股 | 中盘成长 |
-| csi1000 | 中证1000成分股 | 小盘高波动 |
-| sse50 | 上证50成分股 | 超大盘蓝筹 |
-| all_a | 全A股 | 全市场扫描，回测慢 |
-| main_board | 沪深主板 | 主板全市场 |
-| gem | 创业板 | 创业板全市场 |
-| star_board | 科创板 | 科技主题 |
+| 类型 | 说明 | 适用场景 |
+|------|------|---------|
+| `csi300` | 沪深300成分股 | 大盘蓝筹，流动性好 |
+| `csi500` | 中证500成分股 | 中盘股，成长性较高 |
+| `csi1000` | 中证1000成分股 | 小盘股，波动较大 |
+| `sse50` | 上证50成分股 | 超大盘蓝筹 |
+| `all_a` | 全A股 | 最广覆盖，但回测慢 |
+| `main_board` | 沪深主板 | 主板全市场 |
+| `gem` | 创业板 | 创业板全市场 |
+| `star_board` | 科创板 | 科创板全市场 |
+| `main_board+gem` | 主板+创业板 | 沪深除科创板所有标的（默认推荐） |
+| `main_board+star_board` | 主板+科创板 | 主板+科创板 |
 
-> **股票池选择原则**：根据策略风格与市场环境主动选择股票池，**不要默认使用任何一种**。
-> 大盘蓝筹 → csi300/sse50；中盘成长 → csi500；小盘高波动 → csi1000/gem；
-> 全市场扫描 → main_board/all_a；科技主题 → star_board。
-
-### 可用表达式函数
-shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
+**选择原则**：根据策略风格与市场环境主动选择股票池，**不要默认使用任何一种**。
+- 大盘蓝筹 → `csi300` / `sse50`
+- 中盘成长 → `csi500`
+- 小盘高波动 → `csi1000` / `gem`
+- 全市场扫描 → `main_board` / `all_a`
+- 科技主题 → `star_board`
 
 ## 策略设计框架
 
@@ -127,8 +158,8 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
         "sector_limit": "单一行业不超过 30%"
     },
     "backtest_params": {
-        "start_date": "2020-01-01",
-        "end_date": "2023-12-31",
+        "start_date": "2022-01-01",
+        "end_date": "2024-12-31",
         "benchmark": "csi300",
         "universe": "main_board+gem"
     },
@@ -198,8 +229,8 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
         "sector_limit": null
     },
     "backtest_params": {
-        "start_date": "2020-01-01",
-        "end_date": "2023-12-31",
+        "start_date": "2022-01-01",
+        "end_date": "2024-12-31",
         "benchmark": "csi300",
         "universe": "main_board+gem"
     },
@@ -223,76 +254,50 @@ shift(field, n), abs(), max(), min(), sum(), mean(), std(), log(), exp(), sqrt()
 
 ## 输出格式
 
-请严格按照以下 **JSON Schema** 返回：
+请输出 JSON 格式的策略研究方案，**直接输出纯 JSON，不要用 markdown 代码块包裹**：
 
 ```json
 {
-    "type": "object",
-    "properties": {
-        "strategy_name": {"type": "string", "description": "策略名称（英文驼峰命名）"},
-        "strategy_type": {"type": "string", "description": "策略类型（基本面/技术面/多因子等）"},
-        "rationale": {"type": "string", "description": "策略理论基础和逻辑依据"},
-        "investment_logic": {"type": "string", "description": "具体投资逻辑，清晰易懂"},
-        "factors_used": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "field": {"type": "string", "description": "必须使用可用字段名，如 net_profit_yoy、roe、close 等"},
-                    "type": {"type": "string"},
-                    "calculation": {"type": "string"}
-                }
-            }
-        },
-        "position_management": {
-            "type": "object",
-            "properties": {
-                "selection_method": {"type": "string"},
-                "weight_method": {"type": "string"},
-                "max_position": {"type": "number"},
-                "rebalance_freq": {"type": "string"}
-            }
-        },
-        "risk_control": {
-            "type": "object",
-            "properties": {
-                "stop_loss": {"type": ["string", "null"]},
-                "position_limit": {"type": ["string", "null"]},
-                "sector_limit": {"type": ["string", "null"]}
-            }
-        },
-        "backtest_params": {
-            "type": "object",
-            "properties": {
-                "start_date": {"type": "string"},
-                "end_date": {"type": "string"},
-                "benchmark": {"type": "string"},
-                "universe": {"type": "string", "description": "必须使用可用股票池类型，如 csi300、csi500、main_board+gem 等"}
-            }
-        },
-        "expected_metrics": {
-            "type": "object",
-            "properties": {
-                "annual_return": {"type": "string"},
-                "max_drawdown": {"type": "string"},
-                "sharpe_ratio": {"type": "string"}
-            }
-        },
-        "potential_risks": {"type": "array", "items": {"type": "string"}},
-        "improvement_directions": {"type": "array", "items": {"type": "string"}}
+    "strategy_name": "策略名称（英文驼峰命名）",
+    "strategy_type": "策略类型（基本面/技术面/多因子等）",
+    "rationale": "策略理论基础和逻辑依据",
+    "investment_logic": "具体投资逻辑，清晰易懂",
+    "factors_used": [
+        {"name": "因子名", "field": "可用字段名", "type": "因子类型"}
+    ],
+    "position_management": {
+        "selection_method": "选股方法",
+        "weight_method": "等权重",
+        "max_position": 10,
+        "rebalance_freq": "月度调仓"
     },
-    "required": ["strategy_name", "strategy_type", "rationale", "investment_logic", "factors_used",
-                 "position_management", "risk_control", "backtest_params", "expected_metrics",
-                 "potential_risks", "improvement_directions"]
+    "risk_control": {
+        "stop_loss": "止损规则或 null",
+        "position_limit": "仓位限制或 null"
+    },
+    "backtest_params": {
+        "start_date": "2022-01-01",
+        "end_date": "2024-12-31",
+        "benchmark": "csi300",
+        "universe": "main_board+gem"
+    },
+    "expected_metrics": {
+        "annual_return": "预期年化收益",
+        "max_drawdown": "预期最大回撤",
+        "sharpe_ratio": "预期夏普比率"
+    },
+    "potential_risks": ["风险1", "风险2"],
+    "improvement_directions": ["改进方向1", "改进方向2"]
 }
 ```
+
+> 日期范围使用训练集区间（2022-01-01 ~ 2024-12-31），不得使用其他区间。
 
 ## 关键约束（必须遵守）
 
 1. **逻辑清晰**：策略逻辑必须清晰可解释，不能是黑箱
 2. **YAML DSL 可实现**：策略必须能通过 YAML DSL 描述并回测，不要生成 Python 代码
-3. **仅使用可用字段**：factors_used 中的 field 必须来自可用数据字段列表（net_profit_yoy, revenue_yoy, roe, gross_margin, eps, close, open, high, low, volume, net_profit, revenue）
+3. **仅使用可用字段**：factors_used 中的 field 必须来自上方可用字段列表（open, high, low, close, volume, revenue, net_profit, eps, research_expenses, total_equity, total_assets, total_liabilities, ocf, capex, bps, ocf_per_share, debt_to_assets, net_profit_margin, roe_weighted, net_profit_yoy, revenue_yoy, roe, gross_margin）
 4. **仅使用可用股票池**：backtest_params.universe 必须使用可用股票池类型（csi300, csi500, csi1000, sse50, all_a, main_board, gem, star_board, main_board+gem, main_board+star_board）。**默认推荐 `main_board+gem`（沪深除科创板所有标的）**，除非 idea 明确指定其他池子
 5. **风险控制**：必须包含具体的风险控制措施
 6. **避免过拟合**：考虑样本外表现，不能过度优化参数

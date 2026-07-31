@@ -27,11 +27,11 @@ def _format_operator_catalog() -> str:
     try:
         from long_earn.backtest.operators import list_operators  # noqa: PLC0415
     except Exception:
-        return "（算子目录加载失败，仅用表达式路径）"
+        return "（算子目录加载失败，无法提供算子清单）"
 
     ops = list_operators()
     if not ops:
-        return "（算子目录为空，仅用表达式路径）"
+        return "（算子目录为空，无法提供算子清单）"
 
     lines: list[str] = []
     for name in sorted(ops):

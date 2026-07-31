@@ -5,6 +5,7 @@ from long_earn.core.llm_utils import parse_llm_json
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
+from .strategy_develop_agent import _format_operator_catalog
 from .strategy_research_prompt import (
     create_strategy_research_prompt,
     render_strategy_optimize_prompt,
@@ -910,6 +911,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             suggestions_text=suggestions_str,
             backtest_history=backtest_history,
             market_characteristics=market_characteristics,
+            operator_catalog=_format_operator_catalog(),
         )
         response = self.llm_service.invoke(prompt)
 
