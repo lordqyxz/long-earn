@@ -239,7 +239,11 @@ class TestNodeByNodeCheckpoint:
         checkpointer: MemorySaver,
         thread_config: dict,
     ):
-        """executor 执行后应有策略 YAML 与回测结果"""
+        """executor 执行后应有回测结果与执行器结果
+
+        策略可能被 AcceptanceGate 拒绝（退化策略），此时 strategy_yaml 为空，
+        但 executor_results 和 backtest_result 仍应有值。
+        """
         graph = self._build_graph(
             context, checkpointer, interrupt_nodes=["backpropagate"]
         )
@@ -249,19 +253,32 @@ class TestNodeByNodeCheckpoint:
         snapshot = graph.get_state(thread_config)
         values = snapshot.values
 
-        # executor 应产出 strategy_yaml（或 optimized_strategy_yaml）
-        strategy_yaml = (
-            values.get("strategy_yaml")
-            or values.get("optimized_strategy_yaml")
-        )
-        assert strategy_yaml, "executor 应产出策略 YAML"
-        assert isinstance(strategy_yaml, str)
-        assert len(strategy_yaml) > 0
+        # executor 应产出 executor_results（无论策略是否被接受）
+        executor_results = values.get("executor_results")
+        assert executor_results is not None, "executor 应产出 executor_results"
+        assert isinstance(executor_results, list)
+        assert len(executor_results) > 0, "至少应有 1 个执行结果"
 
-        # executor 应产出 backtest_result
+        # executor 应产出 backtest_result（即使策略被拒绝也有回测结果）
         backtest_result = values.get("backtest_result")
         assert backtest_result is not None, "executor 应产出回测结果"
         assert isinstance(backtest_result, dict)
+
+        # 如果策略未被拒绝，应有 strategy_yaml
+        # 如果被 AcceptanceGate 拒绝，executor_results[0] 应有 rejected=True
+        first_result = executor_results[0]
+        if first_result.get("rejected"):
+            # 策略被正确拒绝 — 验证拒绝原因存在
+            assert first_result.get("rejection_reason"), (
+                "被拒绝的策略应有拒绝原因"
+            )
+        else:
+            # 策略被接受 — 应有 strategy_yaml
+            strategy_yaml = (
+                values.get("strategy_yaml")
+                or values.get("optimized_strategy_yaml")
+            )
+            assert strategy_yaml, "被接受的策略应有 strategy_yaml"
 
     def test_backpropagate_updates_tree(
         self,
@@ -419,13 +436,14 @@ class TestInterruptResume:
         graph2 = create_htr_subgraph(context, checkpointer=checkpointer)
         result = graph2.invoke(None, config=thread_config)
 
-        # 续跑后应有策略和回测结果
-        strategy_yaml = (
-            result.get("strategy_yaml")
-            or result.get("optimized_strategy_yaml")
+        # 续跑后应有回测结果（策略可能被 AcceptanceGate 拒绝，但回测仍执行）
+        assert result is not None
+        assert result.get("backtest_result") is not None, (
+            "续跑后应有回测结果"
         )
-        assert strategy_yaml, "续跑后应有策略 YAML"
-        assert result.get("backtest_result") is not None, "续跑后应有回测结果"
+        assert result.get("hypothesis_tree") is not None, (
+            "续跑后应有 hypothesis_tree"
+        )
 
 
 # ── 测试 3：线程复用 ──────────────────────────────────────────────
@@ -555,15 +573,12 @@ class TestStrategyResearchServiceCheckpoint:
             thread_id=thread_id,
         )
 
-        # 验证结果完整
+        # 验证结果完整（策略可能被拒绝，但回测结果应有值）
         assert result is not None
-        assert isinstance(result.strategy_yaml, str)
-        assert len(result.strategy_yaml) > 0, "应产出策略 YAML"
         assert result.backtest_result is not None
         assert isinstance(result.backtest_result, dict)
 
         # 验证 checkpoint 状态已保存
-        # 用同一 checkpointer 重新构建子图，检查线程完成状态
         from long_earn.strategy_rd.htr_subgraph import (
             create_htr_subgraph as create_strategy_rd_subgraph,
         )
@@ -602,7 +617,7 @@ class TestStrategyResearchServiceCheckpoint:
             checkpointer=checkpointer,
             thread_id=thread_id,
         )
-        assert result1.strategy_yaml
+        assert result1 is not None
 
         # 第二次运行同一 thread_id — 应复用结果
         result2 = service.run_round(
@@ -613,8 +628,9 @@ class TestStrategyResearchServiceCheckpoint:
         )
 
         # 结果应一致（复用而非重跑）
-        assert result2.strategy_yaml == result1.strategy_yaml, (
-            "已完成线程应复用结果，策略 YAML 应一致"
+        # backtest_result 应存在且一致
+        assert result2.backtest_result == result1.backtest_result, (
+            "已完成线程应复用结果，回测结果应一致"
         )
 
     def test_run_loop_with_checkpoint_multi_round(
