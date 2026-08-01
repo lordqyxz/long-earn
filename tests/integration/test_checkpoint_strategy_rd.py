@@ -269,7 +269,11 @@ class TestNodeByNodeCheckpoint:
         checkpointer: MemorySaver,
         thread_config: dict,
     ):
-        """backpropagate 执行后假设树应更新"""
+        """backpropagate 执行后假设树应更新
+
+        HTR _backpropagate_node 将实验结果抽象为洞察并传播到父节点，
+        更新 hypothesis_tree（不设置 reflection 字段，那是原 subgraph 的字段）。
+        """
         graph = self._build_graph(
             context, checkpointer, interrupt_nodes=["decide"]
         )
@@ -279,13 +283,15 @@ class TestNodeByNodeCheckpoint:
         snapshot = graph.get_state(thread_config)
         values = snapshot.values
 
-        # backpropagate 应产出 reflection
-        reflection = values.get("reflection")
-        assert reflection is not None, "backpropagate 应产出 reflection"
-
-        # 假设树应已更新（节点状态变化）
+        # backpropagate 应更新 hypothesis_tree（洞察传播后）
         tree = values.get("hypothesis_tree")
-        assert tree is not None
+        assert tree is not None, "backpropagate 后 hypothesis_tree 应存在"
+
+        # executor_results 应保留（backpropagate 读取但不删除）
+        executor_results = values.get("executor_results")
+        assert executor_results is not None, (
+            "executor_results 应在 backpropagate 后保留"
+        )
 
     def test_decide_makes_decision(
         self,
@@ -293,7 +299,11 @@ class TestNodeByNodeCheckpoint:
         checkpointer: MemorySaver,
         thread_config: dict,
     ):
-        """decide 执行后应有决策结果"""
+        """decide 执行后应有决策结果
+
+        HTR _decide_node 设置 result（action: merge/continue/stop）和 iteration，
+        不设置 should_continue（那是原 subgraph 的字段）。
+        """
         graph = self._build_graph(
             context, checkpointer, interrupt_nodes=["save_tree"]
         )
@@ -303,9 +313,16 @@ class TestNodeByNodeCheckpoint:
         snapshot = graph.get_state(thread_config)
         values = snapshot.values
 
-        # decide 应设置 should_continue（True=继续循环，False=停止）
-        should_continue = values.get("should_continue")
-        assert should_continue is not None, "decide 应设置 should_continue"
+        # decide 应设置 result（action: merge/continue/stop）
+        result = values.get("result")
+        assert result is not None, "decide 应设置 result"
+        assert result in ("merge", "continue", "stop"), (
+            f"result 应为 merge/continue/stop，实际: {result}"
+        )
+
+        # iteration 应递增
+        iteration = values.get("iteration")
+        assert iteration is not None, "decide 应设置 iteration"
 
         # 假设树应存在
         assert values.get("hypothesis_tree") is not None
