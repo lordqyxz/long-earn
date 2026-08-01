@@ -225,30 +225,26 @@ class TestPhase4MemoryIntegration:
 
 
 class TestPhase5ParallelDispatch:
-    """Phase 5: Send fan-out 并行分发。"""
+    """ADR-010 阶段 5 收尾（2026-08）：Send fan-out 已移除，dispatch 始终走 executor。"""
 
     def test_dispatch_cond_single_returns_executor(self):
-        """单假设时 _dispatch_cond 返回 'executor'（串行）。"""
+        """单假设时 _dispatch_cond 返回 'executor'。"""
         from long_earn.strategy_rd.htr_subgraph import _dispatch_cond
 
         state = {"selected_leaves": ["node_1"]}
         result = _dispatch_cond(state)  # type: ignore[arg-type]
         assert result == "executor"
 
-    def test_dispatch_cond_multi_returns_send_list(self):
-        """多假设时 _dispatch_cond 返回 Send 列表（并行 fan-out）。"""
-        from langgraph.types import Send
-
+    def test_dispatch_cond_multi_always_returns_executor(self):
+        """多假设时 _dispatch_cond 仍返回 'executor'（批量并行在 executor 内部）。"""
         from long_earn.strategy_rd.htr_subgraph import _dispatch_cond
 
         state = {"selected_leaves": ["node_1", "node_2", "node_3"]}
         result = _dispatch_cond(state)  # type: ignore[arg-type]
-        assert isinstance(result, list)
-        assert len(result) == 3
-        assert all(isinstance(s, Send) for s in result)
+        assert result == "executor"
 
-    def test_subgraph_with_parallel_compiles(self):
-        """含 executor_single 节点的子图应能编译。"""
+    def test_subgraph_without_executor_single_compiles(self):
+        """删除 executor_single 节点后子图仍能编译。"""
         from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
 
         context = _make_mock_context()
@@ -325,9 +321,7 @@ class TestMaxSelectFanOut:
         assert call_kwargs.get("max_select") == 1
 
     def test_fanout_flow_select_then_dispatch(self):
-        """端到端：select 2 个 → dispatch_cond 返回 2 个 Send。"""
-        from langgraph.types import Send
-
+        """端到端：select 2 个 -> dispatch_cond 始终返回 executor（批量在内部）。"""
         from long_earn.strategy_rd.htr_subgraph import (
             _dispatch_cond,
             _select_node,
@@ -353,16 +347,10 @@ class TestMaxSelectFanOut:
             max_select=2,
         )
 
-        # 将 select 结果送入 dispatch_cond
+        # 将 select 结果送入 dispatch_cond - 始终返回 "executor"
         dispatch_state = {"selected_leaves": select_result["selected_leaves"]}
         dispatch_result = _dispatch_cond(dispatch_state)  # type: ignore[arg-type]
-
-        # 2 个假设应触发 Send fan-out
-        assert isinstance(dispatch_result, list)
-        assert len(dispatch_result) == 2
-        assert all(isinstance(s, Send) for s in dispatch_result)
-        # 每个 Send 的目标节点应是 executor_single
-        assert all(s.node == "executor_single" for s in dispatch_result)
+        assert dispatch_result == "executor"
 
     def test_subgraph_reads_htr_max_select_from_config(self):
         """create_htr_subgraph 应从 config.htr_max_select 读取并行度。"""
@@ -376,10 +364,10 @@ class TestMaxSelectFanOut:
 
 
 class TestParallelFanOutGraphInvoke:
-    """层 5 修复回归：真实 graph.invoke 触发 executor_single 并行写。
+    """ADR-010 阶段 5 收尾（2026-08）：executor 内部批量并行回归。
 
-    验证 state.py 的 _collect_executor_results reducer 生效（修 Annotated|None 缺陷）
-    + executor 节点不写 tree + backpropagate 接管 tree 更新（修并行覆盖）。
+    验证 state.py 的 _collect_executor_results reducer 生效
+    + executor 节点不写 tree + backpropagate 接管 tree 更新。
     """
 
     def test_parallel_fanout_invoke_no_crash_and_tree_updated(self):
@@ -392,13 +380,19 @@ class TestParallelFanOutGraphInvoke:
 
         context = _make_mock_context()
         context.config.htr_max_select = 2
-        # context.backtest_service 是 MagicMock(spec=BacktestService)，直接设 return_value
-        # （patch BacktestServiceImpl.run 类方法不影响 mock 实例）
-        context.backtest_service.run.return_value = {
-            "sharpe_ratio": 1.3,
-            "total_return": 0.1,
-            "strategy_diagnostics": {"degenerate": False},
-        }
+        # ADR-010 阶段 5 收尾：executor 调 run_candidates 批量回测（非 run）
+        context.backtest_service.run_candidates.return_value = [
+            {
+                "sharpe_ratio": 1.3,
+                "total_return": 0.1,
+                "strategy_diagnostics": {"degenerate": False},
+            },
+            {
+                "sharpe_ratio": 1.3,
+                "total_return": 0.1,
+                "strategy_diagnostics": {"degenerate": False},
+            },
+        ]
         # _decide_node 会调 run_oos 取 oos_sharpe，必须返回真实 dict 否则 MagicMock 触发 format 错误
         context.backtest_service.run_oos.return_value = {"oos_sharpe": 1.5}
 
