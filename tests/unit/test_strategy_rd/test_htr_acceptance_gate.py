@@ -1,7 +1,11 @@
 """HTR 接入 AcceptanceGate 训练集门测试（ADR-009 收尾）。
 
-验证 _executor_node / _executor_single_node 在优化版 sharpe 严格提升时接受、
+验证 _executor_node 在优化版 sharpe 严格提升时接受、
 sharpe 退化时拒绝（候选标记 rejected，不更新 evidence）。
+
+ADR-010 阶段 5 收尾（2026-08）：_executor_single_node 已删除（Send fan-out
+伪并行移除），多候选由 _executor_node 内部三阶段批量处理。测试改用
+run_candidates mock 验证批量路径的 AcceptanceGate 语义。
 """
 
 from __future__ import annotations
@@ -11,10 +15,7 @@ from typing import Any
 import pytest
 
 from long_earn.strategy_optimization.acceptance import AcceptanceGate
-from long_earn.strategy_rd.htr_subgraph import (
-    _executor_node,
-    _executor_single_node,
-)
+from long_earn.strategy_rd.htr_subgraph import _executor_node
 from long_earn.strategy_rd.hypothesis_tree import HypothesisTree
 
 
@@ -39,13 +40,17 @@ class _FakeDevelopAgent:
 
 
 class _FakeBacktestService:
-    """run() 回传固定 result 字典。"""
+    """run_candidates() 回传固定 result 字典列表（与 run() 同结构）。
+
+    ADR-010 阶段 5 收尾：_executor_node 改调 run_candidates 批量回测，
+    不再逐个调 run()。长度与传入 yamls 对齐。
+    """
 
     def __init__(self, result: dict[str, Any]) -> None:
         self._result = result
 
-    def run(self, *, strategy_yaml, start_date="", end_date=""):
-        return self._result
+    def run_candidates(self, *, strategy_yamls, start_date="", end_date="", universe_type=""):
+        return [self._result for _ in strategy_yamls]
 
 
 class _FakeLogger:
@@ -70,7 +75,6 @@ def _make_tree_data() -> dict[str, Any]:
     """用 HypothesisTree API 构造一棵单节点树并序列化为 dict。"""
     tree = HypothesisTree(run_id="test_run")
     tree.init_root(hypothesis="测试假设", direction="", strategy_ref="")
-    # 把根节点 id 改为 n1 以便测试引用（保持 root_id 不变即可，这里用 root）
     return tree.serialize()
 
 
@@ -91,7 +95,7 @@ def test_executor_node_rejects_sharpe_regression() -> None:
         "strategy": {"name": "base"},
         "backtest_result": _bt(1.5),  # baseline sharpe 1.5
     }
-    # 优化版 sharpe 0.8 < baseline 1.5 → AcceptanceGate 拒绝
+    # 优化版 sharpe 0.8 < baseline 1.5 -> AcceptanceGate 拒绝
     result = _executor_node(
         state,  # type: ignore[arg-type]
         research_agent=_FakeResearchAgent({"name": "optimized"}),
@@ -113,7 +117,7 @@ def test_executor_node_accepts_sharpe_improvement() -> None:
         "strategy": {"name": "base"},
         "backtest_result": _bt(1.0),  # baseline sharpe 1.0
     }
-    # 优化版 sharpe 1.5 > baseline 1.0 + eps → AcceptanceGate 接受
+    # 优化版 sharpe 1.5 > baseline 1.0 + eps -> AcceptanceGate 接受
     result = _executor_node(
         state,  # type: ignore[arg-type]
         research_agent=_FakeResearchAgent({"name": "optimized"}),
@@ -126,26 +130,6 @@ def test_executor_node_accepts_sharpe_improvement() -> None:
     assert result["executor_results"][0].get("rejected") is not True
 
 
-def test_executor_single_node_rejects_sharpe_regression() -> None:
-    """并行模式同样接入 AcceptanceGate — sharpe 退化时拒绝。"""
-    state: dict[str, Any] = {
-        "hypothesis_tree": _make_tree_data(),
-        "strategy": {"name": "base"},
-        "backtest_result": _bt(2.0),  # baseline sharpe 2.0
-    }
-    result = _executor_single_node(
-        state,  # type: ignore[arg-type]
-        node_id="root",
-        research_agent=_FakeResearchAgent({"name": "optimized"}),
-        develop_agent=_FakeDevelopAgent("strategy: name: opt"),
-        backtest_service=_FakeBacktestService(_bt(0.5)),  # 优化版 0.5 < 2.0
-        logger=_FakeLogger(),
-        gate=AcceptanceGate(),
-    )
-    assert result["executor_results"][0]["rejected"] is True
-    assert "dev_score" not in result["executor_results"][0]
-
-
 def test_executor_node_skip_gate_when_none() -> None:
     """gate=None 时跳过校验，保持向后兼容（既有测试无 gate 注入）。"""
     state: dict[str, Any] = {
@@ -154,7 +138,7 @@ def test_executor_node_skip_gate_when_none() -> None:
         "strategy": {"name": "base"},
         "backtest_result": _bt(1.0),
     }
-    # 优化版 sharpe 0.5 < 1.0，但 gate=None → 不校验，直接接受
+    # 优化版 sharpe 0.5 < 1.0，但 gate=None -> 不校验，直接接受
     result = _executor_node(
         state,  # type: ignore[arg-type]
         research_agent=_FakeResearchAgent({"name": "optimized"}),
@@ -181,7 +165,7 @@ def test_executor_node_accepts_initial_baseline_when_no_baseline() -> None:
         "strategy": {"name": "base"},
         "backtest_result": {},  # 首次循环 baseline 为空
     }
-    # 优化版 sharpe=-1.5（负值），但基线无 sharpe → 接受作为初始基线
+    # 优化版 sharpe=-1.5（负值），但基线无 sharpe -> 接受作为初始基线
     result = _executor_node(
         state,  # type: ignore[arg-type]
         research_agent=_FakeResearchAgent({"name": "optimized"}),
@@ -197,7 +181,7 @@ def test_executor_node_accepts_initial_baseline_when_no_baseline() -> None:
 def test_acceptance_gate_initial_baseline_accepts_negative_sharpe() -> None:
     """单元测试 AcceptanceGate：基线无 sharpe 时接受负 sharpe 策略。"""
     gate = AcceptanceGate()
-    # 基线为空，优化版有负 sharpe → 接受作为初始基线
+    # 基线为空，优化版有负 sharpe -> 接受作为初始基线
     result = gate.evaluate(None, _bt(-0.8, ret=-0.05))
     assert result.accepted is True
     assert "初始基线" in result.reason
@@ -206,7 +190,7 @@ def test_acceptance_gate_initial_baseline_accepts_negative_sharpe() -> None:
 def test_acceptance_gate_initial_baseline_rejects_no_sharpe() -> None:
     """单元测试 AcceptanceGate：基线无 sharpe 且优化版也无 sharpe 时拒绝。"""
     gate = AcceptanceGate()
-    # 优化版无 sharpe 字段 → 拒绝
+    # 优化版无 sharpe 字段 -> 拒绝
     optimized = {"total_return": 0.1, "strategy_diagnostics": {"degenerate": False}}
     result = gate.evaluate(None, optimized)
     assert result.accepted is False

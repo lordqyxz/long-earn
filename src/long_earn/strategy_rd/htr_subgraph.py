@@ -11,7 +11,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
 
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
 from long_earn.strategy_rd.agents.strategy_research_agent import StrategyResearchAgent
@@ -674,67 +673,22 @@ def _select_node(
 def _dispatch_node(
     state: State,
     logger: LoggerService,
-) -> dict | list[Send]:
-    """分发阶段 — Phase 5: branching_factor > 1 时用 Send fan-out 并行。
-
-    串行模式（selected_leaves 长度 ≤ 1）：直接传递到 executor。
-    并行模式（长度 > 1）：返回 Send 列表，每个假设一个 executor_single 实例。
+) -> dict:
+    """分发阶段 - ADR-010 阶段 5 收尾（2026-08）：删除 Send fan-out 伪并行，
+    始终走串行 executor 节点。多候选由 _executor_node 内部三阶段批量并行处理
+    （阶段1 逐候选 develop -> 阶段2 run_candidates 进程池批量回测 -> 阶段3 gate）。
     """
     selected = state.get("selected_leaves", []) or []
     if logger:
-        logger.info(f"[HTR-分发] 分发 {len(selected)} 个假设")
-
-    # 串行模式：≤1 个假设，直接传递到 executor
-    if len(selected) <= 1:
-        return {"executor_results": []}
-
-    # 并行模式：>1 个假设，用 Send fan-out
-    return {"executor_results": []}  # 串行 fallback
+        logger.info(f"[HTR-分发] 分发 {len(selected)} 个假设（executor 内部批量）")
+    return {"executor_results": []}
 
 
 def _dispatch_cond(
-    state: State,
-) -> str | list[Send]:
-    """分发路由：多假设 → Send fan-out 到 executor_single；单假设 → executor。"""
-    selected = state.get("selected_leaves", []) or []
-
-    if len(selected) > 1:
-        return [
-            Send(
-                "executor_single",
-                {
-                    **state,
-                    "_parallel_node_id": node_id,
-                },
-            )
-            for node_id in selected
-        ]
+    state: State,  # noqa: ARG001
+) -> str:
+    """分发路由 - ADR-010 阶段 5 收尾：始终返回 executor（删除 Send fan-out）。"""
     return "executor"
-
-
-def _executor_single_wrapper(  # noqa: PLR0913
-    state: dict[str, Any],
-    research_agent: StrategyResearchAgent,
-    develop_agent: StrategyDevelopAgent,
-    backtest_service: BacktestService,
-    logger: LoggerService,
-    gate: AcceptanceGate | None = None,
-    context: RuntimeContext | None = None,
-) -> dict:
-    """Phase 5 并行执行器入口 — 从 Send payload 提取 node_id 调 _executor_single_node。"""
-    node_id = state.get("_parallel_node_id", "")
-    if not node_id:
-        return {"executor_results": []}
-    return _executor_single_node(
-        state,  # type: ignore[arg-type]
-        node_id=node_id,
-        research_agent=research_agent,
-        develop_agent=develop_agent,
-        backtest_service=backtest_service,
-        logger=logger,
-        gate=gate,
-        context=context,
-    )
 
 
 def _handle_executor_exception(  # noqa: PLR0913
@@ -911,6 +865,95 @@ def _process_retry_success(  # noqa: PLR0913
     }
 
 
+def _develop_one_candidate(  # noqa: PLR0913
+    node: Any,
+    strategy: dict[str, Any],
+    previous_backtest: dict[str, Any],
+    research_agent: StrategyResearchAgent,
+    develop_agent: StrategyDevelopAgent,
+    backtest_service: BacktestService,
+    logger: LoggerService,
+    gate: AcceptanceGate | None,
+    context: RuntimeContext | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """阶段1辅助：对单个候选 optimize->develop。
+
+    成功返回 (developed_dict, None)；失败走逃生口返回 (None, escape_result)。
+    逃生口 result 带 escape_hatch_triggered 标志，阶段3跳过避免 double-gate。
+    """
+    optimized: dict[str, Any] = {}
+    strategy_yaml = ""
+    try:
+        optimized = research_agent.optimize_strategy(
+            strategy=strategy,
+            improvement_suggestions=[node.hypothesis],
+            previous_backtest=previous_backtest,
+        )
+        strategy_yaml = develop_agent.develop_strategy(optimized)
+        return (
+            {
+                "node_id": node.id,
+                "strategy_yaml": strategy_yaml,
+                "optimized": optimized,
+            },
+            None,
+        )
+    except Exception as e:
+        if logger:
+            logger.error(f"[HTR-执行] 节点 {node.id} 失败: {e}")
+        result = _handle_executor_exception(
+            error=e,
+            strategy_yaml=strategy_yaml,
+            optimized=optimized,
+            hypothesis=node.hypothesis,
+            node_id=node.id,
+            context=context,
+            develop_agent=develop_agent,
+            backtest_service=backtest_service,
+            previous_backtest=previous_backtest,
+            gate=gate,
+            logger=logger,
+        )
+        return None, result
+
+
+def _gate_check_candidate(
+    developed: dict[str, Any],
+    backtest_result: dict[str, Any],
+    previous_backtest: dict[str, Any],
+    gate: AcceptanceGate | None,
+    logger: LoggerService,
+) -> dict[str, Any]:
+    """阶段3辅助：对单个候选做 AcceptanceGate 校验，返回 result dict。"""
+    if gate is not None:
+        acceptance = gate.evaluate(previous_backtest, backtest_result)
+        if not acceptance.accepted:
+            if logger:
+                logger.warning(
+                    f"[HTR-执行] 节点 {developed['node_id']} 被 AcceptanceGate 拒绝: "
+                    f"{acceptance.reason}"
+                )
+            return {
+                "node_id": developed["node_id"],
+                "rejected": True,
+                "rejection_reason": acceptance.reason,
+                "backtest_result": backtest_result,  # ADR-015 A1
+                "optimized_strategy": developed["optimized"],
+            }
+    dev_score = float(backtest_result.get("sharpe_ratio", 0))
+    if logger:
+        logger.info(
+            f"[HTR-执行] 节点 {developed['node_id']} dev_score={dev_score:.2f}"
+        )
+    return {
+        "node_id": developed["node_id"],
+        "dev_score": dev_score,
+        "backtest_result": backtest_result,
+        "strategy_yaml": developed["strategy_yaml"],
+        "optimized_strategy": developed["optimized"],
+    }
+
+
 def _executor_node(  # noqa: PLR0913
     state: State,
     research_agent: StrategyResearchAgent,
@@ -920,7 +963,7 @@ def _executor_node(  # noqa: PLR0913
     gate: AcceptanceGate | None = None,
     context: RuntimeContext | None = None,
 ) -> dict:
-    """执行器 — 对选中的假设执行 optimize→develop→backtest→refine 循环。
+    """执行器 - 对选中的假设执行 optimize->develop->backtest->refine 循环。
 
     ADR-009 收尾：接入 AcceptanceGate 作为训练集门。优化版回测后立即校验
     ``o_sharpe > b_sharpe + eps``，未通过的候选标记 rejected 并跳过 evidence
@@ -929,206 +972,88 @@ def _executor_node(  # noqa: PLR0913
 
     ADR-016 阶段 2：executor 算子缺口逃生口。backtest 因算子缺失失败时，
     在 executor 内部同步研发算子并重试，不中断六步循环。
+
+    ADR-010 阶段 5 收尾（2026-08）：删除 Send fan-out 伪并行，改为三阶段批量：
+    ①逐候选 optimize->develop（LLM IO 密集）；②backtest_service.run_candidates
+    批量回测（进程池真并行 + 共享面板，ADR-008 B5/B6）；③逐候选 AcceptanceGate。
+    逃生口路径（_handle_executor_exception）保持原逐候选回测语义，不进批量，
+    其产出的 result 带 escape_hatch_triggered 标志，阶段③跳过避免 double-gate。
     """
     tree_data = state.get("hypothesis_tree", {}) or {}
     tree = HypothesisTree.deserialize(tree_data)
     selected = state.get("selected_leaves", []) or []
 
-    results: list[dict[str, Any]] = []
+    # 所有候选共享的 state 级输入（无候选间状态耦合）
+    strategy = state.get("strategy", {}) or {}
+    previous_backtest = state.get("backtest_result", {})
+
+    # ── 阶段 1：逐候选 optimize -> develop（LLM，IO 密集）──
+    developed: list[dict[str, Any]] = []
+    escape_results: list[dict[str, Any]] = []
     for node_id in selected:
         node = tree.get_node(node_id)
         if node is None:
             continue
+        dev, escape = _develop_one_candidate(
+            node=node,
+            strategy=strategy,
+            previous_backtest=previous_backtest,
+            research_agent=research_agent,
+            develop_agent=develop_agent,
+            backtest_service=backtest_service,
+            logger=logger,
+            gate=gate,
+            context=context,
+        )
+        if dev is not None:
+            developed.append(dev)
+        if escape is not None:
+            escape_results.append(escape)
 
-        # 复用现有 optimize 逻辑
-        strategy = state.get("strategy", {}) or {}
-        suggestions = [node.hypothesis]
-        previous_backtest = state.get("backtest_result", {})
-
-        # 初始化变量，确保 except 块可安全引用
-        optimized: dict[str, Any] = {}
-        strategy_yaml = ""
-
+    # ── 阶段 2：批量回测（CPU 密集，进程池真并行 + 共享面板）──
+    results: list[dict[str, Any]] = list(escape_results)
+    if developed:
+        yamls = [d["strategy_yaml"] for d in developed]
         try:
-            optimized = research_agent.optimize_strategy(
-                strategy=strategy,
-                improvement_suggestions=suggestions,
-                previous_backtest=previous_backtest,
-            )
-
-            # develop → backtest
-            strategy_yaml = develop_agent.develop_strategy(optimized)
-            backtest_result = backtest_service.run(
-                strategy_yaml=strategy_yaml,
+            outcomes = backtest_service.run_candidates(
+                strategy_yamls=yamls,
                 start_date="",
                 end_date="",
             )
-
-            # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
-            # tree.status 更新由 _backpropagate_node 根据 rejected 标志统一处理
-            # （并行 fan-out 时各 executor_single 不写 tree，避免 last_value 覆盖）
-            if gate is not None:
-                acceptance = gate.evaluate(previous_backtest, backtest_result)
-                if not acceptance.accepted:
-                    if logger:
-                        logger.warning(
-                            f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
-                            f"{acceptance.reason}"
-                        )
-                    results.append(
-                        {
-                            "node_id": node_id,
-                            "rejected": True,
-                            "rejection_reason": acceptance.reason,
-                            "backtest_result": backtest_result,  # ADR-015 A1
-                            "optimized_strategy": optimized,
-                        }
-                    )
-                    continue
-
-            dev_score = float(backtest_result.get("sharpe_ratio", 0))
-
-            # tree.update_evidence 移到 _backpropagate_node（并行安全单点更新）
-            results.append(
-                {
-                    "node_id": node_id,
-                    "dev_score": dev_score,
-                    "backtest_result": backtest_result,
-                    "strategy_yaml": strategy_yaml,
-                    "optimized_strategy": optimized,
-                }
-            )
-
-            if logger:
-                logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
-
         except Exception as e:
             if logger:
-                logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
+                logger.error(f"[HTR-执行] 批量回测失败，降级为逐候选失败: {e}")
+            outcomes = [
+                {"error": str(e), "error_category": "engine_error"}
+                for _ in developed
+            ]
 
-            # 逃生口 1：算子缺口检测 + 同步研发 + 重试（ADR-016 阶段 2）
-            result = _handle_executor_exception(
-                error=e,
-                strategy_yaml=strategy_yaml,
-                optimized=optimized,
-                hypothesis=node.hypothesis,
-                node_id=node_id,
-                context=context,
-                develop_agent=develop_agent,
-                backtest_service=backtest_service,
-                previous_backtest=previous_backtest,
-                gate=gate,
-                logger=logger,
+        # ── 阶段 3：逐候选 AcceptanceGate（语义不变，backtest 结果就绪后校验）──
+        for d, outcome in zip(developed, outcomes, strict=True):
+            results.append(
+                _gate_check_candidate(
+                    developed=d,
+                    backtest_result=outcome,
+                    previous_backtest=previous_backtest,
+                    gate=gate,
+                    logger=logger,
+                )
             )
-            results.append(result)
 
+    # results[0] -> best 选取（ADR-010 阶段 5 收尾修正）：
+    # 让下一轮 optimize 的 previous_backtest 基线为本轮最佳候选而非随机首个，
+    # 与 _decide 的 best_result 选取一致。失败/rejected 候选 dev_score=0 不优先。
+    best_result = max(
+        results, key=lambda r: r.get("dev_score", 0.0), default=None
+    )
     return {
         "executor_results": results,
-        "backtest_result": results[0].get("backtest_result", {}) if results else {},
-        "strategy_yaml": results[0].get("strategy_yaml", "") if results else "",
+        "backtest_result": best_result.get("backtest_result", {}) if best_result else {},
+        "strategy_yaml": best_result.get("strategy_yaml", "") if best_result else "",
         # 把 optimized strategy 写回 state，让下一周期的 optimize_strategy
         # 能看到累积的 evolution_lineage（否则每周期都从空 lineage 开始）
-        "strategy": results[0].get("optimized_strategy", {}) if results else {},
+        "strategy": best_result.get("optimized_strategy", {}) if best_result else {},
     }
-
-
-def _executor_single_node(  # noqa: PLR0913
-    state: State,
-    node_id: str,
-    research_agent: StrategyResearchAgent,
-    develop_agent: StrategyDevelopAgent,
-    backtest_service: BacktestService,
-    logger: LoggerService,
-    gate: AcceptanceGate | None = None,
-    context: RuntimeContext | None = None,
-) -> dict:
-    """单个假设的执行器（Phase 5 并行模式 — 每个 Send 一个实例）。
-
-    与 _executor_node 逻辑相同，但只处理一个 node_id，
-    返回单个 result dict（reducer _collect_executor_results 会累加）。
-
-    ADR-009 收尾：同步接入 AcceptanceGate 训练集门。
-    ADR-016 阶段 2：同步接入算子缺口逃生口。
-    """
-    tree_data = state.get("hypothesis_tree", {}) or {}
-    tree = HypothesisTree.deserialize(tree_data)
-    node = tree.get_node(node_id)
-    if node is None:
-        return {"executor_results": [{"node_id": node_id, "error": "节点不存在"}]}
-
-    # tree 只读：并行 fan-out 时各 executor_single 不写 tree（避免 last_value 覆盖）。
-    # tree.status / update_evidence 由 _backpropagate_node 统一处理。
-    strategy = state.get("strategy", {}) or {}
-    suggestions = [node.hypothesis]
-    previous_backtest = state.get("backtest_result", {})
-
-    # 初始化变量，确保 except 块可安全引用
-    optimized: dict[str, Any] = {}
-    strategy_yaml = ""
-
-    try:
-        optimized = research_agent.optimize_strategy(
-            strategy=strategy,
-            improvement_suggestions=suggestions,
-            previous_backtest=previous_backtest,
-        )
-        strategy_yaml = develop_agent.develop_strategy(optimized)
-        backtest_result = backtest_service.run(
-            strategy_yaml=strategy_yaml,
-            start_date="",
-            end_date="",
-        )
-
-        # 训练集门：AcceptanceGate 校验优化版 sharpe 严格提升
-        if gate is not None:
-            acceptance = gate.evaluate(previous_backtest, backtest_result)
-            if not acceptance.accepted:
-                if logger:
-                    logger.warning(
-                        f"[HTR-执行] 节点 {node_id} 被 AcceptanceGate 拒绝: "
-                        f"{acceptance.reason}"
-                    )
-                result = {
-                    "node_id": node_id,
-                    "rejected": True,
-                    "rejection_reason": acceptance.reason,
-                    "backtest_result": backtest_result,  # ADR-015 A1: 保留失败回测结果
-                    "optimized_strategy": optimized,
-                }
-                return {"executor_results": [result]}
-
-        dev_score = float(backtest_result.get("sharpe_ratio", 0))
-
-        result = {
-            "node_id": node_id,
-            "dev_score": dev_score,
-            "backtest_result": backtest_result,
-            "strategy_yaml": strategy_yaml,
-            "optimized_strategy": optimized,
-        }
-        if logger:
-            logger.info(f"[HTR-执行] 节点 {node_id} dev_score={dev_score:.2f}")
-
-    except Exception as e:
-        if logger:
-            logger.error(f"[HTR-执行] 节点 {node_id} 失败: {e}")
-
-        # 逃生口 1：算子缺口检测 + 同步研发 + 重试（ADR-016 阶段 2）
-        result = _handle_executor_exception(
-            error=e,
-            strategy_yaml=strategy_yaml,
-            optimized=optimized,
-            hypothesis=node.hypothesis,
-            node_id=node_id,
-            context=context,
-            develop_agent=develop_agent,
-            backtest_service=backtest_service,
-            previous_backtest=previous_backtest,
-            gate=gate,
-            logger=logger,
-        )
-
-    return {"executor_results": [result]}
 
 
 def _backpropagate_node(
@@ -1732,19 +1657,8 @@ def create_htr_subgraph(
             context=context,
         ),
     )
-    # Phase 5: 并行执行器（每个 Send 一个实例）
-    workflow.add_node(
-        "executor_single",
-        partial(
-            _executor_single_wrapper,
-            research_agent=research_agent,
-            develop_agent=develop_agent,
-            backtest_service=backtest_service,
-            logger=logger,
-            gate=acceptance_gate,
-            context=context,
-        ),
-    )
+    # ADR-010 阶段 5 收尾（2026-08）：删除 executor_single 节点注册。
+    # Send fan-out 伪并行已移除，多候选由 _executor_node 内部三阶段批量并行。
     workflow.add_node(
         "backpropagate",
         partial(_backpropagate_node, research_agent=research_agent, logger=logger),
@@ -1786,14 +1700,10 @@ def create_htr_subgraph(
     workflow.add_edge("ideate", "select")
     workflow.add_edge("select", "dispatch")
 
-    # Phase 5: dispatch 用条件边 — 单假设 → executor（串行）；多假设 → executor_single（并行 fan-out）
-    workflow.add_conditional_edges(
-        "dispatch",
-        _dispatch_cond,
-        {"executor": "executor", "executor_single": "executor_single"},
-    )
+    # ADR-010 阶段 5 收尾（2026-08）：dispatch 固定边到 executor。
+    # _dispatch_cond 始终返回 "executor"；多候选由 executor 内部批量并行。
+    workflow.add_edge("dispatch", "executor")
     workflow.add_edge("executor", "backpropagate")
-    workflow.add_edge("executor_single", "backpropagate")
     workflow.add_edge("backpropagate", "decide")
 
     workflow.add_conditional_edges(

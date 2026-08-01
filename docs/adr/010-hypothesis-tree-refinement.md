@@ -1,7 +1,7 @@
 # ADR-010: 假设树精炼（Hypothesis Tree Refinement, HTR）
 
 日期: 2026-06
-状态: Accepted（Enhanced by ADR-015 + ADR-016。ADR-015 追加三道统计过拟合门，ADR-016 在 executor 节点引入有限逃生口。六步骨架与树哲学保留，不被替换）
+状态: Accepted（Enhanced by ADR-015 + ADR-016。ADR-015 追加三道统计过拟合门，ADR-016 在 executor 节点引入有限逃生口。六步骨架与树哲学保留，不被替换。**阶段 5 并行机制于 2026-08 收尾修正**：Send fan-out 伪并行 -> executor 内部批量并行，见下文阶段 5 更新）
 
 ## 背景
 
@@ -101,9 +101,15 @@ optimize_strategy(hypothesis) → develop → backtest → refine(loop) → retu
 - 引入 LangGraph `Send` API 实现动态 fan-out。
 - `dispatch` 节点为每个 selected 叶节点返回 `Send` 对象。
 - `backpropagate` 在 join 点合并所有 executor 结果。
-- 与 `stock_analysis` 的固定列表 fan-out 不同——`Send` 允许任意 branching_factor，无需预定义节点名。
+- 与 `stock_analysis` 的固定列表 fan-out 不同--`Send` 允许任意 branching_factor，无需预定义节点名。
 - `executor_results: Annotated[list[dict], _collect_results]` 自定义 reducer 收集并行结果。
 - **分阶段启用**：阶段 2 先串行单节点 dispatch，阶段 5 再加并行，降低初始复杂度。
+
+> **2026-08 阶段 5 收尾修正**：上述 `Send` fan-out 方案在落地评审中被判定为**伪并行**--`_executor_single_wrapper`（`htr_subgraph.py:715`）是同步函数，LangGraph `Send` 基于 asyncio 事件循环，对同步 CPU 密集节点（backtest）无法真并行，实际串行阻塞事件循环。且每候选各自调 `backtest_service.run` 重复查 DuckDB 取数。
+>
+> 修正决策：**删除 `Send` fan-out 路径，改为 `_executor_node` 单节点内部批量并行**。多候选仍由 `HTR_MAX_SELECT>1` 选入 `selected_leaves`，但不再 Send 扇出--`_executor_node` 内部重排为三阶段：①逐候选 optimize->develop 收集 yaml（LLM IO 密集）；②调 `BacktestService.run_candidates`（ADR-008 B5/B6）批量回测，进程池真并行 + 共享数据面板；③逐候选 AcceptanceGate 校验。拓扑零新增（删 `executor_single` 节点，`_dispatch_cond` 始终返回 `"executor"`），State/reducer/AcceptanceGate 时机不变。逃生口路径（`_handle_executor_exception`，ADR-016）保持原逐候选回测语义，不进批量，避免 double-gate。
+>
+> `htr_max_select` 配置语义从「Send fan-out 宽度」变为「批量回测宽度」，行为等价（都选 N 个候选），执行更高效。六步骨架（Observe->Ideate->Select->Dispatch->Executor->Backpropagate->Decide）、树哲学、held-out 合并门全部不变。
 
 ### F. 历史兼容
 
@@ -223,19 +229,24 @@ src/long_earn/backtest/models.py   # 新增 WalkForwardResult(BaseModel)
 
 ### 阶段 5：并行执行
 
-**目标**：利用 LangGraph `Send` API 并行测试多个假设。
+**目标**：利用多核 CPU 并行测试多个假设的回测。
 
-- `_dispatch_node` 返回 `Send` 对象列表。
-- `_backpropagate_node` 作为 join 节点，LangGraph barrier 语义。
-- `executor_results: Annotated[list[dict], _collect_results]` 自定义 reducer。
-- 测试：`test_subgraph_htr.py`（并行 dispatch + join + reducer 行为）。
+> **2026-08 修正**：原计划用 LangGraph `Send` API 做 fan-out 并行（见 E 节修正说明），评审发现同步节点的 Send fan-out 是伪并行。阶段 5 改为 `_executor_node` 内部批量并行。
+
+- 删除 `_dispatch_node` 的并行分支与 `_dispatch_cond` 的 `Send` 返回，`_dispatch_cond` 始终返回 `"executor"`。
+- 删除 `executor_single` 节点注册与边（`add_node` / `add_conditional_edges` 的 `executor_single` 映射）。
+- `_executor_node` 重排为三阶段：①逐候选 optimize->develop（LLM）；②`backtest_service.run_candidates` 批量回测（进程池）；③逐候选 AcceptanceGate。
+- 复用 [ADR-008 B5/B6](008-parallel-backtest-and-unified-templating.md) 的 warmup 注入与 diagnostics 保真约束。
+- 逃生口 `_handle_executor_exception`（ADR-016）保持原逐候选回测语义，不进批量；其产出的 result 直接 append，阶段③ AcceptanceGate 循环跳过已过 gate 的逃生口结果，避免 double-gate。
+- `results[0]` 选取改为 `max(results, key=lambda r: r.get("dev_score", 0))`（与 `_decide` 的 best_result 选取一致），让下一轮 optimize 的 `previous_backtest` 基线为本轮最佳候选而非随机首个。
+- 测试：`test_subgraph_htr.py`（批量 dispatch + executor 三阶段 + AcceptanceGate 语义不变 + 逃生口不 double-gate）、等价性测试（串行逐候选 vs 批量 `run_candidates` 数值一致，ADR-008 B6 硬约束）。
 
 ## 与其他 ADR 的关系
 
 - **ADR-002**（partial 节点注入）：新节点同样用 partial 绑定服务，沿用 ADR-002 模式。
 - **ADR-005**（事件驱动回测）：Held-out 验证门复用 ADR-005 的 Walk-Forward `walk_forward_run()`。
 - **ADR-007**（物质-运动架构）：**关键依赖**。混合持久化策略——假设树本体独立 JSON Store（层级结构不适合 Substance 扁平模型），树摘要回写 SubstanceStore 为 knowledge 物质（复用双通道检索做 hot-start）。`MemoryService` Protocol 新增两方法，`MemoryServiceImpl` 委托 SubstanceStore，与 ADR-007 其他方法同模式，消费方零改动。
-- **ADR-008**（并行回测 + 统一模板）：HTR executor 内部 backtest 可复用 `run_walk_forward_parallel` 加速 held-out 验证；`ParamGrid` 做参数寻优（ADR-008 的并行回测编排层 B 部分继续有效）。**注**：ADR-008 A 部分（`${var}` 模板渲染层）已被 ADR-011 废弃，HTR 各 prompt 与 DSL YAML 模板统一遵循 ADR-011 的 `{{var}}`（Mustache）语法。
+- **ADR-008**（并行回测 + 统一模板）：HTR executor 内部 backtest 可复用 `run_walk_forward_parallel` 加速 held-out 验证；阶段 5 收尾的候选批量并行复用 `ParallelRunner.run_candidates`，受 [ADR-008 B5](008-parallel-backtest-and-unified-templating.md)（warmup 注入契约）与 [B6](008-parallel-backtest-and-unified-templating.md)（diagnostics 保真约束）约束；`ParamGrid` 做参数寻优（ADR-008 的并行回测编排层 B 部分继续有效）。**注**：ADR-008 A 部分（`${var}` 模板渲染层）已被 ADR-011 废弃，HTR 各 prompt 与 DSL YAML 模板统一遵循 ADR-011 的 `{{var}}`（Mustache）语法。
 - **ADR-009**（算子目录 + operator_dev）：HTR executor 内部的 develop/backtest 复用算子目录 DSL；HTR 假设的"改进方向"若涉及算子缺口，可经 `gap_detector`（ADR-009 后续项）产出 OperatorSpec 进 operator_dev backlog——两系统形成"假设驱动算子研发"闭环。
 
 ## 参考文献

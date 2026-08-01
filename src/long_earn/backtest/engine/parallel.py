@@ -49,11 +49,19 @@ class BacktestTask:
     task_id: str = ""
     param_desc: str = ""
     audit_db_path: str = ""
+    # ADR-008 B5：warmup 注入契约。每 task 独立算（run_grid 每 combo、
+    # run_candidates 每候选），worker 透传给 engine.run(warmup_days=...)。
+    warmup_days: int = 0
 
 
 @dataclass(slots=True)
 class BacktestOutcome:
-    """单个并行回测结果（可 pickle）。"""
+    """单个并行回测结果（可 pickle）。
+
+    ADR-008 B6：diagnostics 保真。worker 内从 DSLStrategy 实例提取
+    factor_failures/step_failures，主进程据此重建完整 strategy_diagnostics，
+    确保 AcceptanceGate 的 degenerate 检测不被降级破坏。
+    """
 
     task_id: str
     success: bool
@@ -70,11 +78,30 @@ class BacktestOutcome:
     error_category: str = ""
     param_desc: str = ""
     metrics_unreliable: bool = False
+    # ADR-008 B6：diagnostics 保真字段
+    trade_count: int = 0
+    degenerate: bool = False
+    factor_failures: list[dict] = field(default_factory=list)
+    step_failures: list[dict] = field(default_factory=list)
 
 
 def _worker_db_path(base: Path, task_id: str) -> Path:
     """派生 worker 专属 DuckDB 路径，避免多进程共享连接写冲突。"""
     return base.parent / f"{base.stem}_{task_id}{base.suffix}"
+
+
+def _shift_start_date(start_date: str, warmup_days: int) -> str:
+    """将起始日期前移 warmup_days 天（日历日），覆盖算子回溯窗口。
+
+    ADR-008 B5：预取区间需前移 max_warmup，让 worker 内 engine.run 的
+    时序因子在 start_date 当天就有非 NaN 值。warmup_days=0 时原样返回。
+    """
+    if warmup_days <= 0:
+        return start_date
+    from datetime import datetime, timedelta  # noqa: PLC0415
+
+    dt = datetime.strptime(start_date, "%Y-%m-%d")
+    return (dt - timedelta(days=warmup_days)).strftime("%Y-%m-%d")
 
 
 @contextmanager
@@ -145,9 +172,23 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
                 task.symbols,
                 task.benchmark_symbol,
                 full_data=full_data,
+                warmup_days=task.warmup_days,
             )
 
         if result.success:
+            # ADR-008 B6：从 DSLStrategy 实例提取 diagnostics，保真回填
+            trade_count = result.trade_count or 0
+            factor_failures = list(strategy.factor_failures)
+            step_failures = list(strategy.step_failures)
+            any_step_failed = len(step_failures) > 0
+            any_factor_failed = len(factor_failures) > 0
+            degenerate = trade_count == 0
+            metrics_unreliable = (
+                result.metrics_unreliable
+                or degenerate
+                or any_step_failed
+                or any_factor_failed
+            )
             return BacktestOutcome(
                 task_id=task.task_id,
                 success=True,
@@ -161,7 +202,11 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
                 calmar_ratio=result.calmar_ratio,
                 sortino_ratio=result.sortino_ratio,
                 param_desc=task.param_desc,
-                metrics_unreliable=result.metrics_unreliable or False,
+                metrics_unreliable=metrics_unreliable,
+                trade_count=trade_count,
+                degenerate=degenerate,
+                factor_failures=factor_failures,
+                step_failures=step_failures,
             )
         return BacktestOutcome(
             task_id=task.task_id,
@@ -295,8 +340,13 @@ class ParallelRunner:
 
         logger.info(f"[grid] 展开 {total} 组合, max_workers={self.max_workers}")
 
-        # 生成所有策略 YAML
-        tasks_data: list[tuple[str, str]] = []
+        # 生成所有策略 YAML + 每 combo 独立算 warmup/风控（ADR-008 B5）
+        # struct_params 可改算子参数或风控参数，各 combo 必须独立解析
+        from long_earn.services.backtest_service import (  # noqa: PLC0415
+            _compute_warmup_days,
+        )
+
+        tasks_data: list[dict[str, Any]] = []
         for _idx, (scalar_params, struct_params) in enumerate(combos):
             yaml_str = render_template(strategy_template, scalar_params)
             dsl = parse_strategy_yaml(yaml_str)
@@ -310,15 +360,21 @@ class ParallelRunner:
             param_desc = ", ".join(
                 f"{k}={v}" for k, v in {**scalar_params, **struct_params}.items()
             )
-            tasks_data.append((final_yaml, param_desc))
+            tasks_data.append(
+                {
+                    "yaml": final_yaml,
+                    "param_desc": param_desc,
+                    "warmup_days": _compute_warmup_days(dsl),
+                    "stop_loss": dsl.risk_control.stop_loss,
+                    "max_drawdown_limit": dsl.risk_control.max_drawdown_limit,
+                    "max_position_pct": dsl.risk_control.max_position_per_stock,
+                }
+            )
 
-        # 预取数据
-        first_dsl = parse_strategy_yaml(tasks_data[0][0])
-        stop_loss = first_dsl.risk_control.stop_loss
-        max_drawdown_limit = first_dsl.risk_control.max_drawdown_limit
-        max_position_pct = first_dsl.risk_control.max_position_per_stock
-
-        full_data = self._prepare_data(symbols, start_date, end_date)
+        # 预取数据：区间前移 max_warmup 覆盖最大回溯需求（ADR-008 B5）
+        max_warmup = max(td["warmup_days"] for td in tasks_data)
+        prefetch_start = _shift_start_date(start_date, max_warmup)
+        full_data = self._prepare_data(symbols, prefetch_start, end_date)
 
         if full_data.is_empty():
             logger.error("[grid] 数据预取为空，无法执行并行回测")
@@ -340,7 +396,7 @@ class ParallelRunner:
 
             tasks = [
                 BacktestTask(
-                    strategy_yaml=yaml_str,
+                    strategy_yaml=td["yaml"],
                     start_date=start_date,
                     end_date=end_date,
                     symbols=symbols,
@@ -348,17 +404,18 @@ class ParallelRunner:
                     shm_token=shm_token,
                     shm_size=shm_size,
                     pickle_data=pickle_data,
-                    stop_loss=stop_loss,
-                    max_drawdown_limit=max_drawdown_limit,
-                    max_position_pct=max_position_pct,
+                    stop_loss=td["stop_loss"],
+                    max_drawdown_limit=td["max_drawdown_limit"],
+                    max_position_pct=td["max_position_pct"],
                     max_positions=max_positions,
                     task_id=str(idx),
-                    param_desc=param_desc,
+                    param_desc=td["param_desc"],
                     audit_db_path=str(_worker_db_path(audit_base, str(idx)))
                     if audit_base
                     else "",
+                    warmup_days=td["warmup_days"],
                 )
-                for idx, (yaml_str, param_desc) in enumerate(tasks_data)
+                for idx, td in enumerate(tasks_data)
             ]
 
             outcomes = self._execute_tasks(tasks)
@@ -370,7 +427,7 @@ class ParallelRunner:
         )
         return result
 
-    def run_walk_forward_parallel(  # noqa: PLR0913
+    def run_walk_forward_parallel(  # noqa: PLR0913, PLR0915
         self,
         strategy_yaml: str,
         start_date: str,
@@ -385,15 +442,21 @@ class ParallelRunner:
             TimeSeriesSplit,
         )
 
-        full_data = self._prepare_data(symbols, start_date, end_date)
-
-        if full_data.is_empty():
-            return {"error": "数据预取为空"}
-
         dsl = parse_strategy_yaml(strategy_yaml)
         stop_loss = dsl.risk_control.stop_loss
         max_drawdown_limit = dsl.risk_control.max_drawdown_limit
         max_position_pct = dsl.risk_control.max_position_per_stock
+        # ADR-008 B5：walk-forward 各 fold 训练期初也需要 warmup 填时序因子
+        from long_earn.services.backtest_service import (  # noqa: PLC0415
+            _compute_warmup_days,
+        )
+
+        warmup_days = _compute_warmup_days(dsl)
+        prefetch_start = _shift_start_date(start_date, warmup_days)
+        full_data = self._prepare_data(symbols, prefetch_start, end_date)
+
+        if full_data.is_empty():
+            return {"error": "数据预取为空"}
 
         from long_earn.backtest.engine.core import (  # noqa: PLC0415
             EventDrivenBacktestEngine,
@@ -436,6 +499,7 @@ class ParallelRunner:
                         audit_db_path=str(_worker_db_path(audit_base, train_task_id))
                         if audit_base
                         else "",
+                        warmup_days=warmup_days,
                     )
                 )
                 tasks.append(
@@ -456,6 +520,7 @@ class ParallelRunner:
                         audit_db_path=str(_worker_db_path(audit_base, test_task_id))
                         if audit_base
                         else "",
+                        warmup_days=warmup_days,
                     )
                 )
 
@@ -532,6 +597,100 @@ class ParallelRunner:
             "n_splits": n_splits,
             "failed_folds": failed_folds,
         }
+
+    def run_candidates(  # noqa: PLR0913
+        self,
+        strategy_yamls: list[str],
+        start_date: str,
+        end_date: str,
+        symbols: list[str],
+        benchmark_symbol: str = "",
+        audit_db_path: Path | str | None = None,
+    ) -> list[BacktestOutcome]:
+        """批量候选并行回测（ADR-010 阶段 5 收尾）。
+
+        各候选 DSL 独立解析风控参数与 warmup（ADR-008 B5）；
+        预取区间前移 max_warmup 覆盖最大回溯需求；
+        SharedMemory 共享面板 + 进程池分发。
+        返回 list[BacktestOutcome]，顺序与输入 strategy_yamls 对齐。
+        """
+        if not strategy_yamls:
+            return []
+
+        from long_earn.services.backtest_service import (  # noqa: PLC0415
+            _compute_warmup_days,
+        )
+
+        # 逐候选解析：风控参数 + warmup 各自独立
+        candidates: list[dict[str, Any]] = []
+        for idx, yaml_str in enumerate(strategy_yamls):
+            dsl = parse_strategy_yaml(yaml_str)
+            candidates.append(
+                {
+                    "yaml": yaml_str,
+                    "warmup_days": _compute_warmup_days(dsl),
+                    "stop_loss": dsl.risk_control.stop_loss,
+                    "max_drawdown_limit": dsl.risk_control.max_drawdown_limit,
+                    "max_position_pct": dsl.risk_control.max_position_per_stock,
+                    "max_positions": 0,
+                    "task_id": f"candidate_{idx}",
+                }
+            )
+
+        # 预取区间前移 max_warmup（ADR-008 B5）
+        max_warmup = max(c["warmup_days"] for c in candidates)
+        prefetch_start = _shift_start_date(start_date, max_warmup)
+        full_data = self._prepare_data(symbols, prefetch_start, end_date)
+
+        if full_data.is_empty():
+            logger.error("[candidates] 数据预取为空，无法执行并行回测")
+            return [
+                BacktestOutcome(
+                    task_id=c["task_id"],
+                    success=False,
+                    error="数据预取为空",
+                    error_category="insufficient_data",
+                )
+                for c in candidates
+            ]
+
+        logger.info(
+            f"[candidates] {len(candidates)} 候选, "
+            f"max_workers={self.max_workers}, max_warmup={max_warmup}"
+        )
+
+        audit_base = Path(audit_db_path) if audit_db_path else None
+        with SharedDataContext(full_data) as ctx:
+            shm_token, shm_size, pickle_data = ctx.get_worker_args()
+
+            tasks = [
+                BacktestTask(
+                    strategy_yaml=c["yaml"],
+                    start_date=start_date,
+                    end_date=end_date,
+                    symbols=symbols,
+                    benchmark_symbol=benchmark_symbol,
+                    shm_token=shm_token,
+                    shm_size=shm_size,
+                    pickle_data=pickle_data,
+                    stop_loss=c["stop_loss"],
+                    max_drawdown_limit=c["max_drawdown_limit"],
+                    max_position_pct=c["max_position_pct"],
+                    max_positions=c["max_positions"],
+                    task_id=c["task_id"],
+                    audit_db_path=str(_worker_db_path(audit_base, c["task_id"]))
+                    if audit_base
+                    else "",
+                    warmup_days=c["warmup_days"],
+                )
+                for c in candidates
+            ]
+
+            outcomes = self._execute_tasks(tasks)
+
+        success_count = sum(1 for o in outcomes if o.success)
+        logger.info(f"[candidates] 完成: {success_count}/{len(candidates)} 成功")
+        return outcomes
 
     def _execute_tasks(self, tasks: list[BacktestTask]) -> list[BacktestOutcome]:
         """执行任务列表，max_workers=1 时退化为顺序。"""

@@ -235,6 +235,29 @@ class BacktestService(Protocol):
         """
         ...
 
+    def run_candidates(
+        self,
+        strategy_yamls: list[str],
+        start_date: str = "",
+        end_date: str = "",
+        universe_type: str = "",
+    ) -> list[dict[str, Any]]:
+        """批量并行回测多个候选策略（ADR-010 阶段 5 收尾）
+
+        共享数据面板 + 进程池分发，各候选独立解析风控参数与 warmup
+        （ADR-008 B5），diagnostics 保真回传（ADR-008 B6）。
+
+        Args:
+            strategy_yamls: 各候选的完整策略 YAML 列表
+            start_date: 回测起始日期（默认 config.backtest_start_date，训练集）
+            end_date: 回测结束日期（默认 config.backtest_end_date，训练集）
+            universe_type: 股票池类型；缺省从首候选 DSL 解析
+
+        Returns:
+            与 strategy_yamls 等长的结果列表，每项与 run() 返回结构一致。
+        """
+        ...
+
 
 # ── Stock Service ────────────────────────────────────────────────
 

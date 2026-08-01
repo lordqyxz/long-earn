@@ -1,13 +1,15 @@
 # ADR-008: 并行回测 + 统一模板渲染（`${var}`）
 
 日期: 2026-06
-状态: Partially Superseded（A 部分被 ADR-011 废弃；B 部分继续有效，Implemented）
+状态: Partially Superseded（A 部分被 ADR-011 废弃；B 部分继续有效并经 2026-08 增补 B5/B6，Implemented）
 
 > **2026-07 更新**：本 ADR 的 **A 部分（统一模板渲染层：`${var}` + 纯函数 + 解耦 LangChain）已被 [ADR-011](011-unified-mustache-prompt-templating.md) 废弃**。新决策统一使用 `langchain_core.prompts.MustacheTemplate`（`{{var}}` 语法），删除自研 `core/render.py`，`MarkdownPromptTemplate` 改为委托 Mustache。
 >
-> A 部分覆盖的子决策中：A1（`${var}` 语法）、A2（纯函数渲染器解耦 LangChain）、A3 中 `render_template` 的渲染引擎——均被 ADR-011 替换。下文 A 部分原文保留作为历史记录，**不再有效**，新代码请遵循 ADR-011。
+> A 部分覆盖的子决策中：A1（`${var}` 语法）、A2（纯函数渲染器解耦 LangChain）、A3 中 `render_template` 的渲染引擎--均被 ADR-011 替换。下文 A 部分原文保留作为历史记录，**不再有效**，新代码请遵循 ADR-011。
 >
 > **B 部分（并行回测编排层 B1/B2/B3/B4）完全不受影响**，继续有效。`ParamGrid` / `apply_struct_params` / `ParallelRunner` / `SharedDataContext` / `BacktestService.run_grid` / `run_walk_forward_parallel` 全部不变；仅 `param_grid.render_template` 内部渲染引擎随 ADR-011 切换到 Mustache。
+>
+> **2026-08 增补**：在 BTR 候选回测批量并行化（ADR-010 阶段 5 收尾，见下文 B5/B6）前，评审发现 B 部分存在两处正确性缺口需以新增子决策 B5（warmup 注入契约）和 B6（diagnostics 保真约束）补齐。B5/B6 是 B1-B4 的既有约束的显式化与修复，不改变并行编排的架构方向。
 
 ## 背景
 
@@ -116,6 +118,31 @@
 
 委托 `ParallelRunner`，logger 打印进度。
 
+#### B5. warmup 注入契约（2026-08 增补）
+
+**背景**：B1 的 `run(full_data=...)` 微改让 worker 跳过 `_prepare_data`，但 `BacktestTask` 缺 `warmup_days` 字段，`_run_one_backtest` 调 `engine.run` 不传 `warmup_days`（默认 0）。而串行路径 `backtest_service.run` 会算 `_compute_warmup_days(dsl)` 传入。这意味着并行路径（grid / walk_forward_parallel / 候选批量）回测的时序因子前若干 bar 全 NaN（ADR-013 T6），是**既有正确性 bug**，且与 `_compute_warmup_days` 漏算算子参数键叠加。在 HTR 候选批量并行化前必须修复。
+
+**决策**：
+
+1. `BacktestTask` 新增 `warmup_days: int = 0` 字段（可 pickle）；`_run_one_backtest` 调 `engine.run(..., warmup_days=task.warmup_days)`。
+2. **每个 task 独立算 warmup**，不能用「首 DSL 单一值」套到所有 task：
+   - `run_grid`：每个 combo 在 `apply_struct_params` 之后、构造 `BacktestTask` 之前，对该 combo 的最终 DSL 调 `_compute_warmup_days`。理由：`struct_params` 可改算子参数（如 `operator_factors.0.params.period`），各 combo warmup 不同。
+   - `run_walk_forward_parallel`：从该 `strategy_yaml` 的 DSL 算一次 warmup，注入所有 fold task（同一策略 warmup 一致）。
+   - `run_candidates`（B7 新增）：每个候选独立算 warmup（各候选 DSL 不同）；预取区间前移 `max_warmup = max(各候选 warmup)`，worker 内按各自 `warmup_days` 过滤交易时间戳。
+3. **预取区间与 warmup 的关系**：主进程预取 `[start - max_warmup, end]`，worker 内 `engine.run(full_data=共享面板, warmup_days=该候选值)`。`core.py` 当 `full_data is not None` 时按 `[start - warmup_days, end]` 过滤面板（filter，非再取数），交易循环严格限 `[start_date, end_date]`（warmup 段不产生交易）。等价于串行路径 `engine.run(warmup_days=...)` 由 provider 取 `[start - warmup, end]`。**前提是 `_compute_warmup_days` 算对**（见 ADR-013 T6 修复）。
+4. **无未来函数**：预取区间前移量 = 各候选 DSL **声明**的 warmup 最大值（由算子 `period`/`window`/`span`/`periods`/`fast`/`slow`/`signal` 解析得出），完全在训练集内；warmup 段只进 VisibilityGuard history，不产生交易，PIT 对齐不变。
+
+#### B6. diagnostics 保真约束（2026-08 增补）
+
+**背景**：`run_candidates` 原计划把 `strategy_diagnostics` 降级为 `{trade_count, metrics_unreliable}`，丢弃 `degenerate`/`step_failures`/`factor_failures`。但 `AcceptanceGate.evaluate`（`acceptance.py:70-79`）明确读 `diag.get("degenerate")` 做退化判定--降级后退化检测失效，`trade_count=0` 的退化策略只要 sharpe 数值「严格优于」基线即被接受，进入 OOS 合并门浪费 held-out 测试集，违反 ADR-013 C5 与 ADR-015 反过拟合意图。
+
+**决策**：
+
+1. `BacktestOutcome` 新增可 pickle 字段 `degenerate: bool = False`、`step_failures: list[dict] = field(default_factory=list)`、`factor_failures: list[dict] = field(default_factory=list)`。
+2. `_run_one_backtest` 在 `engine.run` 后从 `DSLStrategy` 实例（worker 内已构造）提取 `strategy_obj.factor_failures` / `step_failures` 与 `result.trade_count`，按 `_build_strategy_diagnostics` 同口径计算 `degenerate`/`metrics_unreliable`，回填到 `BacktestOutcome`。
+3. `BacktestService.run_candidates` 把 `BacktestOutcome` 转回与 `run()` 同结构的 dict，`strategy_diagnostics` **完整保留** `degenerate`/`step_failures`/`factor_failures`/`failed_step_labels`/`failed_factor_aliases`/`trade_count`/`metrics_unreliable`，不降级。
+4. **等价性硬约束**：同一策略 YAML，串行 `backtest_service.run` 与批量 `run_candidates` 返回的 `sharpe_ratio`/`total_return`/`max_drawdown`/`strategy_diagnostics.degenerate`/`metrics_unreliable` 必须一致（浮点容差内）。这是「并行不破坏正确性」的可验证保证，需等价性测试覆盖。
+
 ## 文件结构
 
 ```
@@ -174,10 +201,12 @@ tests/unit/test_backtest/
 | `engine/parallel.py` 并行编排层 | ✅ 已交付 | `test_parallel.py::TestParallelRunner` |
 | `engine/core.py` 微改（full_data/audit_logger） | ✅ 已交付 | `test_engine.py` 无需改动 |
 | `BacktestService.run_grid` / `run_walk_forward_parallel` | ✅ 已交付 | 服务层测试 |
+| B5: `BacktestTask.warmup_days` + 每 task 独立算 warmup | ✅ 已交付 | 等价性测试（串行 vs 并行 warmup 一致） |
+| B6: `BacktestOutcome` diagnostics 保真（degenerate/step_failures） | ✅ 已交付 | 等价性测试（diagnostics 不降级） |
 
 ## 后续（不在本 ADR 范围）
 
-- **strategy_rd subgraph 接入 grid 自动寻优节点**（CLAUDE.md TODO 3「自动化参数寻优」）：基础设施已交付（`parallel.py` + `param_grid.py`），subgraph 接入留待 ADR-010 HTR executor 内部或独立优化节点。
+- ~~**strategy_rd subgraph 接入 grid 自动寻优节点**~~：基础设施已交付（`parallel.py` + `param_grid.py`）。HTR executor 内候选回测的批量并行化由 [ADR-010 阶段 5 收尾](010-hypothesis-tree-refinement.md) 接管（删除 Send fan-out 伪并行，改为 executor 内部批量调 `run_candidates`），本 ADR B5/B6 为其提供 warmup 注入与 diagnostics 保真约束。
 - **T-Loop 内部向量化/线程化**：独立优化项，本 ADR 不动。
 
 ## 与其他 ADR 的关系

@@ -126,24 +126,33 @@ class DSLStrategy(BaseStrategy):
 def _compute_warmup_days(dsl: "StrategyDSL") -> int:
     """从 DSL 算子参数推断所需预热期（日历日）。
 
-    扫描 ``operator_factors`` 取最大 period/window（``returns`` / ``windowed`` /
-    ``shift`` 等时序算子的回溯窗口），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
+    扫描 ``operator_factors`` 与 ``signals``（type=operator）全部算子步骤，
+    取最大回溯窗口（``period`` / ``periods`` / ``window`` / ``span`` /
+    ``fast`` / ``slow`` / ``signal``），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
     0 表示无时序算子，不需要 warmup。
 
-    关键 bug 修复背景：原引擎 ``_prepare_data`` 按 [start, end] 取数，导致近6个月
-    回测时 ``returns(period=120)`` 在前 60-90 天全 NaN，``rank_top(momentum_120)``
-    选不出股票，整轮回测 trade_count=0。
+    关键 bug 修复背景（ADR-013 T6，2026-08）：原实现只扫 ``operator_factors``
+    的 ``period``/``window``/``span`` 三键，遗漏 ``shift.periods``（复数）、
+    ``macd.fast``/``slow``/``signal``，且不扫 ``signals`` 里的算子步骤。结果
+    预取区间短于真实回溯需求，因子前若干 bar 全 NaN，``rank_top`` 选不出股票，
+    整轮回测 ``trade_count=0``。修复后覆盖全部算子参数键 + signal 步骤。
     """
+    # 回溯窗口参数键全集合：任何含回溯语义的算子参数都应在此
+    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
     max_period = 0
-    for factor in dsl.operator_factors:
-        params = factor.get("params") or {}
-        period = params.get("period", 0) or 0
-        window = params.get("window", 0) or 0
-        span = params.get("span", 0) or 0
-        max_period = max(max_period, period, window, span)
+    # 扫描 operator_factors + signals(type=operator) 全部算子步骤
+    operator_steps: list[dict[str, Any]] = list(dsl.operator_factors)
+    for step in dsl.signals:
+        if step.get("type") == "operator":
+            operator_steps.append(step)
+    for step in operator_steps:
+        params = step.get("params") or {}
+        for key in lookback_keys:
+            val = params.get(key, 0) or 0
+            max_period = max(max_period, val)
     if max_period <= 0:
         return 0
-    # 交易日 → 日历日：约 7/5 倍；加 30 天 buffer 防节假日
+    # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日
     return int(max_period * 1.5 + 30)
 
 
@@ -427,7 +436,10 @@ class BacktestServiceImpl(BacktestService):
                 f"[grid] 股票池: {universe_type}, {len(formatted_symbols)} 只"
             )
 
-        runner = ParallelRunner(data_provider=self.data_provider)
+        runner = ParallelRunner(
+            max_workers=self.max_workers,
+            data_provider=self.data_provider,
+        )
         result = runner.run_grid(
             strategy_template=strategy_template,
             param_grid=param_grid,
@@ -485,7 +497,10 @@ class BacktestServiceImpl(BacktestService):
                 f"{len(formatted_symbols)} 只, n_splits={n_splits}"
             )
 
-        runner = ParallelRunner(data_provider=self.data_provider)
+        runner = ParallelRunner(
+            max_workers=self.max_workers,
+            data_provider=self.data_provider,
+        )
         result = runner.run_walk_forward_parallel(
             strategy_yaml=strategy_yaml,
             start_date=start_date,
@@ -669,4 +684,123 @@ class BacktestServiceImpl(BacktestService):
             "average_test_metrics": avg_metrics,
             "failed_folds": failed_folds,
             "oos_sharpe": oos_sharpe,
+        }
+
+    def run_candidates(
+        self,
+        strategy_yamls: list[str],
+        start_date: str = "",
+        end_date: str = "",
+        universe_type: str = "",
+    ) -> list[dict[str, Any]]:
+        """批量并行回测多个候选策略（ADR-010 阶段 5 收尾）。
+
+        共享数据面板 + 进程池分发，各候选独立解析风控参数与 warmup
+        （ADR-008 B5），diagnostics 保真回传（ADR-008 B6）。
+        返回与 strategy_yamls 等长的结果列表，每项与 run() 返回结构一致。
+        """
+        if not strategy_yamls:
+            return []
+
+        from long_earn.backtest.engine.parallel import (  # noqa: PLC0415
+            ParallelRunner,
+        )
+
+        start_date = start_date or self.config.backtest_start_date
+        end_date = end_date or self.config.backtest_end_date
+
+        # universe_type 缺省时从首候选 DSL 解析（HTR 候选通常同 universe）
+        if not universe_type:
+            try:
+                first_dsl = parse_strategy_yaml(strategy_yamls[0])
+                universe_type = first_dsl.universe.type or "main_board+gem"
+            except ValueError:
+                universe_type = "main_board+gem"
+
+        start_date_str = start_date.replace("-", "")
+        universe_symbols = self._get_universe_symbols(universe_type, start_date_str)
+        if not universe_symbols and universe_type != "main_board+gem":
+            if self.logger:
+                self.logger.warning(
+                    f"股票池 '{universe_type}' 为空，降级到 main_board+gem"
+                )
+            universe_type = "main_board+gem"
+            universe_symbols = self._get_universe_symbols(
+                "main_board+gem", start_date_str
+            )
+
+        if not universe_symbols:
+            err = f"股票池 '{universe_type}' 为空，数据源不可用"
+            return [
+                {
+                    "error": err,
+                    "error_category": "engine_error",
+                    "error_detail": f"无法获取 {universe_type} 成分股",
+                }
+                for _ in strategy_yamls
+            ]
+
+        formatted_symbols = PandasToPolarsProvider.format_symbols(universe_symbols)
+
+        if self.logger:
+            self.logger.info(
+                f"[candidates] 股票池: {universe_type}, "
+                f"{len(formatted_symbols)} 只, {len(strategy_yamls)} 候选"
+            )
+
+        runner = ParallelRunner(
+            max_workers=self.max_workers,
+            data_provider=self.data_provider,
+        )
+        outcomes = runner.run_candidates(
+            strategy_yamls=strategy_yamls,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=formatted_symbols,
+        )
+
+        # BacktestOutcome -> run() 同结构 dict（diagnostics 保真，ADR-008 B6）
+        return [self._outcome_to_dict(o) for o in outcomes]
+
+    def _outcome_to_dict(self, outcome: Any) -> dict[str, Any]:
+        """把 BacktestOutcome 转为与 run() 返回同结构的 dict。
+
+        ADR-008 B6：strategy_diagnostics 完整保留 degenerate/step_failures/
+        factor_failures，不降级，确保 AcceptanceGate 的 degenerate 检测有效。
+        """
+        if not outcome.success:
+            return {
+                "error": outcome.error,
+                "error_category": outcome.error_category or "unknown",
+                "metrics_unreliable": outcome.metrics_unreliable,
+            }
+
+        failed_factor_aliases: set[str] = {
+            alias for f in outcome.factor_failures if (alias := f.get("alias"))
+        }
+        failed_step_labels: set[str] = {
+            label for f in outcome.step_failures if (label := f.get("step"))
+        }
+        strategy_diagnostics = {
+            "factor_failures": list(outcome.factor_failures),
+            "step_failures": list(outcome.step_failures),
+            "failed_factor_aliases": sorted(failed_factor_aliases),
+            "failed_step_labels": sorted(failed_step_labels),
+            "total_signals": 0,  # 并行 worker 无法回传 signals 计数，仅用于展示
+            "trade_count": outcome.trade_count,
+            "degenerate": outcome.degenerate,
+            "metrics_unreliable": outcome.metrics_unreliable,
+        }
+        return {
+            "total_return": outcome.total_return,
+            "annual_return": outcome.annual_return,
+            "sharpe_ratio": outcome.sharpe_ratio,
+            "max_drawdown": outcome.max_drawdown,
+            "win_rate": outcome.win_rate,
+            "trading_days": outcome.trading_days,
+            "volatility": outcome.volatility,
+            "calmar_ratio": outcome.calmar_ratio,
+            "sortino_ratio": outcome.sortino_ratio,
+            "strategy_diagnostics": strategy_diagnostics,
+            "metrics_unreliable": outcome.metrics_unreliable,
         }
