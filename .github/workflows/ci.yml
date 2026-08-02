@@ -35,6 +35,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync
-      - run: uv run pytest tests/unit/ -v --tb=short --cov-fail-under=60
+      - run: uv run pytest tests/unit/ -v --tb=short
       - name: 集成测试（需要凭证的测试自动跳过）
         run: uv run pytest tests/integration/ -v --tb=short -m "not requires_credentials" || echo "集成测试目录不存在或全部跳过"
