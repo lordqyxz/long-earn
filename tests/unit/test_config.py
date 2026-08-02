@@ -54,4 +54,4 @@ class TestRuntimeContext:
         )
         assert ctx.llm_service is mock_llm
         assert ctx.config is config
-        assert ctx.config.llm_type == "ollama"
+        assert ctx.config.llm_type == "deepseek"

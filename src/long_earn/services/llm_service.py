@@ -76,7 +76,7 @@ class LLMServiceImpl(LLMService):
             return llm
         if self.config.llm_type == "ollama":
             return llm.bind(format="json")
-        if self.config.llm_type in ("dashscope", "openai"):
+        if self.config.llm_type in ("deepseek", "dashscope", "openai"):
             return llm.bind(response_format={"type": "json_object"})
         return llm
 
