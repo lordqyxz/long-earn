@@ -9,6 +9,7 @@ ADR-014 阶段 B：``financial_quarterly`` 单一宽表废弃，改为 8 张细�
 """
 
 import contextlib
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,10 @@ from long_earn.backtest.data.financial.migrations import (
 )
 from long_earn.backtest.data.financial.schemas import FinancialSchemaRegistry
 from long_earn.core.storage import backtest_cache_path
+
+# 缓存大查询 info 日志阈值（避免小查询刷屏）
+_CACHE_SLOW_QUERY_SYMBOLS = 500
+_CACHE_SLOW_QUERY_SECONDS = 1.0
 
 
 class DataCache:
@@ -157,6 +162,8 @@ class DataCache:
         """
         if not symbols:
             return {}
+        n = len(symbols)
+        start = time.perf_counter()
         conn = self._get_conn()
         placeholders = ", ".join(["?"] * len(symbols))
         rows = conn.execute(
@@ -168,7 +175,15 @@ class DataCache:
             """,
             symbols,
         ).fetchall()
-        return {r[0]: str(r[1]) for r in rows if r[1] is not None}
+        result = {r[0]: str(r[1]) for r in rows if r[1] is not None}
+        elapsed = time.perf_counter() - start
+        # 大批量或慢查询才打 info，避免日志洪水
+        if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+            logger.info(
+                f"缓存新鲜度 prices latest: {n} 只, 命中 {len(result)}, "
+                f"耗时 {elapsed:.1f}s"
+            )
+        return result
 
     def get_prices(
         self,
@@ -190,20 +205,37 @@ class DataCache:
             ORDER BY date, symbol
         """
         params = [*symbols, start_date, end_date]
+        n = len(symbols)
+        start = time.perf_counter()
 
         try:
             df = conn.execute(query, params).fetchdf()
+            elapsed = time.perf_counter() - start
             if df.empty:
                 logger.debug(
                     f"缓存未命中 prices: {len(symbols)} 只股票, {start_date}~{end_date}"
                 )
+                if (
+                    n >= _CACHE_SLOW_QUERY_SYMBOLS
+                    or elapsed > _CACHE_SLOW_QUERY_SECONDS
+                ):
+                    logger.info(
+                        f"缓存查询 prices: {n} 只, 返回 0 行, 耗时 {elapsed:.1f}s"
+                    )
                 return None
             df["date"] = pd.to_datetime(df["date"])
             logger.debug(
                 f"缓存命中 prices: {len(df)} 行, {df['symbol'].nunique()} 只股票"
             )
+            if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+                logger.info(
+                    f"缓存查询 prices: {n} 只, 返回 {len(df)} 行, 耗时 {elapsed:.1f}s"
+                )
             return df
         except Exception as e:
+            elapsed = time.perf_counter() - start
+            if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+                logger.info(f"缓存查询 prices: {n} 只, 返回 0 行, 耗时 {elapsed:.1f}s")
             logger.warning(f"缓存查询失败: {e}")
             return None
 
@@ -274,6 +306,8 @@ class DataCache:
         """
         if not symbols:
             return {}
+        n = len(symbols)
+        start = time.perf_counter()
         conn = self._get_conn()
         placeholders = ", ".join(["?"] * len(symbols))
         rows = conn.execute(
@@ -285,7 +319,14 @@ class DataCache:
             """,
             symbols,
         ).fetchall()
-        return {r[0]: str(r[1]) for r in rows if r[1] is not None}
+        result = {r[0]: str(r[1]) for r in rows if r[1] is not None}
+        elapsed = time.perf_counter() - start
+        if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+            logger.info(
+                f"缓存新鲜度 financial latest: {n} 只, 命中 {len(result)}, "
+                f"耗时 {elapsed:.1f}s"
+            )
+        return result
 
     def get_financial_latest_announce_by_table(
         self,
@@ -485,18 +526,38 @@ class DataCache:
         query, params = self._build_union_financials_query(
             scalar_tables, symbols, fields
         )
+        n = len(symbols)
+        start = time.perf_counter()
         try:
             df = self._get_conn().execute(query, params).fetchdf()
+            elapsed = time.perf_counter() - start
             if df.empty:
                 logger.debug(f"缓存未命中 financials: {len(symbols)} 只股票")
+                if (
+                    n >= _CACHE_SLOW_QUERY_SYMBOLS
+                    or elapsed > _CACHE_SLOW_QUERY_SECONDS
+                ):
+                    logger.info(
+                        f"缓存查询 financials: {n} 只, 返回 0 行, 耗时 {elapsed:.1f}s"
+                    )
                 return None
             df["report_date"] = pd.to_datetime(df["report_date"])
             df["announce_date"] = pd.to_datetime(df["announce_date"])
             logger.debug(
                 f"缓存命中 financials(union): {len(df)} 行, {df['symbol'].nunique()} 只股票"
             )
+            if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+                logger.info(
+                    f"缓存查询 financials: {n} 只, 返回 {len(df)} 行, "
+                    f"耗时 {elapsed:.1f}s"
+                )
             return df
         except Exception as e:
+            elapsed = time.perf_counter() - start
+            if n >= _CACHE_SLOW_QUERY_SYMBOLS or elapsed > _CACHE_SLOW_QUERY_SECONDS:
+                logger.info(
+                    f"缓存查询 financials: {n} 只, 返回 0 行, 耗时 {elapsed:.1f}s"
+                )
             logger.warning(f"缓存查询失败: {e}")
             return None
 

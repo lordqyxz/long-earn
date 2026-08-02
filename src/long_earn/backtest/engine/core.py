@@ -38,6 +38,10 @@ def _empty_bm() -> dict[str, float]:
     }
 
 
+# 交易日数少于此值时不打进度心跳（短回测日志已够用）
+_PROGRESS_LOG_MIN_BARS = 50
+
+
 class InMemoryAuditTrail:
     """内存审计跟踪，用于测试和快速查询因果链"""
 
@@ -171,6 +175,27 @@ class EventDrivenBacktestEngine:
         if order_type == "SELL" and price <= limit_down:
             return f"跌停拒卖:{symbol} price={price:.2f} <= limit_down={limit_down:.2f}"
         return None
+
+    def _maybe_log_bar_progress(
+        self,
+        bar_idx: int,
+        n_bars: int,
+        ts: object,
+        loop_t0: float,
+        progress_every: int,
+    ) -> None:
+        """按约 10% 粒度输出引擎逐日进度，避免大池回测长时间无日志。"""
+        if n_bars < _PROGRESS_LOG_MIN_BARS:
+            return
+        done = bar_idx + 1
+        if done != n_bars and done % progress_every != 0:
+            return
+        elapsed = time.perf_counter() - loop_t0
+        pct = 100.0 * done / n_bars
+        logger.info(
+            f"[回测引擎] 进度 {done}/{n_bars} ({pct:.0f}%), "
+            f"已用 {elapsed:.0f}s, 当前日 {ts}"
+        )
 
     # ── 主入口 ────────────────────────────────────────────────
 
@@ -309,10 +334,21 @@ class EventDrivenBacktestEngine:
             timestamps = self._get_timestamps(
                 full_data, start_date=start_date, end_date=end_date
             )
+            n_bars = len(timestamps)
+            logger.info(
+                f"[回测引擎] 数据就绪: symbols={len(symbols)}, "
+                f"bars={n_bars}, rows={len(full_data)}, "
+                f"开始逐日迭代 {start_date}~{end_date}"
+            )
+            loop_t0 = time.perf_counter()
+            progress_every = max(1, n_bars // 10) if n_bars else 1
 
             for _bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
                     ts, guard, portfolio, broker, strategy, db_audit
+                )
+                self._maybe_log_bar_progress(
+                    _bar_idx, n_bars, ts, loop_t0, progress_every
                 )
 
             self._finalize_mark_to_market(portfolio, full_data, timestamps[-1])
@@ -1451,8 +1487,18 @@ class EventDrivenBacktestEngine:
                 ).strftime("%Y-%m-%d")
             else:
                 data_start = start[:10]
+            logger.info(
+                f"[回测引擎] 加载合并面板: {len(symbols)} 只, "
+                f"{data_start}~{end[:10]} (warmup={warmup_days}d)"
+            )
+            t0 = time.perf_counter()
             df = self.data_provider.get_merged_panel_as_polars(
                 symbols, data_start, end[:10]
+            )
+            logger.info(
+                f"[回测引擎] 合并面板加载完成: "
+                f"rows={0 if df is None else len(df)}, "
+                f"耗时 {time.perf_counter() - t0:.1f}s"
             )
             if df is not None and not df.is_empty():
                 # 防御性过滤：确保数据不超出 [data_start, end] 范围
