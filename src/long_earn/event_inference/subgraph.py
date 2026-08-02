@@ -212,7 +212,16 @@ def create_event_inference_subgraph(
             extractor = extractor or llm_extractor
             propagator = propagator or llm_propagator
     if registry is None:
-        registry = CollectorRegistry()
+        from long_earn.event_inference.collectors import (  # noqa: PLC0415
+            create_default_collector_registry,
+        )
+
+        market_intel = (
+            context.market_intelligence if context is not None else None
+        )
+        registry = create_default_collector_registry(
+            market_intelligence=market_intel,
+        )
 
     log: LoggerService = context.logger if context is not None else _SILENT_LOGGER  # type: ignore[assignment]
 

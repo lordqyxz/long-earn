@@ -57,17 +57,12 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     # 2b. 算子缺口队列（strategy_rd gap_detector 写入 / operator_dev 消费）
     operator_backlog = OperatorBacklog()
 
-    # 2b-adr014. 本体论注册表 + 连接器（ADR-014 阶段 E）
-    # 装载种子本体（财务指标/实体/策略族/事件类型），构造 Connector 注入 data_connector
+    # 2b-adr014. 本体论注册表（先 seed，Connector 在 memory 就绪后注入）
     ontology_registry = OntologyRegistry()
     try:
         ontology_registry.seed()
     except Exception as exc:
         logger.warning(f"ontology 种子装载失败（非致命）: {exc}")
-    connector = Connector(
-        registry=ontology_registry,
-        data_provider=data_connector,
-    )
 
     # 2c. 市场情报能力（ciccwm 可用时注入；与 data_connector 分离的第二组接口）
     market_intelligence: MarketIntelligenceProvider | None = None
@@ -82,7 +77,7 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
     except Exception as exc:
         logger.warning(f"market_intelligence 初始化失败: {exc}")
 
-    # 2d. 实时行情能力（ADR-011 第三组接口；miniqmt→ciccwm 降级）
+    # 2d. 实时行情能力（ADR-018：显式多源切换，非静默降级链）
     realtime_provider: RealtimeDataProvider | None = None
     try:
         from long_earn.backtest.data.realtime import (  # noqa: PLC0415
@@ -100,6 +95,12 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         config,
         logger,
         ontology_graph=ontology_registry.graph,
+    )
+    # ADR-018：Connector 注入 memory_provider，经验/事件检索可用
+    connector = Connector(
+        registry=ontology_registry,
+        data_provider=data_connector,
+        memory_provider=memory,
     )
     # ADR-014 阶段 C：StockServiceImpl 注入 Connector（get_financial_metrics 走概念查询）
     stock_service = StockServiceImpl(config, logger, connector=connector)

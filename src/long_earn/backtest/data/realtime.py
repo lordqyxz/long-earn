@@ -1,8 +1,11 @@
-"""实时行情数据提供者（ADR-011 阶段 1）。
+"""实时行情数据提供者（ADR-011 阶段 1 / ADR-018 去降级叙事）。
 
 第三组数据接口，面向实时行情场景（快照 + 订阅），与面向历史面板的
 :class:`DataProvider` 和面向市场情报的 :class:`MarketIntelligenceProvider`
-并列。降级链：miniqmt（推送 + 快照）→ ciccwm（HTTP 轮询快照）。
+并列。
+
+源选择：优先使用已配置且可用的 miniqmt；不可用时**显式切换**到 ciccwm
+HTTP 快照（调用方可观测，非静默降级链）。
 
 与历史面板的本质差异：
   - 数据形态：单点 dict（tick 级）vs 批量 DataFrame（日级）
@@ -220,11 +223,11 @@ class CiccwmRealtimeProvider:
 
 
 class CompositeRealtimeProvider:
-    """组合实时行情提供者：miniqmt → ciccwm 自动降级。
+    """组合实时行情提供者：显式主源 miniqmt，次源 ciccwm（ADR-018）。
 
-    数据获取策略：
+    选择策略（可观测，非静默降级）：
     1. miniqmt 可用 → 使用 miniqmt（实时订阅 + get_full_tick 快照）
-    2. miniqmt 不可用 → 降级到 ciccwm HTTP 轮询（仅快照，无订阅）
+    2. miniqmt 不可用 → 切换到已配置的 ciccwm HTTP 快照（无订阅），并打日志
     """
 
     def __init__(self) -> None:
@@ -251,15 +254,15 @@ class CompositeRealtimeProvider:
         return self.miniqmt.is_available or self.ciccwm.is_available
 
     def get_latest_quote(self, symbol: str) -> dict[str, Any]:
-        """获取最新行情快照（自动降级）。"""
+        """获取最新行情快照（主源不可用时显式切换次源）。"""
         # 1. miniqmt 优先
         if self.miniqmt.is_available:
             quote = self.miniqmt.get_latest_quote(symbol)
             if quote:
                 return quote
-        # 2. ciccwm 降级
+        # 2. 显式切换到 ciccwm
         if self.ciccwm.is_available:
-            logger.info("[realtime] miniqmt 不可用，降级到 ciccwm HTTP 轮询")
+            logger.info("[realtime] miniqmt 不可用，切换到 ciccwm HTTP 轮询")
             quote = self.ciccwm.get_latest_quote(symbol)
             if quote:
                 return quote

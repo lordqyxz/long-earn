@@ -68,11 +68,11 @@ class RuntimeContext:
     data_provider: "DataConnector | None" = None
     # 市场情报能力（可选，仅 ciccwm 可用时注入；与 data_provider 分离的第二组接口）
     market_intelligence: "MarketIntelligenceProvider | None" = None
-    # 实时行情能力（可选，ADR-011 第三组接口；miniqmt→ciccwm 降级）
+    # 实时行情能力（可选，ADR-011 第三组；ADR-018：显式主/次源切换）
     realtime_provider: "RealtimeDataProvider | None" = None
     # 算子缺口队列（可选，gap_detector 写入 / operator_dev 消费）
     operator_backlog: "OperatorBacklog | None" = None
-    # 本体论连接器（可选，ADR-014；上层通过概念取数，屏蔽多数据源/PIT/降级链）
+    # 本体论连接器（可选，ADR-014；上层通过概念取数，屏蔽多数据源细节）
     connector: "Connector | None" = None
     # 本体论注册表（可选，ADR-014；承载 OntologyGraph 供记忆激活图遍历用）
     ontology_registry: "OntologyRegistry | None" = None
@@ -128,6 +128,63 @@ class RuntimeContext:
         if self.realtime_provider is None:
             raise RuntimeError("RealtimeDataProvider 未初始化")
         return self.realtime_provider
+
+    def prepare_context(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        force_refresh: bool = False,
+    ) -> str:
+        """激活研究/分析上下文（ADR-018 基础设施）。
+
+        1. 尝试 ``memory.activate_events``
+        2. 若为空或 ``force_refresh``，用默认 Collector 跑轻量事件推理后再激活
+        3. 返回可注入 prompt 的字符串（可能为空）
+        """
+        if not query.strip():
+            return ""
+
+        memory = self.memory
+        activated: list[str] = []
+        if hasattr(memory, "activate_events") and not force_refresh:
+            try:
+                raw = memory.activate_events(query, k=k)
+                activated = [str(x) for x in (raw or [])]
+            except Exception as exc:
+                self.logger.warning(f"prepare_context activate 失败: {exc}")
+
+        if activated and not force_refresh:
+            return "\n".join(activated)
+
+        # miss / 强制刷新 → 轻量事件推理
+        try:
+            from long_earn.event_inference import (  # noqa: PLC0415
+                create_event_inference_subgraph,
+            )
+            from long_earn.event_inference.collectors import (  # noqa: PLC0415
+                create_default_collector_registry,
+            )
+
+            registry = create_default_collector_registry(
+                market_intelligence=self.market_intelligence,
+            )
+            subgraph = create_event_inference_subgraph(
+                self,
+                registry=registry,
+            )
+            subgraph.invoke({"query": query})
+        except Exception as exc:
+            self.logger.warning(f"prepare_context 事件推理跳过: {exc}")
+
+        if hasattr(memory, "activate_events"):
+            try:
+                raw = memory.activate_events(query, k=k)
+                activated = [str(x) for x in (raw or [])]
+            except Exception as exc:
+                self.logger.warning(f"prepare_context 二次激活失败: {exc}")
+                return ""
+        return "\n".join(activated)
 
 
 @dataclass

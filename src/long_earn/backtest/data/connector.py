@@ -1,4 +1,4 @@
-"""数据连接器统一接口 — ADR-014 阶段 F（替代 DataProvider）。
+"""数据连接器统一接口 — ADR-014 阶段 F（替代 DataProvider）/ ADR-018 去降级。
 
 设计哲学：
 - **miniqmt 全能力统一**：行情/财务/universe/行业指数/行业成分股/板块树/
@@ -7,8 +7,9 @@
   对齐，让概念查询直接分发到 connector 方法（行业指数/行业成分股等）
 - **保留 DataProvider 引擎消费契约**：``get_merged_panel_as_polars`` 接口
   不变，引擎层零改动可运行
-- **降级链编排**：:class:`CompositeDataConnector` 替代
-  :class:`CompositeDataProvider`，主源失败 → fallback
+- **显式多源（ADR-018）**：各源按能力注册；``CompositeDataConnector`` =
+  DuckDB Cache + 显式主源 miniqmt。失败即失败并打日志，**不做静默跨源降级**。
+  ciccwm / akshare 为平行能力（情报 / 独立 Connector），由调用方点名。
 
 向后兼容：
 - ``DataProvider = DataConnector`` 别名（避免 40 文件激进改名）
@@ -39,7 +40,7 @@ class DataConnector(Protocol):
        定义 Protocol，避免接口爆炸
     2. **结构化子类型**：所有实现者共享同一 Protocol，调用方按需调用方法
     3. **PIT 对齐**：财务数据由实现者保证 ``announce_date`` 裁剪
-    4. **降级链编排**：``CompositeDataConnector`` 编排多源降级
+    4. **显式源**：实现者绑定单一或显式主源；不做静默跨源降级
     """
 
     @property
@@ -225,19 +226,16 @@ class DataConnector(Protocol):
 
 
 class CompositeDataConnector:
-    """组合数据连接器：DuckDB 缓存 → miniqmt（当前阶段唯一生效路径）。
+    """组合数据连接器：DuckDB Cache + 显式主源 miniqmt（ADR-018）。
 
-    替代 :class:`CompositeDataProvider`，新增行业指数/行业成分股/板块树/
-    交易日历/标的基础信息/实时快照 6 类方法的降级编排。
+    替代旧「多源降级链」叙事：
 
-    设计：
-    1. 优先从 DuckDB 缓存读取
-    2. 缓存缺失/过期时，尝试 miniqmt 增量更新
-    3. 每次从远程获取的数据自动写入 DuckDB 缓存
+    1. 优先从 DuckDB 缓存读取（Cache 层）
+    2. 缓存缺失时由 miniqmt 增量补充并写回缓存
+    3. miniqmt 不可用 / 失败 → 返回空结果并打日志，**不静默切换到 ciccwm/akshare**
 
-    注：ciccwm / akshare 降级分支已暂时屏蔽，本阶段聚焦 miniqmt。
-    ciccwm 的情报能力（MarketIntelligenceProvider）不受影响，
-    通过 ``context.market_intelligence`` 独立获取。
+    ciccwm 情报能力通过 ``context.market_intelligence`` 显式获取；
+    akshare 作为独立 Connector 仅在调用方点名时使用。
     """
 
     def __init__(
@@ -529,5 +527,7 @@ def create_data_connector(
     Returns:
         CompositeDataConnector 实例
     """
-    logger.info("已创建 CompositeDataConnector，路径: DuckDB 缓存 → miniqmt")
+    logger.info(
+        "已创建 CompositeDataConnector：DuckDB Cache + 显式主源 miniqmt（无跨源降级）"
+    )
     return CompositeDataConnector(cache, miniqmt_provider=miniqmt_provider)

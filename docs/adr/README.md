@@ -19,8 +19,9 @@ ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完�
 | [ADR-013](013-backtest-accuracy-principles.md) | 回测引擎准确性原则与陷阱清单 | 七维分类框架（数据正确性/时序偏差/交易执行/市场微观结构/投资组合与风控/指标计算/工程与审计）+ 检测方法论 + 防护状态总览。2026-08 增补 T6（warmup 漏算致因子前视截断） |
 | [ADR-014](014-ontology-connector.md) | 本体论连接器 + DataConnector 全能力接入 | `Connector.get_concept` 作为上层唯一数据访问入口，aspect 字符串经 `ConceptResolver` 解析为 `ResolutionKind` |
 | [ADR-015](015-statistical-overfitting-gates.md) | 统计过拟合门与反馈闭环修复 | 三道统计门（Walk-Forward 稳定性 / DSR / PBO）+ 失败信号上行 + select 多样性修复；防 Q1/Q2 窗口不一致与 selection bias |
-| [ADR-016](016-hierarchical-agent-architecture.md) | 分层智能体架构 | 主智能体 ReAct 任务分解 + 子图工具化 + HTR 六步骨架保留 + executor 有限逃生口（算子缺口同步闭环）+ 硬约束不降级。自我进化拆为 ADR-017 |
+| [ADR-016](016-hierarchical-agent-architecture.md) | 分层智能体架构 | 主智能体 ReAct 任务分解 + 子图工具化。**§C「策略研发不做全量 ReAct」已被 ADR-018 Supersede**；Master 仍负责任务分解，策略飞轮改由 ResearchAgent |
 | [ADR-017](017-self-evolution-capability.md) | 自我进化能力 | 经验回写/热启动/元指标/失败反思/prompt自审。全自主 + 版本追溯。状态 Deferred，前置条件：ADR-015 统计门端到端验证 + ADR-016 主智能体落地 + 稳健策略基线产出 |
+| [ADR-018](018-think-on-graph-research-agent.md) | ToG 策略研发飞轮 | HTR 控制器 → ResearchAgent（LLM ⊗ Graph）；假设树/统计门保留为状态与硬约束；事件 `prepare_context` 基础设施化；数据层取消降级叙事 |
 
 ## 已废弃 / 已退役
 
