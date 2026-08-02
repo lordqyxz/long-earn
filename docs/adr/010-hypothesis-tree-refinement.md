@@ -1,7 +1,7 @@
 # ADR-010: 假设树精炼（Hypothesis Tree Refinement, HTR）
 
 日期: 2026-06
-状态: Accepted（Enhanced by ADR-015 + ADR-016。ADR-015 追加三道统计过拟合门，ADR-016 在 executor 节点引入有限逃生口。六步骨架与树哲学保留，不被替换。**阶段 5 并行机制于 2026-08 收尾修正**：Send fan-out 伪并行 -> executor 内部批量并行，见下文阶段 5 更新）
+状态: Accepted（Enhanced by ADR-015 + ADR-016。**编排控制器地位由 [ADR-018](018-think-on-graph-research-agent.md) 移交 ResearchAgent**：假设树 / held-out 合并门 / 六步节点保留为状态存储与可复用脚手架，不再是策略研发唯一合法编排）
 
 ## 背景
 

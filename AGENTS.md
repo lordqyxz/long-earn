@@ -10,12 +10,15 @@
 
 Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
 
-- **智能意图路由** — 自动识别用户查询意图，路由到策略研发或股票分析子图
-- **策略研发** — 基于 HTR 假设树精炼的闭环研发：观察 → 构思 → 选择 → 调度 → 回测 → 决策（ADR-010）
+- **分层智能体编排** — MasterAgent（ReAct）负责任务分解与跨能力调度（ADR-016）
+- **ToG 策略研发飞轮** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成飞轮（ADR-018）；假设树与 OOS 门保留为状态/硬约束（ADR-010 / ADR-015）
 - **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012）
-- **自我进化** — 策略经验沉淀到物质-运动统一架构记忆系统（ADR-007），后续研发可检索历史经验
+- **事件图谱基础设施** — `prepare_context` 自动激活事件上下文；缺省时触发采集推理（ADR-007 / ADR-018）
+- **自我进化（规划中）** — 策略经验沉淀到物质-运动统一架构记忆系统（ADR-007 / ADR-017 Deferred）
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL 描述策略，支持进程级并行回测（ADR-005 + ADR-008）
 - **实时行情监控** — 实时行情 Provider（显式主源 miniqmt，次源 ciccwm）+ 价格阈值告警（ADR-011 / ADR-018）
+
+运行时总览与分层图见 [docs/architecture.md](docs/architecture.md)。
 
 ---
 
@@ -36,10 +39,10 @@ Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
 ```python
 # 正确
 context = create_runtime_context()
-agent = StrategyResearchAgent(context=context)
+agent = ResearchAgent(context=context)  # 或 MasterAgent(context=context)
 
 # 错误 — 禁止无 context 创建
-agent = StrategyResearchAgent()
+agent = ResearchAgent()
 ```
 
 ### 2.3 关键架构约束
@@ -53,7 +56,7 @@ agent = StrategyResearchAgent()
 
 > 「质量门槛」（见第四节）是代码层硬性检查；「能力基线」是系统层验证标准——任何修改不得破坏既有基线，发现偏离须在 TODO.md 登记并按威胁程度排期修复。基线的具体阈值、验证位置、已知偏离以代码为准（见 `tests/unit/` 与对应源码），本节只记录四个核心维度的目标：
 
-1. **策略生成与持续进化**：HTR 六步循环能产出可回测的策略 YAML，并通过 held-out OOS 合并门保证策略质量单调提升。
+1. **策略生成与持续进化**：ResearchAgent（ToG）能产出可回测的策略 YAML；合并须通过 held-out OOS 与 ADR-015 统计门，保证策略质量单调提升。
 2. **回测金融级可靠性**：事件驱动引擎在架构层面绝对杜绝未来函数，撮合/风控/审计可追溯、可重放。详见 [ADR-005](docs/adr/005-event-driven-backtest.md)。
 3. **数据利用充分性**：DuckDB Cache + 显式多源（miniqmt 面板 / ciccwm 情报 / 实时）按能力点名接入，PIT 对齐严格，缓存加速可观测。
 4. **多核 CPU 利用**：并行回测编排 + 共享数据底座 + 子进程隔离下载，发挥多核优势。
@@ -154,11 +157,11 @@ prompt = prompt_template.format(query=query)
 
 ### 规则
 
-1. **训练集可反复使用**：策略研发、因子筛选、参数网格寻优、ToT 反思等全部在训练集上进行。
-2. **测试集仅在合并门触碰**：HTR 的 `_decide` 节点对 best dev 候选跑 Walk-Forward OOS，`oos_score > current_best + threshold` 才合并。测试集**不得**用于参数调优或日常回测。
+1. **训练集可反复使用**：策略研发、因子筛选、参数网格寻优、ToG 探索等全部在训练集上进行。
+2. **测试集仅在合并门触碰**：候选策略合并前须跑 Walk-Forward OOS / 统计门（ResearchAgent `run_oos_gates` 或 HTR `_decide`），`oos_score > current_best + threshold` 才合并。测试集**不得**用于参数调优或日常回测。
 3. **验证集最后触碰一次**：最终评估使用验证集，**整个研发过程中仅此一次**。验证集业绩是系统对外报告的唯一指标。
 4. **比例参考**：训练 ~55%、测试 ~30%、验证 ~15%（按时间跨度）。可根据数据量调整，但三段必须分离。
-5. **禁止前视偏差**：训练集策略不得隐式或显式地"偷看"测试集/验证集的结果来调整参数。HTR 的 held-out 门就是此规则的系统级保证。
+5. **禁止前视偏差**：训练集策略不得隐式或显式地"偷看"测试集/验证集的结果来调整参数。held-out 门就是此规则的系统级保证。
 
 `AppConfig` 提供 `train_start_date` / `train_end_date` / `test_start_date` / `test_end_date` / `validation_start_date` / `validation_end_date` 字段，从环境变量读取。具体字段定义与默认值见 `src/long_earn/config.py`。
 
@@ -183,6 +186,7 @@ prompt = prompt_template.format(query=query)
 ### 6.3 记忆系统
 
 - 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全）。旧 `memory/` 模块（ADR-004）已删除。
+- **ADR-018**：研究/分析入口统一走 `RuntimeContext.prepare_context(query)`（激活事件；miss 时默认 Collector 轻量推理后再激活）。`Connector` 注入 `memory_provider`。
 
 ### 6.4 集成测试
 
@@ -236,6 +240,8 @@ curl http://localhost:11434/api/tags    # 返回已安装模型列表
 ---
 
 ## 九、架构决策记录 (ADR)
+
+运行时总览图：[docs/architecture.md](docs/architecture.md)。
 
 ADR 索引与详细说明见 [docs/adr/README.md](docs/adr/README.md)。
 

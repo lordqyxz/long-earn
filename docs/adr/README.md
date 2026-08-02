@@ -2,6 +2,8 @@
 
 ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完成状态、扩展方法数等动态信息以代码为准，请直接阅读对应 ADR 文档与源码。
 
+**运行时总览（ADR-018 后）**：[architecture.md](../architecture.md)
+
 ## 当前有效
 
 | 编号 | 标题 | 简述 |
@@ -13,7 +15,7 @@ ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完�
 | [ADR-007](007-unified-substance-architecture.md) | 物质-运动统一架构 | `Substance`（Pydantic）统一事件/关系/知识/策略经验；双索引（keyword+semantic + GraphIndex 邻接表）；JSONL 持久化无 pickle |
 | [ADR-008](008-parallel-backtest-and-unified-templating.md) | 并行回测 + 统一模板渲染 | 进程级并行编排层（SharedMemory 零拷贝 + ProcessPoolExecutor）+ 参数网格。**A 部分（`${var}` 语法 + 纯函数渲染器）已被 ADR-011 废弃**，B 部分（并行回测编排）继续有效，2026-08 增补 B5（warmup 注入契约）+ B6（diagnostics 保真约束） |
 | [ADR-009](009-operator-catalog-and-operator-dev-subgraph.md) | 算子目录 + 算子研发子图 | 类型化算子目录（`@operator` + Pydantic params + 约定目录自动扫描）；`prove_causality` 因果性证明作算子上线硬约束；operator_dev 异步闭环 + strategy_optimization 验收 |
-| [ADR-010](010-hypothesis-tree-refinement.md) | 假设树精炼 HTR | `strategy_rd` 子图 Arbor HTR 六步循环 + 持久化假设树 + Walk-Forward held-out 合并门。Enhanced by ADR-015（三道统计门）+ ADR-016（executor 有限逃生口）。**阶段 5 并行机制于 2026-08 收尾修正**：Send fan-out 伪并行 -> executor 内批量并行（受 ADR-008 B5/B6 约束） |
+| [ADR-010](010-hypothesis-tree-refinement.md) | 假设树精炼 HTR | 假设树 + Walk-Forward held-out 合并门。**编排控制器已由 ADR-018 移交 ResearchAgent**；HTR 子图降为状态/脚手架。Enhanced by ADR-015 + ADR-016 |
 | [ADR-011](011-unified-mustache-prompt-templating.md) | 统一 jinja2 + ChatPromptTemplate | `${var}` -> `{{ var }}`（默认不 HTML 转义，与 JSON `{}` 不冲突）；多消息结构用 `MarkdownChatPromptTemplate` |
 | [ADR-012](012-persona-subgraph-skill-pack.md) | 大师智能节点技能包 | `MasterPersona` Protocol + `PersonaRegistry`，支持 stock_analysis / strategy_review / strategy_generate / result_synthesis 多 mode |
 | [ADR-013](013-backtest-accuracy-principles.md) | 回测引擎准确性原则与陷阱清单 | 七维分类框架（数据正确性/时序偏差/交易执行/市场微观结构/投资组合与风控/指标计算/工程与审计）+ 检测方法论 + 防护状态总览。2026-08 增补 T6（warmup 漏算致因子前视截断） |

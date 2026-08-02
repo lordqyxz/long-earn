@@ -16,7 +16,7 @@ ADR-016 将主图升级为 MasterAgent ReAct，但明确保留 ADR-010 的 HTR �
 
 Think-on-Graph（ToG, ICLR 2024）与 ToG-2 提供了可迁移范式：LLM ⊗ KG——Agent 在知识图上逐步 explore / prune，证据充分后再作答；图检索与非结构化上下文交替。本项目将「作答」替换为「调用不可跳过的回测与统计门」。
 
-本地论文与映射见 [docs/research/papers/](../research/papers/)。
+本地论文与映射见 [docs/research/papers/](../research/papers/)。运行时总览图见 [docs/architecture.md](../architecture.md)。
 
 ## 决策
 
