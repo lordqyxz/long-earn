@@ -25,18 +25,26 @@
 - 产物是 Substance（event / relation 形态），与 ADR-007 物质-运动架构统一。
 """
 
-from long_earn.event_inference.collectors.base import (
+from long_earn.event_inference.collectors import (
+    CiccwmHotCollector,
+    CiccwmTopicCollector,
     CollectedItem,
     Collector,
     CollectorRegistry,
+    KimiCollector,
+    create_default_collector_registry,
 )
 from long_earn.event_inference.state import EventInferenceState
 from long_earn.event_inference.subgraph import create_event_inference_subgraph
 
 __all__ = [
+    "CiccwmHotCollector",
+    "CiccwmTopicCollector",
     "CollectedItem",
     "Collector",
     "CollectorRegistry",
     "EventInferenceState",
+    "KimiCollector",
+    "create_default_collector_registry",
     "create_event_inference_subgraph",
 ]

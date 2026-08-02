@@ -6,7 +6,7 @@
 2. 解析 aspect（概念 → 字段集 / universe / 图谱查询 / 情报方法）
 3. 按 resolution 类型分发取数
 4. 图谱关联节点（供 LLM 推理增强）
-5. 降级链（主源失败 → fallback）
+5. 降级链（已废止：ADR-018 改为显式点名源，失败即失败）
 6. PIT 裁剪
 
 依赖方向：``ontology`` 不依赖 ``backtest.data`` / ``services``（import-linter 契约）。

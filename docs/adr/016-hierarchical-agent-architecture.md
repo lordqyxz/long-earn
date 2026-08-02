@@ -1,7 +1,7 @@
 # ADR-016: 分层智能体架构（主智能体 ReAct + 算子缺口闭环下沉）
 
 日期: 2026-07
-状态: Accepted
+状态: Accepted（§C 策略研发编排条款 **Superseded by [ADR-018](018-think-on-graph-research-agent.md)**）
 
 ## 背景
 
@@ -80,7 +80,9 @@ ADR-010 的 HTR 六步循环 + ADR-015 的三道统计门已构成策略研发�
 
 ### C. 策略研发——六步骨架保留 + 有限逃生口
 
-**保留 ADR-010 的六步循环为默认编排**（`observe→ideate→select→dispatch→executor→backpropagate→decide`），**不做全量 ReAct 化**。理由：ADR-015 的实证表明，量化 sharpe 噪声大，LLM 直觉不可靠——把研究策略决策权（何时剪枝、分支数、何时停止）完全交给 LLM 自主，不比固定 workflow + 统计门更优，且有丢失证据驱动原则的风险。
+> **[ADR-018](018-think-on-graph-research-agent.md) 修订**：实验表明纯 HTR 子图难以产出有效策略，而外置 ReAct + 回测/算子工具能形成飞轮。策略研发的**探索控制器**改为 ToG 风格 `ResearchAgent`；本节「不做全量 ReAct 化」条款废止。HTR 假设树与 ADR-015 统计门仍为状态存储与证据硬约束。下文逃生口设计仍可作为 ResearchAgent 工具内部实现参考。
+
+**原决策（已废止编排地位）**：保留 ADR-010 的六步循环为默认编排（`observe→ideate→select→dispatch→executor→backpropagate→decide`），**不做全量 ReAct 化**。理由曾是：ADR-015 的实证表明，量化 sharpe 噪声大，LLM 直觉不可靠——把研究策略决策权完全交给 LLM 自主，不比固定 workflow + 统计门更优。
 
 **在六步骨架的特定节点引入有限逃生口**——LLM 在这些点做局部决策，但不改变整体步序：
 

@@ -104,10 +104,10 @@ class TestToolSetContract:
 
     @pytest.fixture
     def mock_master_agent(self) -> MasterAgent:
-        """创建 MockMasterAgent（不实际创建子图）"""
+        """创建 MockMasterAgent（不实际创建子图 / ResearchAgent 图）"""
         with (
             patch(
-                "long_earn.master_agent.create_htr_subgraph",
+                "long_earn.master_agent.ResearchAgent",
                 return_value=MagicMock(),
             ),
             patch(

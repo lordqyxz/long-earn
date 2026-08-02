@@ -307,13 +307,14 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
         },
     )
 
-    # event_context → fan-out 到 4 个分析师
+    # event_context → fan-out 到 5 个分析师（含资金流向）
     workflow.add_edge("event_context", "petter_analysis")
     workflow.add_edge("event_context", "charles_munger_analysis")
     workflow.add_edge("event_context", "buffett_analysis")
     workflow.add_edge("event_context", "fiske_analysis")
+    workflow.add_edge("event_context", "fund_flow_analysis")
 
-    # 从四个并行节点汇聚到汇总节点
+    # 从五个并行节点汇聚到汇总节点
     workflow.add_edge("petter_analysis", "summarize")
     workflow.add_edge("charles_munger_analysis", "summarize")
     workflow.add_edge("buffett_analysis", "summarize")

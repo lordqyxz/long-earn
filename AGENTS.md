@@ -15,7 +15,7 @@ Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
 - **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012）
 - **自我进化** — 策略经验沉淀到物质-运动统一架构记忆系统（ADR-007），后续研发可检索历史经验
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL 描述策略，支持进程级并行回测（ADR-005 + ADR-008）
-- **实时行情监控** — 实时行情 Provider（miniqmt→ciccwm 降级）+ 价格阈值告警（ADR-011）
+- **实时行情监控** — 实时行情 Provider（显式主源 miniqmt，次源 ciccwm）+ 价格阈值告警（ADR-011 / ADR-018）
 
 ---
 
@@ -55,7 +55,7 @@ agent = StrategyResearchAgent()
 
 1. **策略生成与持续进化**：HTR 六步循环能产出可回测的策略 YAML，并通过 held-out OOS 合并门保证策略质量单调提升。
 2. **回测金融级可靠性**：事件驱动引擎在架构层面绝对杜绝未来函数，撮合/风控/审计可追溯、可重放。详见 [ADR-005](docs/adr/005-event-driven-backtest.md)。
-3. **数据利用充分性**：DuckDB 缓存 + 多源降级链覆盖全部业务所需数据，PIT 对齐严格，缓存加速可观测。
+3. **数据利用充分性**：DuckDB Cache + 显式多源（miniqmt 面板 / ciccwm 情报 / 实时）按能力点名接入，PIT 对齐严格，缓存加速可观测。
 4. **多核 CPU 利用**：并行回测编排 + 共享数据底座 + 子进程隔离下载，发挥多核优势。
 
 ---
@@ -176,7 +176,7 @@ prompt = prompt_template.format(query=query)
 
 ### 6.2 数据层
 
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。多源降级链：DuckDB 缓存 → miniqmt (xtquant) → ciccwm (HTTP) → akshare。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。**ADR-018**：面板路径为 DuckDB Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **数据层三组接口**：`DataConnector`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。具体能力清单与方法签名以 `services/__init__.py` 与 `backtest/data/connector.py` 代码为准。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
 

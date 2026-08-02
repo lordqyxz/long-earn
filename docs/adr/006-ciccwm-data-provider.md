@@ -1,7 +1,7 @@
 # ADR-006: 引入 ciccwm 财经数据 Provider
 
 ## 状态
-Accepted
+Accepted（面板「降级链」叙事 **由 [ADR-018](018-think-on-graph-research-agent.md) 修订**：ciccwm 保留为情报独占源 / 显式次选面板源，不再作为 Composite 静默 fallback）
 
 ## 上下文
 

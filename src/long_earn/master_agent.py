@@ -21,7 +21,7 @@ from langgraph.prebuilt import create_react_agent
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.event_inference import create_event_inference_subgraph
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
-from long_earn.strategy_rd.htr_subgraph import create_htr_subgraph
+from long_earn.strategy_rd.research_agent import ResearchAgent
 from long_earn.tools.kimi_web_search import kimi_web_search
 
 if TYPE_CHECKING:
@@ -33,9 +33,10 @@ _DEFAULT_RECURSION_LIMIT = 50
 
 
 class MasterAgent:
-    """主智能体 (ADR-016)
+    """主智能体 (ADR-016 / ADR-018)
 
     ReAct 智能体，负责任务分解、工具调度、结果整合。
+    策略研发委托 ToG ResearchAgent（ADR-018），不再直调 HTR 子图。
 
     用法::
 
@@ -55,8 +56,8 @@ class MasterAgent:
         self._logger: LoggerService = context.logger
         self._monitoring: MonitoringService = context.monitoring
 
-        # 创建子图（与旧 agent.py 一致，eager 创建）
-        self._strategy_rd_subgraph = create_htr_subgraph(context)
+        # ADR-018：策略研发 = ResearchAgent；分析 / 事件仍为领域子图工具
+        self._research_agent = ResearchAgent(context)
         self._stock_analysis_subgraph = create_stock_analysis_subgraph(context)
         self._event_inference_subgraph = create_event_inference_subgraph(context)
 
@@ -95,15 +96,15 @@ class MasterAgent:
         ]
 
     def _make_research_strategy_tool(self) -> Any:
-        """策略研发工具"""
+        """策略研发工具 — 委托 ToG ResearchAgent（ADR-018）"""
         logger = self._logger
         monitoring = self._monitoring
-        subgraph = self._strategy_rd_subgraph
+        research_agent = self._research_agent
 
         @tool
         def research_strategy(idea: str, constraints: str = "") -> str:
-            """策略研发：委托策略研发子图进行假设树精炼（HTR），
-            返回最佳策略 YAML + 回测指标 + 探索路径摘要。
+            """策略研发：委托 Think-on-Graph ResearchAgent 探索图 + 回测证据，
+            返回最佳策略摘要、指标与探索路径。
 
             Args:
                 idea: 策略研发想法或方向描述
@@ -116,9 +117,9 @@ class MasterAgent:
                 query = (
                     idea if not constraints else f"{idea} (约束: {constraints})"
                 )
-                logger.info(f"策略研发工具调用: {query}")
+                logger.info(f"策略研发工具调用(ToG): {query}")
                 try:
-                    result = subgraph.invoke({"query": query})
+                    result = research_agent.invoke(idea, constraints)
                     return _format_strategy_result(result)
                 except Exception as e:
                     logger.error(f"策略研发失败: {e}")
