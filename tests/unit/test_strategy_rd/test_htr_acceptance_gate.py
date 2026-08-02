@@ -195,3 +195,21 @@ def test_acceptance_gate_initial_baseline_rejects_no_sharpe() -> None:
     result = gate.evaluate(None, optimized)
     assert result.accepted is False
     assert "无有效 sharpe" in result.reason
+
+
+def test_acceptance_gate_rejects_unreliable_metrics() -> None:
+    """有交易但 factor 失败 → metrics_unreliable，AcceptanceGate 拒绝。"""
+    gate = AcceptanceGate()
+    optimized = {
+        "sharpe_ratio": 2.0,
+        "total_return": 0.3,
+        "metrics_unreliable": True,
+        "strategy_diagnostics": {
+            "degenerate": False,
+            "failed_factor_aliases": ["roe"],
+            "metrics_unreliable": True,
+        },
+    }
+    result = gate.evaluate(_bt(1.0), optimized)
+    assert result.accepted is False
+    assert "不可信" in result.reason

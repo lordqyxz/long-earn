@@ -5,7 +5,7 @@
 
 规则（全部满足才 accept）：
 1. 优化版回测无 error；
-2. 优化版非 degenerate（有真实交易，trade_count > 0 且非全 step 失败）；
+2. 优化版 ``metrics_unreliable`` 为 False（含退化、算子失败、引擎撮合异常）；
 3. 主指标（默认 sharpe_ratio）**严格优于**基线；
 4. 基线 sharpe 缺失时（HTR 首次循环 ``previous_backtest`` 为空）：接受任何有有效
    sharpe 的策略作为初始基线（即使为负 sharpe）。这是为了让 HTR 能建立初始基线
@@ -66,12 +66,22 @@ class AcceptanceGate:
                 None,
             )
 
-        # 2) 优化版不能退化
-        diag = optimized_backtest.get("strategy_diagnostics", {}) or {}
-        if diag.get("degenerate"):
+        # 2) 优化版指标必须可信（退化 / 算子失败 / 引擎 skip 等）
+        if is_metrics_unreliable(optimized_backtest):
+            diag = optimized_backtest.get("strategy_diagnostics", {}) or {}
+            if diag.get("degenerate"):
+                reason = "优化版策略退化（无真实交易）"
+            elif diag.get("failed_factor_aliases") or diag.get("failed_step_labels"):
+                reason = "优化版回测算子链失败，指标不可信"
+            elif diag.get("engine_metrics_unreliable") or optimized_backtest.get(
+                "metrics_unreliable"
+            ):
+                reason = "优化版回测撮合异常（大量跳过/部分成交），指标不可信"
+            else:
+                reason = "优化版回测指标不可信"
             return AcceptanceResult(
                 False,
-                "优化版策略退化（无真实交易/全 step 失败）",
+                reason,
                 None,
                 None,
                 None,
@@ -114,6 +124,14 @@ class AcceptanceGate:
             b_ret,
             o_ret,
         )
+
+
+def is_metrics_unreliable(backtest: dict[str, Any]) -> bool:
+    """回测结果是否标记为指标不可信（顶层或 diagnostics 任一为 True）。"""
+    if backtest.get("metrics_unreliable"):
+        return True
+    diag = backtest.get("strategy_diagnostics") or {}
+    return bool(diag.get("metrics_unreliable"))
 
 
 def _metric(backtest: dict[str, Any] | None, key: str) -> float | None:

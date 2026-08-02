@@ -214,10 +214,15 @@ class BacktestServiceImpl(BacktestService):
         any_factor_failed = len(failed_factor_aliases) > 0
         # degenerate: 策略层退化（无交易 = 啥都没干）；any_step_failed 进一步标记不可信
         degenerate = trade_count == 0
-        # metrics_unreliable: 指标不可信，上层不应基于此做收益对比或验收决策
-        metrics_unreliable = degenerate or any_step_failed or any_factor_failed
+        # metrics_unreliable: 策略层退化/算子失败，或引擎层撮合异常（skip/部分成交）
+        engine_unreliable = bool(getattr(result, "metrics_unreliable", False))
+        strategy_unreliable = degenerate or any_step_failed or any_factor_failed
+        metrics_unreliable = strategy_unreliable or engine_unreliable
 
         if self.logger and metrics_unreliable:
+            engine_note = (
+                f", engine_unreliable={engine_unreliable}" if engine_unreliable else ""
+            )
             self.logger.warning(
                 f"策略指标不可信：trade_count={trade_count}, "
                 f"factor_failures={len(failed_factor_aliases)} "
@@ -225,6 +230,7 @@ class BacktestServiceImpl(BacktestService):
                 f"step_failures={len(failed_step_labels)} "
                 f"unique（共 {len(step_failures)} 次）, "
                 f"degenerate={degenerate}, metrics_unreliable={metrics_unreliable}"
+                f"{engine_note}"
             )
 
         return {
@@ -235,6 +241,7 @@ class BacktestServiceImpl(BacktestService):
             "total_signals": total_signals,
             "trade_count": trade_count,
             "degenerate": degenerate,
+            "engine_metrics_unreliable": engine_unreliable,
             "metrics_unreliable": metrics_unreliable,
         }
 
@@ -356,6 +363,10 @@ class BacktestServiceImpl(BacktestService):
             if self.logger:
                 self.logger.info(
                     f"股票池: {universe_type}, {len(formatted_symbols)} 只股票"
+                )
+
+                self.logger.info(
+                    "开始加载数据并回测（大池可能需数分钟，请关注 [回测引擎]/[合并面板] 进度日志）..."
                 )
 
             result = engine.run(

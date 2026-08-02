@@ -391,37 +391,45 @@ class ResearchAgent:
                 use_train_split: True 时强制使用 config 训练集日期
             """
             with monitoring.track("research.run_backtest"):
-                logger.info("[ToG] run_backtest")
                 start = ""
                 end = ""
                 if use_train_split:
                     start = ctx.config.train_start_date
                     end = ctx.config.train_end_date
+                logger.info(
+                    f"[ToG] run_backtest: {start or '(DSL区间)'}~{end or '(DSL区间)'}"
+                )
                 result = ctx.backtest_service.run(
                     strategy_yaml=strategy_yaml,
                     start_date=start,
                     end_date=end,
                 )
-                metrics = (
-                    (result.get("metrics") or {}) if isinstance(result, dict) else {}
-                )
-                slim = {
-                    "error": result.get("error") if isinstance(result, dict) else None,
-                    "metrics": {
-                        k: metrics.get(k)
-                        for k in (
-                            "total_return",
-                            "sharpe_ratio",
-                            "max_drawdown",
-                            "trade_count",
-                        )
-                    },
-                    "degenerate": (
-                        (result.get("strategy_diagnostics") or {}).get("degenerate")
-                        if isinstance(result, dict)
-                        else None
+                if not isinstance(result, dict):
+                    return json.dumps(
+                        {"error": "回测返回格式异常", "metrics_unreliable": True},
+                        ensure_ascii=False,
+                    )
+                diag = result.get("strategy_diagnostics") or {}
+                unreliable = bool(result.get("metrics_unreliable"))
+                slim: dict[str, Any] = {
+                    "error": result.get("error"),
+                    "total_return": result.get("total_return"),
+                    "sharpe_ratio": result.get("sharpe_ratio"),
+                    "max_drawdown": result.get("max_drawdown"),
+                    "trade_count": diag.get("trade_count", result.get("trade_count")),
+                    "metrics_unreliable": unreliable,
+                    "degenerate": diag.get("degenerate"),
+                    "failed_factor_aliases": diag.get("failed_factor_aliases", []),
+                    "failed_step_labels": diag.get("failed_step_labels", []),
+                    "engine_metrics_unreliable": diag.get(
+                        "engine_metrics_unreliable", False
                     ),
                 }
+                if unreliable:
+                    slim["rejected"] = True
+                    slim["rejection_reason"] = (
+                        "训练集回测指标不可信，不得作为策略有效证据"
+                    )
                 return json.dumps(slim, ensure_ascii=False, default=str)
 
         return run_backtest
@@ -441,6 +449,33 @@ class ResearchAgent:
             with monitoring.track("research.run_oos_gates"):
                 logger.info("[ToG] run_oos_gates")
                 bt = ctx.backtest_service
+
+                from long_earn.strategy_optimization.acceptance import (  # noqa: PLC0415
+                    is_metrics_unreliable,
+                )
+
+                train_bt = bt.run(
+                    strategy_yaml=strategy_yaml,
+                    start_date=ctx.config.train_start_date,
+                    end_date=ctx.config.train_end_date,
+                )
+                if isinstance(train_bt, dict) and is_metrics_unreliable(train_bt):
+                    diag = train_bt.get("strategy_diagnostics") or {}
+                    return json.dumps(
+                        {
+                            "passed": False,
+                            "reason": (
+                                "训练集回测指标不可信"
+                                f"（degenerate={diag.get('degenerate')}, "
+                                f"factor_failures={diag.get('failed_factor_aliases')}, "
+                                f"step_failures={diag.get('failed_step_labels')}）"
+                                "，禁止进入 OOS 门"
+                            ),
+                            "metrics_unreliable": True,
+                        },
+                        ensure_ascii=False,
+                    )
+
                 try:
                     oos = bt.run_walk_forward_parallel(
                         strategy_yaml=strategy_yaml,

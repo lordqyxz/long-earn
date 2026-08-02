@@ -358,6 +358,22 @@ class TestBuildStrategyDiagnosticsAccumulation:
         assert diag["degenerate"] is True
         assert diag["metrics_unreliable"] is True
 
+    def test_engine_skip_marks_metrics_unreliable(self):
+        """引擎层 skip/部分成交标志应合并进 diagnostics.metrics_unreliable"""
+        svc = _make_service()
+        strategy_obj = type("S", (), {})()
+        strategy_obj.factor_failures = []
+        strategy_obj.step_failures = []
+        dsl = type("D", (), {})()
+        dsl.signals = [{"type": "operator"}]
+        result = type("R", (), {"trade_count": 100, "metrics_unreliable": True})()
+
+        diag = svc._build_strategy_diagnostics(strategy_obj, dsl, result)
+
+        assert diag["degenerate"] is False
+        assert diag["engine_metrics_unreliable"] is True
+        assert diag["metrics_unreliable"] is True
+
 
 class TestInflatedReturnBugFixOperatorPath:
     """虚高 bug 回归测试（ADR-009 收尾：算子路径版）
