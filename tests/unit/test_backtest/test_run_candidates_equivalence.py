@@ -92,6 +92,11 @@ class _MockDataProvider:
 
     def __init__(self, panel: pl.DataFrame) -> None:
         self._panel = panel
+        self._symbols = panel["symbol"].unique().to_list()
+
+    def get_symbols(self, universe_type: str, date: str) -> list[str]:
+        """单元测试不依赖真实行情源，直接返回面板内标的。"""
+        return list(self._symbols)
 
     def get_merged_panel_as_polars(
         self, symbols: list[str], start: str, end: str
