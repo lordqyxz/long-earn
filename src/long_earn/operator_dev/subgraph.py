@@ -294,6 +294,8 @@ def create_operator_dev_subgraph(
     *,
     implementer: OperatorImplementer | None = None,
     backlog: OperatorBacklog | None = None,
+    checkpointer: Any = None,
+    interrupt_before: list[str] | None = None,
 ) -> Any:
     """创建算子开发子图。
 
@@ -301,6 +303,8 @@ def create_operator_dev_subgraph(
         context: 运行时上下文；若 ``implementer`` 未提供则用它构造 LLMImplementer。
         implementer: 算子实现者（生产 LLM / 测试 Fake）。可注入以解耦 LLM。
         backlog: 算子缺口队列；不传则用空内存 backlog（由调用方 submit）。
+        checkpointer: LangGraph checkpointer（如 ``SqliteSaver``），用于断点续跑。
+        interrupt_before: 在指定节点前暂停（需配合 checkpointer）。
     """
 
     if implementer is None:
@@ -354,4 +358,9 @@ def create_operator_dev_subgraph(
     workflow.add_edge("register", "pick_task")
     workflow.add_edge("mark_blocked", "pick_task")
 
-    return workflow.compile()
+    compile_kwargs: dict[str, Any] = {}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    if interrupt_before:
+        compile_kwargs["interrupt_before"] = interrupt_before
+    return workflow.compile(**compile_kwargs)

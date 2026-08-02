@@ -35,10 +35,16 @@ class ResearchAgent:
         result = agent.invoke("研发动量策略并补齐缺失算子")
     """
 
-    def __init__(self, context: RuntimeContext) -> None:
+    def __init__(
+        self,
+        context: RuntimeContext,
+        *,
+        checkpointer: Any = None,
+    ) -> None:
         self.context = context
         self._logger: LoggerService = context.logger
         self._monitoring: MonitoringService = context.monitoring
+        self._checkpointer = checkpointer
         # beam 路径状态（进程内，单次 invoke 生命周期）
         self._beam_paths: list[dict[str, Any]] = []
         self._last_context: str = ""
@@ -49,11 +55,14 @@ class ResearchAgent:
         )
         system_prompt = prompt_template.format()
         llm = context.require_llm().get_llm()
-        self._agent = create_react_agent(
-            model=llm,
-            tools=self._build_tools(),
-            prompt=system_prompt,
-        )
+        agent_kwargs: dict[str, Any] = {
+            "model": llm,
+            "tools": self._build_tools(),
+            "prompt": system_prompt,
+        }
+        if checkpointer is not None:
+            agent_kwargs["checkpointer"] = checkpointer
+        self._agent = create_react_agent(**agent_kwargs)
 
     def _build_tools(self) -> list[Any]:
         return [
@@ -254,6 +263,7 @@ class ResearchAgent:
         logger = self._logger
         monitoring = self._monitoring
         ctx = self.context
+        agent = self
 
         @tool
         def develop_operator(name: str, intent: str, category: str = "factor") -> str:
@@ -303,8 +313,19 @@ class ResearchAgent:
                         create_operator_dev_subgraph,
                     )
 
-                    subgraph = create_operator_dev_subgraph(ctx, backlog=backlog)
-                    result = subgraph.invoke({})
+                    subgraph = create_operator_dev_subgraph(
+                        ctx,
+                        backlog=backlog,
+                        checkpointer=agent._checkpointer,
+                    )
+                    invoke_cfg: dict[str, Any] = {}
+                    if agent._checkpointer is not None:
+                        invoke_cfg = {
+                            "configurable": {
+                                "thread_id": f"opdev-{name}",
+                            }
+                        }
+                    result = subgraph.invoke({}, config=invoke_cfg or None)
                     return json.dumps(
                         {
                             "enqueued": name,
@@ -574,12 +595,19 @@ class ResearchAgent:
 
         return record_path_outcome
 
-    def invoke(self, idea: str, constraints: str = "") -> dict[str, Any]:
+    def invoke(
+        self,
+        idea: str,
+        constraints: str = "",
+        *,
+        thread_id: str = "",
+    ) -> dict[str, Any]:
         """执行一次 ToG 策略研发。
 
         Args:
             idea: 研发想法
             constraints: 可选约束
+            thread_id: 启用 checkpointer 时的线程 ID；空则用默认 ``tog-research``
 
         Returns:
             summary / messages / beam_paths
@@ -597,10 +625,16 @@ class ResearchAgent:
         if self._last_context:
             user_content = f"{query}\n\n## 已激活上下文\n\n{self._last_context[:3000]}"
 
+        run_config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
+        if self._checkpointer is not None:
+            tid = thread_id.strip() or "tog-research"
+            run_config["configurable"] = {"thread_id": tid}
+            self._logger.info(f"[ToG] checkpoint 已启用，thread_id={tid}")
+
         with self._monitoring.track("research_agent"):
             result = self._agent.invoke(
                 {"messages": [("user", user_content)]},
-                config={"recursion_limit": _DEFAULT_RECURSION_LIMIT},
+                config=run_config,
             )
 
         messages = result.get("messages", [])

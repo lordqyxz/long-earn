@@ -16,6 +16,7 @@ from long_earn.operator_dev.agents import (
     FakeImplementer,
     LLMImplementer,
     OperatorImplementer,
+    OperatorSourceResult,
 )
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.operator_dev.sandbox import (
@@ -32,6 +33,7 @@ __all__ = [
     "OperatorBacklog",
     "OperatorImplementer",
     "OperatorLoadError",
+    "OperatorSourceResult",
     "OperatorSpec",
     "OperatorSpecPriority",
     "audit_source",

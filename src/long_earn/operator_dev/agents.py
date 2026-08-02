@@ -1,7 +1,7 @@
 """算子开发 Agent —— 实现 / 修复算子源码。
 
 定义 :class:`OperatorImplementer` 协议，便于：
-- 生产用 :class:`LLMImplementer`（调 LLM 生成源码）；
+- 生产用 :class:`LLMImplementer`（调 LLM **结构化 JSON** 生成源码）；
 - 测试用 :class:`FakeImplementer`（确定性返回预置源码，不依赖真实 LLM）。
 
 LLM 生成源码后必须经 :mod:`long_earn.operator_dev.sandbox` 审计 + 因果性证明才能
@@ -12,11 +12,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from pydantic import BaseModel, Field
+
+from long_earn.core.llm_utils import parse_llm_json
 from long_earn.operator_dev.spec import OperatorSpec
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
     from long_earn.services import LLMService
+
+
+class OperatorSourceResult(BaseModel):
+    """LLM 结构化返回：可执行算子源码（禁止 markdown 围栏）。"""
+
+    source_code: str = Field(
+        ...,
+        min_length=1,
+        description="完整可执行的 Python 算子源码，不含 markdown / 解释文字",
+    )
 
 
 # 算子源码模板：实现一个标准因果因子算子的骨架，供 LLM 参考。
@@ -59,18 +72,27 @@ class OperatorImplementer(Protocol):
 
 
 class LLMImplementer:
-    """生产实现者：调 LLM 生成算子源码。"""
+    """生产实现者：强制 JSON 结构化返回 ``source_code``，从根源避免代码围栏。"""
 
     def __init__(self, context: RuntimeContext) -> None:
         self.llm: LLMService = context.require_llm()
 
     def implement(self, spec: OperatorSpec) -> str:
         prompt = self._build_prompt(spec, failure="")
-        return self.llm.invoke(prompt).content
+        response = self.llm.invoke(prompt, format="json")
+        return self._parse_source(str(response.content))
 
     def refine(self, spec: OperatorSpec, failure_report: str) -> str:
         prompt = self._build_prompt(spec, failure=failure_report)
-        return self.llm.invoke(prompt).content
+        response = self.llm.invoke(prompt, format="json")
+        return self._parse_source(str(response.content))
+
+    @staticmethod
+    def _parse_source(content: str) -> str:
+        """从 JSON 响应提取 ``source_code`` 字段。"""
+        data = parse_llm_json(content)
+        result = OperatorSourceResult.model_validate(data)
+        return result.source_code.strip()
 
     def _build_prompt(self, spec: OperatorSpec, failure: str) -> str:
         hint = _SOURCE_TEMPLATE_HINT.format(
@@ -78,13 +100,18 @@ class LLMImplementer:
             name=spec.name,
             category=spec.category,
         )
-        failure_section = f"\n\n## 上次失败报告（请修复）\n{failure}" if failure else ""
+        failure_section = (
+            f"\n\n## 上次失败报告（请修复 source_code）\n{failure}" if failure else ""
+        )
         return (
-            f"实现一个量化算子。严格只用 polars/numpy/math/long_earn.backtest.*，"
-            f"禁止 os/subprocess/eval 等。必须因果（仅回溯历史，禁止读未来）。\n\n"
+            "实现一个量化算子。严格只用 polars/numpy/math/long_earn.backtest.*，"
+            "禁止 os/subprocess/eval 等。必须因果（仅回溯历史，禁止读未来）。\n\n"
+            "请**仅**返回如下 JSON（不要 markdown，不要解释）：\n"
+            '{"source_code": "<完整可执行的 Python 源码>"}\n'
+            "source_code 必须可被 ast.parse 直接解析，禁止 ``` 围栏与前后散文。\n\n"
             f"## 算子规约\n{spec!r}\n\n"
-            f"## 源码骨架参考\n```\n{hint}\n```\n"
-            f"只输出算子源码，不要解释。{failure_section}"
+            f"## 源码骨架参考（写入 source_code 字段的内容形态）\n{hint}\n"
+            f"{failure_section}"
         )
 
 
