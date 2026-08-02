@@ -90,9 +90,15 @@ def build_entity_ontology() -> tuple[list[OntologyNode], list[OntologyEdge]]:
     boards = [
         _universe(
             "concept:universe:main_board",
-            "沪市主板",
-            ["main_board", "沪市主板"],
+            "沪深主板",
+            ["main_board", "沪深主板", "主板"],
             "main_board",
+        ),
+        _universe(
+            "concept:universe:sse_main",
+            "沪市主板",
+            ["sse_main", "沪市主板"],
+            "sse_main",
         ),
         _universe(
             "concept:universe:star_board",
@@ -106,7 +112,7 @@ def build_entity_ontology() -> tuple[list[OntologyNode], list[OntologyEdge]]:
             ["chinext", "创业板", "gem"],
             "chinext",
         ),
-        _universe("concept:universe:bse", "北交所", ["bse", "北交所"], "bse"),
+        _universe("concept:universe:bse", "北交所", ["bse", "北交所", "京市A股"], "bse"),
         _universe(
             "concept:universe:szse_main",
             "深市主板",

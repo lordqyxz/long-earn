@@ -44,15 +44,24 @@ INDEX_SECTOR_MAP = {
     "csi1000": "中证1000",
 }
 
-# 英文板块名 → 中文板块名映射（供 universe_type 使用）
+# 英文板块名 → xtquant 中文板块名（直接可查的板块）
 BOARD_NAME_MAP = {
-    "main_board": "沪市主板",
-    "star_board": "创业板",
     "chinext": "创业板",
     "gem": "创业板",
-    "bse": "北交所",
-    "szse_main": "深市主板",
-    "sse_main": "沪市主板",
+    "star_board": "科创板",
+    "bse": "京市A股",
+}
+
+# 沪/深主板：xtquant 无独立「主板」板块，由交易所 A 股减去科创/创业派生
+# universe_type -> (缓存键, 基础板块, 剔除板块)
+DERIVED_BOARD_SPEC: dict[str, tuple[str, str, str]] = {
+    "sse_main": ("沪市主板", "上证A股", "科创板"),
+    "szse_main": ("深市主板", "深证A股", "创业板"),
+}
+
+# 聚合板块：一个 universe_type 展开为多个原子类型后取并集
+COMPOSITE_BOARD_MAP: dict[str, tuple[str, ...]] = {
+    "main_board": ("sse_main", "szse_main"),
 }
 
 # 财务字段映射：标准字段名清单（get_financial_panel 默认返回这些列）
@@ -1328,28 +1337,61 @@ class MiniQmtUniverseProvider:
         return self._get_single_universe(universe_type, date)
 
     def _get_single_universe(self, universe_type: str, date: str) -> list[str]:
-        # 1. 优先从缓存读取
-        # 指数：沪深300 / 中证500 / 上证50 / 中证1000
+        if universe_type in COMPOSITE_BOARD_MAP:
+            return self._get_composite_board(universe_type, date)
+        if universe_type in DERIVED_BOARD_SPEC:
+            return self._get_derived_board(universe_type, date)
         if universe_type in INDEX_SECTOR_MAP:
             return self._get_index_constituents(INDEX_SECTOR_MAP[universe_type], date)
-        # 英文板块名映射
+
         sector_name = BOARD_NAME_MAP.get(universe_type, universe_type)
-        # 中文板块名
-        if sector_name in ("all_a", "全A股"):
+        if sector_name in ("all_a", "全A股", "沪深A股"):
             return self._get_all_a_stocks(date)
-        # 默认：按板块名查询
+        return self._get_sector_stocks_cached(sector_name, date)
+
+    def _get_composite_board(self, universe_type: str, date: str) -> list[str]:
+        """聚合板块取并集（如 main_board = 沪市主板 ∪ 深市主板）。"""
+        symbols: set[str] = set()
+        for part in COMPOSITE_BOARD_MAP[universe_type]:
+            symbols.update(self._get_single_universe(part, date))
+        return sorted(symbols)
+
+    def _get_derived_board(self, universe_type: str, date: str) -> list[str]:
+        """由基础板块减去剔除板块派生主板成分股。"""
+        cache_key, base_name, exclude_name = DERIVED_BOARD_SPEC[universe_type]
+        cached = self.cache.get_universe(cache_key, date)
+        if cached:
+            return cached
+
+        base = set(self._get_sector_stocks_cached(base_name, date))
+        exclude = set(self._get_sector_stocks_cached(exclude_name, date))
+        if not base:
+            logger.warning(f"派生 {cache_key} 失败：基础板块 {base_name} 为空")
+            return []
+        result = sorted(base - exclude)
+        if result:
+            self.cache.save_universe(cache_key, date, result)
+            logger.info(
+                f"派生 {cache_key}: {len(result)} 只 "
+                f"(= {base_name}[{len(base)}] - {exclude_name}[{len(exclude)}])"
+            )
+        return result
+
+    def _get_sector_stocks_cached(self, sector_name: str, date: str) -> list[str]:
+        """按中文板块名取成分股（缓存优先）。"""
         cached = self.cache.get_universe(sector_name, date)
         if cached:
             return cached
-        # 2. 缓存无数据，尝试 miniqmt
-        if self.client.is_available:
-            result = self.client.get_sector_stocks(sector_name)
-            if result:
-                self.cache.save_universe(sector_name, date, result)
-                logger.info(f"获取 {sector_name} 板块: {len(result)} 只")
-            return result
-        logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}")
-        return []
+        if not self.client.is_available:
+            logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取板块 {sector_name}")
+            return []
+        result = self.client.get_sector_stocks(sector_name)
+        if result:
+            self.cache.save_universe(sector_name, date, result)
+            logger.info(f"获取 {sector_name} 板块: {len(result)} 只")
+        else:
+            logger.warning(f"miniqmt 返回空板块: {sector_name}")
+        return result
 
     def _get_index_constituents(self, index_name: str, date: str) -> list[str]:
         cached = self.cache.get_universe(index_name, date)
@@ -1375,22 +1417,18 @@ class MiniQmtUniverseProvider:
         return []
 
     def _get_all_a_stocks(self, date: str) -> list[str]:
-        cached = self.cache.get_universe("all_a", date)
-        if cached:
-            return cached
+        """沪深 A 股全市场（含主板/创业板/科创板，不含北交所）。"""
+        for key in ("all_a", "沪深A股"):
+            cached = self.cache.get_universe(key, date)
+            if cached:
+                return cached
         if not self.client.is_available:
             logger.warning("缓存无数据且 miniqmt 不可用，无法获取全A股列表")
             return []
-        # 尝试从多个板块聚合
-        result: list[str] = []
-        for idx_name in INDEX_SECTOR_MAP.values():
-            try:
-                symbols = self.client.get_sector_stocks(idx_name)
-                result.extend(symbols)
-            except Exception:
-                continue
+        result = self.client.get_sector_stocks("沪深A股")
         unique = sorted(set(result))
         if unique:
             self.cache.save_universe("all_a", date, unique)
-            logger.info(f"全A股聚合: {len(unique)} 只")
+            self.cache.save_universe("沪深A股", date, unique)
+            logger.info(f"全A股(沪深A股): {len(unique)} 只")
         return unique
