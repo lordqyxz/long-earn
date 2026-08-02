@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Protocol
 
 import pandas as pd
@@ -29,6 +30,9 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.financial.panel import build_daily_financial_panel
+from long_earn.backtest.data.financial.sync import ensure_financial_cache
+from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 
 
@@ -328,18 +332,29 @@ class CompositeDataConnector:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取财务数据面板。"""
+        """获取财务数据面板（DuckDB 缓存 + PIT 日频视图）。"""
         if not symbols:
             return pd.DataFrame()
         start_date = self._normalize_date(start_date)
         end_date = self._normalize_date(end_date)
+        field_list = fields or list(FINANCIAL_FIELD_MAP.values())
         mq = self.miniqmt
+        ensure_financial_cache(self.cache, symbols, start_date, end_date, mq)
+        df = build_daily_financial_panel(
+            self.cache, symbols, start_date, end_date, field_list
+        )
+        if not df.empty:
+            self._log_source("DuckDB 缓存（季频→日频 asof）")
+            return df
+        # 测试桩等：ingestor 直接返回已组装面板
         if mq is not None:
-            df = mq.get_financial_panel(symbols, start_date, end_date, fields)
-            if not df.empty:
-                self._log_source("miniqmt（含 DuckDB 缓存优先）")
-                return df
-        logger.warning("miniqmt 路径无数据，财务数据获取失败")
+            legacy = mq.get_financial_panel(
+                symbols, start_date, end_date, field_list
+            )
+            if not legacy.empty:
+                self._log_source("miniqmt provider 面板")
+                return legacy
+        logger.warning("财务缓存无数据，财务面板获取失败")
         return pd.DataFrame()
 
     def get_symbols(self, universe_type: str, date: str = "") -> list[str]:
@@ -376,10 +391,25 @@ class CompositeDataConnector:
         financial_fields: list[str] | None = None,
     ) -> pd.DataFrame:
         """获取合并面板（行情 + 财务，自动降级）。"""
+        n = len(symbols)
+        t0 = time.perf_counter()
+        if n >= 200:
+            logger.info(f"[合并面板] 开始加载: {n} 只, {start_date}~{end_date}")
         price_df = self.get_price_panel(symbols, start_date, end_date, price_fields)
+        if n >= 200:
+            logger.info(
+                f"[合并面板] 行情就绪: rows={len(price_df)}, "
+                f"耗时 {time.perf_counter() - t0:.1f}s"
+            )
+        t1 = time.perf_counter()
         fin_df = self.get_financial_panel(
             symbols, start_date, end_date, financial_fields
         )
+        if n >= 200:
+            logger.info(
+                f"[合并面板] 财务就绪: rows={len(fin_df)}, "
+                f"耗时 {time.perf_counter() - t1:.1f}s"
+            )
         if price_df.empty and fin_df.empty:
             return pd.DataFrame()
         if price_df.empty:
@@ -390,6 +420,7 @@ class CompositeDataConnector:
             return price_df
         if price_df.index.names != fin_df.index.names:
             fin_df.index.names = price_df.index.names
+        t2 = time.perf_counter()
         p = price_df.reset_index()
         f = fin_df.reset_index()
         idx_cols = [c for c in p.columns if c in f.columns][:2]
@@ -404,7 +435,14 @@ class CompositeDataConnector:
         # 未来函数泄漏点。
         merged = merged.sort_index()
         merged = merged.groupby(level=idx_cols[1]).ffill()
-        return merged.sort_index()
+        result = merged.sort_index()
+        if n >= 200:
+            logger.info(
+                f"[合并面板] 完成: rows={len(result)}, "
+                f"merge+ffill {time.perf_counter() - t2:.1f}s, "
+                f"总耗时 {time.perf_counter() - t0:.1f}s"
+            )
+        return result
 
     def get_merged_panel_as_polars(
         self,
@@ -414,6 +452,16 @@ class CompositeDataConnector:
     ) -> pl.DataFrame:
         """获取合并面板并转为 polars（实现 DataConnector Protocol）。"""
         df = self.get_merged_panel(symbols, start_date, end_date)
+        n = len(symbols)
+        if n >= 200 and not df.empty:
+            t0 = time.perf_counter()
+            logger.info(f"[合并面板] pandas→polars 转换开始: rows={len(df)}")
+            out = to_polars_panel(df)
+            logger.info(
+                f"[合并面板] pandas→polars 完成: rows={len(out)}, "
+                f"耗时 {time.perf_counter() - t0:.1f}s"
+            )
+            return out
         return to_polars_panel(df)
 
     # ── DataConnector 扩展能力降级编排 ─────────────────────────────────

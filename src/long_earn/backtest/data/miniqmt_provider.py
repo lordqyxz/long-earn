@@ -17,8 +17,9 @@ xtquant 数据格式说明：
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import datetime, timedelta
+from datetime import timedelta
 from functools import reduce
 from typing import Any
 
@@ -27,9 +28,17 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.financial.panel import (
+    build_daily_financial_panel,
+    quarterly_to_daily_asof,
+)
 from long_earn.backtest.data.financial.schemas import (
     FinancialSchemaRegistry,
     FinancialTableSchema,
+)
+from long_earn.backtest.data.financial.sync import (
+    ensure_financial_cache,
+    get_quarters_between,
 )
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 
@@ -134,23 +143,20 @@ class MiniQmtClient:
     def is_available(self) -> bool:
         """检测 xtquant 是否可用。
 
-        优先检查两个环境变量（ADR-014 阶段 G）：
+        优先检查两个环境变量：
 
-        1. ``LONG_EARN_CACHE_ONLY``：启动时数据同步完成后设置，
-           强制后续所有数据访问走纯缓存分支，支持高并发并行回测。
-           与 ``DISABLE_XTQUANT`` 的区别：CACHE_ONLY 是运行时切换，
-           同步阶段需要 xtquant 可用，同步完才切换到纯缓存。
-        2. ``LONG_EARN_DISABLE_XTQUANT``：CI / 无 QMT dev 环境
-           通常 import xtquant 成功但实际查询会让 C++ 端触发 SIGABRT 杀整个进程
-           （Python 层超时无法救，因为 abort 是 process-wide signal）。
-           设置 =1 强制走 "xtquant 不可用 → DuckDB 缓存" 分支，避免崩溃。
+        1. ``LONG_EARN_CACHE_ONLY``：显式纯缓存（用户/CI 主动锁定只读 DuckDB）。
+           并行 worker 请用 ``LONG_EARN_DISABLE_XTQUANT``。启动同步完成后
+           **不会**自动设置本变量，以便读路径仍可按需增量更新。
+        2. ``LONG_EARN_DISABLE_XTQUANT``：CI / 无 QMT 环境；并行 worker 内临时设置，
+           避免 xtquant C++ SIGABRT 杀进程。
 
-        注：``set_cache_only()`` 会清理 ``_available`` 缓存，确保下次调用
-        重新走环境变量检测分支。
+        注：``set_cache_only()`` / ``clear_cache_only()`` 会清理 ``_available``，
+        确保下次重新检测环境变量。
         """
         if self._available is not None:
             return self._available
-        # 1. 纯缓存模式（启动同步后）：优先于 import 检测
+        # 1. 显式纯缓存
         cache_only = os.environ.get("LONG_EARN_CACHE_ONLY", "").strip().lower()
         if cache_only in ("1", "true", "yes", "on"):
             self._available = False
@@ -526,50 +532,26 @@ class MiniQmtClient:
 
 
 def _is_price_stale(cache: DataCache, symbols: list[str], end_date: str) -> bool:
-    """检测行情缓存是否过期。
+    """检测行情缓存是否过期（批量查最新日，避免逐股扫库静默卡住）。
 
-    如果任一股票的缓存最新日期距 end_date 超过阈值，视为过期。
+    任一股票缓存最新日期距 ``end_date`` 超过阈值 → 视为过期。
     """
+    if not symbols:
+        return False
     end_dt = pd.to_datetime(end_date)
     threshold = timedelta(days=STALE_THRESHOLD_DAYS)
-    for sym in symbols:
-        rng = cache.get_price_range(sym)
-        if rng is None:
-            return True
-        latest = pd.to_datetime(rng[1])
-        if (end_dt - latest) > threshold:
-            return True
-    return False
-
-
-def _is_financial_stale(
-    cache: DataCache,
-    symbols: list[str],
-    end_date: str = "",
-) -> bool:
-    """检测财务缓存是否过期。
-
-    判定规则：
-    - 若 ``end_date`` 距今超过 120 天，说明用户请求的是历史数据，
-      不需要最新财报 → 直接返回 False（不做 staleness 检查）。
-    - 否则，任一股票的缓存最新报告期距今超过 120 天 → 视为过期。
-
-    之前版本不带 ``end_date`` 参数，对历史回测查询也会判定过期
-    （因为缓存最新报告期永远早于"今天"），导致每次都触发 xtquant 增量下载，
-    抹平了缓存 120x 加速效果（ADR-014 修正）。
-    """
-    threshold = timedelta(days=120)
-    now = datetime.now()
-    if end_date:
-        end_dt = pd.to_datetime(end_date)
-        if (now - end_dt) > threshold:
-            return False
-    for sym in symbols:
-        rng = cache.get_financial_range(sym)
-        if rng is None:
-            return True
-        latest = pd.to_datetime(rng[1])
-        if (now - latest) > threshold:
+    t0 = time.perf_counter()
+    latest_map = cache.get_price_latest_dates(symbols)
+    elapsed = time.perf_counter() - t0
+    if elapsed > 1.0 or len(symbols) >= 500:
+        logger.info(
+            f"行情新鲜度检测: {len(symbols)} 只, "
+            f"缓存命中 {len(latest_map)}, 耗时 {elapsed:.1f}s"
+        )
+    if len(latest_map) < len(symbols):
+        return True
+    for latest_str in latest_map.values():
+        if (end_dt - pd.to_datetime(latest_str)) > threshold:
             return True
     return False
 
@@ -612,12 +594,22 @@ class MiniQmtDataProvider:
             return pd.DataFrame()
 
         fields = fields or ["open", "high", "low", "close", "volume"]
+        n = len(symbols)
+        t0 = time.perf_counter()
+        if n >= 200:
+            logger.info(f"[行情面板] 开始: {n} 只, {start_date}~{end_date}")
 
         # 1. 从 DuckDB 缓存读取
         cached_df = self.cache.get_prices(symbols, start_date, end_date)
         cached_symbols: set[str] = set()
         if cached_df is not None and not cached_df.empty:
             cached_symbols = set(cached_df["symbol"].unique())
+        if n >= 200:
+            logger.info(
+                f"[行情面板] 缓存读取完成: "
+                f"{len(cached_symbols)}/{n} 只有数据, "
+                f"耗时 {time.perf_counter() - t0:.1f}s"
+            )
 
         # 2. 检测缺失和过期
         missing_symbols = [s for s in symbols if s not in cached_symbols]
@@ -645,6 +637,10 @@ class MiniQmtDataProvider:
         if df is None or df.empty:
             return pd.DataFrame()
         df = df.set_index(["date", "symbol"]).sort_index()
+        if n >= 200:
+            logger.info(
+                f"[行情面板] 完成: {len(df)} 行, 总耗时 {time.perf_counter() - t0:.1f}s"
+            )
         return df[fields]
 
     def _fetch_kline(
@@ -682,58 +678,23 @@ class MiniQmtDataProvider:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取财务数据面板（DuckDB 优先，miniqmt 增量补充，前向填充到日级）。"""
+        """获取财务日频面板：缓存同步委托 miniqmt，读路径走 financial.panel。"""
         if not symbols:
             return pd.DataFrame()
-
         fields = fields or list(FINANCIAL_FIELD_MAP.values())
-        quarters = self._get_quarters_between(start_date, end_date)
-        # _get_quarters_between 会把 start_date 之前最近一季（before_start）
-        # 也纳入 quarters，用于 ffill。但该季在用户请求范围外，**不参与**
-        # missing 判定——否则缓存里没该季就永远"缺失 1 个"，每次都触发
-        # xtquant 下载，抹平缓存加速（ADR-014 修正）。
-        start_pd = pd.to_datetime(start_date)
-        in_range_quarters = [
-            q for q in quarters if pd.to_datetime(q, format="%Y%m%d") >= start_pd
-        ]
-
-        # 1. 从 DuckDB 缓存读取
-        cached_df = self.cache.get_financials(symbols, fields)
-        missing_quarters = in_range_quarters
-        if cached_df is not None and not cached_df.empty:
-            cached_quarters = set(
-                cached_df["report_date"].dt.strftime("%Y%m%d").unique()
-            )
-            missing_quarters = [
-                q for q in in_range_quarters if q not in cached_quarters
-            ]
-
-        # 2. 检测是否需要刷新（带 end_date 让历史回测查询跳过 staleness）
-        need_refresh = bool(missing_quarters) or _is_financial_stale(
-            self.cache, symbols, end_date
+        ensure_financial_cache(self.cache, symbols, start_date, end_date, self)
+        return build_daily_financial_panel(
+            self.cache, symbols, start_date, end_date, fields
         )
 
-        # 3. 若需要刷新且 miniqmt 可用，增量获取
-        if need_refresh and self.client.is_available:
-            if missing_quarters:
-                logger.info(
-                    f"财务缓存缺失 {len(missing_quarters)} 个报告期，从 miniqmt 补充"
-                )
-            else:
-                logger.info("财务缓存过期，从 miniqmt 增量更新")
-
-            fetched = self._fetch_financials(symbols, start_date, end_date)
-            if fetched is not None and not fetched.empty:
-                self.cache.save_financials(fetched)
-
-        # 4. 从缓存返回最终结果
-        df = self.cache.get_financials(symbols, fields)
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        trading_dates = pd.date_range(start=start_date, end=end_date, freq="B")
-        panel = self._quarterly_to_daily(df, symbols, trading_dates, fields)
-        return panel
+    def fetch_financials(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame | None:
+        """FinancialCacheIngestor：从 miniqmt 拉季频并供 sync 写缓存。"""
+        return self._fetch_financials(symbols, start_date, end_date)
 
     def _fetch_financials(
         self,
@@ -1101,42 +1062,8 @@ class MiniQmtDataProvider:
         trading_dates: pd.DatetimeIndex,
         fields: list[str],
     ) -> pd.DataFrame:
-        """将季度财务数据前向填充到日级，基于真实公告日对齐。
-
-        ADR-007：用 announce_date（miniqmt 返回的 m_anntime 字段）作为
-        信息可见的起点，不再用 report_date + 固定 lag。
-
-        ADR-014 任务7：保证 ``fields`` 中所有字段都作为列出现在返回 DataFrame 中，
-        即使该字段在 quarterly_df 中全缺失（如 Capital 表尚未下载）。
-        """
-        panels: list[pd.DataFrame] = []
-        for symbol in symbols:
-            symbol_data = quarterly_df[quarterly_df["symbol"] == symbol].copy()
-            if symbol_data.empty:
-                continue
-            symbol_data = symbol_data.sort_values("announce_date")
-            daily = pd.DataFrame(index=trading_dates)
-            daily.index.name = "date"
-            # 预创建所有请求字段的列（NaN），保证输出 schema 稳定
-            for field in fields:
-                if field not in daily.columns:
-                    daily[field] = pd.NA
-            for _, row in symbol_data.iterrows():
-                announce_date = row.get("announce_date")
-                if pd.isna(announce_date):
-                    continue
-                visible_from = pd.to_datetime(announce_date)
-                mask = daily.index >= visible_from
-                for field in fields:
-                    if field in row and pd.notna(row[field]):
-                        daily.loc[mask, field] = float(row[field])
-            daily["symbol"] = symbol
-            daily = daily.reset_index().set_index(["date", "symbol"])
-            panels.append(daily)
-        if not panels:
-            return pd.DataFrame()
-        result = pd.concat(panels)
-        return result
+        """兼容测试：委托 :func:`financial.panel.quarterly_to_daily_asof`。"""
+        return quarterly_to_daily_asof(quarterly_df, symbols, trading_dates, fields)
 
     def get_merged_panel(
         self,
@@ -1288,24 +1215,8 @@ class MiniQmtDataProvider:
 
     @staticmethod
     def _get_quarters_between(start_date: str, end_date: str) -> list[str]:
-        """获取日期范围内的所有季度报告期。"""
-        start = pd.to_datetime(start_date)
-        end = pd.to_datetime(end_date)
-        all_quarters: list[str] = []
-        for year in range(start.year - 1, end.year + 1):
-            for qe in ["0331", "0630", "0930", "1231"]:
-                all_quarters.append(f"{year}{qe}")
-        quarters = [
-            q
-            for q in all_quarters
-            if start <= pd.to_datetime(q, format="%Y%m%d") <= end
-        ]
-        before_start = [
-            q for q in all_quarters if pd.to_datetime(q, format="%Y%m%d") < start
-        ]
-        if before_start:
-            quarters.append(max(before_start))
-        return sorted(set(quarters))
+        """兼容别名：委托 :func:`financial.sync.get_quarters_between`。"""
+        return get_quarters_between(start_date, end_date)
 
 
 # ─────────────────────────────────────────────────────────────────────────
