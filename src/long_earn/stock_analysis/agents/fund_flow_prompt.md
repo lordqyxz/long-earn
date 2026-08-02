@@ -22,10 +22,10 @@ description: 资金流向视角分析提示词（基于 ciccwm 独占数据）
 ## 输入数据
 
 ### 股票基础数据
-${stock_data}
+{{ stock_data }}
 
 ### 资金流向数据（ciccwm，最近 N 个交易日）
-${fund_flow_data}
+{{ fund_flow_data }}
 
 ## 输出格式
 
