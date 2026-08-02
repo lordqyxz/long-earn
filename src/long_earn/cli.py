@@ -25,7 +25,12 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
+from long_earn.core.stdio import ensure_utf8_stdio
+
 load_dotenv()
+
+# Windows 控制台/stdio 尽早切 UTF-8，避免中文日志乱码
+ensure_utf8_stdio()
 
 # 统一日志格式（与原 scripts 一致）
 logger.remove()

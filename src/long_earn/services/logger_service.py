@@ -7,6 +7,7 @@ import sys
 
 from loguru import logger as loguru_logger
 
+from long_earn.core.stdio import ensure_utf8_stdio
 from long_earn.services import LoggerService
 
 
@@ -43,6 +44,9 @@ class LoggerServiceImpl(LoggerService):
                 "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
                 "<level>{message}</level>"
             )
+
+        # 与 CLI 一致：先确保 UTF-8，再挂 stderr sink
+        ensure_utf8_stdio()
 
         # 配置 loguru
         loguru_logger.remove()
