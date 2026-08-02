@@ -223,9 +223,9 @@ class AppConfig:
 
     | 变量 | 读取位置 | 说明 |
     |------|----------|------|
-    | LONG_EARN_SKIP_CACHE_SYNC | context_init.py | =1 跳过启动时数据缓存同步（CI/单元测试/纯 LLM 推理场景） |
-    | LONG_EARN_CACHE_ONLY | cache_sync.py / miniqmt_provider.py | =1 强制纯缓存模式（启动同步完成后设置，所有数据访问只读 DuckDB） |
-    | LONG_EARN_DISABLE_XTQUANT | parallel.py / miniqmt_provider.py | =1 永久禁用 xtquant（CI / 无 QMT 环境；与 CACHE_ONLY 区别：本变量是入口期永久禁用，CACHE_ONLY 是运行时切换） |
+    | LONG_EARN_SKIP_CACHE_SYNC | context_init.py | =1 跳过启动时批量增量同步（CI/加速启动；读路径仍可按需从 miniqmt 补洞） |
+    | LONG_EARN_CACHE_ONLY | cache_sync.py / miniqmt_provider.py | =1 显式强制纯缓存（禁止按需拉 miniqmt；默认不在启动同步后自动设置） |
+    | LONG_EARN_DISABLE_XTQUANT | parallel.py / miniqmt_provider.py | =1 禁用 xtquant（CI/无 QMT；并行 worker 内临时设置，避免 C++ 崩溃） |
 
     ── 第三方 API Key 环境变量 ────────────────────────────────────────
 

@@ -1,32 +1,23 @@
-"""启动时数据缓存同步（ADR-014 阶段 G）。
-
-架构调整：把"按需增量同步"改为"启动时一次性同步 + 后续纯缓存"。
+"""数据缓存同步：缓存优先，适时从 miniqmt 增量更新。
 
 本模块位于 ``services`` 层（编排层），协调 ``backtest.data``（数据层）和
 ``DataIngestionService``（同层服务）完成同步。不放在 ``backtest.data`` 下，
 因为 import-linter 契约禁止数据层依赖 services。
 
-流程：
-1. 系统启动时（``initialize_context``）调用 :func:`sync_data_cache`
-2. 检查 xtquant 可用性：
-   - 不可用 → 跳过同步，纯缓存模式（缓存可能过期但可用）
-   - 可用 → 增量同步行情+财务到 DuckDB 缓存
-3. 同步完成后设置 ``LONG_EARN_CACHE_ONLY=1`` 环境变量
-4. 后续所有 :class:`MiniQmtDataProvider` 调用走纯缓存分支，禁止 xtquant
+数据策略（缓存优先 + 自动更新）::
 
-设计原则：
-- 同步是**幂等**的：重复调用只补齐缺失/过期部分
-- 同步是**可选**的：xtquant 不可用时降级到纯缓存（可能过期）
-- 同步是**显式**的：只有 :func:`sync_data_cache` 触发，不在 Provider getter 里隐式触发
-- 同步后**强制纯缓存**：环境变量 ``LONG_EARN_CACHE_ONLY=1`` 让
-  :class:`MiniQmtClient.is_available` 返回 False
+1. **读路径（常态）**：:class:`MiniQmtDataProvider` 先读 DuckDB；
+   缺失 / 过期时若 miniqmt 可用则增量下载并写回缓存。
+2. **启动时机**：:func:`sync_data_cache` 对股票池做一次智能增量批量同步
+   （缺什么补什么），**不再**事后强制 ``LONG_EARN_CACHE_ONLY``，
+   以便运行期仍可按需从 miniqmt 补洞。
+3. **并行 worker**：:mod:`parallel` 在子进程内临时
+   ``LONG_EARN_DISABLE_XTQUANT``，避免 xtquant C++ 崩溃；主进程可先刷新再共享内存。
+4. **显式纯缓存**：仅当用户 / CI 设置 ``LONG_EARN_CACHE_ONLY=1`` 时锁定只读缓存。
 
-与现有 :class:`DataIngestionService` 的关系：
-- ``DataIngestionService.run(full=True)`` 是 CLI 全量下载入口（``long-earn download``），
-  用于初次建仓或强制刷新
-- :func:`sync_data_cache` 是运行时增量同步，内部委托 ``DataIngestionService.run``
-  执行智能增量下载，同步完成后切换到纯缓存模式
-- 二者都写入同一个 DuckDB 缓存，互不冲突
+与 :class:`DataIngestionService` 的关系：
+- ``DataIngestionService.run(full=True)`` — CLI 全量下载（``long-earn download``）
+- :func:`sync_data_cache` — 启动时智能增量，委托同一 ingestion 服务
 """
 
 from __future__ import annotations
@@ -42,28 +33,36 @@ from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
 if TYPE_CHECKING:
     from long_earn.services.logger_service import LoggerService
 
-# 环境变量：设置后 MiniQmtClient.is_available 返回 False，强制走缓存分支
+# 环境变量：显式设置后 MiniQmtClient.is_available 返回 False，强制只读缓存
 CACHE_ONLY_ENV = "LONG_EARN_CACHE_ONLY"
 
 
 def is_cache_only() -> bool:
-    """检测当前是否处于纯缓存模式。"""
+    """检测当前是否处于显式纯缓存模式。"""
     val = os.environ.get(CACHE_ONLY_ENV, "").strip().lower()
     return val in ("1", "true", "yes", "on")
 
 
 def set_cache_only() -> None:
-    """设置纯缓存模式环境变量。
+    """显式锁定纯缓存模式（CI / 无 QMT / 用户主动要求）。
 
     同时清理 :class:`MiniQmtClient` 单例的 ``_available`` 缓存，
     确保后续 ``is_available`` 重新检测时读到新的环境变量值。
     """
     os.environ[CACHE_ONLY_ENV] = "1"
-    # 清理单例缓存，让下次 is_available 重新走环境变量检测分支
     client = MiniQmtClient.get()
     client._available = None
     client._xtdata = None
     logger.info(f"已设置 {CACHE_ONLY_ENV}=1，后续数据访问走纯缓存分支")
+
+
+def clear_cache_only() -> None:
+    """解除纯缓存锁定，恢复「缓存优先 + 可按需拉 miniqmt」。"""
+    os.environ.pop(CACHE_ONLY_ENV, None)
+    client = MiniQmtClient.get()
+    client._available = None
+    # 保留 _xtdata，避免无谓重复 import；下次 is_available 会重检环境变量
+    logger.info(f"已清除 {CACHE_ONLY_ENV}，允许按需从 miniqmt 增量更新")
 
 
 def sync_data_cache(
@@ -72,24 +71,19 @@ def sync_data_cache(
     skip_financial: bool = False,
     logger_service: LoggerService | None = None,
 ) -> dict[str, object]:
-    """启动时增量同步行情+财务数据到 DuckDB 缓存。
+    """启动时增量同步行情+财务到 DuckDB（合适的批量更新时机）。
 
-    内部委托 :class:`DataIngestionService.run`（智能增量模式）执行实际下载，
-    它已封装 staleness 检测、增量下载、缓存写入、断点续传。
-
-    同步完成后设置 ``LONG_EARN_CACHE_ONLY=1``，后续所有数据访问走纯缓存。
+    内部委托 :class:`DataIngestionService.run`（智能增量）：只补缺失/过期。
+    同步完成后**保持** miniqmt 可用，以便后续读面板时仍可按需补洞。
 
     Args:
-        universe: 股票池，默认 "all"（沪深A股+ETF）；支持 "all_a"/"etf"/指数代码
-        end_date: 同步截止日期，空字符串默认今天
-        skip_financial: 跳过财务同步（仅同步行情）
-        logger_service: 可选日志服务，None 则用 loguru
+        universe: 股票池，默认 "all"（沪深A股+ETF）
+        end_date: 同步截止日期，空=今天
+        skip_financial: 跳过财务同步
+        logger_service: 可选日志服务
 
     Returns:
-        同步结果摘要 dict：
-        - ``status``: "ok" / "skipped" / "error"
-        - ``reason``: 状态说明（skipped/error 时）
-        - ``ingestion``: DataIngestionService.run 返回值（ok 时）
+        ``status``: "ok" / "skipped" / "error"；成功时含 ``ingestion``
     """
 
     def _log(msg: str, level: str = "info") -> None:
@@ -98,9 +92,8 @@ def sync_data_cache(
         else:
             getattr(logger, level)(msg)
 
-    # 已处于纯缓存模式 → 跳过同步（避免重复）
     if is_cache_only():
-        _log(f"{CACHE_ONLY_ENV}=1 已设置，跳过同步（纯缓存模式）")
+        _log(f"{CACHE_ONLY_ENV}=1 已设置，跳过启动同步（显式纯缓存）")
         return {
             "status": "skipped",
             "reason": "cache_only_already_set",
@@ -109,21 +102,24 @@ def sync_data_cache(
     cache = DataCache()
 
     _log("=" * 60)
-    _log("启动时数据缓存同步")
+    _log("启动时数据缓存同步（缓存优先；完成后仍允许按需 miniqmt 更新）")
     _log(f"股票池: {universe}, 截止日期: {end_date or '(今天)'}")
     _log("=" * 60)
 
     client = MiniQmtClient.get()
     if not client.is_available:
-        _log("xtquant 不可用，跳过同步（降级到纯缓存模式）", "warning")
-        set_cache_only()
+        _log(
+            "xtquant 不可用，跳过启动同步；读路径将仅使用已有 DuckDB 缓存",
+            "warning",
+        )
+        with __import__("contextlib").suppress(Exception):
+            cache.close()
         return {
             "status": "skipped",
             "reason": "xtquant_unavailable",
             "cache_path": str(cache.db_path),
         }
 
-    # 委托 DataIngestionService 执行智能增量下载
     from long_earn.services.data_ingestion_service import (  # noqa: PLC0415
         DataIngestionService,
     )
@@ -134,11 +130,12 @@ def sync_data_cache(
             universe=universe,
             end_date=end_date,
             skip_financial=skip_financial,
-            full=False,  # 智能增量模式
+            full=False,
         )
     except Exception as exc:
         _log(f"数据同步异常: {exc}", "error")
-        set_cache_only()
+        with __import__("contextlib").suppress(Exception):
+            cache.close()
         return {
             "status": "error",
             "reason": f"ingestion_failed: {exc}",
@@ -156,10 +153,7 @@ def sync_data_cache(
         _log(f"缓存路径: {result.get('cache_path', cache.db_path)}")
 
     _log("=" * 60)
-
-    # 关键：同步完成后设置纯缓存模式（无论成功失败，都切换到纯缓存）
-    # 失败时缓存可能不完整，但后续走纯缓存避免 worker 触发 xtquant 崩溃
-    set_cache_only()
+    _log("策略: DuckDB 缓存优先；缺失/过期时 Provider 自动从 miniqmt 增量补齐")
 
     with __import__("contextlib").suppress(Exception):
         cache.close()
