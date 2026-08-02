@@ -198,9 +198,9 @@ class AppConfig:
 
     | 变量 | 默认值 | 说明 |
     |------|--------|------|
-    | LLM_TYPE | ollama | LLM 类型（ollama / dashscope / openai） |
-    | LLM_MODEL | deepseek-v4-flash:cloud | LLM 模型名称 |
-    | LLM_BASE_URL | http://localhost:11434 | LLM API 基础 URL |
+    | LLM_TYPE | deepseek | LLM 类型（deepseek / ollama / dashscope / openai） |
+    | LLM_MODEL | deepseek-v4-flash | LLM 模型名称 |
+    | LLM_BASE_URL | https://api.deepseek.com/v1 | LLM API 基础 URL |
     | LONG_EARN_DATA_DIR | D:/dev/long-earn-data | 统一数据根目录（唯一存储位置控制变量，派生全部生成数据路径） |
     | INIT_DIR | ./init | 知识库初始化目录 |
     | BACKTEST_START_DATE | 2020-01-01 | 回测默认起始日期 |
@@ -231,12 +231,13 @@ class AppConfig:
 
     | 变量 | 读取位置 | 说明 |
     |------|----------|------|
+    | DEEPSEEK_API_KEY | utils/llm_factory.py | DeepSeek API Key（LLM_TYPE=deepseek 时必填） |
     | DASHSCOPE_API_KEY | utils/llm_factory.py | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） |
     | OPENAI_API_KEY | langchain_openai（隐式读取） | OpenAI API Key（LLM_TYPE=openai 时必填） |
     | MOONSHOT_API_KEY / KIMI_API_KEY | event_inference/collectors/kimi_collector.py / tools/kimi_web_search.py | Kimi / Moonshot API Key（事件推理采集 + 网页搜索，二选一） |
 
     Attributes:
-        llm_type: LLM 类型，可选值：ollama, dashscope, openai
+        llm_type: LLM 类型，可选值：deepseek, ollama, dashscope, openai
         llm_model: LLM 模型名称
         llm_base_url: LLM API 基础 URL
         data_dir: 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
@@ -251,9 +252,9 @@ class AppConfig:
         stock_analysis_keywords: 股票分析路由关键词列表
     """
 
-    llm_type: str = "ollama"
-    llm_model: str = "deepseek-v4-flash:cloud"
-    llm_base_url: str = "http://localhost:11434"
+    llm_type: str = "deepseek"
+    llm_model: str = "deepseek-v4-flash"
+    llm_base_url: str = "https://api.deepseek.com/v1"
     # 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
     data_dir: str = str(_storage.DEFAULT_DATA_DIR)
     # 记忆持久化路径（由 data_dir 派生）
@@ -312,9 +313,9 @@ class AppConfig:
         paths = _storage.resolve_paths(os.getenv("LONG_EARN_DATA_DIR"))
 
         return cls(
-            llm_type=os.getenv("LLM_TYPE", "ollama"),
-            llm_model=os.getenv("LLM_MODEL", "deepseek-v4-flash:cloud"),
-            llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
+            llm_type=os.getenv("LLM_TYPE", "deepseek"),
+            llm_model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+            llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
             data_dir=str(paths["data_dir"]),
             memory_path=str(paths["substances_db_path"]),
             backtest_cache_path=str(paths["backtest_cache_path"]),
@@ -354,7 +355,7 @@ class AppConfig:
         errors = []
 
         # 验证 LLM 类型
-        if self.llm_type not in ["ollama", "dashscope", "openai"]:
+        if self.llm_type not in ["deepseek", "ollama", "dashscope", "openai"]:
             errors.append(f"无效的 LLM 类型：{self.llm_type}")
 
         # 验证迭代次数

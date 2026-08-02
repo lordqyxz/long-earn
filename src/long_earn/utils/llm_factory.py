@@ -9,16 +9,16 @@ DEFAULT_TIMEOUT = 300
 
 
 def create_llm(
-    llm_type: str = "ollama",
-    model_name: str = "deepseek-v4-flash:cloud",
-    base_url: str = "http://localhost:11434",
+    llm_type: str = "deepseek",
+    model_name: str = "deepseek-v4-flash",
+    base_url: str = "https://api.deepseek.com/v1",
     timeout: int = DEFAULT_TIMEOUT,
     **kwargs,
 ) -> BaseLanguageModel:
     """根据类型创建LLM实例
 
     Args:
-        llm_type: LLM类型，可选值: ollama, dashscope, openai
+        llm_type: LLM类型，可选值: deepseek, ollama, dashscope, openai
         model_name: 模型名称，如果不提供则使用默认值
         base_url: 自定义API基础URL（用于OpenAI兼容模型）
         timeout: 请求超时时间（秒），默认300秒
@@ -27,7 +27,16 @@ def create_llm(
     Returns:
         初始化好的LLM实例
     """
-    if llm_type == "ollama":
+    if llm_type == "deepseek":
+        return ChatOpenAI(
+            model=model_name,
+            api_key=os.getenv("DEEPSEEK_API_KEY"),  # type: ignore
+            base_url=base_url or "https://api.deepseek.com/v1",
+            timeout=timeout,
+            **kwargs,
+        )
+
+    elif llm_type == "ollama":
         return ChatOllama(
             model=model_name,
             client_kwargs={
