@@ -57,7 +57,9 @@ _INDEX_VISIBLE = (
     "ON substances(visible_from);"
 )
 _INDEX_FORM = "CREATE INDEX IF NOT EXISTS idx_substances_form ON substances(form);"
-_INDEX_CREATED = "CREATE INDEX IF NOT EXISTS idx_substances_created ON substances(created_at);"
+_INDEX_CREATED = (
+    "CREATE INDEX IF NOT EXISTS idx_substances_created ON substances(created_at);"
+)
 
 
 def _connect(path: str | Path) -> duckdb.DuckDBPyConnection:

@@ -728,9 +728,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
                 weaknesses = view.weaknesses
                 suggestions = view.suggestions
                 confidence = view.confidence
-                display_name = getattr(
-                    view, "display_name", None
-                ) or name
+                display_name = getattr(view, "display_name", None) or name
                 perspective = getattr(view, "perspective", None) or ""
             elif isinstance(view, dict):
                 verdict = view.get("verdict", "未知")
@@ -743,7 +741,11 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             else:
                 continue
 
-            title = f"## {display_name}（{perspective}）" if perspective else f"## {display_name}"
+            title = (
+                f"## {display_name}（{perspective}）"
+                if perspective
+                else f"## {display_name}"
+            )
             weaknesses_str = (
                 "\n".join(f"  - {w}" for w in weaknesses) if weaknesses else "  - 无"
             )
@@ -846,7 +848,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         """
         strategy_name = strategy.get("strategy_name", "") or ""
         factors = strategy.get("factors_used", []) or []
-        factor_str = " ".join(str(f) for f in factors) if isinstance(factors, list) else ""
+        factor_str = (
+            " ".join(str(f) for f in factors) if isinstance(factors, list) else ""
+        )
 
         # 查询词候选：从最具体到最通用，依次尝试
         # 中文翻译基于常见因子命名（momentum→动量、volatility→波动率、roe→roe）
@@ -859,7 +863,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         ]
         # 去重 + 去空
         seen: set[str] = set()
-        queries = [q for q in candidate_queries if q and q not in seen and not seen.add(q)]
+        queries = [
+            q for q in candidate_queries if q and q not in seen and not seen.add(q)
+        ]
 
         past: list = []
         try:
@@ -877,9 +883,7 @@ class StrategyResearchAgent(KnowledgeContextMixin):
             return ""
         if not past:
             return ""
-        lines = [
-            f"- {p.name}: metrics={p.metrics}" for p in past
-        ]
+        lines = [f"- {p.name}: metrics={p.metrics}" for p in past]
         return "历史同类经验：\n" + "\n".join(lines)
 
     def optimize_strategy(
@@ -966,7 +970,9 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         response = self.llm_service.invoke(prompt)
         # LLM 偶发返回空内容或非 JSON 时容错：返回默认观察让循环继续，
         # 而非抛 JSONDecodeError 让整轮 HTR 崩溃。
-        default_obs = {"next_focus": "继续优化因子组合与风控参数，关注近期回测暴露的问题"}
+        default_obs = {
+            "next_focus": "继续优化因子组合与风控参数，关注近期回测暴露的问题"
+        }
         result = parse_llm_json(response.content, default=default_obs)
         if self.logger:
             self.logger.info(f"[HTR-观察] {result.get('next_focus', '未知')}")
@@ -1190,10 +1196,15 @@ class StrategyResearchAgent(KnowledgeContextMixin):
         prompt_template = MarkdownPromptTemplate(
             "decide_prompt.md",
             [
-                "node_count", "max_depth", "current_best_oos",
-                "best_dev_score", "best_oos_score",
-                "cycles_used", "max_cycles",
-                "similar_experiences", "frontier_summary",
+                "node_count",
+                "max_depth",
+                "current_best_oos",
+                "best_dev_score",
+                "best_oos_score",
+                "cycles_used",
+                "max_cycles",
+                "similar_experiences",
+                "frontier_summary",
             ],
             __file__,
         )

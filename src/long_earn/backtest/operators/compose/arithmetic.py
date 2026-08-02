@@ -34,17 +34,13 @@ class ArithmeticParams(OperatorParams):
         字符串无法被 ``float()`` 整体解析。
         """
         if isinstance(v, (int, float)):
-            raise ValueError(
-                f"lhs 必须是列名，不能是数字标量 {v!r}（标量请放在 rhs）"
-            )
+            raise ValueError(f"lhs 必须是列名，不能是数字标量 {v!r}（标量请放在 rhs）")
         # 字符串形式的纯数字（如 "15.87"）也拒绝
         try:
             float(v)
         except ValueError:
             return v  # 不是数字 → 合法列名
-        raise ValueError(
-            f"lhs 必须是列名，不能是数字 {v!r}（标量请放在 rhs）"
-        )
+        raise ValueError(f"lhs 必须是列名，不能是数字 {v!r}（标量请放在 rhs）")
 
     @field_validator("rhs")
     @classmethod

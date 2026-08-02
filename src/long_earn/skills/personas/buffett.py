@@ -41,38 +41,38 @@ EXAMPLES = [
 STRATEGY_REVIEW_EXAMPLES = [
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"低 PE 蓝筹选股\", "
-            "\"factors\": [\"pe<10\", \"roe>15%\"], \"rebalance\": \"monthly\"}\n"
-            "回测结果：{\"total_return\": 0.45, \"max_drawdown\": 0.18, "
-            "\"sharpe_ratio\": 1.2}\n市场事件上下文：央行降息周期"
+            '策略详情：{"strategy_name": "低 PE 蓝筹选股", '
+            '"factors": ["pe<10", "roe>15%"], "rebalance": "monthly"}\n'
+            '回测结果：{"total_return": 0.45, "max_drawdown": 0.18, '
+            '"sharpe_ratio": 1.2}\n市场事件上下文：央行降息周期'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"接受\", "
-            "\"rationale\": \"策略聚焦低估值高 ROE 蓝筹，符合价值投资原则；"
-            "回测显示稳健的夏普比率与可控回撤，护城河与安全边际兼顾。\", "
-            "\"weaknesses\": [\"PE 阈值偏静态，未区分行业估值中枢差异\"], "
-            "\"suggestions\": [\"按行业分位调整 PE 阈值\", \"增加现金流稳定性过滤\"], "
-            "\"confidence\": 0.8}"
+            '{"verdict": "接受", '
+            '"rationale": "策略聚焦低估值高 ROE 蓝筹，符合价值投资原则；'
+            '回测显示稳健的夏普比率与可控回撤，护城河与安全边际兼顾。", '
+            '"weaknesses": ["PE 阈值偏静态，未区分行业估值中枢差异"], '
+            '"suggestions": ["按行业分位调整 PE 阈值", "增加现金流稳定性过滤"], '
+            '"confidence": 0.8}'
         )
     ),
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"短线动量追涨\", "
-            "\"factors\": [\"5d_return>10%\"], \"holding\": \"3天\"}\n"
-            "回测结果：{\"total_return\": 0.6, \"max_drawdown\": 0.35, "
-            "\"sharpe_ratio\": 0.4}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "短线动量追涨", '
+            '"factors": ["5d_return>10%"], "holding": "3天"}\n'
+            '回测结果：{"total_return": 0.6, "max_drawdown": 0.35, '
+            '"sharpe_ratio": 0.4}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"拒绝\", "
-            "\"rationale\": \"策略依赖短期价格动量而非企业内在价值，"
-            "回撤过大存在永久性资本损失风险，违背价值投资原则。\", "
-            "\"weaknesses\": [\"无护城河考量\", \"回撤失控\", \"换手过高\"], "
-            "\"suggestions\": [\"改为长期持有逻辑\", \"加入基本面质量过滤\", "
-            "\"设置最大回撤止损\"], \"confidence\": 0.85}"
+            '{"verdict": "拒绝", '
+            '"rationale": "策略依赖短期价格动量而非企业内在价值，'
+            '回撤过大存在永久性资本损失风险，违背价值投资原则。", '
+            '"weaknesses": ["无护城河考量", "回撤失控", "换手过高"], '
+            '"suggestions": ["改为长期持有逻辑", "加入基本面质量过滤", '
+            '"设置最大回撤止损"], "confidence": 0.85}'
         )
     ),
 ]
@@ -87,27 +87,22 @@ STRATEGY_GENERATE_EXAMPLES = [
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"推荐\", "
-            "\"rationale\": \"低估值蓝筹契合价值投资原则，"
-            "降息周期有利于估值修复；关注 ROE 与护城河可持续性。\", "
-            "\"suggestions\": [\"以 ROE>15% 与 PE<10 双因子筛选\", "
-            "\"加入自由现金流稳定性过滤\", \"月度调仓、集中持有优质标的\"], "
-            "\"confidence\": 0.8}"
+            '{"verdict": "推荐", '
+            '"rationale": "低估值蓝筹契合价值投资原则，'
+            '降息周期有利于估值修复；关注 ROE 与护城河可持续性。", '
+            '"suggestions": ["以 ROE>15% 与 PE<10 双因子筛选", '
+            '"加入自由现金流稳定性过滤", "月度调仓、集中持有优质标的"], '
+            '"confidence": 0.8}'
         )
     ),
-    HumanMessage(
-        content=(
-            "用户查询：研究一个短线动量追涨策略\n"
-            "已有知识上下文：无"
-        )
-    ),
+    HumanMessage(content=("用户查询：研究一个短线动量追涨策略\n已有知识上下文：无")),
     AIMessage(
         content=(
-            "{\"verdict\": \"不推荐\", "
-            "\"rationale\": \"短线动量追涨依赖价格博弈而非企业内在价值，"
-            "存在永久性资本损失风险，违背价值投资原则。\", "
-            "\"suggestions\": [\"改为长期持有逻辑\", \"加入基本面质量过滤\", "
-            "\"关注护城河与安全边际\"], \"confidence\": 0.85}"
+            '{"verdict": "不推荐", '
+            '"rationale": "短线动量追涨依赖价格博弈而非企业内在价值，'
+            '存在永久性资本损失风险，违背价值投资原则。", '
+            '"suggestions": ["改为长期持有逻辑", "加入基本面质量过滤", '
+            '"关注护城河与安全边际"], "confidence": 0.85}'
         )
     ),
 ]

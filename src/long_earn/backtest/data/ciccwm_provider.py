@@ -142,7 +142,8 @@ class CiccwmDataProvider(MarketIntelligenceProvider):
         # 写入 DuckDB 缓存
         if not result_df.empty:
             cache_cols = ["symbol", "date"] + [
-                c for c in ["open", "high", "low", "close", "volume"]
+                c
+                for c in ["open", "high", "low", "close", "volume"]
                 if c in result_df.columns
             ]
             self.cache.save_prices(result_df[cache_cols])

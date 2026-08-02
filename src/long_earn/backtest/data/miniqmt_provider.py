@@ -464,9 +464,7 @@ class MiniQmtClient:
             )
             if not raw:
                 return []
-            return [
-                f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for d in raw
-            ]
+            return [f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for d in raw]
         except TimeoutError:
             logger.warning("get_trading_dates_by_market 超时")
             return []
@@ -754,6 +752,7 @@ class MiniQmtDataProvider:
                 parts.append(df)
         if not parts:
             return None
+
         # 按 (symbol, report_date) outer merge 4 表
         # 注意：4 张表都含 announce_date 列，每次 merge 都会产生 announce_date_dup。
         # 必须在每次 merge 后立即合并 announce_date_dup → announce_date 并 drop，

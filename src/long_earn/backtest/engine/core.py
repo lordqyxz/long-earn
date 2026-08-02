@@ -276,9 +276,7 @@ class EventDrivenBacktestEngine:
                 # 补全 RUN_END：监督报告判据 3 要求 RUN_START/RUN_END 配对，
                 # 原 DATA_EMPTY 路径直接 return 导致 RUN_END 缺失，审计日志
                 # 不配对（如 7/26 HTR 中 2 个节点只有 RUN_START 无 RUN_END）。
-                empty_result = BacktestResult(
-                    success=False, message="加载数据为空"
-                )
+                empty_result = BacktestResult(success=False, message="加载数据为空")
                 self._log_audit(
                     "RUN_END",
                     str(uuid.uuid4()),
@@ -512,9 +510,7 @@ class EventDrivenBacktestEngine:
                 )
 
         # 检查待成交订单（限价/止损单）— 从 price_dict 提取 close 价格映射
-        close_lookup = {
-            s: fields.get("close") for s, fields in price_dict.items()
-        }
+        close_lookup = {s: fields.get("close") for s, fields in price_dict.items()}
         pending_fills = broker.check_pending_orders(price_lookup=close_lookup)
         for pf in pending_fills:
             portfolio.update_from_fill(pf)
@@ -821,9 +817,7 @@ class EventDrivenBacktestEngine:
             # T+1 锁定：当日买入不可被风控卖出（P0-06）
             if pos.available_date is not None and ts < pos.available_date:
                 continue
-            price = self._lookup_price_fast(
-                slab, symbol, price_dict=price_dict
-            )
+            price = self._lookup_price_fast(slab, symbol, price_dict=price_dict)
             if price is not None:
                 order = OrderEvent(
                     timestamp=ts,
@@ -1006,9 +1000,12 @@ class EventDrivenBacktestEngine:
                 continue
 
             # 获取当日成交量（用于成交量参与率限制，P0-04）
-            daily_volume = self._lookup_price_fast(
-                slab, order.symbol, field="volume", price_dict=price_dict
-            ) or 0.0
+            daily_volume = (
+                self._lookup_price_fast(
+                    slab, order.symbol, field="volume", price_dict=price_dict
+                )
+                or 0.0
+            )
 
             fill = broker.execute_order(order, price, daily_volume=daily_volume)
             portfolio.update_from_fill(fill)

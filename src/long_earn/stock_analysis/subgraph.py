@@ -184,9 +184,7 @@ def event_context_node(state, context: "RuntimeContext"):
             if events:
                 event_context = "\n".join(events)
                 if logger:
-                    logger.info(
-                        f"[事件上下文] {trigger} → 激活 {len(events)} 条事件"
-                    )
+                    logger.info(f"[事件上下文] {trigger} → 激活 {len(events)} 条事件")
         except Exception as e:
             if logger:
                 logger.warning(f"[事件上下文] 激活失败: {e}")
@@ -274,9 +272,7 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node("get_stock_data", lambda state: get_stock_data(state, context))
-    workflow.add_node(
-        "event_context", lambda state: event_context_node(state, context)
-    )
+    workflow.add_node("event_context", lambda state: event_context_node(state, context))
     workflow.add_node(
         "petter_analysis", lambda state: petter_analysis_node(state, context)
     )

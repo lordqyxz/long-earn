@@ -33,7 +33,9 @@ _SUFFIX_TO_CICCWM_MARKET: dict[str, int] = {
 }
 
 # ciccwm market 数值 → 后缀（反向转换）
-_CICCWM_MARKET_TO_SUFFIX: dict[int, str] = {v: k for k, v in _SUFFIX_TO_CICCWM_MARKET.items()}
+_CICCWM_MARKET_TO_SUFFIX: dict[int, str] = {
+    v: k for k, v in _SUFFIX_TO_CICCWM_MARKET.items()
+}
 
 
 # ── xtquant ↔ ciccwm ────────────────────────────────────────────────────

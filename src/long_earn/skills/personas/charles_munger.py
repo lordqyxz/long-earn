@@ -44,43 +44,43 @@ EXAMPLES = [
 STRATEGY_REVIEW_EXAMPLES = [
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"多因子动量+价值\", "
-            "\"factors\": [\"mom_20d\", \"bm_ratio\"], "
-            "\"rebalance\": \"weekly\"}\n"
-            "回测结果：{\"total_return\": 0.5, \"max_drawdown\": 0.22, "
-            "\"sharpe_ratio\": 1.0}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "多因子动量+价值", '
+            '"factors": ["mom_20d", "bm_ratio"], '
+            '"rebalance": "weekly"}\n'
+            '回测结果：{"total_return": 0.5, "max_drawdown": 0.22, '
+            '"sharpe_ratio": 1.0}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"改进\", "
-            "\"rationale\": \"从经济学看，价值+动量组合机会成本合理；"
+            '{"verdict": "改进", '
+            '"rationale": "从经济学看，价值+动量组合机会成本合理；'
             "从心理学看，周度调仓易受近期偏误驱动；"
-            "从数学概率看，回撤表明分布尾部未充分控制。\", "
-            "\"weaknesses\": [\"周度调仓存在近期偏误\", "
-            "\"尾部风险控制不足\", \"样本期可能存在幸存者偏差\"], "
-            "\"suggestions\": [\"延长调仓周期至月度\", \"加入波动率过滤\", "
-            "\"做样本外稳健性检验\"], \"confidence\": 0.75}"
+            '从数学概率看，回撤表明分布尾部未充分控制。", '
+            '"weaknesses": ["周度调仓存在近期偏误", '
+            '"尾部风险控制不足", "样本期可能存在幸存者偏差"], '
+            '"suggestions": ["延长调仓周期至月度", "加入波动率过滤", '
+            '"做样本外稳健性检验"], "confidence": 0.75}'
         )
     ),
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"高杠杆趋势跟踪\", "
-            "\"leverage\": 3, \"factors\": [\"trend_60d\"]}\n"
-            "回测结果：{\"total_return\": 1.2, \"max_drawdown\": 0.55, "
-            "\"sharpe_ratio\": 0.8}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "高杠杆趋势跟踪", '
+            '"leverage": 3, "factors": ["trend_60d"]}\n'
+            '回测结果：{"total_return": 1.2, "max_drawdown": 0.55, '
+            '"sharpe_ratio": 0.8}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"拒绝\", "
-            "\"rationale\": \"从工程学看，3 倍杠杆放大反馈循环风险；"
+            '{"verdict": "拒绝", '
+            '"rationale": "从工程学看，3 倍杠杆放大反馈循环风险；'
             "从心理学看，高收益诱发过度自信偏差；"
-            "从生物学看，策略对环境变化缺乏适应性。\", "
-            "\"weaknesses\": [\"杠杆失控\", \"过度自信偏差\", "
-            "\"回撤接近不可恢复阈值\"], "
-            "\"suggestions\": [\"降低杠杆至 1 倍\", \"加入动态仓位管理\", "
-            "\"增加压力测试\"], \"confidence\": 0.9}"
+            '从生物学看，策略对环境变化缺乏适应性。", '
+            '"weaknesses": ["杠杆失控", "过度自信偏差", '
+            '"回撤接近不可恢复阈值"], '
+            '"suggestions": ["降低杠杆至 1 倍", "加入动态仓位管理", '
+            '"增加压力测试"], "confidence": 0.9}'
         )
     ),
 ]
@@ -95,29 +95,24 @@ STRATEGY_GENERATE_EXAMPLES = [
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"推荐\", "
-            "\"rationale\": \"从经济学看，价值+动量组合机会成本合理；"
+            '{"verdict": "推荐", '
+            '"rationale": "从经济学看，价值+动量组合机会成本合理；'
             "从心理学看，可利用市场近期偏误；"
-            "从概率论看，多因子分散降低单一因子失效风险。\", "
-            "\"suggestions\": [\"延长调仓周期至月度以避免近期偏误\", "
-            "\"加入波动率过滤控制尾部风险\", \"做样本外稳健性检验\"], "
-            "\"confidence\": 0.75}"
+            '从概率论看，多因子分散降低单一因子失效风险。", '
+            '"suggestions": ["延长调仓周期至月度以避免近期偏误", '
+            '"加入波动率过滤控制尾部风险", "做样本外稳健性检验"], '
+            '"confidence": 0.75}'
         )
     ),
-    HumanMessage(
-        content=(
-            "用户查询：研究一个高杠杆趋势跟踪策略\n"
-            "已有知识上下文：无"
-        )
-    ),
+    HumanMessage(content=("用户查询：研究一个高杠杆趋势跟踪策略\n已有知识上下文：无")),
     AIMessage(
         content=(
-            "{\"verdict\": \"不推荐\", "
-            "\"rationale\": \"从工程学看，高杠杆放大反馈循环风险；"
+            '{"verdict": "不推荐", '
+            '"rationale": "从工程学看，高杠杆放大反馈循环风险；'
             "从心理学看，诱发过度自信偏差；"
-            "从生物学看，策略对环境变化缺乏适应性。\", "
-            "\"suggestions\": [\"降低杠杆至 1 倍\", \"加入动态仓位管理\", "
-            "\"增加压力测试与极端场景检验\"], \"confidence\": 0.9}"
+            '从生物学看，策略对环境变化缺乏适应性。", '
+            '"suggestions": ["降低杠杆至 1 倍", "加入动态仓位管理", '
+            '"增加压力测试与极端场景检验"], "confidence": 0.9}'
         )
     ),
 ]

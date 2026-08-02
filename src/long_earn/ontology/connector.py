@@ -245,7 +245,8 @@ class Connector:
         # 闭包字典：kind → () → (data, provenance)
         # 注意每个 lambda 必须返回 tuple，且延迟调用避免无谓执行
         dispatch: dict[
-            str, Callable[[], tuple[pl.DataFrame | dict[str, Any] | list[Any], list[str]]]
+            str,
+            Callable[[], tuple[pl.DataFrame | dict[str, Any] | list[Any], list[str]]],
         ] = {
             "indicator_panel": lambda: self._fetch_indicator_panel(
                 symbols, resolution, query
@@ -376,8 +377,7 @@ class Connector:
         # 去重保序
         seen: set[str] = set()
         queries = [
-            q for q in candidate_queries
-            if q and q not in seen and not seen.add(q)
+            q for q in candidate_queries if q and q not in seen and not seen.add(q)
         ]
         k = int(query.constraints.get("k", 3))
         provenance = [f"memory:search_experience:{family}"]
@@ -462,9 +462,7 @@ class Connector:
             return [], []
         try:
             symbols = self._data.get_industry_constituents(query.subject)
-            return symbols, [
-                f"data_connector:industry_constituents:{query.subject}"
-            ]
+            return symbols, [f"data_connector:industry_constituents:{query.subject}"]
         except Exception as e:
             logger.warning(f"Connector 取行业成分股 {query.subject} 失败: {e}")
             return [], []
@@ -531,9 +529,7 @@ class Connector:
                     details.append(d)
             return (
                 {"instruments": details},
-                [
-                    f"data_connector:instrument_detail:{','.join(codes)}"
-                ],
+                [f"data_connector:instrument_detail:{','.join(codes)}"],
             )
         except Exception as e:
             logger.warning(f"Connector 取标的基础信息 {query.subject} 失败: {e}")
@@ -563,9 +559,7 @@ class Connector:
                 return {"data": tick}, [
                     f"data_connector:realtime_tick:{len(code_list)}"
                 ]
-            return tick, [
-                f"data_connector:realtime_tick:{','.join(code_list)}"
-            ]
+            return tick, [f"data_connector:realtime_tick:{','.join(code_list)}"]
         except Exception as e:
             logger.warning(f"Connector 取实时快照失败: {e}")
             return {}, []

@@ -245,6 +245,4 @@ class BasePersona:
 
     def _do_analyze(self, context: PersonaContext) -> PersonaResult:
         """子类实现：执行实际分析并返回 PersonaResult。"""
-        raise NotImplementedError(
-            f"{self.name} persona 未实现 _do_analyze"
-        )
+        raise NotImplementedError(f"{self.name} persona 未实现 _do_analyze")

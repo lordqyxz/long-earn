@@ -84,7 +84,9 @@ class BacktestAnalyzer:
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
         conn = self._get_conn()
-        query = "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        query = (
+            "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        )
         params = [run_id]
         if event_type:
             query += " AND event_type = ?"

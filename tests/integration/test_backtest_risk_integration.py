@@ -30,10 +30,7 @@ def _make_data_with_crash():
     dates = [datetime(2023, 1, 1) + timedelta(days=i) for i in range(20)]
     rows = []
     for i, d in enumerate(dates):
-        if i < 5:
-            price = 10.0 + i * 0.5
-        else:
-            price = 12.5 - (i - 5) * 1.5
+        price = 10.0 + i * 0.5 if i < 5 else 12.5 - (i - 5) * 1.5
         rows.append({"timestamp": d, "symbol": "S1", "close": price})
     return pl.DataFrame(rows)
 

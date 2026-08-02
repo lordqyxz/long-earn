@@ -177,11 +177,7 @@ def _fetch_universe_financial_brief(
         universe_result = connector.get_concept(
             ConceptQuery(subject=universe, aspect="成分股")
         )
-        symbols = (
-            universe_result.data
-            if isinstance(universe_result.data, list)
-            else []
-        )
+        symbols = universe_result.data if isinstance(universe_result.data, list) else []
         if not symbols:
             return f"无（universe={universe} 未取到成分股）"
         symbols = symbols[:_FINANCIAL_BRIEF_MAX_SYMBOLS]
@@ -206,18 +202,14 @@ def _fetch_universe_financial_brief(
             for c in data.columns
             if c not in ("symbol", "timestamp", "report_date", "announce_date")
         ]
-        lines = [
-            f"{aspect} 摘要（{universe} 前 {len(symbols)} 只，最新季度）:"
-        ]
+        lines = [f"{aspect} 摘要（{universe} 前 {len(symbols)} 只，最新季度）:"]
         for col in numeric_cols[:6]:
             try:
                 vals = data[col].drop_nulls()
                 if len(vals) > 0:
                     mean_v = float(vals.mean())
                     median_v = float(vals.median())
-                    lines.append(
-                        f"  {col}: mean={mean_v:.2f}, median={median_v:.2f}"
-                    )
+                    lines.append(f"  {col}: mean={mean_v:.2f}, median={median_v:.2f}")
             except Exception:
                 continue
         if len(lines) == 1:
@@ -277,11 +269,12 @@ def _observe_node(
     related_concepts = "无"
     if connector is not None and best and best.hypothesis:
         try:
-
-            result = connector.get_concept(ConceptQuery(
-                subject=best.hypothesis,
-                aspect="研究上下文",
-            ))
+            result = connector.get_concept(
+                ConceptQuery(
+                    subject=best.hypothesis,
+                    aspect="研究上下文",
+                )
+            )
             if result.related_nodes:
                 related_concepts = "\n".join(
                     f"- {n.label} ({n.domain.value})" for n in result.related_nodes[:5]
@@ -329,11 +322,13 @@ def _enhance_child_insights(
     # ADR-014 任务2：图谱按策略族检索相似经验
     if connector is not None and parent_hypothesis:
         try:
-            exp_result = connector.get_concept(ConceptQuery(
-                subject=parent_hypothesis,
-                aspect="动量族",  # 默认动量族，可根据假设内容扩展
-                constraints={"k": 3},
-            ))
+            exp_result = connector.get_concept(
+                ConceptQuery(
+                    subject=parent_hypothesis,
+                    aspect="动量族",  # 默认动量族，可根据假设内容扩展
+                    constraints={"k": 3},
+                )
+            )
             if isinstance(exp_result.data, list) and exp_result.data:
                 graph_insights = "\n".join(
                     f"- [图谱] {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
@@ -409,7 +404,9 @@ def _collect_tried_directions(
         diag = backtest_result.get("strategy_diagnostics", {}) or {}
         step_failures = diag.get("step_failures", []) or []
         if step_failures:
-            first_failure = step_failures[0] if isinstance(step_failures[0], dict) else {}
+            first_failure = (
+                step_failures[0] if isinstance(step_failures[0], dict) else {}
+            )
             step_error = str(first_failure.get("error", ""))[:60]
             if step_error:
                 reason_parts.append(f"step_error:{step_error}")
@@ -852,9 +849,7 @@ def _process_retry_success(  # noqa: PLR0913
 
     dev_score = float(retry_backtest.get("sharpe_ratio", 0))
     if logger:
-        logger.info(
-            f"{log_prefix.format(node_id=node_id)} dev_score={dev_score:.2f}"
-        )
+        logger.info(f"{log_prefix.format(node_id=node_id)} dev_score={dev_score:.2f}")
     return {
         "node_id": node_id,
         "dev_score": dev_score,
@@ -942,9 +937,7 @@ def _gate_check_candidate(
             }
     dev_score = float(backtest_result.get("sharpe_ratio", 0))
     if logger:
-        logger.info(
-            f"[HTR-执行] 节点 {developed['node_id']} dev_score={dev_score:.2f}"
-        )
+        logger.info(f"[HTR-执行] 节点 {developed['node_id']} dev_score={dev_score:.2f}")
     return {
         "node_id": developed["node_id"],
         "dev_score": dev_score,
@@ -1024,8 +1017,7 @@ def _executor_node(  # noqa: PLR0913
             if logger:
                 logger.error(f"[HTR-执行] 批量回测失败，降级为逐候选失败: {e}")
             outcomes = [
-                {"error": str(e), "error_category": "engine_error"}
-                for _ in developed
+                {"error": str(e), "error_category": "engine_error"} for _ in developed
             ]
 
         # ── 阶段 3：逐候选 AcceptanceGate（语义不变，backtest 结果就绪后校验）──
@@ -1043,12 +1035,12 @@ def _executor_node(  # noqa: PLR0913
     # results[0] -> best 选取（ADR-010 阶段 5 收尾修正）：
     # 让下一轮 optimize 的 previous_backtest 基线为本轮最佳候选而非随机首个，
     # 与 _decide 的 best_result 选取一致。失败/rejected 候选 dev_score=0 不优先。
-    best_result = max(
-        results, key=lambda r: r.get("dev_score", 0.0), default=None
-    )
+    best_result = max(results, key=lambda r: r.get("dev_score", 0.0), default=None)
     return {
         "executor_results": results,
-        "backtest_result": best_result.get("backtest_result", {}) if best_result else {},
+        "backtest_result": best_result.get("backtest_result", {})
+        if best_result
+        else {},
         "strategy_yaml": best_result.get("strategy_yaml", "") if best_result else "",
         # 把 optimized strategy 写回 state，让下一周期的 optimize_strategy
         # 能看到累积的 evolution_lineage（否则每周期都从空 lineage 开始）
@@ -1220,7 +1212,9 @@ def _evaluate_oos_and_merge(  # noqa: PLR0913
         return "continue"
 
     # ADR-015 S2: Deflated Sharpe Ratio 门
-    if not _check_dsr_gate(dsr_gate, oos_score, tree, best_result, best_node_id, logger):
+    if not _check_dsr_gate(
+        dsr_gate, oos_score, tree, best_result, best_node_id, logger
+    ):
         return "continue"
 
     # 全部门通过 → 合并
@@ -1252,9 +1246,7 @@ def _check_stability_gate(
             )
         return False
     if logger:
-        logger.info(
-            f"[HTR-OOS] 节点 {node_id} 通过 S1 稳定性门: {stability.reason}"
-        )
+        logger.info(f"[HTR-OOS] 节点 {node_id} 通过 S1 稳定性门: {stability.reason}")
     return True
 
 
@@ -1284,9 +1276,7 @@ def _check_dsr_gate(  # noqa: PLR0913
             )
         return False
     if logger:
-        logger.info(
-            f"[HTR-OOS] 节点 {node_id} 通过 S2 DSR 门: {dsr_result.reason}"
-        )
+        logger.info(f"[HTR-OOS] 节点 {node_id} 通过 S2 DSR 门: {dsr_result.reason}")
     return True
 
 
@@ -1345,9 +1335,15 @@ def _decide_evaluate_and_merge(  # noqa: PLR0913
 
     best_result = max(results, key=lambda r: r.get("dev_score", 0))
     action = _evaluate_oos_and_merge(
-        tree, best_result, current_best_oos, backtest_service,
-        oos_n_splits, oos_threshold, logger,
-        stability_gate=stability_gate, dsr_gate=dsr_gate,
+        tree,
+        best_result,
+        current_best_oos,
+        backtest_service,
+        oos_n_splits,
+        oos_threshold,
+        logger,
+        stability_gate=stability_gate,
+        dsr_gate=dsr_gate,
     )
     oos_score = (
         tree.get_node(best_result.get("node_id", "")).oos_score
@@ -1390,11 +1386,7 @@ def _should_force_stop(
     llm_action: str,
 ) -> bool:
     """判断是否应强制停止 HTR 循环。"""
-    return (
-        iteration >= max_cycles
-        or max_depth >= HTR_MAX_DEPTH
-        or llm_action == "stop"
-    )
+    return iteration >= max_cycles or max_depth >= HTR_MAX_DEPTH or llm_action == "stop"
 
 
 def _inject_connector_context(
@@ -1410,11 +1402,13 @@ def _inject_connector_context(
     """
     if connector is not None and best and best.hypothesis:
         try:
-            fail_result = connector.get_concept(ConceptQuery(
-                subject=best.hypothesis,
-                aspect="动量族",
-                constraints={"k": 2},
-            ))
+            fail_result = connector.get_concept(
+                ConceptQuery(
+                    subject=best.hypothesis,
+                    aspect="动量族",
+                    constraints={"k": 2},
+                )
+            )
             if isinstance(fail_result.data, list) and fail_result.data:
                 tree_state["similar_experiences"] = "\n".join(
                     f"- {e.get('name', '')}: sharpe={e.get('sharpe', '?')}"
@@ -1475,13 +1469,26 @@ def _decide_node(  # noqa: PLR0913
     current_best_oos = best.oos_score if best else None
 
     action, oos_score = _decide_evaluate_and_merge(
-        state, tree, best, current_best_oos, backtest_service, oos_n_splits,
-        oos_threshold, logger, stability_gate, dsr_gate, pbo_gate,
+        state,
+        tree,
+        best,
+        current_best_oos,
+        backtest_service,
+        oos_n_splits,
+        oos_threshold,
+        logger,
+        stability_gate,
+        dsr_gate,
+        pbo_gate,
     )
 
     tree_state = _build_tree_state(
-        tree, current_best_oos, results=state.get("executor_results", []) or [],
-        oos_score=oos_score, iteration=iteration, max_cycles=max_cycles,
+        tree,
+        current_best_oos,
+        results=state.get("executor_results", []) or [],
+        oos_score=oos_score,
+        iteration=iteration,
+        max_cycles=max_cycles,
     )
     # ADR-015 B1/B4: 注入 frontier_summary 供 LLM 决策 expand 时参考
     tree_state["frontier_summary"] = _build_frontier_summary(tree)
@@ -1497,9 +1504,7 @@ def _decide_node(  # noqa: PLR0913
         # expand: 在指定节点展开新分支（覆盖默认 merge/continue 决策）
         action = "continue"
         if logger:
-            logger.info(
-                f"[HTR-决策] Arbor expand → 在 {next_parent_id} 下展开新分支"
-            )
+            logger.info(f"[HTR-决策] Arbor expand → 在 {next_parent_id} 下展开新分支")
     elif llm_action == "prune" and prune_target_id:
         # prune: 剪枝指定子树
         _arbor_prune(tree, prune_target_id, logger)
@@ -1534,10 +1539,7 @@ def _build_frontier_summary(tree: HypothesisTree) -> str:
     best = tree.best_node()
     best_id = best.id if best else ""
     # 排除 best_node 和 root，只保留真正可回溯探索的节点
-    candidates = [
-        n for n in frontier
-        if n.id not in (best_id, "root")
-    ]
+    candidates = [n for n in frontier if n.id not in (best_id, "root")]
     if not candidates:
         return "无（当前最佳节点是唯一可探索节点）"
     # 最多 5 个，按 dev_score 降序
@@ -1565,9 +1567,7 @@ def _arbor_prune(
     node = tree.get_node(target_id)
     if node is None:
         if logger:
-            logger.warning(
-                f"[HTR-决策] Arbor prune 失败: 节点 {target_id} 不存在"
-            )
+            logger.warning(f"[HTR-决策] Arbor prune 失败: 节点 {target_id} 不存在")
         return
     tree.prune_subtree(target_id)
     if logger:
@@ -1621,14 +1621,22 @@ def create_htr_subgraph(
 
     workflow.add_node("init_tree", partial(_init_tree_node, logger=logger))
     workflow.add_node(
-        "observe", partial(_observe_node, research_agent=research_agent,
-                           connector=connector, logger=logger)
+        "observe",
+        partial(
+            _observe_node,
+            research_agent=research_agent,
+            connector=connector,
+            logger=logger,
+        ),
     )
     workflow.add_node(
         "ideate",
         partial(
-            _ideate_node, research_agent=research_agent, memory=memory,
-            connector=connector, logger=logger
+            _ideate_node,
+            research_agent=research_agent,
+            memory=memory,
+            connector=connector,
+            logger=logger,
         ),
     )
     # ADR-010 Phase 5: max_select 可配置（HTR_MAX_SELECT），>1 时激活 Send fan-out
@@ -1804,9 +1812,9 @@ def _gap_detector_node(
     if not texts:
         return {"operator_gaps": []}
 
-    strategy_yaml = state.get("strategy_yaml", "") or state.get(
-        "optimized_strategy_yaml", ""
-    ) or ""
+    strategy_yaml = (
+        state.get("strategy_yaml", "") or state.get("optimized_strategy_yaml", "") or ""
+    )
 
     # 所有策略被 AcceptanceGate 拒绝时 strategy_yaml 为空，
     # 此时无 reference_strategy 可用，跳过缺口检测（避免 OperatorSpec 非空校验崩溃）

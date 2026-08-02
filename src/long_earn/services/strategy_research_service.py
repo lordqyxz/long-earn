@@ -128,14 +128,10 @@ class StrategyResearchService:
         config = self.ctx.config
         config.max_iterations = max_iterations
 
-        subgraph = create_strategy_rd_subgraph(
-            self.ctx, checkpointer=checkpointer
-        )
+        subgraph = create_strategy_rd_subgraph(self.ctx, checkpointer=checkpointer)
         self.logger.info(f"[循环] 启动策略研发子图，idea='{idea}'")
         if checkpointer is not None:
-            self.logger.info(
-                f"[循环] checkpoint 已启用，thread_id={thread_id}"
-            )
+            self.logger.info(f"[循环] checkpoint 已启用，thread_id={thread_id}")
         t0 = time.time()
         invoke_input: dict[str, Any] = {"query": idea}
         if history_return != 0.0:
@@ -154,9 +150,7 @@ class StrategyResearchService:
             and invoke_config is not None
             and self._thread_already_completed(subgraph, invoke_config)
         ):
-            self.logger.info(
-                f"[循环] thread_id={thread_id} 已有完成态，直接复用结果"
-            )
+            self.logger.info(f"[循环] thread_id={thread_id} 已有完成态，直接复用结果")
             result = subgraph.get_state(invoke_config).values
         else:
             result = subgraph.invoke(invoke_input, config=invoke_config)
@@ -247,9 +241,7 @@ class StrategyResearchService:
         # 优先用上一轮的历史收益作为家族失效信号传给子图；
         # 无历史时默认 0.0（不触发家族切换打分）
         prev_history_return = (
-            round_history[-1].get("history_return", 0.0)
-            if round_history
-            else 0.0
+            round_history[-1].get("history_return", 0.0) if round_history else 0.0
         )
 
         round_result = self.run_round(
@@ -321,9 +313,7 @@ class StrategyResearchService:
             )
             if round_num > 1 and improvement <= min_improvement:
                 self.logger.info("[循环] 近三个月收益率无法进一步提升，停止迭代")
-                self.logger.info(
-                    f"[循环] 最佳近三个月收益率: {best_recent_return:.4f}"
-                )
+                self.logger.info(f"[循环] 最佳近三个月收益率: {best_recent_return:.4f}")
                 should_stop = True
 
         return metrics, new_best, best_yaml, best_round, should_stop
@@ -369,7 +359,9 @@ class StrategyResearchService:
         for round_num in range(1, max_rounds + 1):
             self.logger.info("")
             self.logger.info("#" * 60)
-            self.logger.info(f"# 第 {round_num}/{max_rounds} 轮 (家族索引 {family_idx})")
+            self.logger.info(
+                f"# 第 {round_num}/{max_rounds} 轮 (家族索引 {family_idx})"
+            )
             self.logger.info("#" * 60)
 
             thread_id = (
@@ -463,19 +455,11 @@ class StrategyResearchService:
         self.logger.info("=" * 60)
 
         if summary.best_strategy_yaml:
-            self.logger.info(
-                f"最佳近三个月收益率: {summary.best_recent_return:.4f}"
-            )
-            self.logger.info(
-                f"最佳策略所在轮次: 第{summary.best_round}轮"
-            )
-            self.logger.info(
-                f"最佳策略历史收益率: {summary.best_history_return:.4f}"
-            )
+            self.logger.info(f"最佳近三个月收益率: {summary.best_recent_return:.4f}")
+            self.logger.info(f"最佳策略所在轮次: 第{summary.best_round}轮")
+            self.logger.info(f"最佳策略历史收益率: {summary.best_history_return:.4f}")
             best_path = best_strategy_path()
-            best_path.write_text(
-                summary.best_strategy_yaml, encoding="utf-8"
-            )
+            best_path.write_text(summary.best_strategy_yaml, encoding="utf-8")
             self.logger.info(f"最佳策略已保存到: {best_path}")
         else:
             self.logger.info("未能生成有效策略")

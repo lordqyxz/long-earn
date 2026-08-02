@@ -64,9 +64,7 @@ class WalkForwardResult(BaseModel):
     average_test_metrics: dict[str, float] = Field(
         default_factory=dict, description="所有折叠 test 指标的平均值"
     )
-    failed_folds: list[int] = Field(
-        default_factory=list, description="失败折叠的索引"
-    )
+    failed_folds: list[int] = Field(default_factory=list, description="失败折叠的索引")
     oos_sharpe: float | None = Field(
         default=None, description="OOS 平均夏普比率（合并门主判据）"
     )

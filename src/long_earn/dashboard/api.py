@@ -72,9 +72,7 @@ def _file_response(
     data = file_path.read_bytes()
     handler.send_response(200)
     handler.send_header("Content-Type", content_type)
-    handler.send_header(
-        "Content-Disposition", f'attachment; filename="{filename}"'
-    )
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
@@ -439,7 +437,9 @@ class VisualizationServer(BaseHTTPRequestHandler):
         """返回本次回测中所有交易标的的价格走势 + 买卖点标注数据"""
         analyzer = self._get_analyzer()
         charts = analyzer.export_all_symbol_charts(run_id)
-        _json_response(self, {"run_id": run_id, "symbols": len(charts), "charts": charts})
+        _json_response(
+            self, {"run_id": run_id, "symbols": len(charts), "charts": charts}
+        )
 
 
 def serve_visualization(

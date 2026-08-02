@@ -102,8 +102,8 @@ class _MockDataProvider:
         _prepare_data 拿到的面板会含 warmup 之前的数据，导致与批量路径
         （防御性过滤 [start-warmup, end]）不等价。
         """
-        start_dt = datetime.strptime(start[:10], "%Y-%m-%d")  # noqa: DTZ007
-        end_dt = datetime.strptime(end[:10], "%Y-%m-%d")  # noqa: DTZ007
+        start_dt = datetime.strptime(start[:10], "%Y-%m-%d")
+        end_dt = datetime.strptime(end[:10], "%Y-%m-%d")
         return self._panel.filter(
             (pl.col("timestamp") >= start_dt) & (pl.col("timestamp") <= end_dt)
         )

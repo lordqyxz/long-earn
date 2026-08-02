@@ -288,9 +288,7 @@ class ParallelRunner:
         self.max_workers = max_workers or os.cpu_count() or 1
         self.data_provider = data_provider
 
-    def _prepare_data(
-        self, symbols: list[str], start_date: str, end_date: str
-    ) -> Any:
+    def _prepare_data(self, symbols: list[str], start_date: str, end_date: str) -> Any:
         """预取合并面板为 polars DataFrame（主进程执行，worker 通过 SharedMemory 共享）。
 
         优先用注入的 ``data_provider``（走降级链），未注入时退回 ``MiniQmtDataProvider``。
@@ -304,7 +302,9 @@ class ParallelRunner:
             # 已实现 get_merged_panel_as_polars 的 provider（如 CompositeDataProvider）
             # 直接调用；否则用 PandasToPolarsProvider 适配
             if hasattr(provider, "get_merged_panel_as_polars"):
-                return provider.get_merged_panel_as_polars(symbols, start_date, end_date)
+                return provider.get_merged_panel_as_polars(
+                    symbols, start_date, end_date
+                )
             return PandasToPolarsProvider(provider).get_merged_panel_as_polars(
                 symbols, start_date, end_date
             )
@@ -552,7 +552,9 @@ class ParallelRunner:
                     {
                         "fold_id": fold_idx,
                         "phase": "train",
-                        "error_category": (train_o.error_category if train_o else "missing"),
+                        "error_category": (
+                            train_o.error_category if train_o else "missing"
+                        ),
                         "message": (train_o.error if train_o else "worker 未返回结果"),
                     }
                 )
@@ -568,7 +570,9 @@ class ParallelRunner:
                     {
                         "fold_id": fold_idx,
                         "phase": "test",
-                        "error_category": (test_o.error_category if test_o else "missing"),
+                        "error_category": (
+                            test_o.error_category if test_o else "missing"
+                        ),
                         "message": (test_o.error if test_o else "worker 未返回结果"),
                     }
                 )

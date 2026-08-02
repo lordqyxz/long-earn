@@ -239,4 +239,3 @@ class AkshareFallbackProvider:
         """akshare 不支持实时快照。返回空 dict。"""
         logger.debug("akshare 不支持 get_full_tick，返回空")
         return {}
-

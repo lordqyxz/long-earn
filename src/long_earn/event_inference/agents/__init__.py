@@ -203,9 +203,9 @@ class FakeEventPropagator:
         return relations
 
 
-def create_default_extractors(context: RuntimeContext) -> tuple[
-    EventExtractor, EventPropagator
-]:
+def create_default_extractors(
+    context: RuntimeContext,
+) -> tuple[EventExtractor, EventPropagator]:
     """从 RuntimeContext 构造默认的 LLM 抽取器 + 传播器。"""
     llm = context.require_llm()
     return LLMEventExtractor(llm), LLMEventPropagator(llm)

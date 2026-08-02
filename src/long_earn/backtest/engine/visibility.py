@@ -119,11 +119,7 @@ class VisibilityGuard:
 
         # 从当前 slab 切片中过滤（slab 已是连续行切片，O(U)）
         slab = self.read_current_slab()
-        val = (
-            slab.filter(pl.col("symbol") == symbol)
-            .select(field)
-            .to_series()
-        )
+        val = slab.filter(pl.col("symbol") == symbol).select(field).to_series()
 
         if val.is_empty():
             return float("nan")
@@ -176,4 +172,6 @@ class VisibilityGuard:
             # 当前 timestamp 在数据中不存在
             return self._full_data.head(0)
         # polars slice 是半开区间 [start, end)
-        return self._full_data.slice(self._slab_start_idx, self._slab_end_idx - self._slab_start_idx)
+        return self._full_data.slice(
+            self._slab_start_idx, self._slab_end_idx - self._slab_start_idx
+        )

@@ -45,8 +45,8 @@ def mock_conn_with_old_table() -> duckdb.DuckDBPyConnection:
             table_name VARCHAR PRIMARY KEY, version INTEGER NOT NULL
         )
     """)
-    # 插入 3 行旧数据（old_rows 被 DuckDB SELECT FROM 引用，ruff F841 误报）
-    old_rows = pd.DataFrame(
+    # 插入 3 行旧数据（变量名须保留：DuckDB 按名引用 Python DataFrame）
+    old_rows = pd.DataFrame(  # noqa: F841
         [
             {
                 "symbol": "600519.SH",

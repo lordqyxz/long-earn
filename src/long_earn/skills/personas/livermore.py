@@ -45,40 +45,40 @@ EXAMPLES = [
 STRATEGY_REVIEW_EXAMPLES = [
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"趋势突破选股\", "
-            "\"factors\": [\"breakout_20d_high\", \"volume_surge>1.5x\"], "
-            "\"holding\": \"直到跌破 10 日均线\"}\n"
-            "回测结果：{\"total_return\": 0.55, \"max_drawdown\": 0.22, "
-            "\"sharpe_ratio\": 1.1}\n市场事件上下文：牛市初期"
+            '策略详情：{"strategy_name": "趋势突破选股", '
+            '"factors": ["breakout_20d_high", "volume_surge>1.5x"], '
+            '"holding": "直到跌破 10 日均线"}\n'
+            '回测结果：{"total_return": 0.55, "max_drawdown": 0.22, '
+            '"sharpe_ratio": 1.1}\n市场事件上下文：牛市初期'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"接受\", "
-            "\"rationale\": \"策略基于趋势突破与成交量确认，符合顺势交易原则；"
-            "回撤可控、夏普比率合理，具备趋势跟踪的纪律性。\", "
-            "\"weaknesses\": [\"突破失败时的止损规则未明确\"], "
-            "\"suggestions\": [\"加入 ATR 动态止损\", \"突破失败立即离场不补仓\"], "
-            "\"confidence\": 0.75}"
+            '{"verdict": "接受", '
+            '"rationale": "策略基于趋势突破与成交量确认，符合顺势交易原则；'
+            '回撤可控、夏普比率合理，具备趋势跟踪的纪律性。", '
+            '"weaknesses": ["突破失败时的止损规则未明确"], '
+            '"suggestions": ["加入 ATR 动态止损", "突破失败立即离场不补仓"], '
+            '"confidence": 0.75}'
         )
     ),
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"逆势抄底\", "
-            "\"factors\": [\"drawdown>30%\", \"pe<historical_low\"], "
-            "\"holding\": \"长期\"}\n"
-            "回测结果：{\"total_return\": -0.15, \"max_drawdown\": 0.45, "
-            "\"sharpe_ratio\": -0.3}\n市场事件上下文：熊市中段"
+            '策略详情：{"strategy_name": "逆势抄底", '
+            '"factors": ["drawdown>30%", "pe<historical_low"], '
+            '"holding": "长期"}\n'
+            '回测结果：{"total_return": -0.15, "max_drawdown": 0.45, '
+            '"sharpe_ratio": -0.3}\n市场事件上下文：熊市中段'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"拒绝\", "
-            "\"rationale\": \"逆势抄底违背顺势交易原则，在熊市中段抄底"
-            "等同于接飞刀，回撤失控且收益为负，缺乏纪律性。\", "
-            "\"weaknesses\": [\"逆势交易\", \"无止损\", \"抄底逻辑主观\"], "
-            "\"suggestions\": [\"改为等待趋势反转确认后再进场\", "
-            "\"加入均线多头排列过滤\", \"设置硬止损\"], \"confidence\": 0.8}"
+            '{"verdict": "拒绝", '
+            '"rationale": "逆势抄底违背顺势交易原则，在熊市中段抄底'
+            '等同于接飞刀，回撤失控且收益为负，缺乏纪律性。", '
+            '"weaknesses": ["逆势交易", "无止损", "抄底逻辑主观"], '
+            '"suggestions": ["改为等待趋势反转确认后再进场", '
+            '"加入均线多头排列过滤", "设置硬止损"], "confidence": 0.8}'
         )
     ),
 ]
@@ -93,28 +93,25 @@ STRATEGY_GENERATE_EXAMPLES = [
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"推荐\", "
-            "\"rationale\": \"趋势跟踪契合顺势交易原则，多头行情下"
-            "突破策略胜率较高；关注关键点突破与成交量确认。\", "
-            "\"suggestions\": [\"以 20 日新高突破 + 成交量放大 1.5 倍为入场信号\", "
-            "\"跌破 10 日均线止损\", \"盈利后金字塔加仓\"], "
-            "\"confidence\": 0.8}"
+            '{"verdict": "推荐", '
+            '"rationale": "趋势跟踪契合顺势交易原则，多头行情下'
+            '突破策略胜率较高；关注关键点突破与成交量确认。", '
+            '"suggestions": ["以 20 日新高突破 + 成交量放大 1.5 倍为入场信号", '
+            '"跌破 10 日均线止损", "盈利后金字塔加仓"], '
+            '"confidence": 0.8}'
         )
     ),
     HumanMessage(
-        content=(
-            "用户查询：研究一个逆势抄底策略\n"
-            "已有知识上下文：市场处于熊市中段"
-        )
+        content=("用户查询：研究一个逆势抄底策略\n已有知识上下文：市场处于熊市中段")
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"不推荐\", "
-            "\"rationale\": \"逆势抄底违背顺势交易原则，熊市中段抄底"
-            "风险极高，容易造成重大损失。\", "
-            "\"suggestions\": [\"改为等待趋势反转确认后再进场\", "
-            "\"关注均线多头排列与成交量回升\", \"熊市优先考虑空仓或对冲\"], "
-            "\"confidence\": 0.85}"
+            '{"verdict": "不推荐", '
+            '"rationale": "逆势抄底违背顺势交易原则，熊市中段抄底'
+            '风险极高，容易造成重大损失。", '
+            '"suggestions": ["改为等待趋势反转确认后再进场", '
+            '"关注均线多头排列与成交量回升", "熊市优先考虑空仓或对冲"], '
+            '"confidence": 0.85}'
         )
     ),
 ]

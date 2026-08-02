@@ -170,9 +170,7 @@ class MemoryService(Protocol):
 class LLMService(Protocol):
     """LLM 调用服务"""
 
-    def invoke(
-        self, prompt: str | list[BaseMessage], format: str = ""
-    ) -> Any:
+    def invoke(self, prompt: str | list[BaseMessage], format: str = "") -> Any:
         """调用 LLM
 
         Args:

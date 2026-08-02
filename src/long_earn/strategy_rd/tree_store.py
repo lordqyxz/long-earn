@@ -53,6 +53,4 @@ class HypothesisTreeStore:
         """列出所有已持久化的 run_id。"""
         if not self._base_dir.exists():
             return []
-        return sorted(
-            p.stem for p in self._base_dir.glob("*.json") if p.is_file()
-        )
+        return sorted(p.stem for p in self._base_dir.glob("*.json") if p.is_file())

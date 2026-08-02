@@ -42,12 +42,14 @@ def _format_operator_catalog() -> str:
         props = schema.get("properties", {}) or {}
         reqs = schema.get("required", []) or []
         params_str = ", ".join(
-            f'{p}: {s.get("type", "?")}'
+            f"{p}: {s.get('type', '?')}"
             + (" (必填)" if p in reqs else "")
-            + (f' default={s.get("default")}' if "default" in s else "")
+            + (f" default={s.get('default')}" if "default" in s else "")
             for p, s in props.items()
         )
-        lines.append(f"- {name} ({category}): params={{ {params_str} }} min_history={min_hist}")
+        lines.append(
+            f"- {name} ({category}): params={{ {params_str} }} min_history={min_hist}"
+        )
     return "\n".join(lines)
 
 

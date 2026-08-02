@@ -144,10 +144,7 @@ def assert_valid_strategy_yaml(yaml_str: str) -> None:
     import re
 
     code_section = re.split(r"\n  signals:", yaml_str, maxsplit=1)
-    if len(code_section) > 1:
-        check_zone = "signals:" + code_section[1]
-    else:
-        check_zone = yaml_str
+    check_zone = "signals:" + code_section[1] if len(code_section) > 1 else yaml_str
     for char in ["，", "（", "）", "；"]:
         assert char not in check_zone, f"策略代码区域不应包含全角字符: {char}"
 

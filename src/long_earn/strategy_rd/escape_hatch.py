@@ -110,7 +110,9 @@ def attempt_operator_development(
 
     # 2. 创建 OperatorSpec
     spec = _create_operator_spec(operator_name, strategy_yaml, hypothesis)
-    audit_parts.append(f"  OperatorSpec: category={spec.category}, inputs={spec.input_fields}")
+    audit_parts.append(
+        f"  OperatorSpec: category={spec.category}, inputs={spec.input_fields}"
+    )
 
     # 3. 提交到 backlog
     backlog = context.operator_backlog
@@ -156,9 +158,7 @@ def attempt_operator_development(
 
     audit_parts.append(f"  决策: 算子 {operator_name} 研发后未注册（可能被 blocked）")
     if logger:
-        logger.warning(
-            f"[逃生口] 算子 {operator_name} 研发后未注册（可能被 blocked）"
-        )
+        logger.warning(f"[逃生口] 算子 {operator_name} 研发后未注册（可能被 blocked）")
     return EscapeHatchResult(
         success=False,
         operator_name=operator_name,
@@ -182,8 +182,7 @@ def _create_operator_spec(
     return OperatorSpec(
         name=operator_name,
         intent=(
-            f"executor 逃生口触发：假设「{hypothesis[:80]}」"
-            f"需要算子 {operator_name}"
+            f"executor 逃生口触发：假设「{hypothesis[:80]}」需要算子 {operator_name}"
         ),
         input_fields=input_fields,
         category=category,
@@ -285,9 +284,7 @@ def escape_hatch_with_retry(  # noqa: PLR0913
         }
     except Exception as retry_error:
         if logger:
-            logger.error(
-                f"[逃生口] 重试 develop + backtest 失败: {retry_error}"
-            )
+            logger.error(f"[逃生口] 重试 develop + backtest 失败: {retry_error}")
         return {
             "error": f"逃生口重试失败: {retry_error}",
             "escape_hatch_triggered": True,
@@ -323,10 +320,7 @@ def apply_escape_hatch_on_error(
         return {"error": str(error), "escape_hatch_triggered": False}
 
     if logger:
-        logger.info(
-            f"[逃生口] 检测到算子缺失: {missing_op}，"
-            f"触发同步研发"
-        )
+        logger.info(f"[逃生口] 检测到算子缺失: {missing_op}，触发同步研发")
 
     result = attempt_operator_development(
         operator_name=missing_op,

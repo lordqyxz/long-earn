@@ -93,7 +93,9 @@ class ResearchAgent:
                 logger.info(f"[ToG] prepare_context: {query[:80]}")
                 text = ctx.prepare_context(query, force_refresh=refresh_events)
                 agent._last_context = text
-                return text or "（无激活上下文；可继续 expand_relations / list_operators）"
+                return (
+                    text or "（无激活上下文；可继续 expand_relations / list_operators）"
+                )
 
         return prepare_context
 
@@ -148,9 +150,7 @@ class ResearchAgent:
                             min_weight=0.0,
                         )
                         for p in paths[:20]:
-                            node_name = (
-                                p.node.name if p.node is not None else p.sid
-                            )
+                            node_name = p.node.name if p.node is not None else p.sid
                             lines.append(
                                 f"- {p.sid} → {node_name} "
                                 f"(w={getattr(p, 'weight', 0):.2f})"
@@ -171,7 +171,7 @@ class ResearchAgent:
                     {
                         "id": path_id,
                         "entity": entity,
-                        "neighbors": lines[:_BEAM_WIDTH * 4],
+                        "neighbors": lines[: _BEAM_WIDTH * 4],
                         "status": "open",
                     }
                 )
@@ -381,7 +381,9 @@ class ResearchAgent:
                     start_date=start,
                     end_date=end,
                 )
-                metrics = (result.get("metrics") or {}) if isinstance(result, dict) else {}
+                metrics = (
+                    (result.get("metrics") or {}) if isinstance(result, dict) else {}
+                )
                 slim = {
                     "error": result.get("error") if isinstance(result, dict) else None,
                     "metrics": {
@@ -483,7 +485,12 @@ class ResearchAgent:
                 # 最小因果性面板
                 panel = pl.DataFrame(
                     {
-                        "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+                        "date": [
+                            "2024-01-01",
+                            "2024-01-02",
+                            "2024-01-03",
+                            "2024-01-04",
+                        ],
                         "symbol": ["AAA"] * 4,
                         "close": [10.0, 11.0, 10.5, 12.0],
                         "volume": [1000, 1100, 900, 1200],
@@ -588,9 +595,7 @@ class ResearchAgent:
 
         user_content = query
         if self._last_context:
-            user_content = (
-                f"{query}\n\n## 已激活上下文\n\n{self._last_context[:3000]}"
-            )
+            user_content = f"{query}\n\n## 已激活上下文\n\n{self._last_context[:3000]}"
 
         with self._monitoring.track("research_agent"):
             result = self._agent.invoke(

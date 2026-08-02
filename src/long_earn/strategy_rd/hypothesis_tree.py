@@ -263,11 +263,7 @@ class HypothesisTree:
         ADR-015 B1: 包含 PENDING/RUNNING/VALIDATED/MERGED 状态的叶节点。
         排除 FAILED/PRUNED 与非叶节点。
         """
-        return [
-            n
-            for n in self._nodes.values()
-            if n.is_frontier()
-        ]
+        return [n for n in self._nodes.values() if n.is_frontier()]
 
     def best_node(self) -> HypothesisNode | None:
         """获取 OOS 得分最高的 validated/merged 节点。"""

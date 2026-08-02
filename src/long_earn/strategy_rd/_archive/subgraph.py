@@ -76,9 +76,7 @@ def _initial_retrieval_node(
             + event_context
         )
         if logger:
-            logger.info(
-                f"[初始检索] 注入事件上下文 {len(event_context)} 字符"
-            )
+            logger.info(f"[初始检索] 注入事件上下文 {len(event_context)} 字符")
 
     if logger:
         logger.info(f"[初始检索] 完成, 获取到 {len(knowledge_context)} 字符上下文")
@@ -390,9 +388,9 @@ def _gap_detector_node(
     if not suggestions:
         return {"operator_gaps": []}
 
-    strategy_yaml = state.get("strategy_yaml", "") or state.get(
-        "optimized_strategy_yaml", ""
-    ) or ""
+    strategy_yaml = (
+        state.get("strategy_yaml", "") or state.get("optimized_strategy_yaml", "") or ""
+    )
     if not strategy_yaml:
         return {"operator_gaps": []}
 
@@ -425,9 +423,7 @@ def _gap_detector_node(
             )
             submitted = backlog.submit(spec)
             if submitted:
-                gaps.append(
-                    {"name": op_name, "intent": intent, "keyword": keyword}
-                )
+                gaps.append({"name": op_name, "intent": intent, "keyword": keyword})
                 if logger:
                     logger.info(
                         f"[缺口检测] 发现算子缺口: {op_name} ({category}) — {intent}"
@@ -822,9 +818,7 @@ def create_strategy_rd_subgraph(  # noqa: PLR0915
             logger=logger,
         ),
     )
-    workflow.add_node(
-        "gap_detector", partial(_gap_detector_node, logger=logger)
-    )
+    workflow.add_node("gap_detector", partial(_gap_detector_node, logger=logger))
     workflow.add_node(
         "operator_dev", partial(_operator_dev_node, context=context, logger=logger)
     )

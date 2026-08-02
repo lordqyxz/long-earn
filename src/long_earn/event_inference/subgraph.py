@@ -216,9 +216,7 @@ def create_event_inference_subgraph(
             create_default_collector_registry,
         )
 
-        market_intel = (
-            context.market_intelligence if context is not None else None
-        )
+        market_intel = context.market_intelligence if context is not None else None
         registry = create_default_collector_registry(
             market_intelligence=market_intel,
         )
@@ -227,9 +225,7 @@ def create_event_inference_subgraph(
 
     workflow = StateGraph(EventInferenceState)
 
-    workflow.add_node(
-        "collect", partial(_collect_node, registry=registry, logger=log)
-    )
+    workflow.add_node("collect", partial(_collect_node, registry=registry, logger=log))
     workflow.add_node(
         "extract", partial(_extract_node, extractor=extractor, logger=log)
     )

@@ -13,7 +13,13 @@ from long_earn.core.prompt_loader import MarkdownPromptTemplate
 
 _research_prompt_template = MarkdownPromptTemplate(
     "strategy_research_prompt.md",
-    ["target_market", "query", "strategy_examples", "strategy_context", "master_hints_context"],
+    [
+        "target_market",
+        "query",
+        "strategy_examples",
+        "strategy_context",
+        "master_hints_context",
+    ],
     __file__,
 )
 

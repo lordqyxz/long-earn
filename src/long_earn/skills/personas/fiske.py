@@ -41,43 +41,43 @@ EXAMPLES = [
 STRATEGY_REVIEW_EXAMPLES = [
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"高研发投入选股\", "
-            "\"factors\": [\"rd_ratio>8%\", \"revenue_growth>15%\"], "
-            "\"rebalance\": \"quarterly\"}\n"
-            "回测结果：{\"total_return\": 0.7, \"max_drawdown\": 0.25, "
-            "\"sharpe_ratio\": 1.3}\n市场事件上下文：产业政策利好"
+            '策略详情：{"strategy_name": "高研发投入选股", '
+            '"factors": ["rd_ratio>8%", "revenue_growth>15%"], '
+            '"rebalance": "quarterly"}\n'
+            '回测结果：{"total_return": 0.7, "max_drawdown": 0.25, '
+            '"sharpe_ratio": 1.3}\n市场事件上下文：产业政策利好'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"接受\", "
-            "\"rationale\": \"策略聚焦高研发投入与营收成长，"
-            "契合成长股投资原则；技术壁垒与创新能力被有效捕捉。\", "
-            "\"weaknesses\": [\"未考虑专利到期风险\", "
-            "\"行业景气度下行缺乏防御机制\"], "
-            "\"suggestions\": [\"加入专利剩余年限因子\", "
-            "\"增加行业景气度过滤\"], \"confidence\": 0.8}"
+            '{"verdict": "接受", '
+            '"rationale": "策略聚焦高研发投入与营收成长，'
+            '契合成长股投资原则；技术壁垒与创新能力被有效捕捉。", '
+            '"weaknesses": ["未考虑专利到期风险", '
+            '"行业景气度下行缺乏防御机制"], '
+            '"suggestions": ["加入专利剩余年限因子", '
+            '"增加行业景气度过滤"], "confidence": 0.8}'
         )
     ),
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"低估值蓝筹\", "
-            "\"factors\": [\"pe<8\", \"dividend_yield>5%\"], "
-            "\"rebalance\": \"annual\"}\n"
-            "回测结果：{\"total_return\": 0.3, \"max_drawdown\": 0.15, "
-            "\"sharpe_ratio\": 0.9}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "低估值蓝筹", '
+            '"factors": ["pe<8", "dividend_yield>5%"], '
+            '"rebalance": "annual"}\n'
+            '回测结果：{"total_return": 0.3, "max_drawdown": 0.15, '
+            '"sharpe_ratio": 0.9}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"改进\", "
-            "\"rationale\": \"策略与成长性无关，仅关注估值与分红，"
-            "未捕捉研发投入与技术壁垒，成长股原则覆盖不足。\", "
-            "\"weaknesses\": [\"缺乏成长性因子\", \"研发投入缺失\", "
-            "\"技术壁垒未考量\"], "
-            "\"suggestions\": [\"加入营收增长率因子\", "
-            "\"纳入研发占比过滤\", \"增加技术代差评估\"], "
-            "\"confidence\": 0.7}"
+            '{"verdict": "改进", '
+            '"rationale": "策略与成长性无关，仅关注估值与分红，'
+            '未捕捉研发投入与技术壁垒，成长股原则覆盖不足。", '
+            '"weaknesses": ["缺乏成长性因子", "研发投入缺失", '
+            '"技术壁垒未考量"], '
+            '"suggestions": ["加入营收增长率因子", '
+            '"纳入研发占比过滤", "增加技术代差评估"], '
+            '"confidence": 0.7}'
         )
     ),
 ]
@@ -92,28 +92,23 @@ STRATEGY_GENERATE_EXAMPLES = [
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"推荐\", "
-            "\"rationale\": \"高研发投入契合成长股投资原则，"
-            "技术壁垒与创新能力被有效捕捉，产业政策强化成长持续性。\", "
-            "\"suggestions\": [\"以研发占比>8% 与营收增长>15% 双因子筛选\", "
-            "\"加入专利剩余年限因子\", \"增加行业景气度过滤\"], "
-            "\"confidence\": 0.8}"
+            '{"verdict": "推荐", '
+            '"rationale": "高研发投入契合成长股投资原则，'
+            '技术壁垒与创新能力被有效捕捉，产业政策强化成长持续性。", '
+            '"suggestions": ["以研发占比>8% 与营收增长>15% 双因子筛选", '
+            '"加入专利剩余年限因子", "增加行业景气度过滤"], '
+            '"confidence": 0.8}'
         )
     ),
-    HumanMessage(
-        content=(
-            "用户查询：研究一个低估值蓝筹分红策略\n"
-            "已有知识上下文：无"
-        )
-    ),
+    HumanMessage(content=("用户查询：研究一个低估值蓝筹分红策略\n已有知识上下文：无")),
     AIMessage(
         content=(
-            "{\"verdict\": \"不推荐\", "
-            "\"rationale\": \"低估值蓝筹分红策略与成长性无关，"
-            "未捕捉研发投入与技术壁垒，成长股原则覆盖不足。\", "
-            "\"suggestions\": [\"加入营收增长率因子\", "
-            "\"纳入研发占比过滤\", \"增加技术代差评估\"], "
-            "\"confidence\": 0.7}"
+            '{"verdict": "不推荐", '
+            '"rationale": "低估值蓝筹分红策略与成长性无关，'
+            '未捕捉研发投入与技术壁垒，成长股原则覆盖不足。", '
+            '"suggestions": ["加入营收增长率因子", '
+            '"纳入研发占比过滤", "增加技术代差评估"], '
+            '"confidence": 0.7}'
         )
     ),
 ]

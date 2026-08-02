@@ -59,9 +59,7 @@ class BuffettAnalyst:
         )
         self.examples = EXAMPLES
 
-    def analyze(
-        self, stock_data: dict[str, Any], event_context: str = ""
-    ) -> str:
+    def analyze(self, stock_data: dict[str, Any], event_context: str = "") -> str:
         """分析股票
 
         Args:

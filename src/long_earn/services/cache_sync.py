@@ -91,6 +91,7 @@ def sync_data_cache(
         - ``reason``: 状态说明（skipped/error 时）
         - ``ingestion``: DataIngestionService.run 返回值（ok 时）
     """
+
     def _log(msg: str, level: str = "info") -> None:
         if logger_service is not None:
             getattr(logger_service, level)(msg)

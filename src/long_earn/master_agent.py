@@ -114,9 +114,7 @@ class MasterAgent:
                 策略研发结果摘要，包含策略 YAML、回测指标和探索路径
             """
             with monitoring.track("research_strategy"):
-                query = (
-                    idea if not constraints else f"{idea} (约束: {constraints})"
-                )
+                query = idea if not constraints else f"{idea} (约束: {constraints})"
                 logger.info(f"策略研发工具调用(ToG): {query}")
                 try:
                     result = research_agent.invoke(idea, constraints)
@@ -146,9 +144,7 @@ class MasterAgent:
                 股票分析结果摘要
             """
             with monitoring.track("analyze_stock"):
-                full_query = (
-                    query if not symbols else f"{query} (股票: {symbols})"
-                )
+                full_query = query if not symbols else f"{query} (股票: {symbols})"
                 logger.info(f"股票分析工具调用: {full_query}")
                 try:
                     result = subgraph.invoke({"query": full_query})

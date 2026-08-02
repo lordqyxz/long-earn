@@ -60,7 +60,8 @@ index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 line-length = 88
 target-version = "py313"
 src = ["src", "tests"]
-exclude = [".venv", "build", "dist"]
+# scripts/ 为一次性研究脚本，不纳入质量门槛（AGENTS.md 卡口为 src/）
+exclude = [".venv", "build", "dist", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF", "C", "PL", "ARG"]

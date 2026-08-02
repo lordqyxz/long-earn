@@ -96,7 +96,9 @@ class BacktestAnalyzer:
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
         conn = self._get_conn()
-        query = "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        query = (
+            "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
+        )
         params: list[Any] = [run_id]
         if event_type:
             query += " AND event_type = ?"
@@ -579,26 +581,28 @@ class BacktestAnalyzer:
         else:
             if output_path.suffix.lower() != ".csv":
                 output_path = output_path.with_suffix(".csv")
-            df = pl.DataFrame(traces) if traces else pl.DataFrame(
-                schema={
-                    "time": pl.Utf8,
-                    "trace_id": pl.Utf8,
-                    "symbol": pl.Utf8,
-                    "direction": pl.Utf8,
-                    "price": pl.Float64,
-                    "quantity": pl.Float64,
-                    "amount": pl.Float64,
-                    "portfolio_value": pl.Float64,
-                }
+            df = (
+                pl.DataFrame(traces)
+                if traces
+                else pl.DataFrame(
+                    schema={
+                        "time": pl.Utf8,
+                        "trace_id": pl.Utf8,
+                        "symbol": pl.Utf8,
+                        "direction": pl.Utf8,
+                        "price": pl.Float64,
+                        "quantity": pl.Float64,
+                        "amount": pl.Float64,
+                        "portfolio_value": pl.Float64,
+                    }
+                )
             )
             df.write_csv(str(output_path))
 
         logger.info(f"交易日志已导出: {output_path} ({len(traces)} 笔)")
         return output_path
 
-    def export_symbol_chart_data(
-        self, run_id: str, symbol: str
-    ) -> dict[str, Any]:
+    def export_symbol_chart_data(self, run_id: str, symbol: str) -> dict[str, Any]:
         """导出单只标的的价格走势 + 买卖点标注数据（用于绘制图表）
 
         从 price_daily 表读取该标的的日线行情（open/high/low/close/volume），

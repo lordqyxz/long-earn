@@ -548,7 +548,9 @@ class BacktestServiceImpl(BacktestService):
             return self._empty_oos_result(n_splits, f"策略解析失败: {e}")
 
         try:
-            formatted_symbols, universe_type = self._resolve_oos_symbols(dsl, start_date)
+            formatted_symbols, universe_type = self._resolve_oos_symbols(
+                dsl, start_date
+            )
             if not formatted_symbols:
                 return self._empty_oos_result(
                     n_splits, f"股票池 '{universe_type}' 为空，数据源不可用"
@@ -606,9 +608,7 @@ class BacktestServiceImpl(BacktestService):
             "error": error,
         }
 
-    def _resolve_oos_symbols(
-        self, dsl: Any, start_date: str
-    ) -> tuple[list[str], str]:
+    def _resolve_oos_symbols(self, dsl: Any, start_date: str) -> tuple[list[str], str]:
         """解析 OOS 回测的股票池，返回 (formatted_symbols, universe_type)。
 
         含 main_board+gem 降级逻辑：指定股票池为空时退回默认池。
@@ -653,9 +653,7 @@ class BacktestServiceImpl(BacktestService):
         # - 旧 core.py 返回 list of fold indices
         raw_failed = wf_result.get("failed_folds", [])
         if raw_failed and isinstance(raw_failed[0], dict):
-            failed_folds = [
-                f.get("fold_id", i) for i, f in enumerate(raw_failed)
-            ]
+            failed_folds = [f.get("fold_id", i) for i, f in enumerate(raw_failed)]
         else:
             failed_folds = list(raw_failed)
 
@@ -663,9 +661,7 @@ class BacktestServiceImpl(BacktestService):
         # 优先用 ParallelRunner 返回的 average_metrics.test（已聚合），
         # 退化到自行从 fold_results 聚合（兼容旧 core.py 路径）
         avg_metrics: dict[str, float] = {}
-        avg_from_runner = (
-            wf_result.get("average_metrics", {}).get("test", {}) or {}
-        )
+        avg_from_runner = wf_result.get("average_metrics", {}).get("test", {}) or {}
         if avg_from_runner:
             avg_metrics = dict(avg_from_runner)
         elif test_metrics:

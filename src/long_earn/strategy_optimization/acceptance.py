@@ -91,9 +91,7 @@ class AcceptanceGate:
                 if accepted
                 else f"sharpe 未提升（{b_sharpe} -> {o_sharpe}）"
             )
-            return AcceptanceResult(
-                accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret
-            )
+            return AcceptanceResult(accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret)
 
         # 基线 sharpe 缺失（HTR 首次循环 previous_backtest 为空）：
         # 接受任何有有效 sharpe 的策略作为初始基线（即使为负 sharpe）。
@@ -101,17 +99,13 @@ class AcceptanceGate:
         # 整个研发循环空转（如 2026-07-26 run_20260726_174857 中 6 个节点
         # 全部因此被拒绝）。
         if o_sharpe is not None:
-            accepted = b_ret is None or (
-                o_ret is not None and o_ret > b_ret + self.eps
-            )
+            accepted = b_ret is None or (o_ret is not None and o_ret > b_ret + self.eps)
             reason = (
                 "基线无 sharpe，优化版作为初始基线接受（有有效回测指标）"
                 if accepted
                 else "基线无 sharpe 且优化版收益未优于基线"
             )
-            return AcceptanceResult(
-                accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret
-            )
+            return AcceptanceResult(accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret)
         return AcceptanceResult(
             False,
             "基线无 sharpe 且优化版无有效 sharpe",

@@ -120,8 +120,8 @@ class DuckDBAuditProvider(AuditProvider):
             )
 
         query = (
-            'SELECT run_id, timestamp, event_type, trace_id, parent_id, '
-            'component, status, payload, latency_ms '
+            "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
+            "component, status, payload, latency_ms "
             'FROM "backtest_audit".logs WHERE run_id = ?'
         )
         params: list[Any] = [run_id]
@@ -156,8 +156,8 @@ class DuckDBAuditProvider(AuditProvider):
         with self._lock:
             conn = self._get_conn()
             res = conn.execute(
-                'SELECT run_id, timestamp, event_type, trace_id, parent_id, '
-                'component, status, payload, latency_ms '
+                "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
+                "component, status, payload, latency_ms "
                 'FROM "backtest_audit".logs WHERE trace_id = ? ORDER BY seq ASC',
                 [trace_id],
             ).fetchall()

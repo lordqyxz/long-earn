@@ -78,7 +78,11 @@ class KnowledgeContextMixin:
         """
         cache_key = f"event:{query}"
         if use_cache and cache_key in self._event_cache:
-            return "\n".join(self._event_cache[cache_key]) if self._event_cache[cache_key] else ""
+            return (
+                "\n".join(self._event_cache[cache_key])
+                if self._event_cache[cache_key]
+                else ""
+            )
 
         if not hasattr(self.memory, "activate_events"):
             return ""

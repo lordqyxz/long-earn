@@ -171,9 +171,7 @@ class MarkdownChatPromptTemplate:
                         f"实际类型 {type(value).__name__}"
                     )
                 builder = _ROLE_BUILDERS[key]
-                message_templates.append(
-                    builder(prompt=_make_prompt_template(value))
-                )
+                message_templates.append(builder(prompt=_make_prompt_template(value)))
             elif key == "placeholder":
                 for var_name in self._normalize_placeholder(value):
                     message_templates.append(

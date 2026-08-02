@@ -58,7 +58,7 @@ class TradingCostConfig:
         participation = order_amount / daily_volume
         if participation <= 0:
             return 0.0
-        return self.impact_cost_k * (participation ** 0.5) * 10000  # 转为 bps
+        return self.impact_cost_k * (participation**0.5) * 10000  # 转为 bps
 
     def compute_commission(self, amount: float) -> float:
         """计算佣金：max(rate * amount, min_commission)
@@ -91,7 +91,9 @@ class Broker:
 
     # ── 主入口 ──────────────────────────────────────────────────
 
-    def submit_order(self, order: OrderEvent, current_price: float, daily_volume: float = 0.0) -> list[FillEvent]:
+    def submit_order(
+        self, order: OrderEvent, current_price: float, daily_volume: float = 0.0
+    ) -> list[FillEvent]:
         """
         提交订单并尝试撮合
 
@@ -383,7 +385,9 @@ class Broker:
 
     # ── 向后兼容 ────────────────────────────────────────────────
 
-    def execute_order(self, order: OrderEvent, current_price: float, daily_volume: float = 0.0) -> FillEvent:
+    def execute_order(
+        self, order: OrderEvent, current_price: float, daily_volume: float = 0.0
+    ) -> FillEvent:
         """
         [向后兼容] 市价单立即成交
 

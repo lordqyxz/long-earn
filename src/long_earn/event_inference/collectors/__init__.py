@@ -40,4 +40,3 @@ def create_default_collector_registry(
         registry.register(CiccwmHotCollector(market_intelligence))  # type: ignore[arg-type]
         registry.register(CiccwmTopicCollector(market_intelligence))  # type: ignore[arg-type]
     return registry
-

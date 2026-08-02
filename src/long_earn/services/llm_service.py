@@ -80,9 +80,7 @@ class LLMServiceImpl(LLMService):
             return llm.bind(response_format={"type": "json_object"})
         return llm
 
-    def invoke(
-        self, prompt: str | list[BaseMessage], format: str = ""
-    ) -> Any:
+    def invoke(self, prompt: str | list[BaseMessage], format: str = "") -> Any:
         """调用 LLM
 
         每次都构造新 LLM 实例（避免长连接累积错误）+ 普通异常重试 1 次。

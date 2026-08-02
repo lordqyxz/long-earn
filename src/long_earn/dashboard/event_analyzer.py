@@ -81,9 +81,7 @@ class EventAnalyzer:
         if not self.is_ready:
             return []
 
-        events = [
-            s for s in self._store.get_all() if s.form is SubstanceForm.EVENT
-        ]
+        events = [s for s in self._store.get_all() if s.form is SubstanceForm.EVENT]
         results: list[dict[str, Any]] = []
         for s in events:
             meta = s.metadata
@@ -142,9 +140,7 @@ class EventAnalyzer:
                 "top_symbols": [],
             }
 
-        events = [
-            s for s in self._store.get_all() if s.form is SubstanceForm.EVENT
-        ]
+        events = [s for s in self._store.get_all() if s.form is SubstanceForm.EVENT]
         relations = [
             s for s in self._store.get_all() if s.form is SubstanceForm.RELATION
         ]
@@ -182,9 +178,7 @@ class EventAnalyzer:
         if not self.is_ready:
             return []
 
-        events = [
-            s for s in self._store.get_all() if s.form is SubstanceForm.EVENT
-        ]
+        events = [s for s in self._store.get_all() if s.form is SubstanceForm.EVENT]
         today = datetime.now().date()
         daily: dict[str, dict[str, Any]] = {}
         for s in events:
@@ -195,7 +189,13 @@ class EventAnalyzer:
             day_key = s.created_at.strftime("%Y-%m-%d")
             bucket = daily.setdefault(
                 day_key,
-                {"date": day_key, "count": 0, "positive": 0, "negative": 0, "neutral": 0},
+                {
+                    "date": day_key,
+                    "count": 0,
+                    "positive": 0,
+                    "negative": 0,
+                    "neutral": 0,
+                },
             )
             bucket["count"] += 1
             sentiment = s.metadata.get("sentiment", "neutral")

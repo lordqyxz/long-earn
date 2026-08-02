@@ -200,9 +200,7 @@ class CiccwmRealtimeProvider:
             "open": float(info.get("open", 0.0) or 0.0),
             "high": float(info.get("high", 0.0) or 0.0),
             "low": float(info.get("low", 0.0) or 0.0),
-            "preClose": float(
-                info.get("preClose", info.get("lastClose", 0.0)) or 0.0
-            ),
+            "preClose": float(info.get("preClose", info.get("lastClose", 0.0)) or 0.0),
             "source": "ciccwm",
         }
 

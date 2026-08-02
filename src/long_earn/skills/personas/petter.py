@@ -41,41 +41,41 @@ EXAMPLES = [
 STRATEGY_REVIEW_EXAMPLES = [
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"PEG 选股\", "
-            "\"factors\": [\"peg<1\", \"earnings_growth>20%\"], "
-            "\"classification\": \"fast_grower\", \"rebalance\": \"monthly\"}\n"
-            "回测结果：{\"total_return\": 0.8, \"max_drawdown\": 0.2, "
-            "\"sharpe_ratio\": 1.4}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "PEG 选股", '
+            '"factors": ["peg<1", "earnings_growth>20%"], '
+            '"classification": "fast_grower", "rebalance": "monthly"}\n'
+            '回测结果：{"total_return": 0.8, "max_drawdown": 0.2, '
+            '"sharpe_ratio": 1.4}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"接受\", "
-            "\"rationale\": \"策略以 PEG<1 配合高成长性选股，"
-            "估值与成长性匹配合理，分类为快速增长型适配正确。\", "
-            "\"weaknesses\": [\"成长性定义单一，未考虑盈利质量\"], "
-            "\"suggestions\": [\"加入经营性现金流增长率\", "
-            "\"区分内生性与外延式增长\"], \"confidence\": 0.85}"
+            '{"verdict": "接受", '
+            '"rationale": "策略以 PEG<1 配合高成长性选股，'
+            '估值与成长性匹配合理，分类为快速增长型适配正确。", '
+            '"weaknesses": ["成长性定义单一，未考虑盈利质量"], '
+            '"suggestions": ["加入经营性现金流增长率", '
+            '"区分内生性与外延式增长"], "confidence": 0.85}'
         )
     ),
     HumanMessage(
         content=(
-            "策略详情：{\"strategy_name\": \"高 PE 投机\", "
-            "\"factors\": [\"pe>100\", \"momentum_strong\"], "
-            "\"rebalance\": \"weekly\"}\n"
-            "回测结果：{\"total_return\": 0.4, \"max_drawdown\": 0.4, "
-            "\"sharpe_ratio\": 0.5}\n市场事件上下文：无"
+            '策略详情：{"strategy_name": "高 PE 投机", '
+            '"factors": ["pe>100", "momentum_strong"], '
+            '"rebalance": "weekly"}\n'
+            '回测结果：{"total_return": 0.4, "max_drawdown": 0.4, '
+            '"sharpe_ratio": 0.5}\n市场事件上下文：无'
         )
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"拒绝\", "
-            "\"rationale\": \"PE>100 与 PEG 成长投资原则严重背离，"
-            "估值过高且未做分类适配，回撤过大风险不可控。\", "
-            "\"weaknesses\": [\"估值严重偏离合理区间\", "
-            "\"无 PEG 匹配\", \"分类适配缺失\", \"回撤失控\"], "
-            "\"suggestions\": [\"改为 PEG<1.5 选股\", \"加入林奇六类分类\", "
-            "\"设置最大回撤阈值\"], \"confidence\": 0.9}"
+            '{"verdict": "拒绝", '
+            '"rationale": "PE>100 与 PEG 成长投资原则严重背离，'
+            '估值过高且未做分类适配，回撤过大风险不可控。", '
+            '"weaknesses": ["估值严重偏离合理区间", '
+            '"无 PEG 匹配", "分类适配缺失", "回撤失控"], '
+            '"suggestions": ["改为 PEG<1.5 选股", "加入林奇六类分类", '
+            '"设置最大回撤阈值"], "confidence": 0.9}'
         )
     ),
 ]
@@ -90,27 +90,22 @@ STRATEGY_GENERATE_EXAMPLES = [
     ),
     AIMessage(
         content=(
-            "{\"verdict\": \"推荐\", "
-            "\"rationale\": \"PEG 选股契合成长投资原则，"
-            "估值与成长性匹配合理，分类为快速增长型适配正确。\", "
-            "\"suggestions\": [\"以 PEG<1 与盈利增长>20% 双因子筛选\", "
-            "\"加入林奇六类分类标签\", \"区分内生性与外延式增长\"], "
-            "\"confidence\": 0.85}"
+            '{"verdict": "推荐", '
+            '"rationale": "PEG 选股契合成长投资原则，'
+            '估值与成长性匹配合理，分类为快速增长型适配正确。", '
+            '"suggestions": ["以 PEG<1 与盈利增长>20% 双因子筛选", '
+            '"加入林奇六类分类标签", "区分内生性与外延式增长"], '
+            '"confidence": 0.85}'
         )
     ),
-    HumanMessage(
-        content=(
-            "用户查询：研究一个高 PE 投机策略\n"
-            "已有知识上下文：无"
-        )
-    ),
+    HumanMessage(content=("用户查询：研究一个高 PE 投机策略\n已有知识上下文：无")),
     AIMessage(
         content=(
-            "{\"verdict\": \"不推荐\", "
-            "\"rationale\": \"PE>100 与 PEG 成长投资原则严重背离，"
-            "估值过高且未做分类适配，回撤过大风险不可控。\", "
-            "\"suggestions\": [\"改为 PEG<1.5 选股\", \"加入林奇六类分类\", "
-            "\"设置最大回撤阈值\"], \"confidence\": 0.9}"
+            '{"verdict": "不推荐", '
+            '"rationale": "PE>100 与 PEG 成长投资原则严重背离，'
+            '估值过高且未做分类适配，回撤过大风险不可控。", '
+            '"suggestions": ["改为 PEG<1.5 选股", "加入林奇六类分类", '
+            '"设置最大回撤阈值"], "confidence": 0.9}'
         )
     ),
 ]

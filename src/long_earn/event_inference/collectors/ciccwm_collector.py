@@ -29,10 +29,17 @@ _CONTENT_FIELD_CANDIDATES: tuple[str, ...] = (
     "abstract",
 )
 _TITLE_FIELD_CANDIDATES: tuple[str, ...] = ("title", "name", "subject")
-_URL_FIELD_CANDIDATES: tuple[str, ...] = ("redirect_url", "url", "out_detail_url", "detail_url")
+_URL_FIELD_CANDIDATES: tuple[str, ...] = (
+    "redirect_url",
+    "url",
+    "out_detail_url",
+    "detail_url",
+)
 
 
-def _first_available(record: dict[str, Any], candidates: tuple[str, ...], default: str = "") -> str:
+def _first_available(
+    record: dict[str, Any], candidates: tuple[str, ...], default: str = ""
+) -> str:
     """从记录中按候选字段名顺序取第一个非空值。"""
     for key in candidates:
         value = record.get(key)

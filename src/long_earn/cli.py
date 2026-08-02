@@ -61,9 +61,7 @@ def research(
         None,
         help="初始交易策略或交易思路（缺省时使用默认思路）",
     ),
-    max_rounds: int = typer.Option(
-        5, "--max-rounds", help="最大研究轮次"
-    ),
+    max_rounds: int = typer.Option(5, "--max-rounds", help="最大研究轮次"),
     max_iterations: int = typer.Option(
         2, "--max-iterations", help="每轮子图内部最大迭代次数"
     ),
@@ -126,9 +124,7 @@ def _print_research_banner(
         idea_display = idea_display[: width - 9] + "..."
 
     typer.echo("\n" + "=" * width)
-    typer.echo(
-        " " * ((width - 28) // 2) + "策略研究循环 / Strategy Research Loop"
-    )
+    typer.echo(" " * ((width - 28) // 2) + "策略研究循环 / Strategy Research Loop")
     typer.echo("=" * width)
     typer.echo(f"  研究思路 : {idea_display}")
     typer.echo(f"  LLM 模型 : {config.llm_type} / {config.llm_model}")
@@ -172,7 +168,9 @@ def optimize(
         help="优化建议，逗号分隔（如 '增加波动率过滤,降低换手率'），空则用默认建议",
     ),
     max_iterations: int = typer.Option(
-        1, "--max-iterations", help="最大优化迭代次数（每次迭代 = optimize + backtest + gate）"
+        1,
+        "--max-iterations",
+        help="最大优化迭代次数（每次迭代 = optimize + backtest + gate）",
     ),
     yes: bool = typer.Option(
         False, "-y", "--yes", help="跳过启动确认提示，直接开始优化"
@@ -280,12 +278,8 @@ def download(
         "-u",
         help="股票池类型（all/all_a/etf/csi300/csi500/sse50/csi1000）",
     ),
-    start: str = typer.Option(
-        "", "--start", help="起始日期 YYYY-MM-DD，空=最长历史"
-    ),
-    end: str = typer.Option(
-        "", "--end", help="结束日期 YYYY-MM-DD，空=今天"
-    ),
+    start: str = typer.Option("", "--start", help="起始日期 YYYY-MM-DD，空=最长历史"),
+    end: str = typer.Option("", "--end", help="结束日期 YYYY-MM-DD，空=今天"),
     skip_financial: bool = typer.Option(
         False, "--skip-financial", help="跳过财务数据下载"
     ),

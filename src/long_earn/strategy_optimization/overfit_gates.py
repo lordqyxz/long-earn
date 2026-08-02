@@ -364,9 +364,7 @@ def _compute_pbo_cscv(
     """
     n = len(is_sharpes)
     # 配对：(strategy_id, is_sharpe, oos_sharpe)
-    pairs = [
-        (i, is_sharpes[i], oos_sharpes[i]) for i in range(n)
-    ]
+    pairs = [(i, is_sharpes[i], oos_sharpes[i]) for i in range(n)]
 
     # 2N 个观测，每个标注 (strategy_id, value, is_is)
     observations: list[tuple[int, float, bool]] = []
@@ -408,7 +406,9 @@ def _compute_pbo_cscv(
             continue  # 理论上不会发生
 
         # 收集 OOS 组所有 sharpe
-        oos_group_obs = [observations[i][1] for i in range(2 * n) if i not in is_group_idx]
+        oos_group_obs = [
+            observations[i][1] for i in range(2 * n) if i not in is_group_idx
+        ]
         if not oos_group_obs:
             continue
 

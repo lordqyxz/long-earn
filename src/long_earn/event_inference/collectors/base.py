@@ -97,7 +97,9 @@ class CollectorRegistry:
         """仅返回 is_available 为 True 的采集器。"""
         return [c for c in self._collectors.values() if c.is_available]
 
-    def collect_all(self, query: str, max_items_per_source: int = 10) -> list[CollectedItem]:
+    def collect_all(
+        self, query: str, max_items_per_source: int = 10
+    ) -> list[CollectedItem]:
         """对所有可用采集器并发拉取并合并结果。
 
         单个采集器异常不影响其他源（记录警告后继续），失败源的素材不进入结果。
