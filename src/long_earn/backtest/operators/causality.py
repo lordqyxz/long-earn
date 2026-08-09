@@ -9,9 +9,12 @@
 
 本模块提供 :func:`prove_causality`，用"未来扰动不变性"数值验证任意算子的因果性：
 取一个确定性面板，计算输出 ``O1``；把所有 ``timestamp > T`` 的数据大幅扰动
-（乘以一个大常数 / 置 NaN），再算 ``O2``；断言 ``O1`` 与 ``O2`` 在
-``timestamp <= T`` 上逐元素相等（容差内）。若相等，则该算子在 T 切面上被证明
+（NaN / 极值×1e6 / 负数×-1 / 随机大数），再算 ``O2``；断言 ``O1`` 与 ``O2``
+在 ``timestamp <= T`` 上逐元素相等（容差内）。若相等，则该算子在 T 切面上被证明
 不读未来；遍历多个 T 即覆盖整段历史。
+
+AUDIT-P2-12：支持四种扰动策略，覆盖 NaN 置空、极值放大、符号反转、随机大数
+四种场景，防止算子通过 NaN 传播吞掉未来数据泄漏。
 
 该证明是**数学性质的**（基于因果性的操作定义），不是经验拟合，因此可作为
 "系统从数学角度证明符合金融交易规范、严谨无未来函数"的依据。
@@ -19,13 +22,36 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
 if TYPE_CHECKING:
     from long_earn.backtest.operators.base import Operator, OperatorParams
+
+
+class PerturbStrategy(StrEnum):
+    """未来扰动策略（AUDIT-P2-12）。
+
+    不同策略模拟不同攻击场景，防止算子通过 NaN 传播、数值截断等方式
+    吞掉未来数据泄漏。
+    """
+
+    NAN = "nan"
+    """将未来数据全部置 NaN——最激进，任何泄漏都会改变输出。"""
+
+    EXTREME = "extreme"
+    """将未来数据乘以 1e6——极值放大，检测算子对量纲变化的敏感度。"""
+
+    NEGATE = "negate"
+    """将未来数据乘以 -1——符号反转，检测算子对方向性泄漏的敏感度。"""
+
+    RANDOM_LARGE = "random_large"
+    """将未来数据替换为随机大数（±1e6 量级）——防止算子在 NaN 策略下
+    恰好因 NaN 传播而"看起来"因果（实际含未来函数但输出被 NaN 淹没）。"""
 
 
 @dataclass
@@ -38,11 +64,20 @@ class CausalityReport:
     detail: str = ""
 
 
-def _perturb_future(panel: pl.DataFrame, split_ts: Any) -> pl.DataFrame:
-    """把 ``timestamp > split_ts`` 的所有数值列大幅扰动（乘 1e6 + 置部分 NaN）。
+def _perturb_future(
+    panel: pl.DataFrame,
+    split_ts: Any,
+    strategy: PerturbStrategy = PerturbStrategy.NAN,
+) -> pl.DataFrame:
+    """把 ``timestamp > split_ts`` 的所有数值列按策略扰动（AUDIT-P2-12）。
 
-    扰动幅度极大，任何泄漏都会把 T 之前的输出打成完全不同的值，使不变性断言
-    高灵敏度地失败。
+    四种策略：
+    - ``nan``：置 NaN（最激进，原策略）
+    - ``extreme``：乘以 1e6（极值放大，检测量纲敏感度）
+    - ``negate``：乘以 -1（符号反转，检测方向性泄漏）
+    - ``random_large``：替换为随机大数（检测 NaN 传播掩盖的未来函数）
+
+    扰动幅度极大，任何泄漏都会把 T 之前的输出打成完全不同的值。
     """
 
     future_mask = pl.col("timestamp") > split_ts
@@ -53,8 +88,33 @@ def _perturb_future(panel: pl.DataFrame, split_ts: Any) -> pl.DataFrame:
     for c in numeric_cols:
         if c in ("timestamp", "symbol"):
             continue
-        # 把未来段置 NaN：任何泄漏都会改变 T 之前输出，高灵敏度失败
-        perturbed = pl.when(future_mask).then(pl.lit(float("nan"))).otherwise(pl.col(c))
+        if strategy == PerturbStrategy.NAN:
+            perturbed = (
+                pl.when(future_mask).then(pl.lit(float("nan"))).otherwise(pl.col(c))
+            )
+        elif strategy == PerturbStrategy.EXTREME:
+            perturbed = (
+                pl.when(future_mask)
+                .then(pl.col(c) * 1e6)
+                .otherwise(pl.col(c))
+            )
+        elif strategy == PerturbStrategy.NEGATE:
+            perturbed = (
+                pl.when(future_mask)
+                .then(pl.col(c) * -1.0)
+                .otherwise(pl.col(c))
+            )
+        elif strategy == PerturbStrategy.RANDOM_LARGE:
+            perturbed = (
+                pl.when(future_mask)
+                .then(
+                    pl.Series("_rnd", [random.uniform(-1e6, 1e6) for _ in range(panel.height)])
+                    .alias("_rnd")
+                )
+                .otherwise(pl.col(c))
+            )
+        else:
+            perturbed = pl.col(c)
         exprs.append(perturbed.alias(c))
     return panel.with_columns(exprs)
 
@@ -99,6 +159,7 @@ def prove_causality(
     params: OperatorParams,
     panel: pl.DataFrame,
     split_timestamps: list[Any] | None = None,
+    perturb_strategy: PerturbStrategy = PerturbStrategy.NAN,
 ) -> list[CausalityReport]:
     """证明算子 ``op`` 在给定 panel 上因果（无未来函数）。
 
@@ -110,6 +171,7 @@ def prove_causality(
         params: 算子参数。
         panel: 确定性面板（含 timestamp/symbol 及算子所需列）。
         split_timestamps: 验证切点；默认取面板内第 1/3、1/2、2/3 处的时间戳。
+        perturb_strategy: 扰动策略（AUDIT-P2-12）；默认 NaN 保持不变。
     """
 
     if split_timestamps is None:
@@ -125,7 +187,7 @@ def prove_causality(
     base_output = op.apply(panel, params)
 
     for t in split_timestamps:
-        perturbed = _perturb_future(panel, t)
+        perturbed = _perturb_future(panel, t, strategy=perturb_strategy)
         try:
             perturbed_output = op.apply(perturbed, params)
         except Exception as exc:
@@ -172,10 +234,15 @@ def is_causal(
     params: OperatorParams,
     panel: pl.DataFrame,
     split_timestamps: list[Any] | None = None,
+    perturb_strategy: PerturbStrategy = PerturbStrategy.NAN,
 ) -> bool:
     """便捷封装：所有切点都通过即返回 True。"""
 
-    return all(r.passed for r in prove_causality(op, params, panel, split_timestamps))
+    return all(
+        r.passed for r in prove_causality(
+            op, params, panel, split_timestamps, perturb_strategy=perturb_strategy
+        )
+    )
 
 
 def math_note() -> str:

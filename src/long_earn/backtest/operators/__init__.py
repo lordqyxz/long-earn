@@ -26,6 +26,7 @@ from long_earn.backtest.operators.base import (
     operator,
     validate_contract,
 )
+from long_earn.backtest.operators.causality import PerturbStrategy
 
 __all__ = [
     "OPERATOR_REGISTRY",
@@ -34,6 +35,7 @@ __all__ = [
     "OperatorContractError",
     "OperatorNotFoundError",
     "OperatorParams",
+    "PerturbStrategy",
     "get_operator",
     "list_operators",
     "operator",
