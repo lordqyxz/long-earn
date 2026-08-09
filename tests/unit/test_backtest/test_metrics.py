@@ -85,6 +85,102 @@ def _numpy_total_return(equity: list[float]) -> float:
     return (equity[-1] / equity[0]) - 1 if equity[0] > 0 else 0.0
 
 
+def _numpy_beta(
+    port_equity: list[float], bm_prices: list[float]
+) -> float:
+    """用 numpy 计算 Beta：Cov(R_p, R_m) / Var(R_m)，ddof=1。"""
+    eq_arr = np.array(port_equity, dtype=float)
+    bm_arr = np.array(bm_prices, dtype=float)
+    port_ret = np.diff(eq_arr) / eq_arr[:-1]
+    bm_ret = np.diff(bm_arr) / bm_arr[:-1]
+    cov = float(np.cov(port_ret, bm_ret)[0, 1])
+    var_bm = float(np.var(bm_ret, ddof=1))
+    return cov / var_bm if var_bm > 0 else 0.0
+
+
+def _numpy_alpha(
+    port_equity: list[float], bm_prices: list[float]
+) -> float:
+    """Jensen's Alpha: α = R_p_annual - β · R_m_annual (R_f=0)。"""
+    eq_arr = np.array(port_equity, dtype=float)
+    bm_arr = np.array(bm_prices, dtype=float)
+    port_ret = np.diff(eq_arr) / eq_arr[:-1]
+    bm_ret = np.diff(bm_arr) / bm_arr[:-1]
+    beta = _numpy_beta(port_equity, bm_prices)
+    port_annual = float(np.mean(port_ret)) * 252
+    bm_annual = float(np.mean(bm_ret)) * 252
+    return port_annual - beta * bm_annual
+
+
+def _numpy_information_ratio(
+    port_equity: list[float], bm_prices: list[float]
+) -> float:
+    """信息比率：IR = α / tracking_error。"""
+    alpha = _numpy_alpha(port_equity, bm_prices)
+    tracking_error = _numpy_tracking_error(port_equity, bm_prices)
+    return alpha / tracking_error if tracking_error > 0 else 0.0
+
+
+def _numpy_tracking_error(
+    port_equity: list[float], bm_prices: list[float]
+) -> float:
+    """跟踪误差：std(excess_returns, ddof=1) * sqrt(252)。"""
+    eq_arr = np.array(port_equity, dtype=float)
+    bm_arr = np.array(bm_prices, dtype=float)
+    port_ret = np.diff(eq_arr) / eq_arr[:-1]
+    bm_ret = np.diff(bm_arr) / bm_arr[:-1]
+    excess = port_ret - bm_ret
+    return float(np.std(excess, ddof=1)) * np.sqrt(252)
+
+
+def _numpy_benchmark_return(bm_prices: list[float]) -> float:
+    """基准收益率：(last / first) - 1。"""
+    bm_arr = np.array(bm_prices, dtype=float)
+    return float((bm_arr[-1] / bm_arr[0]) - 1) if bm_arr[0] > 0 else 0.0
+
+
+def _panel_with_benchmark(
+    port_days: int = 30,
+    port_growth: float = 1.005,
+    bm_growth: float = 1.003,
+) -> pl.DataFrame:
+    """构造含策略标的和基准标的的面板。
+
+    port_days: 策略天数（日频）
+    port_growth: 策略标的日收益率（如 1.005 = 每日涨 0.5%）
+    bm_growth: 基准标的日收益率
+    """
+    rows = []
+    base = datetime(2024, 1, 1)
+    for i in range(port_days):
+        ts = base + timedelta(days=i)
+        close_a = round(100.0 * (port_growth**i), 4)
+        close_bm = round(2000.0 * (bm_growth**i), 4)
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "A.SZ",
+                "open": close_a * 0.99,
+                "high": close_a * 1.01,
+                "low": close_a * 0.98,
+                "close": close_a,
+                "volume": 100000.0,
+            }
+        )
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "000300.SH",
+                "open": close_bm * 0.99,
+                "high": close_bm * 1.01,
+                "low": close_bm * 0.98,
+                "close": close_bm,
+                "volume": 1000000.0,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
 # ── C1: Sharpe 年化对齐 ─────────────────────────────────────────
 
 
@@ -237,3 +333,155 @@ def test_high_skip_ratio_marks_metrics_unreliable(mock_data_provider):
     assert len(skipped) / total >= 0.5, (
         f"skip_ratio 应 >= 0.5，实际 {len(skipped)}/{total}"
     )
+
+
+# ── C2: Alpha / Beta / IR 与 numpy 对齐 ──────────────────────────
+
+
+def test_alpha_beta_ir_matches_numpy(mock_data_provider):
+    """C2：引擎输出的 Alpha/Beta/IR 应与 numpy 直接计算一致。
+
+    构造含策略标的和基准标的面板，策略买入持有策略标的，
+    引擎以基准标的计算 Alpha/Beta/IR。
+    """
+    panel = _panel_with_benchmark(port_days=30, port_growth=1.005, bm_growth=1.003)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+    result = engine.run(
+        _SimpleBuyStrategy(),
+        "2024-01-01",
+        "2024-01-31",
+        ["A.SZ"],
+        benchmark_symbol="000300.SH",
+        full_data=panel,
+    )
+    assert result.success
+
+    # 提取权益曲线和基准价格
+    daily_values = [d["value"] for d in (result.daily_returns or [])]
+    bm_prices = (
+        panel.filter(pl.col("symbol") == "000300.SH")
+        .sort("timestamp")["close"]
+        .to_list()
+    )
+
+    numpy_beta = _numpy_beta(daily_values, bm_prices)
+    numpy_alpha = _numpy_alpha(daily_values, bm_prices)
+    numpy_ir = _numpy_information_ratio(daily_values, bm_prices)
+    numpy_te = _numpy_tracking_error(daily_values, bm_prices)
+    numpy_bm_ret = _numpy_benchmark_return(bm_prices)
+
+    assert result.beta is not None
+    assert result.alpha is not None
+    assert result.information_ratio is not None
+    assert result.tracking_error is not None
+    assert result.benchmark_return is not None
+
+    assert result.beta == pytest.approx(numpy_beta, rel=1e-4, abs=1e-6), (
+        f"引擎 Beta={result.beta:.6f} != numpy={numpy_beta:.6f}"
+    )
+    assert result.alpha == pytest.approx(numpy_alpha, rel=1e-4, abs=1e-6), (
+        f"引擎 Alpha={result.alpha:.6f} != numpy={numpy_alpha:.6f}"
+    )
+    assert result.information_ratio == pytest.approx(numpy_ir, rel=1e-4, abs=1e-6), (
+        f"引擎 IR={result.information_ratio:.6f} != numpy={numpy_ir:.6f}"
+    )
+    assert result.tracking_error == pytest.approx(numpy_te, rel=1e-4, abs=1e-6), (
+        f"引擎 TE={result.tracking_error:.6f} != numpy={numpy_te:.6f}"
+    )
+    assert result.benchmark_return == pytest.approx(
+        numpy_bm_ret, rel=1e-4, abs=1e-6
+    ), (
+        f"引擎 BM_ret={result.benchmark_return:.6f} != numpy={numpy_bm_ret:.6f}"
+    )
+
+
+def test_no_benchmark_symbol_returns_zero_metrics(mock_data_provider):
+    """C2b：未提供 benchmark_symbol 时 Alpha/Beta/IR 应为零值。"""
+    panel = _panel_with_benchmark(port_days=30)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+    result = engine.run(
+        _SimpleBuyStrategy(),
+        "2024-01-01",
+        "2024-01-31",
+        ["A.SZ"],
+        full_data=panel,
+    )
+    assert result.success
+    assert result.alpha == 0.0
+    assert result.beta == 0.0
+    assert result.information_ratio == 0.0
+    assert result.tracking_error == 0.0
+    assert result.benchmark_return == 0.0
+
+
+def test_benchmark_not_in_data_returns_zero_metrics(mock_data_provider):
+    """C2c：基准标的不在数据中时 Alpha/Beta/IR 应为零值。"""
+    panel = _panel_with_benchmark(port_days=30)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+    result = engine.run(
+        _SimpleBuyStrategy(),
+        "2024-01-01",
+        "2024-01-31",
+        ["A.SZ"],
+        benchmark_symbol="NONEXISTENT",
+        full_data=panel,
+    )
+    assert result.success
+    assert result.alpha == 0.0
+    assert result.beta == 0.0
+    assert result.information_ratio == 0.0
+    assert result.tracking_error == 0.0
+    assert result.benchmark_return == 0.0
+
+
+def test_benchmark_insufficient_data_returns_zero_metrics(mock_data_provider):
+    """C2d：基准数据不足 MIN_BM_POINTS 时 Alpha/Beta/IR 应为零值。"""
+    # 仅 1 天基准数据（低于 MIN_BM_POINTS=2）
+    rows = []
+    base = datetime(2024, 1, 1)
+    for i in range(20):
+        ts = base + timedelta(days=i)
+        close_a = round(100.0 * (1.005**i), 4)
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "A.SZ",
+                "open": close_a * 0.99,
+                "high": close_a * 1.01,
+                "low": close_a * 0.98,
+                "close": close_a,
+                "volume": 100000.0,
+            }
+        )
+    # 仅 1 天基准数据
+    rows.append(
+        {
+            "timestamp": base,
+            "symbol": "000300.SH",
+            "open": 2000.0,
+            "high": 2020.0,
+            "low": 1980.0,
+            "close": 2000.0,
+            "volume": 1000000.0,
+        }
+    )
+    panel = pl.DataFrame(rows)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+    result = engine.run(
+        _SimpleBuyStrategy(),
+        "2024-01-01",
+        "2024-01-21",
+        ["A.SZ"],
+        benchmark_symbol="000300.SH",
+        full_data=panel,
+    )
+    assert result.success
+    assert result.alpha == 0.0
+    assert result.beta == 0.0
+    assert result.information_ratio == 0.0
+    assert result.tracking_error == 0.0
+    assert result.benchmark_return == 0.0

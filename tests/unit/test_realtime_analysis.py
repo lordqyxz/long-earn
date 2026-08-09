@@ -15,51 +15,69 @@ from long_earn.backtest.data.realtime import (
     CiccwmRealtimeProvider,
     CompositeRealtimeProvider,
     MiniQmtRealtimeProvider,
+    RealtimeDataProvider,
 )
 from long_earn.monitoring.realtime_alert import PriceAlert, PriceAlertMonitor
 
 # ── 实时行情 Provider ──────────────────────────────────────────────────
+#
+# RealtimeDataProvider 契约套：面向接口参数化测试。
+# 所有实现共用同一套契约测试，新增实现只需添加 provider 实例到参数列表。
 
 
-class TestCiccwmRealtimeProvider:
-    """ciccwm 实时行情提供者接口契约。"""
+def _make_ciccwm_provider() -> CiccwmRealtimeProvider:
+    """构造 CiccwmRealtimeProvider（凭证不可用状态）。"""
+    provider = CiccwmRealtimeProvider()
+    provider._available = False
+    return provider
 
-    def test_unavailable_returns_empty_quote(self) -> None:
-        """凭证不可用时 get_latest_quote 返回空 dict。"""
-        provider = CiccwmRealtimeProvider()
-        provider._available = False
-        assert provider.get_latest_quote("600519.SH") == {}
 
-    def test_subscribe_not_supported(self) -> None:
-        """ciccwm 不支持订阅，subscribe_quote 返回空 ID。"""
-        provider = CiccwmRealtimeProvider()
-        provider._available = True
-        assert provider.subscribe_quote(["600519.SH"], lambda _d: None) == ""
+def _make_miniqmt_provider_unavailable() -> MiniQmtRealtimeProvider:
+    """构造 MiniQmtRealtimeProvider（xtquant 不可用状态）。"""
+    with patch("long_earn.backtest.data.realtime.MiniQmtClient") as mock_client:
+        mock_instance = mock_client.get.return_value
+        mock_instance.is_available = False
+        return MiniQmtRealtimeProvider()
 
-    def test_unsubscribe_is_noop(self) -> None:
+
+@pytest.fixture(params=["ciccwm", "miniqmt"])
+def unavailable_provider(request: pytest.FixtureRequest) -> RealtimeDataProvider:
+    """参数化：返回不可用状态的 RealtimeDataProvider 实例。"""
+    if request.param == "ciccwm":
+        return _make_ciccwm_provider()
+    return _make_miniqmt_provider_unavailable()
+
+
+class TestRealtimeProviderContract:
+    """RealtimeDataProvider 接口契约：所有实现共用的参数化测试套。
+
+    新增 RealtimeDataProvider 实现时，只需在 fixture 中添加一个分支即可
+    自动继承本套契约测试。
+    """
+
+    def test_unavailable_returns_empty_quote(
+        self, unavailable_provider: RealtimeDataProvider
+    ) -> None:
+        """不可用时 get_latest_quote 返回空 dict。"""
+        assert unavailable_provider.get_latest_quote("600519.SH") == {}
+
+    def test_is_available_returns_false(
+        self, unavailable_provider: RealtimeDataProvider
+    ) -> None:
+        """不可用时 is_available 返回 False。"""
+        assert unavailable_provider.is_available is False
+
+    def test_unsubscribe_is_noop(
+        self, unavailable_provider: RealtimeDataProvider
+    ) -> None:
         """unsubscribe 是空操作，不抛异常。"""
-        provider = CiccwmRealtimeProvider()
-        provider.unsubscribe("fake_id")  # 不应抛异常
+        unavailable_provider.unsubscribe("fake_id")  # 不应抛异常
 
-
-class TestMiniQmtRealtimeProvider:
-    """miniqmt 实时行情提供者接口契约。"""
-
-    def test_unavailable_returns_empty_quote(self) -> None:
-        """xtquant 不可用时 get_latest_quote 返回空 dict。"""
-        with patch("long_earn.backtest.data.realtime.MiniQmtClient") as mock_client:
-            mock_instance = mock_client.get.return_value
-            mock_instance.is_available = False
-            provider = MiniQmtRealtimeProvider()
-            assert provider.get_latest_quote("600519.SH") == {}
-
-    def test_subscribe_unavailable_returns_empty(self) -> None:
-        """xtquant 不可用时 subscribe_quote 返回空 ID。"""
-        with patch("long_earn.backtest.data.realtime.MiniQmtClient") as mock_client:
-            mock_instance = mock_client.get.return_value
-            mock_instance.is_available = False
-            provider = MiniQmtRealtimeProvider()
-            assert provider.subscribe_quote(["600519.SH"], lambda _d: None) == ""
+    def test_subscribe_unavailable_returns_empty(
+        self, unavailable_provider: RealtimeDataProvider
+    ) -> None:
+        """不可用时 subscribe_quote 返回空 ID。"""
+        assert unavailable_provider.subscribe_quote(["600519.SH"], lambda _d: None) == ""
 
 
 class TestCompositeRealtimeProvider:
