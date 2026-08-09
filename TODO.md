@@ -135,8 +135,8 @@
 - [x] **AUDIT-P2-03** ORDER_SKIPPED 原因统一为结构化枚举 — 已完成
 - [~] **AUDIT-P2-09** data provider 契约套未参数化多源 — 部分完成（ADR-018 后「多源」= 显式点名）
 - [~] **AUDIT-P2-11** Alpha / Beta / IR 与 numpy 对齐测试 — 部分完成
-- [ ] **AUDIT-P2-10** EMA / RSI / MACD / Bollinger 公式对齐测试
-- [ ] **AUDIT-P2-08** hypothesis property-based testing（算子单调性 / 滑点对称 / PIT 延迟）
+- [x] **AUDIT-P2-10** EMA / RSI / MACD / Bollinger 公式对齐测试 — 已完成
+- [x] **AUDIT-P2-08** hypothesis property-based testing（算子单调性 / 滑点对称 / PIT 延迟）— 已完成
 - [x] **AUDIT-P2-16** 关键事件写入单步 `latency_ms` — 已完成（MARKET_DATA / SIGNAL / SIGNAL_EXECUTE_T1 均记录 perf_counter 耗时）
 
 ---

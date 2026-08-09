@@ -826,19 +826,32 @@ def _assert_series_approx(
 
 
 class TestEMAFormula:
-    """EMA = alpha * price + (1-alpha) * prev_ema, alpha = 2/(span+1)"""
+    """EMA = ewm_mean(span, adjust=True)，Polars 默认调整权重。
+
+    adjust=True 公式：y[i] = Σ(x[j] * (1-α)^(i-j)) / Σ((1-α)^(i-j))
+    其中 α = 2/(span+1)，j 从 0 到 i。
+    """
+
+    @staticmethod
+    def _adjusted_ema(prices: list[float], span: int) -> list[float]:
+        alpha = 2.0 / (span + 1.0)
+        decay = 1.0 - alpha
+        result = []
+        for i in range(len(prices)):
+            num = 0.0
+            den = 0.0
+            for j in range(i + 1):
+                w = decay ** (i - j)
+                num += prices[j] * w
+                den += w
+            result.append(num / den)
+        return result
 
     def test_ema_span3(self) -> None:
         prices = [10.0, 12.0, 14.0, 16.0, 18.0]
         panel = _simple_panel(prices)
         out = get_operator("ema").apply(panel, EMAParams(field="close", span=3))
-        # span=3 → alpha=2/4=0.5
-        alpha = 0.5
-        expected = [None] * 5
-        expected[0] = 10.0  # 首值 = price
-        for i in range(1, 5):
-            expected[i] = alpha * prices[i] + (1 - alpha) * expected[i - 1]
-        # [10.0, 11.0, 12.5, 14.25, 16.125]
+        expected = self._adjusted_ema(prices, 3)
         _assert_series_approx(out, expected)
 
     def test_ema_span5(self) -> None:
@@ -846,54 +859,71 @@ class TestEMAFormula:
         prices = [10.0, 12.0, 9.0, 15.0, 11.0, 14.0]
         panel = _simple_panel(prices)
         out = get_operator("ema").apply(panel, EMAParams(field="close", span=5))
-        alpha = 2.0 / 6.0
-        expected = [None] * 6
-        expected[0] = 10.0
-        for i in range(1, 6):
-            expected[i] = alpha * prices[i] + (1 - alpha) * expected[i - 1]
+        expected = self._adjusted_ema(prices, 5)
         _assert_series_approx(out, expected)
 
 
 class TestRSIFormula:
-    """RSI = 100 - 100/(1 + avg_gain/avg_loss), Cutler's RSI (rolling_mean)"""
+    """RSI = 100 - 100/(1 + avg_gain/avg_loss), Cutler's RSI (rolling_mean)。
+
+    diff = close - shift(close,1)，diff[0]=null → gain[0]=null → rolling_mean
+    含 null 的窗口结果为 null。因此实际有效起始索引 = window（非 window-1）。
+    """
 
     def test_rsi_window4(self) -> None:
         prices = [10.0, 12.0, 11.0, 14.0, 13.0, 15.0]
         panel = _simple_panel(prices)
         out = get_operator("rsi").apply(panel, RSIParams(field="close", window=4))
-        # 手算 diff / gain / loss
-        diffs = [0.0] * 6
-        for i in range(1, 6):
-            diffs[i] = prices[i] - prices[i - 1]
-        # diff = [0, 2, -1, 3, -1, 2]
-        gains = [max(d, 0) for d in diffs]  # [0, 2, 0, 3, 0, 2]
-        losses = [max(-d, 0) for d in diffs]  # [0, 0, 1, 0, 1, 0]
-        # rolling_mean(4):
+        # diff = [null, 2, -1, 3, -1, 2]
+        # gain = [null, 2, 0, 3, 0, 2]
+        # loss = [null, 0, 1, 0, 1, 0]
+        # rolling_mean(4) 含 null 窗口为 null：
+        #   i=0,1,2: null（窗口未满）
+        #   i=3: mean([null,2,0,3]) = null
+        #   i=4: mean([2,0,3,0]) = 1.25, loss=mean([0,1,0,1])=0.5
+        #   i=5: mean([0,3,0,2]) = 1.25, loss=mean([1,0,1,0])=0.5
         expected = [None] * 6
-        for i in range(6):
-            if i < 3:
-                continue  # 前 3 个窗口未满
-            avg_g = sum(gains[i - 3 : i + 1]) / 4.0
-            avg_l = sum(losses[i - 3 : i + 1]) / 4.0
-            if avg_l == 0:
-                expected[i] = 100.0
-            else:
-                rs = avg_g / avg_l
-                expected[i] = 100.0 - 100.0 / (1.0 + rs)
+        # i=4: RS=1.25/0.5=2.5, RSI=100-100/3.5≈71.43
+        expected[4] = 100.0 - 100.0 / (1.0 + 1.25 / 0.5)
+        # i=5: same
+        expected[5] = 100.0 - 100.0 / (1.0 + 1.25 / 0.5)
         _assert_series_approx(out, expected)
 
     def test_rsi_all_up(self) -> None:
-        """连续上涨 → loss=0 → RSI=100"""
+        """连续上涨 → loss=0 → RSI=100（窗口满且不含 null 后）"""
         prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
         panel = _simple_panel(prices)
         out = get_operator("rsi").apply(panel, RSIParams(field="close", window=4))
-        # 窗口满后 RSI 应为 100
-        for i in range(3, 7):
+        # diff=[null,1,1,1,1,1,1]; gain=[null,1,1,1,1,1,1]; loss全0
+        # i=0,1,2,3: null；i=4+: gain=1, loss=0 → RS=inf → RSI=100
+        assert out[0] is None
+        assert out[1] is None
+        assert out[2] is None
+        assert out[3] is None  # mean([null,1,1,1]) = null
+        for i in range(4, 7):
             assert out[i] == pytest.approx(100.0, rel=1e-6), f"索引 {i}: {out[i]}"
 
 
 class TestMACDFormula:
-    """MACD = EMA_fast - EMA_slow; Signal = EMA(MACD, signal_span)"""
+    """MACD = EMA_fast - EMA_slow; Signal = EMA(MACD, signal_span)。
+
+    EMA 使用 Polars 默认 adjust=True 公式。
+    """
+
+    @staticmethod
+    def _adjusted_ema(prices: list[float], span: int) -> list[float]:
+        alpha = 2.0 / (span + 1.0)
+        decay = 1.0 - alpha
+        result = []
+        for i in range(len(prices)):
+            num = 0.0
+            den = 0.0
+            for j in range(i + 1):
+                w = decay ** (i - j)
+                num += prices[j] * w
+                den += w
+            result.append(num / den)
+        return result
 
     def test_macd_basic(self) -> None:
         prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
@@ -901,27 +931,12 @@ class TestMACDFormula:
         out = get_operator("macd").apply(
             panel, MACDParams(field="close", fast=3, slow=7, signal=3)
         )
-        # 手算 EMA_fast (span=3, alpha=0.5)
-        alpha_f = 2.0 / 4.0
-        ema_f = [0.0] * 10
-        ema_f[0] = 10.0
-        for i in range(1, 10):
-            ema_f[i] = alpha_f * prices[i] + (1 - alpha_f) * ema_f[i - 1]
-        # 手算 EMA_slow (span=7, alpha=2/8=0.25)
-        alpha_s = 2.0 / 8.0
-        ema_s = [0.0] * 10
-        ema_s[0] = 10.0
-        for i in range(1, 10):
-            ema_s[i] = alpha_s * prices[i] + (1 - alpha_s) * ema_s[i - 1]
-        # MACD = ema_f - ema_s
+        # EMA_fast (span=3), EMA_slow (span=7), 均 adjust=True
+        ema_f = self._adjusted_ema(prices, 3)
+        ema_s = self._adjusted_ema(prices, 7)
         macd_vals = [ema_f[i] - ema_s[i] for i in range(10)]
-        # Signal = EMA(macd, span=3, alpha=0.5)
-        alpha_sig = 2.0 / 4.0
-        signal_vals = [0.0] * 10
-        signal_vals[0] = macd_vals[0]
-        for i in range(1, 10):
-            signal_vals[i] = alpha_sig * macd_vals[i] + (1 - alpha_sig) * signal_vals[i - 1]
-        # Histogram = macd - signal
+        # Signal = EMA(macd, span=3, adjust=True)
+        signal_vals = self._adjusted_ema(macd_vals, 3)
         hist_vals = [macd_vals[i] - signal_vals[i] for i in range(10)]
 
         assert isinstance(out, pl.DataFrame)
