@@ -124,7 +124,7 @@
 
 ### 观测
 
-- [ ] **Dashboard 事件流可视化**：`prepare_context` / Substance 事件已可激活，Dashboard 展示仍缺
+- [x] **Dashboard 事件流可视化**：FastAPI + WebSocket 实时推送，事件推理管线可视化页面，CLI 默认启用 `--fastapi`
 
 ---
 

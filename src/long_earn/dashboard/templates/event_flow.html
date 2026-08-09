@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>事件流可视化 — Long Earn</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  .header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+  .header h1 { font-size: 24px; color: #f8fafc; }
+  .nav-link { color: #7c3aed; text-decoration: none; font-size: 14px; padding: 6px 12px; border: 1px solid #7c3aed; border-radius: 6px; transition: all 0.2s; }
+  .nav-link:hover { background: #7c3aed; color: #fff; }
+  .ws-status { font-size: 12px; padding: 4px 10px; border-radius: 12px; margin-left: auto; }
+  .ws-status.connected { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
+  .ws-status.disconnected { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+  .ws-status.connecting { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+  .query-section { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 24px; }
+  .query-section h3 { font-size: 14px; color: #94a3b8; margin-bottom: 12px; }
+  .query-row { display: flex; gap: 10px; }
+  .query-input { flex: 1; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 10px 14px; border-radius: 8px; font-size: 14px; outline: none; transition: border-color 0.2s; }
+  .query-input:focus { border-color: #7c3aed; }
+  .query-input::placeholder { color: #475569; }
+  .btn { padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+  .btn-primary { background: #7c3aed; color: #fff; }
+  .btn-primary:hover { background: #6d28d9; }
+  .btn-primary:disabled { background: #4c1d95; color: #6b7280; cursor: not-allowed; }
+  .btn-secondary { background: #334155; color: #e2e8f0; }
+  .btn-secondary:hover { background: #475569; }
+  .pipeline-section { margin-bottom: 24px; }
+  .pipeline-title { font-size: 14px; color: #94a3b8; margin-bottom: 16px; }
+  .pipeline { display: flex; align-items: center; gap: 0; }
+  .pipeline-stage { flex: 1; text-align: center; position: relative; }
+  .stage-circle { width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; font-size: 18px; font-weight: 700; transition: all 0.4s; border: 2px solid #334155; background: #1e293b; color: #475569; }
+  .stage-circle.active { border-color: #7c3aed; background: #1e293b; color: #7c3aed; box-shadow: 0 0 16px rgba(124,58,237,0.3); animation: pulse 1.5s ease-in-out infinite; }
+  .stage-circle.done { border-color: #22c55e; background: rgba(34,197,94,0.1); color: #22c55e; }
+  .stage-circle.error { border-color: #ef4444; background: rgba(239,68,68,0.1); color: #ef4444; }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 8px rgba(124,58,237,0.3); } 50% { box-shadow: 0 0 24px rgba(124,58,237,0.6); } }
+  .stage-connector { flex: 0 0 40px; height: 2px; background: #334155; margin-top: -32px; transition: background 0.4s; }
+  .stage-connector.done { background: #22c55e; }
+  .stage-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; }
+  .stage-label-mapping { font-size: 10px; color: #475569; margin-top: 2px; }
+  .progress-bar-bg { background: #334155; border-radius: 4px; height: 6px; margin-top: 16px; overflow: hidden; }
+  .progress-bar-fill { background: linear-gradient(90deg, #7c3aed, #22c55e); height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; transition: border-color 0.3s; }
+  .card:hover { border-color: #475569; }
+  .card h3 { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; }
+  .card .value.positive { color: #22c55e; }
+  .card .value.negative { color: #ef4444; }
+  .card .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .chart-container { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 24px; }
+  .chart-container h3 { font-size: 14px; color: #94a3b8; margin-bottom: 16px; }
+  .chart-wrapper { position: relative; width: 100%; height: 320px; }
+  canvas { width: 100% !important; height: 100% !important; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #64748b; font-weight: 500; border-bottom: 1px solid #334155; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  tr:hover td { background: #0f172a; }
+  .log-container { background: #0f172a; border-radius: 8px; border: 1px solid #334155; padding: 12px; max-height: 300px; overflow-y: auto; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 12px; }
+  .log-entry { padding: 4px 0; color: #94a3b8; border-bottom: 1px solid rgba(51,65,85,0.3); }
+  .log-entry .time { color: #475569; margin-right: 8px; }
+  .log-entry .stage { color: #7c3aed; font-weight: 600; }
+  .log-entry .done { color: #22c55e; }
+  .log-entry .error { color: #ef4444; }
+  .log-entry .info { color: #60a5fa; }
+  .empty-state { text-align: center; padding: 60px 20px; color: #475569; }
+  .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
+  .loading { text-align: center; padding: 80px 20px; color: #64748b; }
+  .spinner { width: 32px; height: 32px; margin: 0 auto 12px; border: 3px solid #334155; border-top-color: #7c3aed; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .relation-graph { display: flex; flex-wrap: wrap; gap: 8px; }
+  .relation-chip { display: inline-flex; align-items: center; gap: 6px; background: #334155; padding: 6px 12px; border-radius: 16px; font-size: 12px; }
+  .relation-chip .direction { width: 6px; height: 6px; border-radius: 50%; }
+  .relation-chip .direction.positive { background: #22c55e; }
+  .relation-chip .direction.negative { background: #ef4444; }
+  .relation-chip .direction.neutral { background: #64748b; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .tag.positive { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .tag.negative { background: rgba(239,68,68,0.15); color: #ef4444; }
+  .tag.neutral { background: rgba(100,116,139,0.15); color: #94a3b8; }
+  .activation-box { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; margin-bottom: 24px; }
+  .activation-box h3 { font-size: 14px; color: #94a3b8; margin-bottom: 12px; }
+  .activation-box pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; color: #94a3b8; max-height: 200px; overflow-y: auto; }
+  .substance-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .substance-item { background: #334155; padding: 3px 8px; border-radius: 6px; font-size: 11px; color: #e2e8f0; }
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    .pipeline { flex-wrap: wrap; }
+    .stage-connector { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>事件流可视化</h1>
+    <a href="/" class="nav-link">回测仪表盘</a>
+    <span class="ws-status disconnected" id="wsStatus">未连接</span>
+  </div>
+
+  <!-- 查询输入 -->
+  <div class="query-section">
+    <h3>触发事件推理管线</h3>
+    <div class="query-row">
+      <input type="text" class="query-input" id="queryInput" placeholder="输入查询（如：近期降息政策对A股的影响）" value="近期降息政策对A股的影响">
+      <button class="btn btn-primary" id="triggerBtn" onclick="triggerPipeline()">运行推理管线</button>
+      <button class="btn btn-secondary" id="loadBtn" onclick="loadEventData()">刷新数据</button>
+    </div>
+  </div>
+
+  <!-- 管线阶段可视化 -->
+  <div class="pipeline-section" id="pipelineSection">
+    <div class="pipeline-title">推理管线进度</div>
+    <div class="pipeline" id="pipeline">
+      <div class="pipeline-stage" id="stage-collect">
+        <div class="stage-circle">1</div>
+        <div class="stage-label">采集</div>
+        <div class="stage-label-mapping">collect</div>
+      </div>
+      <div class="stage-connector" id="conn-1"></div>
+      <div class="pipeline-stage" id="stage-extract">
+        <div class="stage-circle">2</div>
+        <div class="stage-label">提取</div>
+        <div class="stage-label-mapping">extract</div>
+      </div>
+      <div class="stage-connector" id="conn-2"></div>
+      <div class="pipeline-stage" id="stage-propagate">
+        <div class="stage-circle">3</div>
+        <div class="stage-label">传播</div>
+        <div class="stage-label-mapping">propagate</div>
+      </div>
+      <div class="stage-connector" id="conn-3"></div>
+      <div class="pipeline-stage" id="stage-conflict">
+        <div class="stage-circle">4</div>
+        <div class="stage-label">冲突检测</div>
+        <div class="stage-label-mapping">conflict</div>
+      </div>
+      <div class="stage-connector" id="conn-4"></div>
+      <div class="pipeline-stage" id="stage-save">
+        <div class="stage-circle">5</div>
+        <div class="stage-label">保存</div>
+        <div class="stage-label-mapping">save</div>
+      </div>
+    </div>
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar" style="width: 0%;"></div></div>
+    <div style="text-align:center;margin-top:8px;color:#64748b;font-size:12px;" id="statusText">就绪，等待触发</div>
+  </div>
+
+  <!-- 运行日志 -->
+  <div class="chart-container" id="logContainer">
+    <h3>运行日志</h3>
+    <div class="log-container" id="logBox">
+      <div class="log-entry"><span class="time">--:--:--</span><span class="info">等待 WebSocket 连接...</span></div>
+    </div>
+  </div>
+
+  <!-- 事件统计卡片 -->
+  <div class="grid" id="statsGrid">
+    <div class="card"><h3>事件总数</h3><div class="value" id="statTotal">-</div></div>
+    <div class="card"><h3>影响关系</h3><div class="value" id="statRelations">-</div></div>
+    <div class="card"><h3>利好事件</h3><div class="value positive" id="statPositive">-</div></div>
+    <div class="card"><h3>利空事件</h3><div class="value negative" id="statNegative">-</div></div>
+  </div>
+
+  <!-- 情绪分布 + 时间线 -->
+  <div class="two-col" id="chartsArea">
+    <div class="chart-container">
+      <h3>情绪分布</h3>
+      <div class="chart-wrapper"><canvas id="sentimentChart"></canvas></div>
+    </div>
+    <div class="chart-container">
+      <h3>事件时间线（最近 30 天）</h3>
+      <div class="chart-wrapper"><canvas id="timelineChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- 热门标的 + 影响关系 -->
+  <div class="two-col" id="detailsArea">
+    <div class="chart-container">
+      <h3>热门标的</h3>
+      <div id="topSymbols" class="empty-state"><div class="icon">-</div>暂无数据</div>
+    </div>
+    <div class="chart-container">
+      <h3>影响关系</h3>
+      <div id="relationsList" class="empty-state"><div class="icon">-</div>暂无数据</div>
+    </div>
+  </div>
+
+  <!-- 事件列表 -->
+  <div class="chart-container" id="eventsTableContainer">
+    <h3>事件列表</h3>
+    <div style="overflow-x:auto;">
+      <table id="eventsTable">
+        <thead><tr><th>时间</th><th>情绪</th><th>标的</th><th>类别</th><th>内容</th></tr></thead>
+        <tbody><tr><td colspan="5" style="text-align:center;color:#64748b;padding:24px;">暂无事件数据</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Substance 激活结果 -->
+  <div class="activation-box" id="activationBox" style="display:none;">
+    <h3>Substance 激活结果</h3>
+    <div class="substance-list" id="substanceList"></div>
+    <pre id="activationText" style="display:none;"></pre>
+  </div>
+</div>
+
+<script>
+// ── WebSocket 连接管理 ──
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events';
+let ws = null;
+let sentimentChart = null;
+let timelineChart = null;
+
+function updateWsStatus(status) {
+  const el = document.getElementById('wsStatus');
+  el.className = 'ws-status ' + status;
+  el.textContent = { connected: '已连接', disconnected: '未连接', connecting: '连接中...' }[status] || status;
+}
+
+function connectWs() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  updateWsStatus('connecting');
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    updateWsStatus('connected');
+    addLog('info', 'WebSocket 已连接');
+    ws.send(JSON.stringify({ action: 'subscribe' }));
+  };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    handleWsMessage(data);
+  };
+
+  ws.onclose = () => {
+    updateWsStatus('disconnected');
+    addLog('info', 'WebSocket 已断开，5秒后重连...');
+    setTimeout(connectWs, 5000);
+  };
+
+  ws.onerror = () => {
+    updateWsStatus('disconnected');
+  };
+}
+
+function handleWsMessage(data) {
+  switch (data.type) {
+    case 'subscribed':
+      addLog('info', '已订阅事件流');
+      break;
+    case 'pong':
+      break;
+    case 'pipeline_start':
+      resetPipeline();
+      addLog('info', '管线启动: ' + data.query);
+      setStatus('管线运行中...');
+      break;
+    case 'pipeline_progress':
+      updatePipelineStage(data.stage, data.progress);
+      addLog('stage', data.stage, data.detail);
+      setStatus(data.detail);
+      break;
+    case 'pipeline_complete':
+      updatePipelineStage('save', 100);
+      addLog('done', 'save', data.detail);
+      setStatus(data.detail);
+      updateStats(data.stats);
+      loadEventData();
+      break;
+    case 'pipeline_error':
+      markPipelineError();
+      addLog('error', 'error', data.detail);
+      setStatus('管线失败: ' + data.detail);
+      break;
+    case 'reloaded':
+      addLog('info', '事件数据已重新加载 (共 ' + data.count + ' 条)');
+      loadEventData();
+      break;
+  }
+}
+
+// ── 管线阶段控制 ──
+const STAGE_ORDER = ['collect', 'extract', 'propagate', 'conflict', 'save'];
+const STAGE_LABELS = { collect: '采集', extract: '提取', propagate: '传播', conflict: '冲突检测', save: '保存' };
+
+function resetPipeline() {
+  STAGE_ORDER.forEach((stage, i) => {
+    const el = document.getElementById('stage-' + stage);
+    const circle = el.querySelector('.stage-circle');
+    circle.className = 'stage-circle';
+    circle.textContent = i + 1;
+    if (i > 0) {
+      document.getElementById('conn-' + i).className = 'stage-connector';
+    }
+  });
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('statusText').textContent = '就绪';
+  document.getElementById('triggerBtn').disabled = true;
+}
+
+function updatePipelineStage(stage, progress) {
+  const idx = STAGE_ORDER.indexOf(stage);
+  if (idx < 0) return;
+
+  // 标记之前的阶段为完成
+  for (let i = 0; i < idx; i++) {
+    const el = document.getElementById('stage-' + STAGE_ORDER[i]);
+    const circle = el.querySelector('.stage-circle');
+    circle.className = 'stage-circle done';
+    circle.textContent = '✓';
+    if (i > 0) document.getElementById('conn-' + i).className = 'stage-connector done';
+  }
+
+  // 当前阶段为活跃
+  const el = document.getElementById('stage-' + stage);
+  const circle = el.querySelector('.stage-circle');
+  circle.className = 'stage-circle active';
+  circle.textContent = idx + 1;
+
+  // 连接线
+  if (idx > 0) document.getElementById('conn-' + idx).className = 'stage-connector done';
+
+  document.getElementById('progressBar').style.width = progress + '%';
+}
+
+function markPipelineError() {
+  STAGE_ORDER.forEach((stage, i) => {
+    const el = document.getElementById('stage-' + stage);
+    const circle = el.querySelector('.stage-circle');
+    if (circle.className.includes('active')) {
+      circle.className = 'stage-circle error';
+      circle.textContent = '✗';
+    }
+  });
+  document.getElementById('triggerBtn').disabled = false;
+}
+
+function setStatus(text) {
+  document.getElementById('statusText').textContent = text;
+}
+
+// ── 日志 ──
+function addLog(type, stage, detail) {
+  const box = document.getElementById('logBox');
+  const now = new Date();
+  const time = now.toTimeString().slice(0, 8);
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = '<span class="time">' + time + '</span>' +
+    (stage ? '<span class="' + type + '">[' + (STAGE_LABELS[stage] || stage) + ']</span> ' : '') +
+    '<span class="' + type + '">' + escapeHtml(detail || '') + '</span>';
+  box.appendChild(entry);
+  box.scrollTop = box.scrollHeight;
+  // 保持最多 100 条
+  while (box.children.length > 100) box.removeChild(box.firstChild);
+}
+
+// ── 触发管线 ──
+function triggerPipeline() {
+  const query = document.getElementById('queryInput').value.trim();
+  if (!query) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addLog('error', 'error', 'WebSocket 未连接，请等待重连');
+    return;
+  }
+  ws.send(JSON.stringify({ action: 'trigger', query: query }));
+  document.getElementById('triggerBtn').disabled = true;
+}
+
+// ── 加载事件数据 ──
+async function loadEventData() {
+  try {
+    const [statsRes, timelineRes, eventsRes, relationsRes] = await Promise.all([
+      fetch('/api/events/stats').then(r => r.json()),
+      fetch('/api/events/timeline?days=30').then(r => r.json()),
+      fetch('/api/events?limit=50').then(r => r.json()),
+      fetch('/api/events/relations?limit=50').then(r => r.json()),
+    ]);
+    updateStats(statsRes);
+    renderTimeline(timelineRes.timeline || []);
+    renderEventsTable(eventsRes.events || []);
+    renderTopSymbols(statsRes.top_symbols || []);
+    renderRelations(relationsRes.relations || []);
+    renderSentimentChart(statsRes.by_sentiment || {});
+    document.getElementById('triggerBtn').disabled = false;
+  } catch (e) {
+    addLog('error', 'error', '加载事件数据失败: ' + escapeHtml(String(e)));
+    document.getElementById('triggerBtn').disabled = false;
+  }
+}
+
+function updateStats(stats) {
+  document.getElementById('statTotal').textContent = stats.total_events || 0;
+  document.getElementById('statRelations').textContent = stats.total_relations || 0;
+  const sent = stats.by_sentiment || {};
+  document.getElementById('statPositive').textContent = sent.positive || 0;
+  document.getElementById('statNegative').textContent = sent.negative || 0;
+}
+
+function renderTimeline(timeline) {
+  if (timelineChart) { timelineChart.destroy(); timelineChart = null; }
+  const canvas = document.getElementById('timelineChart');
+  if (!canvas || timeline.length === 0) return;
+
+  const labels = timeline.map(t => t.date);
+  timelineChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: '利好', data: timeline.map(t => t.positive), backgroundColor: '#22c55e', stack: 's' },
+        { label: '利空', data: timeline.map(t => t.negative), backgroundColor: '#ef4444', stack: 's' },
+        { label: '中性', data: timeline.map(t => t.neutral), backgroundColor: '#64748b', stack: 's' },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 12 } } } },
+      scales: {
+        x: { ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+        y: { beginAtZero: true, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+      },
+    },
+  });
+}
+
+function renderSentimentChart(sentiment) {
+  if (sentimentChart) { sentimentChart.destroy(); sentimentChart = null; }
+  const canvas = document.getElementById('sentimentChart');
+  if (!canvas) return;
+
+  const labels = Object.keys(sentiment);
+  const values = Object.values(sentiment);
+  const colors = ['#22c55e', '#ef4444', '#64748b'];
+
+  if (labels.length === 0) {
+    const ctx = canvas.getContext('2d');
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#64748b'; ctx.textAlign = 'center';
+    ctx.fillText('暂无数据', canvas.width/2, canvas.height/2);
+    return;
+  }
+
+  sentimentChart = new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors.slice(0, labels.length), borderColor: '#1e293b', borderWidth: 2 }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 11 }, padding: 14 } },
+        tooltip: { backgroundColor: '#1e293b', titleColor: '#f8fafc', bodyColor: '#e2e8f0', borderColor: '#334155', borderWidth: 1, padding: 12, cornerRadius: 8 },
+      },
+    },
+  });
+}
+
+function renderEventsTable(events) {
+  const tbody = document.querySelector('#eventsTable tbody');
+  if (events.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:24px;">暂无事件数据</td></tr>';
+    return;
+  }
+  tbody.innerHTML = events.map(ev => {
+    const sc = ev.sentiment === 'positive' ? '#22c55e' : ev.sentiment === 'negative' ? '#ef4444' : '#64748b';
+    const symbols = (ev.symbols || []).join(', ');
+    return '<tr>' +
+      '<td style="color:#94a3b8;font-size:11px;">' + escapeHtml(ev.created_at.slice(0,16)) + '</td>' +
+      '<td><span class="tag ' + escapeHtml(ev.sentiment) + '">' + escapeHtml(ev.sentiment) + '</span></td>' +
+      '<td style="color:#60a5fa;font-size:12px;">' + escapeHtml(symbols) + '</td>' +
+      '<td style="color:#94a3b8;font-size:12px;">' + escapeHtml(ev.category) + '</td>' +
+      '<td style="font-size:12px;">' + escapeHtml((ev.content || '').slice(0, 120)) + (ev.content && ev.content.length > 120 ? '...' : '') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function renderTopSymbols(symbols) {
+  const el = document.getElementById('topSymbols');
+  if (!symbols || symbols.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">-</div>暂无数据</div>';
+    return;
+  }
+  el.innerHTML = symbols.map(s =>
+    '<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:4px 10px;border-radius:12px;font-size:12px;margin:3px;">' + escapeHtml(s.symbol) + ' (' + s.count + ')</span>'
+  ).join('');
+}
+
+function renderRelations(relations) {
+  const el = document.getElementById('relationsList');
+  if (!relations || relations.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">-</div>暂无数据</div>';
+    return;
+  }
+  el.innerHTML = '<div class="relation-graph">' + relations.map(r =>
+    '<div class="relation-chip">' +
+    '<span class="direction ' + escapeHtml(r.direction) + '"></span>' +
+    '<span style="color:#60a5fa;">' + escapeHtml(r.target || '') + '</span>' +
+    '<span style="color:#64748b;font-size:11px;">' + escapeHtml((r.content || '').slice(0, 40)) + '</span>' +
+    '<span style="color:#475569;font-size:10px;">' + (r.confidence * 100).toFixed(0) + '%</span>' +
+    '</div>'
+  ).join('') + '</div>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ── 初始化 ──
+connectWs();
+loadEventData();
+
+// Enter 键触发
+document.getElementById('queryInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') triggerPipeline();
+});
+</script>
+</body>
+</html>

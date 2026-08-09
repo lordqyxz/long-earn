@@ -364,16 +364,33 @@ def web(
     substances: str = typer.Option(
         "", "--substances", help="SubstanceStore JSONL 路径（事件流端点）"
     ),
+    fastapi: bool = typer.Option(
+        True, "--fastapi/--no-fastapi", help="使用 FastAPI + WebSocket（默认启用）"
+    ),
 ) -> None:
-    """启动回测可视化 Web 服务。"""
-    from long_earn.dashboard.api import serve_visualization
+    """启动回测可视化 Web 服务。
 
-    serve_visualization(
-        host=host,
-        port=port,
-        db_path=db,
-        substances_path=substances,
-    )
+    默认使用 FastAPI + Uvicorn，支持 WebSocket 实时事件流推送。
+    使用 --no-fastapi 回退到 stdlib http.server 旧版。
+    """
+    if fastapi:
+        from long_earn.dashboard.fastapi_app import serve_visualization_fastapi
+
+        serve_visualization_fastapi(
+            host=host,
+            port=port,
+            db_path=db,
+            substances_path=substances,
+        )
+    else:
+        from long_earn.dashboard.api import serve_visualization
+
+        serve_visualization(
+            host=host,
+            port=port,
+            db_path=db,
+            substances_path=substances,
+        )
 
 
 if __name__ == "__main__":
