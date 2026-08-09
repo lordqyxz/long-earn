@@ -172,7 +172,10 @@ class TestLivermoreStrategyGenerate:
             {
                 "verdict": "推荐",
                 "rationale": "趋势跟踪契合顺势交易原则，多头行情下胜率较高",
-                "suggestions": ["20 日新高突破 + 成交量放大 1.5 倍", "跌破 10 日均线止损"],
+                "suggestions": [
+                    "20 日新高突破 + 成交量放大 1.5 倍",
+                    "跌破 10 日均线止损",
+                ],
                 "confidence": 0.8,
             }
         )
@@ -191,7 +194,10 @@ class TestLivermoreStrategyGenerate:
         mock_llm.invoke.assert_called_once()
         assert result.verdict == "推荐"
         assert "顺势交易" in result.rationale
-        assert result.suggestions == ["20 日新高突破 + 成交量放大 1.5 倍", "跌破 10 日均线止损"]
+        assert result.suggestions == [
+            "20 日新高突破 + 成交量放大 1.5 倍",
+            "跌破 10 日均线止损",
+        ]
         assert result.confidence == pytest.approx(0.8)
 
     def test_strategy_generate_confidence_clamped(self):

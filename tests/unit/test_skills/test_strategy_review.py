@@ -153,9 +153,7 @@ class TestAllPersonasSupportStrategyReview:
             (PetterPersona, "petter", "彼得·林奇"),
         ],
     )
-    def test_persona_supports_strategy_review(
-        self, persona_cls, name, display_name
-    ):
+    def test_persona_supports_strategy_review(self, persona_cls, name, display_name):
         """大师 supported_modes 包含 strategy_review。"""
         assert "strategy_review" in persona_cls.supported_modes
         assert persona_cls.name == name

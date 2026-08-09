@@ -1,4 +1,4 @@
-﻿"""ciccwm 数据层单元测试
+"""ciccwm 数据层单元测试
 
 覆盖 ADR-006 定义的「系统关键环节」：
   - 凭证加载（缺失/为空/JSON 格式错误/BOM 容错）
@@ -52,9 +52,7 @@ class TestLoadApiKey:
     def test_empty_api_key_raises_credential_error(self, tmp_path: Path):
         """API Key 为空时抛 CICCWMCredentialError。"""
         config_path = tmp_path / "config.json"
-        config_path.write_text(
-            json.dumps({"CICCWM_API_KEY": ""}), encoding="utf-8"
-        )
+        config_path.write_text(json.dumps({"CICCWM_API_KEY": ""}), encoding="utf-8")
         with pytest.raises(CICCWMCredentialError, match="重新安装"):
             load_api_key(config_path)
 

@@ -55,9 +55,13 @@ def _make_panel(perturb_after: datetime | None = None) -> pl.DataFrame:
                 close = close * 1e3 + 100.0 * rng.standard_normal()
             rows.append(
                 {
-                    "timestamp": ts, "symbol": sym, "open": close,
-                    "high": close * 1.01, "low": close * 0.99,
-                    "close": round(float(close), 4), "volume": 10000.0,
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": round(float(close), 4),
+                    "volume": 10000.0,
                 }
             )
     return pl.DataFrame(rows)

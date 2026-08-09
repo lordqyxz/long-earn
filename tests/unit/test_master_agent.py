@@ -149,17 +149,13 @@ class TestToolSetContract:
         assert "web_search" in names
         assert "summarize" in names
 
-    def test_tool_descriptions_non_empty(
-        self, mock_master_agent: MasterAgent
-    ) -> None:
+    def test_tool_descriptions_non_empty(self, mock_master_agent: MasterAgent) -> None:
         """验证每个工具都有非空描述"""
         tools = mock_master_agent._build_tools()
         for tool in tools:
             assert tool.description, f"工具 {tool.name} 描述为空"
 
-    def test_research_strategy_params(
-        self, mock_master_agent: MasterAgent
-    ) -> None:
+    def test_research_strategy_params(self, mock_master_agent: MasterAgent) -> None:
         """验证 research_strategy 工具参数"""
         tools = mock_master_agent._build_tools()
         rs = next(t for t in tools if t.name == "research_strategy")

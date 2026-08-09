@@ -151,4 +151,5 @@ class TestReadScalar:
         val = guard.read_scalar("UNKNOWN", "close")
 
         import math
+
         assert math.isnan(val)

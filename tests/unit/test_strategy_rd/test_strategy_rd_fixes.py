@@ -229,7 +229,11 @@ class TestToTBranchScoring:
         return [
             {"direction": "收益增强", "reflection": "", "improvement_suggestions": []},
             {"direction": "风险控制", "reflection": "", "improvement_suggestions": []},
-            {"direction": "收益稳定性", "reflection": "", "improvement_suggestions": []},
+            {
+                "direction": "收益稳定性",
+                "reflection": "",
+                "improvement_suggestions": [],
+            },
         ]
 
     def test_high_drawdown_makes_risk_control_top(self):
@@ -251,7 +255,7 @@ class TestToTBranchScoring:
         agent = self._agent()
         backtest_result = {
             "total_return": 0.12,  # 跑赢阈值，收益增强 +5
-            "sharpe_ratio": 0.1,   # 远低 _POOR_SHARPE_THRESHOLD 0.3
+            "sharpe_ratio": 0.1,  # 远低 _POOR_SHARPE_THRESHOLD 0.3
             "max_drawdown": -0.05,  # 远低 _DRAWDOWN_MODERATE_THRESHOLD 0.20
         }
 
@@ -265,8 +269,8 @@ class TestToTBranchScoring:
         agent = self._agent()
         backtest_result = {
             "total_return": -0.15,
-            "sharpe_ratio": 0.8,    # 中等
-            "max_drawdown": -0.10,   # 轻微
+            "sharpe_ratio": 0.8,  # 中等
+            "max_drawdown": -0.10,  # 轻微
         }
 
         evaluated = agent._evaluate_branches(self._branches(), backtest_result)
@@ -328,7 +332,9 @@ class TestReflectionFallbackFlatFields:
         assert "无法获取回测指标" not in result["reflection"]
         assert "0.20" in result["reflection"] or "0.2" in result["reflection"]
         # 业绩极差（max_dd > 阈值），至少应给出风控建议
-        assert any("止损" in s or "回撤" in s for s in result["improvement_suggestions"])
+        assert any(
+            "止损" in s or "回撤" in s for s in result["improvement_suggestions"]
+        )
         # primary_issue 应被填充
         assert "primary_issue" in result
 
@@ -372,7 +378,9 @@ class TestSupervisorResilience:
     防止 LLM 输出格式异常导致系统永远停在第 1 轮。
     """
 
-    def _make_supervisor(self, llm_content: str | None = None, raises: Exception | None = None):
+    def _make_supervisor(
+        self, llm_content: str | None = None, raises: Exception | None = None
+    ):
         from long_earn.strategy_rd.agents.strategy_rd_supervisor import (
             StrategyRdSupervisor,
         )
@@ -518,7 +526,10 @@ class TestRefineRoutingMultiRound:
             "backtest_result": {"error": "syntax X", "error_category": "code_logic"},
         }
         out = _refine_node(
-            state, _StubAgent(), logger=None, target="optimized"  # type: ignore[arg-type]
+            state,
+            _StubAgent(),
+            logger=None,
+            target="optimized",  # type: ignore[arg-type]
         )
 
         # 关键：修的是优化版的代码，不是初版
@@ -606,7 +617,13 @@ class TestMultiRoundEvolutionStaticE2E:
             def __init__(self):
                 self.calls: list = []
 
-            def reflect(self, strategy, backtest_result, master_perspectives=None, history_return=0.0):
+            def reflect(
+                self,
+                strategy,
+                backtest_result,
+                master_perspectives=None,
+                history_return=0.0,
+            ):
                 self.calls.append(("reflect", strategy.get("strategy_name")))
                 return {
                     "reflection": "需要降低回撤",

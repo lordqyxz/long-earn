@@ -173,6 +173,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
                 task.benchmark_symbol,
                 full_data=full_data,
                 warmup_days=task.warmup_days,
+                strategy_yaml=task.strategy_yaml,
             )
 
         if result.success:

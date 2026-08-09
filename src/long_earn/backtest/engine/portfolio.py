@@ -11,6 +11,7 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.domain.entities import (
+    ExecType,
     FillEvent,
     OrderEvent,
     Position,
@@ -356,6 +357,10 @@ class Portfolio:
                     quantity=qty,
                     price=price,
                     order_id=f"ord_{uuid.uuid4().hex[:8]}",
+                    # P1-08: 从 SignalEvent.metadata 读取订单执行类型
+                    exec_type=event.metadata.get("exec_type", ExecType.MARKET),
+                    stop_price=event.metadata.get("stop_price"),
+                    oco_group_id=event.metadata.get("oco_group_id", ""),
                 )
             )
 

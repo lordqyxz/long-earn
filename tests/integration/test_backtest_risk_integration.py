@@ -66,9 +66,7 @@ class TestStopLossIntegration:
         """止损触发后应清仓"""
         data = _make_data_with_crash()
         provider = MockDataProvider(data)
-        engine = EventDrivenBacktestEngine(
-            data_provider=provider, stop_loss=0.05
-        )
+        engine = EventDrivenBacktestEngine(data_provider=provider, stop_loss=0.05)
         strategy = AlwaysBuyStrategy("test_sl")
 
         res = engine.run(strategy, "2023-01-01", "2023-01-20", ["S1"])
@@ -102,9 +100,7 @@ class TestRiskDisabled:
         """止损关闭时不应触发"""
         data = _make_data_with_crash()
         provider = MockDataProvider(data)
-        engine = EventDrivenBacktestEngine(
-            data_provider=provider, stop_loss=0.0
-        )
+        engine = EventDrivenBacktestEngine(data_provider=provider, stop_loss=0.0)
         strategy = AlwaysBuyStrategy("test_no_sl")
 
         res = engine.run(strategy, "2023-01-01", "2023-01-20", ["S1"])

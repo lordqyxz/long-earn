@@ -92,7 +92,9 @@ class TestDecideNodeLogic:
             "iteration": 100,  # 超过 HTR_MAX_CYCLES=10
             "executor_results": [],
         }
-        result = _decide_node(state, agent, backtest_service, connector=None, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(
+            state, agent, backtest_service, connector=None, logger=None
+        )  # type: ignore[arg-type]
         assert result["result"] == "stop"
 
     def test_max_cycles_config_override(self):
@@ -164,7 +166,9 @@ class TestDecideNodeLogic:
             "iteration": 0,
             "executor_results": [],
         }
-        result = _decide_node(state, agent, backtest_service, connector=None, logger=None)  # type: ignore[arg-type]
+        result = _decide_node(
+            state, agent, backtest_service, connector=None, logger=None
+        )  # type: ignore[arg-type]
         assert result["result"] == "stop"
 
 
@@ -204,12 +208,17 @@ class TestPhase4MemoryIntegration:
         memory = context.require_memory()
         # 模拟历史树摘要返回
         memory.search_hypothesis_trees.return_value = [
-            {"run_id": "old_run", "best_insight": "动量过滤有效", "best_direction": "收益增强"}
+            {
+                "run_id": "old_run",
+                "best_insight": "动量过滤有效",
+                "best_direction": "收益增强",
+            }
         ]
 
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
 
         _ideate_node(
@@ -288,9 +297,7 @@ class TestMaxSelectFanOut:
         # 树应含 root + 2 个子节点
         assert len(result["selected_leaves"]) == 2
         updated_tree = HypothesisTree.deserialize(result["hypothesis_tree"])
-        root_children = [
-            n for n in updated_tree.all_nodes() if n.parent_id == "root"
-        ]
+        root_children = [n for n in updated_tree.all_nodes() if n.parent_id == "root"]
         assert len(root_children) == 2
 
     def test_select_node_max_select_1_serial_behavior(self):
@@ -397,41 +404,49 @@ class TestParallelFanOutGraphInvoke:
         context.backtest_service.run_oos.return_value = {"oos_sharpe": 1.5}
 
         # 拦截所有 LLM 依赖路径，让 graph.invoke 快速跑完一轮
-        with patch(
-            "long_earn.strategy_rd.htr_subgraph.PersonaRegistry.create_all",
-            return_value={},  # 跳过大师 LLM
-        ), patch(
-            "long_earn.strategy_rd.htr_subgraph.HypothesisTreeStore.save",
-            return_value=None,  # 避免沙箱磁盘写入
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.observe",
-            return_value={"observation": "测试观察"},
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.ideate",
-            return_value=[{"hypothesis": "假设A"}, {"hypothesis": "假设B"}],
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.select",
-            return_value=[
-                {"hypothesis": "假设A", "direction": "动量"},
-                {"hypothesis": "假设B", "direction": "反转"},
-            ],
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.optimize_strategy",
-            return_value={"name": "optimized"},
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_develop_agent.StrategyDevelopAgent.develop_strategy",
-            return_value="strategy:\n  name: opt\n",
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.backpropagate_insights",
-            return_value={"insight": "测试洞察"},
-        ), patch(
-            "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.decide",
-            return_value={"action": "stop"},  # ADR-015 B4: decide 返回 dict
+        with (
+            patch(
+                "long_earn.strategy_rd.htr_subgraph.PersonaRegistry.create_all",
+                return_value={},  # 跳过大师 LLM
+            ),
+            patch(
+                "long_earn.strategy_rd.htr_subgraph.HypothesisTreeStore.save",
+                return_value=None,  # 避免沙箱磁盘写入
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.observe",
+                return_value={"observation": "测试观察"},
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.ideate",
+                return_value=[{"hypothesis": "假设A"}, {"hypothesis": "假设B"}],
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.select",
+                return_value=[
+                    {"hypothesis": "假设A", "direction": "动量"},
+                    {"hypothesis": "假设B", "direction": "反转"},
+                ],
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.optimize_strategy",
+                return_value={"name": "optimized"},
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_develop_agent.StrategyDevelopAgent.develop_strategy",
+                return_value="strategy:\n  name: opt\n",
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.backpropagate_insights",
+                return_value={"insight": "测试洞察"},
+            ),
+            patch(
+                "long_earn.strategy_rd.agents.strategy_research_agent.StrategyResearchAgent.decide",
+                return_value={"action": "stop"},  # ADR-015 B4: decide 返回 dict
+            ),
         ):
             graph = create_htr_subgraph(context)
-            result = graph.invoke(
-                {"query": "测试并行"}, config={"recursion_limit": 50}
-            )
+            result = graph.invoke({"query": "测试并行"}, config={"recursion_limit": 50})
 
         # 1. 不崩溃（走到这里即证明 InvalidUpdateError 已修复）
         # 2. executor_results 通过 reducer 累加 2 项
@@ -469,6 +484,7 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
         # 拦截 ideate 避免真实 LLM 调用
         agent.ideate = MagicMock(return_value=[{"hypothesis": "h1"}])
@@ -515,6 +531,7 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
         agent.ideate = MagicMock(return_value=[])
 
@@ -555,6 +572,7 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
         agent.ideate = MagicMock(return_value=[])
 
@@ -593,10 +611,9 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
-        agent.backpropagate_insights = MagicMock(
-            return_value={"insight": "测试洞察"}
-        )
+        agent.backpropagate_insights = MagicMock(return_value={"insight": "测试洞察"})
 
         mock_persona = MagicMock()
         mock_persona.analyze.return_value = PersonaResult(
@@ -644,10 +661,9 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
-        agent.backpropagate_insights = MagicMock(
-            return_value={"insight": "测试洞察"}
-        )
+        agent.backpropagate_insights = MagicMock(return_value={"insight": "测试洞察"})
 
         mock_persona = MagicMock()
         mock_persona.analyze.return_value = PersonaResult(
@@ -673,10 +689,8 @@ class TestPersonaIntegration:
             )
 
         agent.backpropagate_insights.assert_called_once()
-        perspectives_arg = (
-            agent.backpropagate_insights.call_args.kwargs.get(
-                "master_perspectives"
-            )
+        perspectives_arg = agent.backpropagate_insights.call_args.kwargs.get(
+            "master_perspectives"
         )
         assert perspectives_arg is not None
         assert "munger" in perspectives_arg
@@ -696,10 +710,9 @@ class TestPersonaIntegration:
         from long_earn.strategy_rd.agents.strategy_research_agent import (
             StrategyResearchAgent,
         )
+
         agent = StrategyResearchAgent(context=context)
-        agent.backpropagate_insights = MagicMock(
-            return_value={"insight": "降级洞察"}
-        )
+        agent.backpropagate_insights = MagicMock(return_value={"insight": "降级洞察"})
 
         state = {
             "hypothesis_tree": tree.serialize(),
@@ -722,9 +735,7 @@ class TestPersonaIntegration:
 
         # backpropagate_insights 仍应被调用，master_perspectives 为 None
         agent.backpropagate_insights.assert_called_once()
-        perspectives_arg = (
-            agent.backpropagate_insights.call_args.kwargs.get(
-                "master_perspectives"
-            )
+        perspectives_arg = agent.backpropagate_insights.call_args.kwargs.get(
+            "master_perspectives"
         )
         assert perspectives_arg is None

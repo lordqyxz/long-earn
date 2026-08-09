@@ -37,6 +37,7 @@ def test_analyzer_reads_events_from_db():
 
         # 使用 duckdb 直接查询（避免 backtest_analyzer 中的硬编码 schema 名）
         import duckdb
+
         conn = duckdb.connect(str(db_path))
         events = conn.execute('SELECT * FROM "backtest_audit".logs').pl()
         conn.close()
@@ -74,6 +75,7 @@ def test_analyzer_returns_summary():
         provider.close()
 
         import duckdb
+
         conn = duckdb.connect(str(db_path))
         summary = conn.execute(
             'SELECT event_type, COUNT(*) as count FROM "backtest_audit".logs GROUP BY event_type'

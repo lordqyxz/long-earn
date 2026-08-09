@@ -25,7 +25,9 @@ class _FakeResearchAgent:
     def __init__(self, optimized: dict[str, Any]) -> None:
         self._optimized = optimized
 
-    def optimize_strategy(self, *, strategy, improvement_suggestions, previous_backtest):
+    def optimize_strategy(
+        self, *, strategy, improvement_suggestions, previous_backtest
+    ):
         return self._optimized
 
 
@@ -49,7 +51,9 @@ class _FakeBacktestService:
     def __init__(self, result: dict[str, Any]) -> None:
         self._result = result
 
-    def run_candidates(self, *, strategy_yamls, start_date="", end_date="", universe_type=""):
+    def run_candidates(
+        self, *, strategy_yamls, start_date="", end_date="", universe_type=""
+    ):
         return [self._result for _ in strategy_yamls]
 
 

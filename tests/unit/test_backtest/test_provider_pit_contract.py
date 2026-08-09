@@ -44,12 +44,8 @@ def _make_quarterly_data() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "symbol": ["600519.SH"] * 2,
-            "report_date": pd.to_datetime(
-                ["2020-03-31", "2020-06-30"]
-            ),
-            "announce_date": pd.to_datetime(
-                ["2020-04-25", "2020-08-20"]
-            ),
+            "report_date": pd.to_datetime(["2020-03-31", "2020-06-30"]),
+            "announce_date": pd.to_datetime(["2020-04-25", "2020-08-20"]),
             "revenue": [100.0, 200.0],
             "net_profit": [10.0, 20.0],
         }
@@ -88,9 +84,7 @@ class TestPITContract:
     - 公告日前 revenue 必须为 NaN，公告日及之后 revenue 必须为 100
     """
 
-    def test_no_future_function_before_announce_date(
-        self, provider_instance: Any
-    ):
+    def test_no_future_function_before_announce_date(self, provider_instance: Any):
         """C1.1 公告日前不能用未公布数据——PIT 契约生效"""
         provider = provider_instance
         quarterly_df = _make_quarterly_data()
@@ -108,9 +102,7 @@ class TestPITContract:
             f"该财报 2020-04-25 才公告"
         )
 
-    def test_data_visible_after_announce_date(
-        self, provider_instance: Any
-    ):
+    def test_data_visible_after_announce_date(self, provider_instance: Any):
         """C1.2 公告日后数据可见——announce_date 后能看到报告值"""
         provider = provider_instance
         quarterly_df = _make_quarterly_data()
@@ -158,9 +150,7 @@ class TestPITContract:
                 "revenue": [100.0],
             }
         )
-        trading_dates = pd.DatetimeIndex(
-            ["2020-04-27", "2020-04-28", "2020-04-29"]
-        )
+        trading_dates = pd.DatetimeIndex(["2020-04-27", "2020-04-28", "2020-04-29"])
         result = provider._quarterly_to_daily(
             quarterly_df2, ["600519.SH"], trading_dates, ["revenue"]
         )
@@ -189,9 +179,7 @@ class TestEmptyReturnContract:
     def test_empty_symbols_price_panel(self, provider_instance: Any):
         """C2.2 get_price_panel symbols 为空 → 空 DataFrame"""
         provider = provider_instance
-        result = provider.get_price_panel(
-            [], "2020-01-01", "2020-12-31"
-        )
+        result = provider.get_price_panel([], "2020-01-01", "2020-12-31")
         assert isinstance(result, pd.DataFrame)
         assert result.empty
 
@@ -285,18 +273,31 @@ class TestAnnounceDateExtraction:
         # 验证各表字段存在
         expected_fields = {
             # Income
-            "revenue", "net_profit", "eps", "research_expenses",
+            "revenue",
+            "net_profit",
+            "eps",
+            "research_expenses",
             # Balance
-            "total_equity", "total_assets", "total_liabilities",
+            "total_equity",
+            "total_assets",
+            "total_liabilities",
             # CashFlow
-            "ocf", "capex",
+            "ocf",
+            "capex",
             # Pershareindex
-            "bps", "ocf_per_share", "debt_to_assets",
-            "net_profit_margin", "roe_weighted",
+            "bps",
+            "ocf_per_share",
+            "debt_to_assets",
+            "net_profit_margin",
+            "roe_weighted",
             # 衍生指标
-            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+            "net_profit_yoy",
+            "revenue_yoy",
+            "roe",
+            "gross_margin",
             # Capital（ADR-014 任务7）
-            "total_shares", "float_shares",
+            "total_shares",
+            "float_shares",
         }
         assert set(FINANCIAL_FIELD_MAP.keys()) == expected_fields, (
             f"FINANCIAL_FIELD_MAP 字段不匹配，"
@@ -328,12 +329,24 @@ class TestAnnounceDateExtraction:
             all_cols.update(columns["column_name"].tolist())
 
         expected_financial_cols = {
-            "revenue", "net_profit", "eps", "research_expenses",
-            "total_equity", "total_assets", "total_liabilities",
-            "ocf", "capex",
-            "bps", "ocf_per_share", "debt_to_assets",
-            "net_profit_margin", "roe_weighted",
-            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+            "revenue",
+            "net_profit",
+            "eps",
+            "research_expenses",
+            "total_equity",
+            "total_assets",
+            "total_liabilities",
+            "ocf",
+            "capex",
+            "bps",
+            "ocf_per_share",
+            "debt_to_assets",
+            "net_profit_margin",
+            "roe_weighted",
+            "net_profit_yoy",
+            "revenue_yoy",
+            "roe",
+            "gross_margin",
         }
         missing = expected_financial_cols - all_cols
         assert not missing, f"8 张细表 collectively 缺失字段: {missing}"
@@ -348,29 +361,31 @@ class TestAnnounceDateExtraction:
 
         cache = DataCache(db_path=tmp_path / "test_rt.duckdb")
         # 构造含全部 18 个字段的测试数据
-        test_df = pd.DataFrame({
-            "symbol": ["600519.SH"],
-            "report_date": pd.to_datetime(["2020-03-31"]),
-            "announce_date": pd.to_datetime(["2020-04-25"]),
-            "revenue": [100.0],
-            "net_profit": [10.0],
-            "eps": [0.8],
-            "research_expenses": [5.0],
-            "total_equity": [500.0],
-            "total_assets": [1000.0],
-            "total_liabilities": [500.0],
-            "ocf": [15.0],
-            "capex": [3.0],
-            "bps": [40.0],
-            "ocf_per_share": [1.2],
-            "debt_to_assets": [0.5],
-            "net_profit_margin": [0.1],
-            "roe_weighted": [0.02],
-            "net_profit_yoy": [0.15],
-            "revenue_yoy": [0.2],
-            "roe": [0.02],
-            "gross_margin": [0.5],
-        })
+        test_df = pd.DataFrame(
+            {
+                "symbol": ["600519.SH"],
+                "report_date": pd.to_datetime(["2020-03-31"]),
+                "announce_date": pd.to_datetime(["2020-04-25"]),
+                "revenue": [100.0],
+                "net_profit": [10.0],
+                "eps": [0.8],
+                "research_expenses": [5.0],
+                "total_equity": [500.0],
+                "total_assets": [1000.0],
+                "total_liabilities": [500.0],
+                "ocf": [15.0],
+                "capex": [3.0],
+                "bps": [40.0],
+                "ocf_per_share": [1.2],
+                "debt_to_assets": [0.5],
+                "net_profit_margin": [0.1],
+                "roe_weighted": [0.02],
+                "net_profit_yoy": [0.15],
+                "revenue_yoy": [0.2],
+                "roe": [0.02],
+                "gross_margin": [0.5],
+            }
+        )
         cache.save_financials(test_df)
 
         # 读取（不指定 fields，返回全量 union）
@@ -379,11 +394,24 @@ class TestAnnounceDateExtraction:
         assert not result.empty
         # 验证所有 18 个字段都有值（union 后跨表合并）
         for col in [
-            "revenue", "net_profit", "eps", "research_expenses",
-            "total_equity", "total_assets", "total_liabilities",
-            "ocf", "capex", "bps", "ocf_per_share", "debt_to_assets",
-            "net_profit_margin", "roe_weighted",
-            "net_profit_yoy", "revenue_yoy", "roe", "gross_margin",
+            "revenue",
+            "net_profit",
+            "eps",
+            "research_expenses",
+            "total_equity",
+            "total_assets",
+            "total_liabilities",
+            "ocf",
+            "capex",
+            "bps",
+            "ocf_per_share",
+            "debt_to_assets",
+            "net_profit_margin",
+            "roe_weighted",
+            "net_profit_yoy",
+            "revenue_yoy",
+            "roe",
+            "gross_margin",
         ]:
             assert col in result.columns, f"返回结果缺少字段: {col}"
             assert pd.notna(result[col].iloc[0]), f"字段 {col} 值为 NaN"

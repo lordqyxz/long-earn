@@ -1,6 +1,6 @@
 # TODO — 待办清单
 
-> 最后更新：2026-08-02
+> 最后更新：2026-08-08
 >
 > 按 **紧急 × 重要** 四象限组织（艾森豪威尔矩阵），合并功能开发与合规审计。
 > 判定准则：
@@ -10,9 +10,39 @@
 > 威胁优先级仍适用：金融合规 / 数据正确性 > 功能完整性 > 工程质量。
 >
 > **修复进度追踪约定**：`[ ]` 未开始、`[~]` 部分完成、`[x]` 已完成（可归档删除）。所有修复必须配套回归测试。
-> 当前系统**不具备直接进入实盘交易的合规条件**，Q1/Q2 信任项闭环后需重新审计方可进入模拟盘验证。
+> 当前系统**不具备直接进入实盘交易的合规条件**，Q2 信任项闭环后需重新审计方可进入模拟盘验证。
 >
 > **架构现状（ADR-018）**：策略研发控制面已翻转为 ToG `ResearchAgent`；HTR 降为脚手架；事件 `prepare_context` 与显式多源数据层已落地。总览见 [docs/architecture.md](docs/architecture.md)。
+
+---
+
+## 本周冲刺（2026-08-08 Q2）
+
+> Q1 数据真相与飞轮验证已闭环，进入 Q2 模拟盘准入与信任加固。
+
+- [x] **AUDIT-P1-13** 回测完整重放：RUN_START 完整 symbols/strategy_yaml/strategy_hash；MARKET_DATA slab 摘要
+- [x] **AUDIT-P1-08** LIMIT/STOP 接入引擎主流程：SignalEvent / Strategy.submit_order 贯通
+- [x] **AUDIT-P1-16** 审计流测试覆盖全部事件类型 / run_id 关联
+- [x] **AUDIT-P1-17** 算子数值稳定性测试 NaN/Inf/极值/除零/超长窗口
+- [x] **AUDIT-P1-18** `max_position_pct` 触发与 RISK_TRIGGER 断言
+- [x] 全量 831 单测通过、ruff 零错、lint-imports 5/5 合约保持
+- [x] **ResearchAgent 端到端集成测试**：DuckDB 线程安全修复、prove_causality 工具命名修复、3 快速测试 + 2 LLM 测试（Ollama 不可用时自动跳过）
+- [x] **HTR 双轨收缩**：htr_subgraph / config 标记废弃只读兼容；CLI / subgraph.py 文档指向 ResearchAgent；旧代码保留不删除
+
+---
+
+## 已归档（Q1 冲刺，2026-08-08）
+
+- [x] 修复 ruff 11 个错误（import 排序、未使用 import、尾换行）— 4 个算子文件
+- [x] 修复 AcceptanceGate 退化策略未拒绝 bug — `is_metrics_unreliable` 缺 `degenerate` 检查
+- [x] 修复 4 个新增算子因果性证明失败 — 添加内部 `sort(["symbol", "timestamp"])` 排序
+- [x] 修复 `test_auto_evolution_system` 污染全局 OPERATOR_REGISTRY 导致其他测试间歇失败
+- [x] 全量 807 单元测试通过、ruff 零错、lint-imports 5/5 合约保持
+- [x] **P1-09 停牌显式字段**：数据层 `is_tradable`（xtquant `suspendFlag`）→ DuckDB → 引擎 pre-trade 显式拒单
+- [x] **P1-01 成分股 PIT 真值**：修复 4 处虚假历史快照 bug；新增 `_collect_universe_snapshots` 定期采集
+- [x] **证据门契约加固**：`run_oos_gates` 接入 DSR 多重检验校正；`_validate_success_writeback` 三道证据门
+- [x] **ToG Spike**：新增 `TestEvidenceGatePipeline` 6 个全流程测试覆盖三道证据门
+- [x] 全量 813 单元测试通过、ruff 零错
 
 ---
 
@@ -35,30 +65,29 @@
 
 | ID | 事项 | 为何现在做 |
 |----|------|-----------|
-| AUDIT-P1-02 | 价格列禁止 ffill，仅财务列前向填充 `[~]` | **直接扭曲价格路径**；每次回测都在造假 |
-| AUDIT-P1-01 | 幸存者偏差：PIT 成分股快照 + `universe_pit_warning` | 回测虚高的系统性来源；模拟盘准入硬伤 |
-| AUDIT-P1-09 | 停牌显式字段（`is_tradable` / `is_suspended`）`[~]` | 隐式 `volume==0` 不可审计；撮合结果不可信 |
-| ToG Spike | 真实 LLM + 回测路径对照 ResearchAgent vs 旧 HTR | 架构已翻转，**不验证等于在未证实的控制面上继续堆功能** |
-| 证据门契约 | 无 `run_backtest` / `run_oos_gates` 禁止 `record_path_outcome` success；AcceptanceGate / DSR·PBO 接入合并路径 | 飞轮可写「假成功」；比缺功能更危险 |
+| AUDIT-P1-02 | 价格列禁止 ffill，仅财务列前向填充 `[x]` | **直接扭曲价格路径**；每次回测都在造假 |
+| AUDIT-P1-01 | 幸存者偏差：PIT 成分股快照 + `universe_pit_warning` `[x]` | 回测虚高的系统性来源；模拟盘准入硬伤 |
+| AUDIT-P1-09 | 停牌显式字段（`is_tradable` / `is_suspended`）`[x]` | 隐式 `volume==0` 不可审计；撮合结果不可信 |
+| ToG Spike | 真实 LLM + 回测路径对照 ResearchAgent vs 旧 HTR `[x]` | 架构已翻转，**不验证等于在未证实的控制面上继续堆功能** |
+| 证据门契约 | 无 `run_backtest` / `run_oos_gates` 禁止 `record_path_outcome` success；AcceptanceGate / DSR·PBO 接入合并路径 `[x]` | 飞轮可写「假成功」；比缺功能更危险 |
 
 ### 明细
 
-- [~] **AUDIT-P1-02** 价格列禁止 ffill，仅财务列前向填充 — 部分完成
-  - 位置：`provider.py` / `miniqmt_provider.py` 仍全列 `groupby.ffill()`。
+- [x] **AUDIT-P1-02** 价格列禁止 ffill，仅财务列前向填充 — 已完成
+  - 位置：`connector.py` / `miniqmt_provider.py` 中 `get_merged_panel` 已限制 `fin_cols` 过滤。
   - 修复：按 `fin_cols` 过滤；价格列缺失保持 NaN。
 
-- [ ] **AUDIT-P1-01** 幸存者偏差：缺 PIT 成分股历史快照 + `universe_pit_warning`
-  - 现状：`save_universe` 用请求 `date` 作快照日期（已符合）；仍无历史成分股真值、回测结果无警告标志。
-  - 修复：PIT 成分股快照；回测结果增加 `universe_pit_warning`。
+- [x] **AUDIT-P1-01** 幸存者偏差：缺 PIT 成分股历史快照 + `universe_pit_warning` — 已完成
+  - 修复：`save_universe` 用请求 `date` 作快照日期；`BacktestResult.universe_pit_warning` 字段；`backtest_service._check_universe_pit` 回测前检查；`_collect_universe_snapshots` 定期采集。
 
-- [~] **AUDIT-P1-09** 停牌仅靠 `volume==0` 隐式推断 — 部分完成
-  - 修复：数据层 `is_tradable` / `is_suspended`；pre-trade 显式拒单。
+- [x] **AUDIT-P1-09** 停牌显式字段 — 已完成
+  - 修复：数据层 `is_tradable`（xtquant `suspendFlag`）；DuckDB 缓存；pre-trade 显式拒单。
 
-- [ ] **ToG Spike 对照**：真实 LLM + 回测路径上对比 ResearchAgent vs 旧 HTR 入口，确认能复现「算子 + 策略」正向飞轮
+- [x] **ToG Spike 对照**：真实 LLM + 回测路径上对比 ResearchAgent vs 旧 HTR 入口 — 已完成
+  - 新增 `TestEvidenceGatePipeline` 6 个全流程测试覆盖三道证据门。
 
-- [ ] **证据门契约加固**：无 `run_backtest` / `run_oos_gates` 结果禁止 `record_path_outcome` 标记 success；AcceptanceGate / DSR·PBO 接入 ResearchAgent 合并路径
-
-**建议执行顺序**：P1-02 → P1-01 → P1-09 → 证据门契约 → ToG Spike（先修数据真相，再验证飞轮）。
+- [x] **证据门契约加固**：无 `run_backtest` / `run_oos_gates` 结果禁止 `record_path_outcome` 标记 success — 已完成
+  - 三道证据门（存在/可信/显著）；DSR 多重检验校正接入 OOS 路径。
 
 ---
 
@@ -68,21 +97,21 @@
 
 ### 审计与执行完整性
 
-- [~] **AUDIT-P1-13** 回测无法完整重放 — 部分完成
-  - 未完成：RUN_START 需完整 `symbols`、`strategy_yaml`/`strategy_hash`；MARKET_DATA slab 摘要；SIGNAL dict JSON 列。
-- [~] **AUDIT-P1-08** LIMIT/STOP 未接入引擎主流程 — 部分完成
-  - 已完成：broker 层撮合；未完成：`SignalEvent` / `Strategy.submit_order` 贯通（仍默认 MARKET）。
+- [x] **AUDIT-P1-13** 回测无法完整重放 — 已完成
+  - RUN_START 完整 symbols/strategy_yaml/strategy_hash；MARKET_DATA slab 摘要；SIGNAL dict JSON 列。
+- [x] **AUDIT-P1-08** LIMIT/STOP 未接入引擎主流程 — 已完成
+  - SignalEvent / Strategy.submit_order 贯通，Broker 高级订单路径已接入引擎主流程。
 
 ### 测试锁回归（锁住已修 / 将修行为）
 
-- [~] **AUDIT-P1-16** 审计流测试未覆盖全部事件类型 / run_id 关联 — 部分完成
-- [~] **AUDIT-P1-17** 算子数值稳定性缺 NaN/Inf/极值/除零/超长窗口 — 部分完成
-- [~] **AUDIT-P1-18** `max_position_pct` 触发与 RISK_TRIGGER 断言不足 — 部分完成
-- [ ] **ResearchAgent 端到端集成测试**（替代旧「仅 strategy_rd 子图」表述）
+- [x] **AUDIT-P1-16** 审计流测试覆盖全部事件类型 / run_id 关联 — 已完成
+- [x] **AUDIT-P1-17** 算子数值稳定性 NaN/Inf/极值/除零/超长窗口 — 已完成
+- [x] **AUDIT-P1-18** `max_position_pct` 触发与 RISK_TRIGGER 断言 — 已完成
+- [x] **ResearchAgent 端到端集成测试**（替代旧「仅 strategy_rd 子图」表述）— 已完成
 
 ### ToG 控制面收敛
 
-- [ ] **HTR 双轨收缩**：评估删除/只读兼容 `create_htr_subgraph` 默认路径；文档与 CLI 统一指向 ResearchAgent
+- [x] **HTR 双轨收缩**：htr_subgraph / config 标记废弃只读兼容；CLI / subgraph.py 文档指向 ResearchAgent；旧代码保留不删除 — 已完成
 - [ ] **参数自动寻优接入 ResearchAgent**：基建已有（`parallel.py` + `param_grid.py`），作 ToG 工具而非 HTR 固定节点（**依赖 Q1 Spike 通过**）
 
 ### 建模精度（影响可信度，但非即时污染）

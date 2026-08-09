@@ -9,6 +9,7 @@ ADR-014 阶段 B：``financial_quarterly`` 单一宽表废弃，改为 8 张细�
 """
 
 import contextlib
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,14 +41,19 @@ class DataCache:
         """
         self.db_path = Path(db_path) if db_path else backtest_cache_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: duckdb.DuckDBPyConnection | None = None
+        self._db_path_str = str(self.db_path)
+        self._local = threading.local()
         self._init_tables()
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        """获取数据库连接（懒加载）"""
-        if self._conn is None:
-            self._conn = duckdb.connect(str(self.db_path))
-        return self._conn
+        """获取当前线程的数据库连接（线程安全）。
+
+        每个线程持有独立 DuckDB 连接，避免多线程并发访问同一连接
+        导致的 access violation 崩溃。
+        """
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn = duckdb.connect(self._db_path_str)
+        return self._local.conn
 
     @staticmethod
     def _normalize_date(date_str: str) -> str:
@@ -87,9 +93,16 @@ class DataCache:
                 low DOUBLE,
                 close DOUBLE,
                 volume DOUBLE,
+                is_tradable BOOLEAN DEFAULT TRUE,
                 PRIMARY KEY (symbol, date)
             )
         """)
+        # P1-09 迁移：为旧表添加 is_tradable 列（IF NOT EXISTS 语法）
+        with contextlib.suppress(Exception):
+            conn.execute("""
+                ALTER TABLE price_daily
+                ADD COLUMN IF NOT EXISTS is_tradable BOOLEAN DEFAULT TRUE
+            """)
 
         # 财务数据 schema 元表（版本管理）
         conn.execute("""
@@ -257,9 +270,14 @@ class DataCache:
         conn.execute("""
             CREATE OR REPLACE TEMP TABLE temp_price AS SELECT * FROM df
         """)
-        conn.execute("""
-            INSERT OR REPLACE INTO price_daily
-            SELECT symbol, date, open, high, low, close, volume
+        # 动态构建 INSERT 列清单：兼容新旧 schema（is_tradable 列可选）
+        insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
+        if "is_tradable" in df.columns:
+            insert_cols.append("is_tradable")
+        cols_str = ", ".join(insert_cols)
+        conn.execute(f"""
+            INSERT OR REPLACE INTO price_daily ({cols_str})
+            SELECT {cols_str}
             FROM temp_price
         """)
         logger.info(f"缓存行情数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
@@ -735,6 +753,32 @@ class DataCache:
             logger.warning(f"缓存查询成分股失败: {e}")
             return []
 
+    def get_universe_snapshot_date(
+        self, index_code: str, target_date: str
+    ) -> str | None:
+        """获取 PIT 查询实际使用的快照日期。
+
+        返回 <= target_date 的最新快照日期，或 None（无历史快照时）。
+        用于判断回测是否使用了 PIT 对齐的股票池（幸存者偏差检测）。
+        """
+        date_fmt = self._normalize_date(target_date)
+        if not date_fmt:
+            return None
+        try:
+            conn = self._get_conn()
+            result = conn.execute(
+                """
+                SELECT MAX(date) FROM universe_constituents
+                WHERE index_code = ? AND date <= ?
+                """,
+                [index_code, date_fmt],
+            ).fetchdf()
+            if result.empty or result.iloc[0, 0] is None:
+                return None
+            return str(result.iloc[0, 0])[:10]
+        except Exception:
+            return None
+
     def save_universe(self, index_code: str, date: str, symbols: list[str]) -> None:
         """保存指数成分股到缓存。
 
@@ -766,11 +810,11 @@ class DataCache:
         logger.info(f"缓存成分股: {index_code} @ {date}, {len(symbols)} 只")
 
     def close(self) -> None:
-        """关闭数据库连接"""
-        if self._conn is not None:
+        """关闭当前线程的数据库连接"""
+        if hasattr(self._local, "conn") and self._local.conn is not None:
             with contextlib.suppress(Exception):
-                self._conn.close()
-            self._conn = None
+                self._local.conn.close()
+            self._local.conn = None
 
     def __enter__(self):
         return self

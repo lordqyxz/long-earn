@@ -66,9 +66,7 @@ class TestExtractChatPrompt:
         extractor = LLMEventExtractor(mock_llm)
 
         items = [
-            CollectedItem(
-                title="茅台财报", content="净利润增长15%", source="fake"
-            )
+            CollectedItem(title="茅台财报", content="净利润增长15%", source="fake")
         ]
         extractor.extract(items)
 

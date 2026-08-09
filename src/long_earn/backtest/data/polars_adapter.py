@@ -77,7 +77,7 @@ class PandasToPolarsProvider:
             symbols,
             start_date,
             end_date,
-            price_fields=["open", "high", "low", "close", "volume"],
+            price_fields=["open", "high", "low", "close", "volume", "is_tradable"],
             # financial_fields=None：provider 默认返回全量财务字段
             # （FINANCIAL_FIELD_MAP 中定义的 18 个字段，ADR-007 Phase 3）
         )

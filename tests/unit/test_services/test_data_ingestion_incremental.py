@@ -141,9 +141,13 @@ class TestSchemaVersioning:
         assert "2024-01-01" in str(latest)
 
         # 版本号已刷回当前版本
-        ver = cache2._get_conn().execute(
-            "SELECT version FROM _schema_meta WHERE table_name = 'income_stmt'"
-        ).fetchone()
+        ver = (
+            cache2._get_conn()
+            .execute(
+                "SELECT version FROM _schema_meta WHERE table_name = 'income_stmt'"
+            )
+            .fetchone()
+        )
         assert ver is not None
         assert ver[0] >= 1
 
@@ -297,9 +301,7 @@ class TestBatchLatestInterfaces:
         _save_price_rows(cache, "000001.SZ", ["2026-07-01", "2026-07-08"])
         _save_price_rows(cache, "000002.SZ", ["2026-07-05"])
 
-        result = cache.get_price_latest_dates(
-            ["000001.SZ", "000002.SZ", "999999.SZ"]
-        )
+        result = cache.get_price_latest_dates(["000001.SZ", "000002.SZ", "999999.SZ"])
         assert "000001.SZ" in result
         assert "2026-07-08" in str(result["000001.SZ"])
         assert "000002.SZ" in result

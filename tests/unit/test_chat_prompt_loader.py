@@ -34,9 +34,7 @@ messages:
 ---
 """
         prompt_file, caller_file = _write(tmp_path, "split.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         msgs = tpl.format_messages(role="价值", stock_data="600519")
 
@@ -61,9 +59,7 @@ messages:
 ---
 """
         prompt_file, caller_file = _write(tmp_path, "jinja.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         msgs = tpl.format_messages(role="<a> & x", data="<strategy> & y")
 
@@ -85,9 +81,7 @@ description: 无 messages 字段
 
 分析 {{ stock }} 的数据，市场：{{ market }}。"""
         prompt_file, caller_file = _write(tmp_path, "fallback.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         msgs = tpl.format_messages(stock="600519", market="A 股")
 
@@ -112,17 +106,13 @@ messages:
 ---
 """
         prompt_file, caller_file = _write(tmp_path, "placeholder.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         examples = [
             HumanMessage(content="示例问题"),
             AIMessage(content="示例回答"),
         ]
-        msgs = tpl.format_messages(
-            role="价值", data="600519", examples=examples
-        )
+        msgs = tpl.format_messages(role="价值", data="600519", examples=examples)
 
         # system + 2 examples + human = 4
         assert len(msgs) == 4
@@ -148,9 +138,7 @@ messages:
 ---
 """
         prompt_file, caller_file = _write(tmp_path, "fmt.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         result = tpl.format(role="价值", data="600519")
 
@@ -167,9 +155,7 @@ version: 1.0.0
 
 分析 {{ stock }}。"""
         prompt_file, caller_file = _write(tmp_path, "fmt_fb.md", content)
-        tpl = MarkdownChatPromptTemplate(
-            str(prompt_file), caller_file=str(caller_file)
-        )
+        tpl = MarkdownChatPromptTemplate(str(prompt_file), caller_file=str(caller_file))
 
         result = tpl.format(stock="600519")
         assert result == "分析 600519。"

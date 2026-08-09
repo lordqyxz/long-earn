@@ -73,10 +73,22 @@ class TestFamilyPivotBranch:
         branches = [
             {"direction": "收益增强", "reflection": "", "improvement_suggestions": []},
             {"direction": "风险控制", "reflection": "", "improvement_suggestions": []},
-            {"direction": "收益稳定性", "reflection": "", "improvement_suggestions": []},
-            {"direction": "策略家族切换", "reflection": "", "improvement_suggestions": []},
+            {
+                "direction": "收益稳定性",
+                "reflection": "",
+                "improvement_suggestions": [],
+            },
+            {
+                "direction": "策略家族切换",
+                "reflection": "",
+                "improvement_suggestions": [],
+            },
         ]
-        backtest_result = {"total_return": 0.15, "max_drawdown": -0.10, "sharpe_ratio": 0.6}
+        backtest_result = {
+            "total_return": 0.15,
+            "max_drawdown": -0.10,
+            "sharpe_ratio": 0.6,
+        }
 
         evaluated = agent._evaluate_branches(
             branches, backtest_result, history_return=-0.30
@@ -91,9 +103,17 @@ class TestFamilyPivotBranch:
 
         branches = [
             {"direction": "收益增强", "reflection": "", "improvement_suggestions": []},
-            {"direction": "策略家族切换", "reflection": "", "improvement_suggestions": []},
+            {
+                "direction": "策略家族切换",
+                "reflection": "",
+                "improvement_suggestions": [],
+            },
         ]
-        backtest_result = {"total_return": 0.15, "max_drawdown": -0.10, "sharpe_ratio": 0.6}
+        backtest_result = {
+            "total_return": 0.15,
+            "max_drawdown": -0.10,
+            "sharpe_ratio": 0.6,
+        }
 
         evaluated = agent._evaluate_branches(
             branches, backtest_result, history_return=0.20
@@ -110,9 +130,17 @@ class TestFamilyPivotBranch:
 
         branches = [
             {"direction": "收益增强", "reflection": "", "improvement_suggestions": []},
-            {"direction": "策略家族切换", "reflection": "", "improvement_suggestions": []},
+            {
+                "direction": "策略家族切换",
+                "reflection": "",
+                "improvement_suggestions": [],
+            },
         ]
-        backtest_result = {"total_return": -0.05, "max_drawdown": -0.10, "sharpe_ratio": 0.3}
+        backtest_result = {
+            "total_return": -0.05,
+            "max_drawdown": -0.10,
+            "sharpe_ratio": 0.3,
+        }
 
         evaluated = agent._evaluate_branches(
             branches, backtest_result, history_return=-0.30

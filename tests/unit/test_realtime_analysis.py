@@ -199,9 +199,7 @@ class TestFundFlowAnalyst:
         from long_earn.stock_analysis.agents.fund_flow_analyst import FundFlowAnalyst
 
         mi = MagicMock()
-        mi.get_fund_flow.return_value = pd.DataFrame(
-            {"net_inflow": [1000000, 2000000]}
-        )
+        mi.get_fund_flow.return_value = pd.DataFrame({"net_inflow": [1000000, 2000000]})
         ctx = self._make_context(market_intelligence=mi)
         analyst = FundFlowAnalyst(ctx)
         df = analyst.fetch_fund_flow("600519.SH")

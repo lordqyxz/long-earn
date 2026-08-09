@@ -205,6 +205,46 @@ class TestMergedPanelFfillSorted:
         # 6-01: ROE 应是 0.2
         assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.2
 
+    @pytest.mark.parametrize("kind", FFILL_PROVIDERS)
+    def test_price_not_ffilled_fin_still_ffilled(self, kind: str):
+        """价格列缺失保持 NaN；财务列仍前向填充（AUDIT-P1-02）。"""
+        # 行情仅 5-01、6-01 有 close；4-01 无行情
+        price_dates = pd.to_datetime(["2023-05-01", "2023-06-01"])
+        price_df = pd.DataFrame(
+            {"close": [11.0, 12.0]},
+            index=pd.MultiIndex.from_product(
+                [price_dates, ["000001"]], names=["date", "symbol"]
+            ),
+        )
+        # 财务 4-01、6-01 有 ROE
+        fin_dates = pd.to_datetime(["2023-04-01", "2023-06-01"])
+        fin_df = pd.DataFrame(
+            {"roe": [0.1, 0.2]},
+            index=pd.MultiIndex.from_product(
+                [fin_dates, ["000001"]], names=["date", "symbol"]
+            ),
+        )
+
+        provider = _make_ffill_provider(kind, price_df, fin_df)
+        result = provider.get_merged_panel(
+            symbols=["000001"],
+            start_date="2023-04-01",
+            end_date="2023-06-30",
+        )
+
+        sym = result.xs("000001", level="symbol")
+        # 4-01: 无行情，close 必须保持 NaN（禁止价格 ffill）
+        assert pd.isna(sym.loc[pd.Timestamp("2023-04-01"), "close"]), (
+            f"{kind}: 价格列被错误 ffill，4-01 close 应为 NaN"
+        )
+        assert sym.loc[pd.Timestamp("2023-04-01"), "roe"] == 0.1
+        # 5-01: 有行情；ROE 由 4-01 前向填充
+        assert sym.loc[pd.Timestamp("2023-05-01"), "close"] == 11.0
+        assert sym.loc[pd.Timestamp("2023-05-01"), "roe"] == 0.1
+        # 6-01: 行情与财务均有值
+        assert sym.loc[pd.Timestamp("2023-06-01"), "close"] == 12.0
+        assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.2
+
 
 # ── 委托契约：ciccwm/akshare 的 get_merged_panel（无 ffill） ──────────
 

@@ -226,9 +226,7 @@ class TestRunCandidatesEquivalence:
         panel = _make_panel(days=80)
         symbols = ["000001", "000002", "000003", "000004", "000005"]
 
-        runner = ParallelRunner(
-            max_workers=1, data_provider=_MockDataProvider(panel)
-        )
+        runner = ParallelRunner(max_workers=1, data_provider=_MockDataProvider(panel))
         outcomes = runner.run_candidates(
             strategy_yamls=[STRATEGY_YAML],
             start_date="2024-01-01",

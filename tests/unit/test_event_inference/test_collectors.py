@@ -68,14 +68,10 @@ class TestCollectorRegistry:
     def test_collect_all_merges_results(self):
         registry = CollectorRegistry()
         registry.register(
-            _FakeCollector(
-                "a", [CollectedItem(title="t1", content="c1", source="a")]
-            )
+            _FakeCollector("a", [CollectedItem(title="t1", content="c1", source="a")])
         )
         registry.register(
-            _FakeCollector(
-                "b", [CollectedItem(title="t2", content="c2", source="b")]
-            )
+            _FakeCollector("b", [CollectedItem(title="t2", content="c2", source="b")])
         )
         items = registry.collect_all("茅台")
         assert len(items) == 2
@@ -163,7 +159,11 @@ class TestCiccwmHotCollector:
     def test_collect_converts_dataframe(self):
         df = pd.DataFrame(
             [
-                {"title": "央行降准", "content": "释放长期资金", "redirect_url": "http://a"},
+                {
+                    "title": "央行降准",
+                    "content": "释放长期资金",
+                    "redirect_url": "http://a",
+                },
                 {"title": "", "content": ""},
             ]
         )

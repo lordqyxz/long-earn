@@ -13,7 +13,9 @@ from long_earn.backtest.engine.audit import AuditLogger, DuckDBAuditProvider
 from long_earn.dashboard.analyzer import BacktestAnalyzer
 
 
-def _make_provider_and_logger(db_path: Path, run_id: str) -> tuple[AuditLogger, DuckDBAuditProvider]:
+def _make_provider_and_logger(
+    db_path: Path, run_id: str
+) -> tuple[AuditLogger, DuckDBAuditProvider]:
     provider = DuckDBAuditProvider(db_path=db_path)
     logger = AuditLogger(provider=provider, run_id=run_id)
     return logger, provider

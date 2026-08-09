@@ -139,9 +139,7 @@ class TestNodeByNodeCheckpoint:
         thread_config: dict,
     ):
         """init_tree 执行后应创建 hypothesis_tree 与 run_id"""
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["observe"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["observe"])
 
         # 首次 invoke，在 observe 前暂停
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
@@ -170,9 +168,7 @@ class TestNodeByNodeCheckpoint:
         thread_config: dict,
     ):
         """observe 执行后应有观察数据"""
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["ideate"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["ideate"])
 
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
@@ -192,9 +188,7 @@ class TestNodeByNodeCheckpoint:
         thread_config: dict,
     ):
         """ideate 执行后应有假设生成"""
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["select"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["select"])
 
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
@@ -218,9 +212,7 @@ class TestNodeByNodeCheckpoint:
         thread_config: dict,
     ):
         """select 执行后应有选中的假设"""
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["dispatch"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["dispatch"])
 
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
@@ -269,14 +261,11 @@ class TestNodeByNodeCheckpoint:
         first_result = executor_results[0]
         if first_result.get("rejected"):
             # 策略被正确拒绝 — 验证拒绝原因存在
-            assert first_result.get("rejection_reason"), (
-                "被拒绝的策略应有拒绝原因"
-            )
+            assert first_result.get("rejection_reason"), "被拒绝的策略应有拒绝原因"
         else:
             # 策略被接受 — 应有 strategy_yaml
-            strategy_yaml = (
-                values.get("strategy_yaml")
-                or values.get("optimized_strategy_yaml")
+            strategy_yaml = values.get("strategy_yaml") or values.get(
+                "optimized_strategy_yaml"
             )
             assert strategy_yaml, "被接受的策略应有 strategy_yaml"
 
@@ -291,9 +280,7 @@ class TestNodeByNodeCheckpoint:
         HTR _backpropagate_node 将实验结果抽象为洞察并传播到父节点，
         更新 hypothesis_tree（不设置 reflection 字段，那是原 subgraph 的字段）。
         """
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["decide"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["decide"])
 
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
@@ -321,9 +308,7 @@ class TestNodeByNodeCheckpoint:
         HTR _decide_node 设置 result（action: merge/continue/stop）和 iteration，
         不设置 should_continue（那是原 subgraph 的字段）。
         """
-        graph = self._build_graph(
-            context, checkpointer, interrupt_nodes=["save_tree"]
-        )
+        graph = self._build_graph(context, checkpointer, interrupt_nodes=["save_tree"])
 
         graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
@@ -402,9 +387,7 @@ class TestInterruptResume:
 
         # 验证最终结果完整
         assert result is not None
-        assert result.get("hypothesis_tree") is not None, (
-            "续跑后应有 hypothesis_tree"
-        )
+        assert result.get("hypothesis_tree") is not None, "续跑后应有 hypothesis_tree"
 
     def test_resume_from_executor(
         self,
@@ -438,12 +421,8 @@ class TestInterruptResume:
 
         # 续跑后应有回测结果（策略可能被 AcceptanceGate 拒绝，但回测仍执行）
         assert result is not None
-        assert result.get("backtest_result") is not None, (
-            "续跑后应有回测结果"
-        )
-        assert result.get("hypothesis_tree") is not None, (
-            "续跑后应有 hypothesis_tree"
-        )
+        assert result.get("backtest_result") is not None, "续跑后应有回测结果"
+        assert result.get("hypothesis_tree") is not None, "续跑后应有 hypothesis_tree"
 
 
 # ── 测试 3：线程复用 ──────────────────────────────────────────────
@@ -468,12 +447,8 @@ class TestThreadReuse:
         thread_config = {"configurable": {"thread_id": thread_id}}
 
         # 阶段 1：完整运行一轮
-        graph = create_strategy_rd_subgraph(
-            context, checkpointer=checkpointer
-        )
-        graph.invoke(
-            {"query": "研究一个基于ROE的选股策略"}, config=thread_config
-        )
+        graph = create_strategy_rd_subgraph(context, checkpointer=checkpointer)
+        graph.invoke({"query": "研究一个基于ROE的选股策略"}, config=thread_config)
 
         # 验证线程已完成
         snapshot = graph.get_state(thread_config)
@@ -481,10 +456,8 @@ class TestThreadReuse:
         assert snapshot.values, "线程应有最终状态"
 
         # 阶段 2：用 _thread_already_completed 检测
-        is_completed = (
-            StrategyResearchService._thread_already_completed(
-                graph, thread_config
-            )
+        is_completed = StrategyResearchService._thread_already_completed(
+            graph, thread_config
         )
         assert is_completed, "_thread_already_completed 应返回 True"
 
@@ -512,10 +485,8 @@ class TestThreadReuse:
         graph.invoke({"query": "研究策略"}, config=thread_config)
 
         # 线程未完成
-        is_completed = (
-            StrategyResearchService._thread_already_completed(
-                graph, thread_config
-            )
+        is_completed = StrategyResearchService._thread_already_completed(
+            graph, thread_config
         )
         assert not is_completed, "未完成线程不应被判定为已完成"
 
@@ -531,16 +502,12 @@ class TestThreadReuse:
         )
 
         checkpointer = MemorySaver()
-        graph = create_strategy_rd_subgraph(
-            context, checkpointer=checkpointer
-        )
+        graph = create_strategy_rd_subgraph(context, checkpointer=checkpointer)
 
         # 不存在的 thread_id
         thread_config = {"configurable": {"thread_id": "nonexistent"}}
-        is_completed = (
-            StrategyResearchService._thread_already_completed(
-                graph, thread_config
-            )
+        is_completed = StrategyResearchService._thread_already_completed(
+            graph, thread_config
         )
         assert not is_completed, "不存在的 thread 不应被判定为已完成"
 
@@ -583,14 +550,10 @@ class TestStrategyResearchServiceCheckpoint:
             create_htr_subgraph as create_strategy_rd_subgraph,
         )
 
-        graph = create_strategy_rd_subgraph(
-            context, checkpointer=checkpointer
-        )
+        graph = create_strategy_rd_subgraph(context, checkpointer=checkpointer)
         thread_config = {"configurable": {"thread_id": thread_id}}
-        is_completed = (
-            StrategyResearchService._thread_already_completed(
-                graph, thread_config
-            )
+        is_completed = StrategyResearchService._thread_already_completed(
+            graph, thread_config
         )
         assert is_completed, "checkpoint 应记录线程完成状态"
 

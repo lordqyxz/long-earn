@@ -112,9 +112,7 @@ class TestFinancialFieldDetailRetrieval:
         assert len(results) > 0
         content = " ".join(r["content"] for r in results)
         # 加权 ROE 应提及证监会或加权计算
-        assert "加权" in content, (
-            f"加权 ROE 背景未检索到，返回: {content[:300]}"
-        )
+        assert "加权" in content, f"加权 ROE 背景未检索到，返回: {content[:300]}"
 
     def test_fcf_formula_retrievable(self, kb_store: SubstanceStore):
         """自由现金流 FCF = OCF - capex 应能被检索到。"""
@@ -148,9 +146,7 @@ class TestKnowledgeBaseFieldCoverage:
         content = data_doc.read_text(encoding="utf-8")
         from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 
-        documented = sum(
-            1 for f in FINANCIAL_FIELD_MAP if f in content
-        )
+        documented = sum(1 for f in FINANCIAL_FIELD_MAP if f in content)
         assert documented == 20, (
             f"01_data.md 应记录全部 20 个字段，实际 {documented} 个"
         )

@@ -21,10 +21,26 @@ from long_earn.backtest.operators.base import (
 )
 
 EXPECTED_OPS = {
-    "shift", "returns", "windowed", "filter_threshold", "rank_top",
-    "arithmetic", "sma", "ema", "rsi", "macd", "bollinger",
+    "shift",
+    "returns",
+    "windowed",
+    "filter_threshold",
+    "rank_top",
+    "arithmetic",
+    "sma",
+    "ema",
+    "rsi",
+    "macd",
+    "bollinger",
     # operator_dev 自主研发写盘算子（htr_subgraph 接入后由 LLM 生成）
-    "log_return", "realized_vol",
+    "log_return",
+    "realized_vol",
+    # operator_dev 新增算子
+    "gross_margin_stability",
+    "roe_quality",
+    "lowvol_momentum_combo",
+    "quality_momentum",
+    "e2e_volatility",
 }
 
 

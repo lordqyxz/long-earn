@@ -185,6 +185,9 @@ def optimize(
 
     ADR-009 收尾：暴露 OptimizationPipeline 给研究员手动驱动，
     无需走完整 HTR 循环。AcceptanceGate 严格校验 sharpe 提升，未通过则保留原策略。
+
+    ADR-018：策略研发主入口已迁移至 ResearchAgent（ToG），
+    推荐使用 ``python -m long_earn research`` 或直接调用 ResearchAgent.invoke()。
     """
     from pathlib import Path
 

@@ -52,6 +52,13 @@ class BacktestResult(BaseModel):
             "风控频繁触发等。上层（GridResult.best / Walk-Forward）应据此过滤。"
         ),
     )
+    universe_pit_warning: bool = Field(
+        default=False,
+        description=(
+            "PIT 成分股警告。为 True 时表示回测使用的股票池快照日期与回测起始日期"
+            "不匹配，可能存在幸存者偏差——回测期起始后上市/退市的股票未被正确反映。"
+        ),
+    )
 
 
 class WalkForwardResult(BaseModel):

@@ -260,7 +260,7 @@ class MiniQmtClient:
     ) -> pd.DataFrame:
         """获取多只股票的 K 线数据，返回标准化 DataFrame。
 
-        返回列：date, symbol, open, high, low, close, volume
+        返回列：date, symbol, open, high, low, close, volume, is_tradable
         xtquant 不可用 / 超时 / 异常时返回空 DataFrame（不抛、不卡、不让主进程崩）。
         """
         xtdata = self._ensure_xtdata()
@@ -270,7 +270,9 @@ class MiniQmtClient:
         # 先下载再查询
         self._download_kline(stock_list, start_time, end_time, period)
 
-        result_fields = fields or ["time", "open", "high", "low", "close", "volume"]
+        result_fields = fields or [
+            "time", "open", "high", "low", "close", "volume", "suspendFlag"
+        ]
         if "time" not in result_fields:
             result_fields = ["time", *fields] if fields else result_fields
 
@@ -313,6 +315,8 @@ class MiniQmtClient:
                         "low": float(data.iloc[i].get("low", 0.0) or 0.0),
                         "close": float(data.iloc[i].get("close", 0.0) or 0.0),
                         "volume": float(data.iloc[i].get("volume", 0.0) or 0.0),
+                        # P1-09: suspendFlag=1 表示停牌，is_tradable = NOT suspendFlag
+                        "is_tradable": int(data.iloc[i].get("suspendFlag", 0) or 0) == 0,
                     }
                 )
 
@@ -593,7 +597,7 @@ class MiniQmtDataProvider:
         if not symbols:
             return pd.DataFrame()
 
-        fields = fields or ["open", "high", "low", "close", "volume"]
+        fields = fields or ["open", "high", "low", "close", "volume", "is_tradable"]
         n = len(symbols)
         t0 = time.perf_counter()
         if n >= 200:
@@ -1105,7 +1109,10 @@ class MiniQmtDataProvider:
         # groupby.ffill 会用"原始行序"填充——可能拿未来值填到过去，构成又一个数据层
         # 未来函数泄漏点（与 _quarterly_to_daily 的截止日 bug 互补）。
         merged = merged.sort_index()
-        merged = merged.groupby(level=idx_cols[1]).ffill()
+        # 仅财务列前向填充；行情/成交量缺失保持 NaN，禁止价格 ffill
+        fin_cols = [c for c in f.columns if c not in idx_cols]
+        if fin_cols:
+            merged[fin_cols] = merged.groupby(level=idx_cols[1])[fin_cols].ffill()
         return merged.sort_index()
 
     def get_merged_panel_as_polars(
@@ -1281,10 +1288,11 @@ class MiniQmtUniverseProvider:
             return []
         result = sorted(base - exclude)
         if result:
-            self.cache.save_universe(cache_key, date, result)
+            # P1-01 修复：派生板成分来自 miniqmt 当前快照，保存为当前快照
+            self.cache.save_universe(cache_key, "", result)
             logger.info(
                 f"派生 {cache_key}: {len(result)} 只 "
-                f"(= {base_name}[{len(base)}] - {exclude_name}[{len(exclude)}])"
+                f"(= {base_name}[{len(base)}] - {exclude_name}[{len(exclude)}])（当前快照）"
             )
         return result
 
@@ -1298,8 +1306,9 @@ class MiniQmtUniverseProvider:
             return []
         result = self.client.get_sector_stocks(sector_name)
         if result:
-            self.cache.save_universe(sector_name, date, result)
-            logger.info(f"获取 {sector_name} 板块: {len(result)} 只")
+            # P1-01 修复：miniqmt 返回当前成分股，保存为当前快照
+            self.cache.save_universe(sector_name, "", result)
+            logger.info(f"获取 {sector_name} 板块: {len(result)} 只（当前快照）")
         else:
             logger.warning(f"miniqmt 返回空板块: {sector_name}")
         return result
@@ -1321,8 +1330,10 @@ class MiniQmtUniverseProvider:
         if self.client.is_available:
             result = self.client.get_sector_stocks(index_name)
             if result:
-                self.cache.save_universe(index_name, date, result)
-                logger.info(f"获取 {index_name} 成分股: {len(result)} 只")
+                # P1-01 修复：miniqmt 返回的是当前成分股，不是历史成分股。
+                # 用空 date（今天）保存，避免制造虚假的 PIT 历史快照。
+                self.cache.save_universe(index_name, "", result)
+                logger.info(f"获取 {index_name} 成分股: {len(result)} 只（当前快照）")
             return result
         logger.warning(f"缓存无数据且 miniqmt 不可用，无法获取 {index_name} 成分股")
         return []
@@ -1339,7 +1350,8 @@ class MiniQmtUniverseProvider:
         result = self.client.get_sector_stocks("沪深A股")
         unique = sorted(set(result))
         if unique:
-            self.cache.save_universe("all_a", date, unique)
-            self.cache.save_universe("沪深A股", date, unique)
-            logger.info(f"全A股(沪深A股): {len(unique)} 只")
+            # P1-01 修复：miniqmt 返回当前成分股，保存为当前快照
+            self.cache.save_universe("all_a", "", unique)
+            self.cache.save_universe("沪深A股", "", unique)
+            logger.info(f"全A股(沪深A股): {len(unique)} 只（当前快照）")
         return unique

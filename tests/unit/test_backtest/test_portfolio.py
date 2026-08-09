@@ -108,7 +108,9 @@ class TestSignalToOrder:
         )
         portfolio.positions["000001"].update_market_value(11.0)
         portfolio.cash = 500_000.0
-        portfolio.total_value = portfolio.cash + portfolio.positions["000001"].market_value
+        portfolio.total_value = (
+            portfolio.cash + portfolio.positions["000001"].market_value
+        )
 
         slab = _make_slab({"000001": 11.0})
         signal = _make_signal({"000001": 0.1})
@@ -277,8 +279,11 @@ class TestRebalancing:
         """portfolio 持有 A，新信号 {B:1.0} → A 必须被 SELL，B 必须被 BUY"""
         portfolio = Portfolio(initial_capital=1_000_000.0)
         portfolio.positions["A"] = Position(
-            symbol="A", shares=10000.0, avg_cost=10.0,
-            current_price=10.0, market_value=100_000.0,
+            symbol="A",
+            shares=10000.0,
+            avg_cost=10.0,
+            current_price=10.0,
+            market_value=100_000.0,
         )
         portfolio.total_value = 1_000_000.0
 
@@ -297,8 +302,11 @@ class TestRebalancing:
         """portfolio 持有 A，信号 {A:0.0} 显式 0 也被解读为 SELL 全部"""
         portfolio = Portfolio(initial_capital=1_000_000.0)
         portfolio.positions["A"] = Position(
-            symbol="A", shares=10000.0, avg_cost=10.0,
-            current_price=10.0, market_value=100_000.0,
+            symbol="A",
+            shares=10000.0,
+            avg_cost=10.0,
+            current_price=10.0,
+            market_value=100_000.0,
         )
         portfolio.total_value = 1_000_000.0
 

@@ -25,7 +25,7 @@ from long_earn.strategy_optimization import (
 )
 
 # 由 operator_dev 研发出的新因果算子：已实现波动率（独立测试名，避免与目录算子冲突）
-_REALIZED_VOL = '''
+_REALIZED_VOL = """
 import polars as pl
 from typing import ClassVar
 from long_earn.backtest.operators._util import temporal_series
@@ -52,10 +52,10 @@ class e2e_volatility(Operator):
             .over("symbol").alias("e2e_volatility")
         )
         return temporal_series(panel, expr)
-'''
+"""
 
 # 含未来函数的伪算子（绝不应注册成功）
-_LEAK = '''
+_LEAK = """
 import polars as pl
 from typing import ClassVar
 from long_earn.backtest.operators._util import temporal_series
@@ -76,17 +76,20 @@ class leak_op(Operator):
 
     def apply(self, panel, params):
         return temporal_series(panel, pl.col(params.field).shift(-2).over("symbol").alias("leak"))
-'''
+"""
 
 
 class _MockBacktest:
     def __init__(self, sharpe: float, ret: float) -> None:
         self._m = {
-            "sharpe_ratio": sharpe, "total_return": ret,
+            "sharpe_ratio": sharpe,
+            "total_return": ret,
             "strategy_diagnostics": {"degenerate": False},
         }
 
-    def run(self, strategy_yaml: str = "", start_date: str = "", end_date: str = "") -> dict:
+    def run(
+        self, strategy_yaml: str = "", start_date: str = "", end_date: str = ""
+    ) -> dict:
         return dict(self._m)
 
 
@@ -95,8 +98,11 @@ def _develop(name: str, source: str) -> dict:
     backlog = OperatorBacklog()
     backlog.submit(
         OperatorSpec(
-            name=name, intent="test", input_fields=["close"],
-            category="factor", expected_output="float",
+            name=name,
+            intent="test",
+            input_fields=["close"],
+            category="factor",
+            expected_output="float",
             reference_strategy="shift(close,1)",
         )
     )
@@ -106,24 +112,33 @@ def _develop(name: str, source: str) -> dict:
 
 def _optimize(baseline_sharpe: float, optimized_sharpe: float) -> bool:
     """跑策略优化 pipeline，返回是否被接受。"""
-    return OptimizationPipeline(
-        FakeStrategyOptimizer(), _MockBacktest(optimized_sharpe, 0.3)
-    ).run(
-        base_strategy={"strategy_name": "Base", "description": "基线"},
-        base_strategy_yaml="strategy: ...",
-        improvement_suggestions=["改进"],
-        baseline_backtest={"sharpe_ratio": baseline_sharpe, "total_return": 0.2},
-    ).accepted
+    return (
+        OptimizationPipeline(
+            FakeStrategyOptimizer(), _MockBacktest(optimized_sharpe, 0.3)
+        )
+        .run(
+            base_strategy={"strategy_name": "Base", "description": "基线"},
+            base_strategy_yaml="strategy: ...",
+            improvement_suggestions=["改进"],
+            baseline_backtest={"sharpe_ratio": baseline_sharpe, "total_return": 0.2},
+        )
+        .accepted
+    )
 
 
 @pytest.fixture(autouse=True)
 def _cleanup():
-    # 测试前清理：避免前一轮测试残留导致 spec_review 直接走 resolved 分支
-    OPERATOR_REGISTRY.pop("e2e_volatility", None)
-    OPERATOR_REGISTRY.pop("leak_op", None)
+    # 测试前清理：避免前一轮测试残留导致 spec_review 直接走 resolved 分支。
+    # 保存并恢复，避免污染全局 OPERATOR_REGISTRY 影响其他测试模块。
+    _saved_e2ev = OPERATOR_REGISTRY.pop("e2e_volatility", None)
+    _saved_leak = OPERATOR_REGISTRY.pop("leak_op", None)
     yield
     OPERATOR_REGISTRY.pop("e2e_volatility", None)
     OPERATOR_REGISTRY.pop("leak_op", None)
+    if _saved_e2ev is not None:
+        OPERATOR_REGISTRY["e2e_volatility"] = _saved_e2ev
+    if _saved_leak is not None:
+        OPERATOR_REGISTRY["leak_op"] = _saved_leak
 
 
 class TestAutoEvolutionSystem:
@@ -143,7 +158,9 @@ class TestAutoEvolutionSystem:
     def test_system_rejects_future_function_operator(self):
         """含未来函数的算子绝不进入目录。"""
         result = _develop("leak_op", _LEAK)
-        assert {r["name"]: r["status"] for r in result["results"]}["leak_op"] == "blocked"
+        assert {r["name"]: r["status"] for r in result["results"]}[
+            "leak_op"
+        ] == "blocked"
         assert "leak_op" not in OPERATOR_REGISTRY
 
     def test_strategy_optimization_accepts_improvement(self):
@@ -151,6 +168,8 @@ class TestAutoEvolutionSystem:
 
     def test_end_to_end_evolution_loop(self):
         """完整闭环：研发新算子 → 用它优化策略 → 验收。"""
-        assert _develop("e2e_volatility", _REALIZED_VOL)["registered_names"] == ["e2e_volatility"]
+        assert _develop("e2e_volatility", _REALIZED_VOL)["registered_names"] == [
+            "e2e_volatility"
+        ]
         assert "e2e_volatility" in OPERATOR_REGISTRY
         assert _optimize(baseline_sharpe=1.2, optimized_sharpe=2.1) is True

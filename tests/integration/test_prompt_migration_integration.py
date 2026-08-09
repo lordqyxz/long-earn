@@ -73,9 +73,7 @@ class TestPromptMigration:
         import re
 
         leftover = re.findall(r"\{\{\s*\w+\s*\}\}", result)
-        assert not leftover, (
-            f"{prompt_file.name} 渲染后残留未替换变量: {leftover}"
-        )
+        assert not leftover, f"{prompt_file.name} 渲染后残留未替换变量: {leftover}"
 
     def test_no_html_escape_in_rendered(self, prompt_file: Path):
         """渲染结果不应引入 HTML 实体（jinja2 默认不转义）。"""

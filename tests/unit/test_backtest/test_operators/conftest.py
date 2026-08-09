@@ -27,8 +27,11 @@ def panel() -> pl.DataFrame:
             close = 10.0 + s_idx * 5 + 0.5 * t + 2.0 * (t % 7) - 0.01 * (t**2 % 13)
             rows.append(
                 {
-                    "timestamp": ts, "symbol": sym,
-                    "open": close - 0.1, "high": close + 0.3, "low": close - 0.3,
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "open": close - 0.1,
+                    "high": close + 0.3,
+                    "low": close - 0.3,
                     "close": round(close, 4),
                     "volume": 1000.0 * (t + s_idx * 10),
                 }

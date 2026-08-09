@@ -62,12 +62,16 @@ def _trending_panel() -> pl.DataFrame:
     for i in range(45):
         ts = base + timedelta(days=i)
         for sym, growth in [("A.SZ", 1.008), ("B.SH", 1.0005), ("C.SZ", 0.992)]:
-            close = round(10.0 * (growth ** i), 4)
+            close = round(10.0 * (growth**i), 4)
             rows.append(
                 {
-                    "timestamp": ts, "symbol": sym, "open": close,
-                    "high": close * 1.005, "low": close * 0.995,
-                    "close": close, "volume": 10000.0,
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "open": close,
+                    "high": close * 1.005,
+                    "low": close * 0.995,
+                    "close": close,
+                    "volume": 10000.0,
                 }
             )
     return pl.DataFrame(rows)
@@ -81,15 +85,22 @@ class _RealEngineBacktest:
         self._provider_cls = provider_cls
         self.calls = 0
 
-    def run(self, strategy_yaml: str = "", start_date: str = "", end_date: str = "") -> dict[str, Any]:
+    def run(
+        self, strategy_yaml: str = "", start_date: str = "", end_date: str = ""
+    ) -> dict[str, Any]:
         self.calls += 1
         dsl = parse_strategy_yaml(strategy_yaml)
-        engine = EventDrivenBacktestEngine(data_provider=self._provider_cls(self._panel))
+        engine = EventDrivenBacktestEngine(
+            data_provider=self._provider_cls(self._panel)
+        )
         result = engine.run(
             DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl), START, END, SYMBOLS
         )
         if not result.success:
-            return {"error": result.message, "strategy_diagnostics": {"degenerate": True}}
+            return {
+                "error": result.message,
+                "strategy_diagnostics": {"degenerate": True},
+            }
         return {
             "total_return": result.total_return,
             "sharpe_ratio": result.sharpe_ratio,
@@ -133,7 +144,11 @@ class TestStrategyOptimizationRealEngineE2E:
         backtest = _RealEngineBacktest(_trending_panel(), mock_data_provider)
         baseline = backtest.run(BASE_YAML)
         optimizer = FakeStrategyOptimizer(
-            mutator=lambda base, _s: {**base, "strategy_name": "Same", "evolution_lineage": []}
+            mutator=lambda base, _s: {
+                **base,
+                "strategy_name": "Same",
+                "evolution_lineage": [],
+            }
         )
         outcome = OptimizationPipeline(optimizer, backtest, gate=AcceptanceGate()).run(
             base_strategy={"strategy_name": "EqualAll"},

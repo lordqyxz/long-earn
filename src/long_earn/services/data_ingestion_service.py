@@ -14,6 +14,8 @@ import pandas as pd
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.miniqmt_provider import (
+    BOARD_NAME_MAP,
+    INDEX_SECTOR_MAP,
     MiniQmtClient,
     MiniQmtDataProvider,
     MiniQmtUniverseProvider,
@@ -575,6 +577,9 @@ class DataIngestionService:
                 financial_symbols, start_date, end, financial_batch, max_workers
             )
 
+        # P1-01：采集成分股快照，积累历史 PIT 数据
+        self._collect_universe_snapshots()
+
         self._info("=" * 60)
         self._info(f"数据下载完成！缓存路径: {self.cache.db_path}")
         self._info("=" * 60)
@@ -590,6 +595,42 @@ class DataIngestionService:
             "financial_symbols": len(financial_symbols),
             "cache_path": str(self.cache.db_path),
         }
+
+    # ── P1-01 成分股快照采集 ──────────────────────────────────────
+
+    def _collect_universe_snapshots(self) -> None:
+        """采集当前成分股快照，积累历史 PIT 数据。
+
+        每次下载数据时采集一次当前成分股，随着时间推移积累多日期快照，
+        逐步消除幸存者偏差。只采集 miniqmt 直接支持的指数/板块。
+        """
+        if not self.is_available:
+            self._info("[成分股快照] xtquant 不可用，跳过")
+            return
+
+        # 待采集的指数/板块清单
+        targets: dict[str, str] = {}
+
+        # 四大指数
+        targets.update(INDEX_SECTOR_MAP)
+
+        # 板块（沪深主板、创业板、科创板等）
+        for board_key, board_name in BOARD_NAME_MAP.items():
+            if board_name not in ("all_a", "全A股", "沪深A股"):
+                targets[board_key] = board_name
+
+        self._info(f"[成分股快照] 开始采集 {len(targets)} 个指数/板块的当前成分股...")
+        collected = 0
+        for key, name in targets.items():
+            try:
+                symbols = self.data_provider.get_sector_stocks(name)
+                if symbols:
+                    self.cache.save_universe(key, "", sorted(symbols))
+                    collected += 1
+            except Exception as exc:
+                self._warning(f"[成分股快照] {name} 采集失败: {exc}")
+
+        self._info(f"[成分股快照] 完成：{collected}/{len(targets)} 个指数/板块")
 
     # ── 内部工具 ──────────────────────────────────────────────────
 

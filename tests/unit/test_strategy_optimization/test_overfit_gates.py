@@ -75,9 +75,7 @@ class TestDeflatedSharpeGate:
         """高 sharpe + 少试验数应通过。"""
         gate = DeflatedSharpeGate()
         # SR=2.0, N=1, T=252 → t = (2.0 - 0) / (1/sqrt(252)) = 2.0 * 15.87 = 31.75
-        result = gate.evaluate(
-            observed_sharpe=2.0, n_trials=1, n_observations=252
-        )
+        result = gate.evaluate(observed_sharpe=2.0, n_trials=1, n_observations=252)
         assert result.passed
         assert result.t_statistic > 1.96
 
@@ -86,27 +84,21 @@ class TestDeflatedSharpeGate:
         gate = DeflatedSharpeGate()
         # SR=0.3, N=100, T=252 → E[max_100] = sqrt(2*ln(100)) ≈ 3.03
         # t = (0.3 - 3.03*0.063) / 0.063 ≈ (0.3 - 0.191) / 0.063 ≈ 1.73 < 1.96
-        result = gate.evaluate(
-            observed_sharpe=0.3, n_trials=100, n_observations=252
-        )
+        result = gate.evaluate(observed_sharpe=0.3, n_trials=100, n_observations=252)
         assert not result.passed
         assert result.expected_max_noise > 2.5  # E[max_N] 约等于 3.03
 
     def test_n_trials_1_no_correction(self) -> None:
         """N=1 时 E[max_N]=0，无多重检验校正。"""
         gate = DeflatedSharpeGate()
-        result = gate.evaluate(
-            observed_sharpe=0.5, n_trials=1, n_observations=252
-        )
+        result = gate.evaluate(observed_sharpe=0.5, n_trials=1, n_observations=252)
         assert result.expected_max_noise == 0.0
         assert result.passed
 
     def test_insufficient_observations_rejected(self) -> None:
         """回测天数 < 2 应拒绝。"""
         gate = DeflatedSharpeGate()
-        result = gate.evaluate(
-            observed_sharpe=2.0, n_trials=1, n_observations=1
-        )
+        result = gate.evaluate(observed_sharpe=2.0, n_trials=1, n_observations=1)
         assert not result.passed
         assert "不足" in result.reason
 

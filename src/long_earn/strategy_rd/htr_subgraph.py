@@ -1,4 +1,9 @@
-"""HTR 六步循环子图（ADR-010 Phase 2）。
+"""HTR 六步循环子图（ADR-010 Phase 2）—— **只读兼容脚手架**
+
+.. deprecated:: ADR-018
+    策略研发控制面已翻转为 ``ResearchAgent``（ToG）。
+    本模块保留为只读兼容层，仅供旧脚本/测试引用。
+    **新代码请使用** ``from long_earn.strategy_rd.research_agent import ResearchAgent``。
 
 Observe → Ideate → Select → Dispatch → Executor → Backpropagate → Decide
 

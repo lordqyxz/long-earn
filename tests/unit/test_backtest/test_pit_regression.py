@@ -40,12 +40,8 @@ def _make_pit_fixture_data() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "symbol": ["600519.SH", "600519.SH", "000001.SZ"],
-            "report_date": pd.to_datetime(
-                ["2020-03-31", "2020-06-30", "2020-03-31"]
-            ),
-            "announce_date": pd.to_datetime(
-                ["2020-04-28", "2020-08-20", "2020-04-29"]
-            ),
+            "report_date": pd.to_datetime(["2020-03-31", "2020-06-30", "2020-03-31"]),
+            "announce_date": pd.to_datetime(["2020-04-28", "2020-08-20", "2020-04-29"]),
             "revenue": [100.0, 200.0, 50.0],
             "net_profit": [10.0, 20.0, 5.0],
             "eps": [0.8, 1.6, 0.4],
@@ -118,8 +114,7 @@ class TestPITRegression:
         visible = result[result["revenue"].notna()]
         assert not visible.empty
         assert (visible["revenue"] == 100.0).all(), (
-            f"公告日后应返回第一份报告 revenue=100，"
-            f"实际={visible['revenue'].tolist()}"
+            f"公告日后应返回第一份报告 revenue=100，实际={visible['revenue'].tolist()}"
         )
 
     def test_second_report_overrides_after_its_announce_date(
@@ -137,8 +132,7 @@ class TestPITRegression:
         visible = result[result["revenue"].notna()]
         assert not visible.empty
         assert (visible["revenue"] == 200.0).all(), (
-            f"第二份报告公告后应返回 revenue=200，"
-            f"实际={visible['revenue'].tolist()}"
+            f"第二份报告公告后应返回 revenue=200，实际={visible['revenue'].tolist()}"
         )
 
     def test_announce_date_boundary_exact(
@@ -164,8 +158,7 @@ class TestPITRegression:
             )
         )
         assert pd.isna(vals_by_date["2020-04-27"]), (
-            f"公告日前一天（2020-04-27）应 NaN，"
-            f"实际={vals_by_date['2020-04-27']}"
+            f"公告日前一天（2020-04-27）应 NaN，实际={vals_by_date['2020-04-27']}"
         )
         assert vals_by_date["2020-04-28"] == 100.0, (
             f"公告日当天（2020-04-28）应可见 revenue=100，"

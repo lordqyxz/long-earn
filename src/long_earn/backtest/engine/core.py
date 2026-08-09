@@ -4,6 +4,7 @@
 """
 
 import contextlib
+import hashlib
 import math
 import time
 import uuid
@@ -137,7 +138,7 @@ class EventDrivenBacktestEngine:
         覆盖检查项：
           - 涨跌停板（P0-07）：涨停拒买、跌停拒卖
           - 价格有效性：NaN / Inf / 非正数
-          - 停牌检查（P1-09）：成交量为 0 时视为停牌，禁止交易
+          - 停牌检查（P1-09）：is_tradable=False 禁止交易，旧数据回退 volume==0 启发式
 
         T+1 约束（P0-06）在 Portfolio._compute_order_infos 中完成，
         成交量限制（P0-04）在 Broker._fill_market 中完成。
@@ -149,13 +150,22 @@ class EventDrivenBacktestEngine:
         if limit_reason is not None:
             return limit_reason
 
-        # 停牌检查（P1-09）：成交量 = 0 时视为停牌
+        # 停牌检查（P1-09）：is_tradable 为 False 时禁止交易
+        # 优先使用 xtquant suspendFlag 字段映射的 is_tradable；
+        # 数据源不提供 is_tradable 时回退到 volume==0 启发式。
         if slab is not None:
-            volume = self._lookup_price_fast(
-                slab, order.symbol, field="volume", price_dict=price_dict
+            is_tradable = self._lookup_price_fast(
+                slab, order.symbol, field="is_tradable", price_dict=price_dict
             )
-            if volume is not None and volume == 0:
-                return f"停牌拒单:{order.symbol} 当日成交量为 0（疑似停牌）"
+            if is_tradable is not None and is_tradable == 0.0:
+                return f"停牌拒单:{order.symbol} 当日停牌（is_tradable=False）"
+            # 回退：旧数据无 is_tradable 列时用 volume==0 兜底
+            if is_tradable is None:
+                volume = self._lookup_price_fast(
+                    slab, order.symbol, field="volume", price_dict=price_dict
+                )
+                if volume is not None and volume == 0:
+                    return f"停牌拒单:{order.symbol} 当日成交量为 0（疑似停牌）"
 
         return None
 
@@ -199,7 +209,7 @@ class EventDrivenBacktestEngine:
 
     # ── 主入口 ────────────────────────────────────────────────
 
-    def run(  # noqa: PLR0913, PLR0915
+    def run(  # noqa: PLR0912, PLR0913, PLR0915
         self,
         strategy: BaseStrategy,
         start_date: str,
@@ -208,6 +218,8 @@ class EventDrivenBacktestEngine:
         benchmark_symbol: str = "",
         full_data: pl.DataFrame | None = None,
         warmup_days: int = 0,
+        universe_pit_warning: bool = False,
+        strategy_yaml: str = "",
     ) -> BacktestResult:
         """执行回测
 
@@ -222,6 +234,7 @@ class EventDrivenBacktestEngine:
                 天，让时序因子（如 returns(period=120)）在 start_date 当天就有非 NaN
                 值；交易时间戳仍按 [start_date, end_date] 过滤，不会在 warmup 期产生
                 交易。
+            strategy_yaml: 策略 YAML 全文（P1-13），存入审计日志以支持完整重放。
         """
         # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
         run_id = str(uuid.uuid4())
@@ -244,6 +257,11 @@ class EventDrivenBacktestEngine:
         self._current_limit_down_map = {}
 
         # RUN_START：记录回测配置，让审计日志能独立重建本次回测的输入参数
+        strategy_hash = ""
+        if strategy_yaml:
+            strategy_hash = hashlib.sha256(
+                strategy_yaml.strip().encode()
+            ).hexdigest()[:16]
         self._log_audit(
             "RUN_START",
             run_id,
@@ -253,6 +271,7 @@ class EventDrivenBacktestEngine:
             {
                 "start_date": start_date,
                 "end_date": end_date,
+                "symbols": symbols,
                 "symbols_count": len(symbols),
                 "benchmark_symbol": benchmark_symbol,
                 "stop_loss": self.stop_loss,
@@ -260,6 +279,10 @@ class EventDrivenBacktestEngine:
                 "max_position_pct": self.max_position_pct,
                 "max_positions": self.max_positions,
                 "strategy_id": getattr(strategy, "strategy_id", ""),
+                "strategy_yaml": strategy_yaml,
+                "strategy_hash": strategy_hash,
+                "universe_pit_warning": universe_pit_warning,
+                "warmup_days": warmup_days,
             },
             db_audit,
         )
@@ -371,6 +394,7 @@ class EventDrivenBacktestEngine:
                 full_data,
                 benchmark_symbol,
                 metrics_unreliable=metrics_unreliable,
+                universe_pit_warning=universe_pit_warning,
             )
 
             # RUN_END：记录回测结果摘要（成功/失败都要记）
@@ -584,6 +608,12 @@ class EventDrivenBacktestEngine:
                 "portfolio_value": portfolio.total_value,
                 "strategy_state": strategy._state,
                 "risk_triggered": risk_triggered,
+                # P1-13: slab 摘要，便于审计重放时验证数据完整性
+                "slab_symbol_count": slab.height,
+                "slab_date_range": f"{ts}",
+                "slab_columns": slab.columns,
+                "slab_close_range": self._slab_price_range(slab, "close"),
+                "slab_volume_sum": self._slab_volume_summary(slab),
             },
             db_audit,
         )
@@ -599,7 +629,7 @@ class EventDrivenBacktestEngine:
                 "Strategy",
                 "SUCCESS",
                 {
-                    "signals": str(signal_event.signals),
+                    "signals": self._signal_to_dict(signal_event.signals),
                     "strategy_id": signal_event.strategy_id,
                     "risk_triggered": risk_triggered,
                 },
@@ -873,7 +903,7 @@ class EventDrivenBacktestEngine:
         """从 slab 构建 symbol -> {field: value} 字典（O(U) 一次）。
 
         性能优化（P0）：避免每 bar 多次 polars filter（_lookup_price 调用）。
-        包含 close/open/high/low/volume 五个常用字段。
+        包含 close/open/high/low/volume/is_tradable 六个常用字段。
         """
         result: dict[str, dict[str, float]] = {}
         if slab.is_empty() or "symbol" not in slab.columns:
@@ -881,7 +911,9 @@ class EventDrivenBacktestEngine:
 
         symbols = slab.select("symbol").to_series().to_list()
         fields_to_extract = [
-            f for f in ("open", "high", "low", "close", "volume") if f in slab.columns
+            f
+            for f in ("open", "high", "low", "close", "volume", "is_tradable")
+            if f in slab.columns
         ]
         for field in fields_to_extract:
             vals = slab.select(field).to_series().to_list()
@@ -1043,29 +1075,129 @@ class EventDrivenBacktestEngine:
                 or 0.0
             )
 
-            fill = broker.execute_order(order, price, daily_volume=daily_volume)
-            portfolio.update_from_fill(fill)
-            if fill.partial_fill:
-                self._total_partial_fills += 1
+            # P1-08: 使用 broker.submit_order 替代旧接口 execute_order，
+            # 支持 LIMIT/STOP/STOP_LIMIT/OCO 等高级订单类型。
+            # submit_order 返回 list[FillEvent]（可能空列表 = 待成交/未触发）。
+            fills = broker.submit_order(order, price, daily_volume=daily_volume)
+            for fill in fills:
+                portfolio.update_from_fill(fill)
+                if fill.partial_fill:
+                    self._total_partial_fills += 1
 
+                self._log_audit(
+                    "FILL",
+                    fill.trace_id,
+                    order.trace_id,
+                    "Broker",
+                    "SUCCESS",
+                    {
+                        "symbol": fill.symbol,
+                        "type": fill.order_type,
+                        "price": fill.fill_price,
+                        "quantity": fill.fill_quantity,
+                        "partial_fill": fill.partial_fill,
+                        "portfolio_value": portfolio.total_value,
+                    },
+                    db_audit,
+                )
+
+        # P1-08: 处理 SignalEvent.metadata["direct_orders"] 中的高级订单
+        # （LIMIT/STOP/STOP_LIMIT/OCO），绕过 Portfolio 权重系统直接提交给 Broker。
+        direct_orders = signal_event.metadata.get("direct_orders", [])
+        for order in direct_orders:
+            self._total_orders += 1
             self._log_audit(
-                "FILL",
-                fill.trace_id,
+                "ORDER",
                 order.trace_id,
-                "Broker",
+                signal_event.trace_id,
+                "Strategy",
                 "SUCCESS",
                 {
-                    "symbol": fill.symbol,
-                    "type": fill.order_type,
-                    "price": fill.fill_price,
-                    "quantity": fill.fill_quantity,
-                    "partial_fill": fill.partial_fill,
-                    "portfolio_value": portfolio.total_value,
+                    "symbol": order.symbol,
+                    "type": order.order_type,
+                    "quantity": order.quantity,
+                    "exec_type": order.exec_type,
+                    "stop_price": order.stop_price,
+                    "direct": True,
                 },
                 db_audit,
             )
+            price = self._lookup_price_fast(
+                slab, order.symbol, field=price_field, price_dict=price_dict
+            )
+            if price is None:
+                self._total_skipped += 1
+                self._log_audit(
+                    "ORDER_SKIPPED",
+                    str(uuid.uuid4()),
+                    order.trace_id,
+                    "Engine",
+                    "SKIPPED",
+                    {
+                        "symbol": order.symbol,
+                        "order_type": order.order_type,
+                        "quantity": order.quantity,
+                        "reason": "price_not_found_in_slab",
+                    },
+                    db_audit,
+                )
+                continue
 
-    # ── 审计日志 ──────────────────────────────────────────────
+            pre_trade_reason = self._pre_trade_check(
+                order,
+                price,
+                signal_event.trace_id,
+                db_audit,
+                slab=slab,
+                price_dict=price_dict,
+            )
+            if pre_trade_reason is not None:
+                self._total_skipped += 1
+                self._log_audit(
+                    "ORDER_SKIPPED",
+                    str(uuid.uuid4()),
+                    order.trace_id,
+                    "Engine",
+                    "SKIPPED",
+                    {
+                        "symbol": order.symbol,
+                        "order_type": order.order_type,
+                        "quantity": order.quantity,
+                        "reason": pre_trade_reason,
+                    },
+                    db_audit,
+                )
+                continue
+
+            daily_volume = (
+                self._lookup_price_fast(
+                    slab, order.symbol, field="volume", price_dict=price_dict
+                )
+                or 0.0
+            )
+            fills = broker.submit_order(order, price, daily_volume=daily_volume)
+            for fill in fills:
+                portfolio.update_from_fill(fill)
+                if fill.partial_fill:
+                    self._total_partial_fills += 1
+                self._log_audit(
+                    "FILL",
+                    fill.trace_id,
+                    order.trace_id,
+                    "Broker",
+                    "SUCCESS",
+                    {
+                        "symbol": fill.symbol,
+                        "type": fill.order_type,
+                        "price": fill.fill_price,
+                        "quantity": fill.fill_quantity,
+                        "partial_fill": fill.partial_fill,
+                        "portfolio_value": portfolio.total_value,
+                    },
+                    db_audit,
+                )
+            # 更新持仓后更新市值（直接订单可能影响 portfolio 状态）
+            portfolio.update_market_values(slab)
 
     def _log_audit(  # noqa: PLR0913
         self,
@@ -1117,6 +1249,50 @@ class EventDrivenBacktestEngine:
             except Exception:
                 logger.warning("DuckDB 审计写入失败，已降级（审计不阻断主流程）")
 
+    # ── P1-13 审计辅助方法 ────────────────────────────────────
+
+    @staticmethod
+    def _slab_price_range(slab: pl.DataFrame, col: str) -> dict[str, float]:
+        """提取 slab 中某价格列的范围（min/max/mean），用于审计摘要。"""
+        if col not in slab.columns:
+            return {"min": 0.0, "max": 0.0, "mean": 0.0}
+        col_data = slab[col].drop_nulls()
+        if col_data.len() == 0:
+            return {"min": 0.0, "max": 0.0, "mean": 0.0}
+        return {
+            "min": float(col_data.min()),
+            "max": float(col_data.max()),
+            "mean": float(col_data.mean()),
+        }
+
+    @staticmethod
+    def _slab_volume_summary(slab: pl.DataFrame) -> float:
+        """提取 slab 中成交量总和，用于审计摘要。"""
+        if "volume" not in slab.columns:
+            return 0.0
+        vol = slab["volume"].drop_nulls()
+        if vol.len() == 0:
+            return 0.0
+        return float(vol.sum())
+
+    @staticmethod
+    def _signal_to_dict(signals: Any) -> dict[str, float]:
+        """将 SignalEvent.signals 转为 JSON 友好的 dict。
+
+        signals 可能是 polars Series 或 dict[str, float]。
+        P1-13: 不再使用 str() 序列化，而是输出结构化 JSON dict。
+        """
+        if isinstance(signals, dict):
+            return dict(signals)
+        if isinstance(signals, pl.Series):
+            result: dict[str, float] = {}
+            for i in range(signals.len()):
+                val = signals[i]
+                if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                    result[str(i)] = float(val)
+            return result
+        return {}
+
     # ── 最终处理 ──────────────────────────────────────────────
 
     @staticmethod
@@ -1132,13 +1308,14 @@ class EventDrivenBacktestEngine:
         if portfolio.equity_curve:
             portfolio.equity_curve[-1] = portfolio.total_value
 
-    def _build_result(
+    def _build_result(  # noqa: PLR0913
         self,
         portfolio: Portfolio,
         trading_days: int,
         full_data: pl.DataFrame | None = None,
         benchmark_symbol: str = "",
         metrics_unreliable: bool = False,
+        universe_pit_warning: bool = False,
     ) -> BacktestResult:
         # 数据可信度门槛：交易日数 / equity_curve 长度不足时拒绝输出指标，
         # 防止把"全程持仓未变 → 零收益"误标为成功的回测结果。
@@ -1200,6 +1377,7 @@ class EventDrivenBacktestEngine:
             trade_count=portfolio.trade_count,
             attribution=dict(portfolio.pnl_by_symbol),
             metrics_unreliable=metrics_unreliable,
+            universe_pit_warning=universe_pit_warning,
         )
 
     @staticmethod

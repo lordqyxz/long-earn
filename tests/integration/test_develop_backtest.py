@@ -265,7 +265,11 @@ class TestBacktest:
         """回测服务应检测到语法错误并返回错误信息"""
         start, end = backtest_dates
         result = run_backtest_via_context(
-            context, "strategy:\n  name: bad\n  signals:\n    - type: filter\n      condition: 'x > >'", start, end, stock_list=DEFAULT_STOCK_LIST
+            context,
+            "strategy:\n  name: bad\n  signals:\n    - type: filter\n      condition: 'x > >'",
+            start,
+            end,
+            stock_list=DEFAULT_STOCK_LIST,
         )
         assert result is not None, "语法错误应返回错误结果，而非 None"
         assert "error" in result, "语法错误应在 result.error 中反映"

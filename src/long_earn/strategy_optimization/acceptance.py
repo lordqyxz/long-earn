@@ -127,10 +127,15 @@ class AcceptanceGate:
 
 
 def is_metrics_unreliable(backtest: dict[str, Any]) -> bool:
-    """回测结果是否标记为指标不可信（顶层或 diagnostics 任一为 True）。"""
+    """回测结果是否标记为指标不可信（顶层或 diagnostics 任一为 True）。
+
+    包括：metrics_unreliable 标志、退化策略（无真实交易）、算子链失败。
+    """
     if backtest.get("metrics_unreliable"):
         return True
     diag = backtest.get("strategy_diagnostics") or {}
+    if diag.get("degenerate"):
+        return True
     return bool(diag.get("metrics_unreliable"))
 
 

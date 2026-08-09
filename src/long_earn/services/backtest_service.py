@@ -3,11 +3,17 @@
 对接事件驱动回测引擎，支持 YAML DSL 策略描述。
 """
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from long_earn.backtest.data.miniqmt_provider import MiniQmtUniverseProvider
+from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.miniqmt_provider import (
+    COMPOSITE_BOARD_MAP,
+    INDEX_SECTOR_MAP,
+    MiniQmtUniverseProvider,
+)
 from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
 from long_earn.backtest.engine.audit import DuckDBAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
@@ -17,6 +23,9 @@ from long_earn.backtest.engine.dsl import (
 )
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.services import BacktestService, LoggerService
+
+# PIT 快照日期偏差容忍天数（超过此值触发幸存者偏差警告）
+_UNIVERSE_PIT_MAX_DAYS = 30
 
 if TYPE_CHECKING:
     from long_earn.backtest.data.connector import DataConnector
@@ -279,6 +288,36 @@ class BacktestServiceImpl(BacktestService):
                     )
         return MiniQmtUniverseProvider().get_symbols(universe_type, date)
 
+    def _check_universe_pit(
+        self, universe_type: str, start_date: str
+    ) -> bool:
+        """检查股票池快照是否 PIT 对齐。
+
+        返回 True 表示存在幸存者偏差风险（快照日期与回测起始日期偏差 > 30 天）。
+        """
+        try:
+            cache = DataCache()
+            # 复合板类型映射到第一个子板
+            if universe_type in COMPOSITE_BOARD_MAP:
+                index_code = COMPOSITE_BOARD_MAP[universe_type][0]
+            elif universe_type in INDEX_SECTOR_MAP:
+                index_code = universe_type
+            else:
+                index_code = universe_type
+
+            snapshot_date = cache.get_universe_snapshot_date(
+                index_code, start_date
+            )
+            if snapshot_date is None:
+                return True  # 无历史快照 → 警告
+
+            # 快照日期与回测起始日期偏差 > 阈值 → 警告
+            sd = datetime.strptime(snapshot_date, "%Y-%m-%d")
+            td = datetime.strptime(start_date, "%Y%m%d")
+            return abs((td - sd).days) > _UNIVERSE_PIT_MAX_DAYS
+        except Exception:
+            return True  # 检查失败 → 保守警告
+
     def run(
         self,
         strategy_yaml: str,
@@ -369,12 +408,18 @@ class BacktestServiceImpl(BacktestService):
                     "开始加载数据并回测（大池可能需数分钟，请关注 [回测引擎]/[合并面板] 进度日志）..."
                 )
 
+            universe_pit_warning = self._check_universe_pit(
+                universe_type, start_date_str
+            )
+
             result = engine.run(
                 strategy_obj,
                 start_date,
                 end_date,
                 formatted_symbols,
                 warmup_days=_compute_warmup_days(dsl),
+                universe_pit_warning=universe_pit_warning,
+                strategy_yaml=strategy_yaml,
             )
 
             if self.logger:
@@ -404,6 +449,7 @@ class BacktestServiceImpl(BacktestService):
                     "daily_returns": result.daily_returns,
                     "strategy_diagnostics": strategy_diagnostics,
                     "metrics_unreliable": metrics_unreliable,
+                    "universe_pit_warning": result.universe_pit_warning,
                 }
 
             return {
@@ -412,6 +458,7 @@ class BacktestServiceImpl(BacktestService):
                 "error_detail": result.error_detail or "",
                 "strategy_diagnostics": strategy_diagnostics,
                 "metrics_unreliable": metrics_unreliable,
+                "universe_pit_warning": result.universe_pit_warning,
             }
 
         except Exception as e:
@@ -421,6 +468,7 @@ class BacktestServiceImpl(BacktestService):
                 "error": str(e),
                 "error_category": "engine_error",
                 "error_detail": str(e),
+                "universe_pit_warning": True,
             }
 
     def run_grid(  # noqa: PLR0913

@@ -8,7 +8,9 @@ LLM ⊗ Graph：在 Substance / Ontology 上 explore + prune，
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage
@@ -23,6 +25,38 @@ if TYPE_CHECKING:
 
 _DEFAULT_RECURSION_LIMIT = 50
 _BEAM_WIDTH = 3
+
+
+def _strategy_fingerprint(strategy_yaml: str) -> str:
+    """策略 YAML 摘要指纹，用于证据与写回路径对齐。"""
+    return hashlib.sha256(strategy_yaml.strip().encode()).hexdigest()[:16]
+
+
+def _evidence_metrics_block_reason(metrics: dict[str, Any]) -> str | None:
+    """指标是否不足以支撑 success 写回；无问题时返回 None。"""
+    if metrics.get("metrics_unreliable"):
+        return "指标不可信 (metrics_unreliable)"
+    if metrics.get("degenerate"):
+        return "策略退化 (degenerate)"
+    trade_count = metrics.get("trade_count")
+    if trade_count is not None and int(trade_count) == 0:
+        return "无交易 (trade_count=0)"
+    if metrics.get("error"):
+        return f"回测错误: {metrics['error']}"
+    return None
+
+
+@dataclass
+class _StrategyEvidence:
+    """单次 invoke 内缓存的回测 / OOS 证据（进程内，不写盘）。"""
+
+    strategy_hash: str
+    backtest_metrics: dict[str, Any] | None = None
+    backtest_reliable: bool = False
+    oos_passed: bool | None = None
+    oos_metrics: dict[str, Any] = field(default_factory=dict)
+    # DSR 多重检验校正是否通过（仅 OOS 路径有效）
+    oos_dsr_passed: bool | None = None
 
 
 class ResearchAgent:
@@ -48,6 +82,10 @@ class ResearchAgent:
         # beam 路径状态（进程内，单次 invoke 生命周期）
         self._beam_paths: list[dict[str, Any]] = []
         self._last_context: str = ""
+        # 证据门：strategy_hash -> 回测/OOS 缓存（同一次 invoke 内有效）
+        self._evidence_cache: dict[str, _StrategyEvidence] = {}
+        # DSR 多重检验校正：本 session 已探索策略数（run_backtest 调用次数）
+        self._strategy_trial_count: int = 0
 
         prompt_template = MarkdownPromptTemplate(
             "research_agent_prompt.md",
@@ -63,6 +101,101 @@ class ResearchAgent:
         if checkpointer is not None:
             agent_kwargs["checkpointer"] = checkpointer
         self._agent = create_react_agent(**agent_kwargs)
+
+    def _cache_backtest_evidence(
+        self, strategy_yaml: str, metrics: dict[str, Any]
+    ) -> None:
+        """缓存训练集回测证据（仅可靠指标）。"""
+        fp = _strategy_fingerprint(strategy_yaml)
+        ev = self._evidence_cache.get(fp)
+        if ev is None:
+            ev = _StrategyEvidence(strategy_hash=fp)
+            self._evidence_cache[fp] = ev
+        ev.backtest_metrics = dict(metrics)
+        ev.backtest_reliable = True
+
+    def _cache_oos_evidence(
+        self,
+        strategy_yaml: str,
+        *,
+        passed: bool,
+        metrics: dict[str, Any],
+        dsr_passed: bool | None = None,
+    ) -> None:
+        """缓存 OOS 门结果。"""
+        fp = _strategy_fingerprint(strategy_yaml)
+        ev = self._evidence_cache.get(fp)
+        if ev is None:
+            ev = _StrategyEvidence(strategy_hash=fp)
+            self._evidence_cache[fp] = ev
+        ev.oos_passed = passed
+        ev.oos_metrics = dict(metrics)
+        if dsr_passed is not None:
+            ev.oos_dsr_passed = dsr_passed
+
+    def _validate_success_writeback(
+        self,
+        strategy_yaml: str,
+        metrics: dict[str, Any],
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """校验 success 写回是否满足证据门契约。
+
+        三道证据门：
+        1. 证据存在门：必须有 run_backtest 或 run_oos_gates 证据
+        2. 指标可信门：回测指标不可信（degenerate/step_failures）直接拒绝
+        3. 统计显著门（OOS 路径）：DSR 多重检验校正
+
+        Returns:
+            (allowed, error_message, merged_metrics)
+        """
+        yaml_text = strategy_yaml.strip()
+        if not yaml_text:
+            return False, "拒绝写回成功：缺少 strategy_yaml，无法核对证据", metrics
+
+        fp = _strategy_fingerprint(yaml_text)
+        evidence = self._evidence_cache.get(fp)
+        if evidence is None:
+            return (
+                False,
+                "拒绝写回成功：无 run_backtest / run_oos_gates 证据，请先调用证据工具",
+                metrics,
+            )
+
+        # 门 1: 证据存在 + 指标可信
+        has_reliable_backtest = (
+            evidence.backtest_reliable
+            and evidence.backtest_metrics is not None
+            and _evidence_metrics_block_reason(evidence.backtest_metrics) is None
+        )
+        has_oos_pass = evidence.oos_passed is True
+        if not has_reliable_backtest and not has_oos_pass:
+            return (
+                False,
+                "拒绝写回成功：证据不足（需可靠训练集回测或 OOS 通过）",
+                metrics,
+            )
+
+        # 门 2: 合并指标后再次校验 AcceptanceGate
+        merged = dict(metrics)
+        if not merged and evidence.backtest_metrics:
+            merged = dict(evidence.backtest_metrics)
+        if evidence.oos_metrics:
+            merged.update(evidence.oos_metrics)
+
+        block = _evidence_metrics_block_reason(merged)
+        if block is not None:
+            return False, f"拒绝写回成功：{block}", merged
+
+        # 门 3: 若走 OOS 路径，检查 DSR 是否已通过
+        if has_oos_pass and evidence.oos_dsr_passed is False:
+            return (
+                False,
+                "拒绝写回成功：OOS 通过稳定性门但未通过 DSR 多重检验校正",
+                merged,
+            )
+
+        merged["outcome"] = "success"
+        return True, "", merged
 
     def _build_tools(self) -> list[Any]:
         return [
@@ -381,6 +514,7 @@ class ResearchAgent:
         logger = self._logger
         monitoring = self._monitoring
         ctx = self.context
+        agent = self
 
         @tool
         def run_backtest(strategy_yaml: str, use_train_split: bool = True) -> str:
@@ -399,6 +533,8 @@ class ResearchAgent:
                 logger.info(
                     f"[ToG] run_backtest: {start or '(DSL区间)'}~{end or '(DSL区间)'}"
                 )
+                # DSR 多重检验校正：每调用一次 run_backtest 递增探索计数
+                agent._strategy_trial_count += 1
                 result = ctx.backtest_service.run(
                     strategy_yaml=strategy_yaml,
                     start_date=start,
@@ -430,6 +566,8 @@ class ResearchAgent:
                     slim["rejection_reason"] = (
                         "训练集回测指标不可信，不得作为策略有效证据"
                     )
+                elif _evidence_metrics_block_reason(slim) is None:
+                    agent._cache_backtest_evidence(strategy_yaml, slim)
                 return json.dumps(slim, ensure_ascii=False, default=str)
 
         return run_backtest
@@ -438,6 +576,7 @@ class ResearchAgent:
         logger = self._logger
         monitoring = self._monitoring
         ctx = self.context
+        agent = self
 
         @tool
         def run_oos_gates(strategy_yaml: str) -> str:
@@ -495,20 +634,58 @@ class ResearchAgent:
                         fold_results = [oos]
 
                 from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+                    DeflatedSharpeGate,
                     WalkForwardStabilityGate,
                 )
 
                 stability = WalkForwardStabilityGate().evaluate(fold_results)
-                return json.dumps(
-                    {
-                        "passed": stability.passed,
-                        "reason": stability.reason,
-                        "worst_fold_sharpe": stability.worst_fold_sharpe,
-                        "fold_sharpe_std": stability.fold_sharpe_std,
-                        "consistency_ratio": stability.consistency_ratio,
-                    },
-                    ensure_ascii=False,
+                oos_payload = {
+                    "passed": stability.passed,
+                    "reason": stability.reason,
+                    "worst_fold_sharpe": stability.worst_fold_sharpe,
+                    "fold_sharpe_std": stability.fold_sharpe_std,
+                    "consistency_ratio": stability.consistency_ratio,
+                }
+
+                # S2: DSR 多重检验校正门
+                dsr_passed: bool | None = None
+                if stability.passed and fold_results:
+                    oos_sharpe = oos_payload.get("worst_fold_sharpe")
+                    if oos_sharpe is not None:
+                        n_trials = max(agent._strategy_trial_count, 1)
+                        # 从 fold_results 估算观测数（取 folds 平均交易日）
+                        n_obs = 252
+                        if fold_results:
+                            avg_days = sum(
+                                int(f.get("trading_days", 0) or 0)
+                                for f in fold_results
+                            ) / max(len(fold_results), 1)
+                            n_obs = max(int(avg_days), 63)
+                        dsr = DeflatedSharpeGate().evaluate(
+                            observed_sharpe=oos_sharpe,
+                            n_trials=n_trials,
+                            n_observations=n_obs,
+                        )
+                        dsr_passed = dsr.passed
+                        if not dsr.passed:
+                            oos_payload["passed"] = False
+                            oos_payload["reason"] = (
+                                f"{stability.reason}；但 DSR 门拒绝: {dsr.reason}"
+                            )
+                            logger.warning(
+                                f"[ToG] OOS 稳定性通过但 DSR 拒绝: {dsr.reason}"
+                            )
+                        else:
+                            oos_payload["dsr_t_stat"] = dsr.t_statistic
+                            oos_payload["dsr_n_trials"] = n_trials
+
+                agent._cache_oos_evidence(
+                    strategy_yaml,
+                    passed=oos_payload["passed"],
+                    metrics=oos_payload,
+                    dsr_passed=dsr_passed,
                 )
+                return json.dumps(oos_payload, ensure_ascii=False)
 
         return run_oos_gates
 
@@ -516,7 +693,7 @@ class ResearchAgent:
         monitoring = self._monitoring
 
         @tool
-        def prove_causality_tool(operator_name: str) -> str:
+        def prove_causality(operator_name: str) -> str:
             """对已注册算子跑 prove_causality 数值证明。
 
             Args:
@@ -583,12 +760,13 @@ class ResearchAgent:
                         ensure_ascii=False,
                     )
 
-        return prove_causality_tool
+        return prove_causality
 
     def _make_record_path_outcome_tool(self) -> Any:
         logger = self._logger
         monitoring = self._monitoring
         ctx = self.context
+        agent = self
 
         @tool
         def record_path_outcome(
@@ -596,23 +774,38 @@ class ResearchAgent:
             strategy_yaml: str = "",
             metrics_json: str = "",
             reflection: str = "",
+            outcome: str = "success",
         ) -> str:
             """将探索路径结果写回 Substance（飞轮）。
 
             Args:
                 path_summary: 路径摘要 / 策略名
-                strategy_yaml: 策略 YAML（可空）
+                strategy_yaml: 策略 YAML（success 时必填以核对证据）
                 metrics_json: 指标 JSON 字符串
                 reflection: 反思文本
+                outcome: ``success`` 或 ``failure``；success 须有回测/OOS 证据
             """
             with monitoring.track("research.record_path_outcome"):
-                logger.info(f"[ToG] record_path_outcome: {path_summary[:80]}")
+                logger.info(
+                    f"[ToG] record_path_outcome: {path_summary[:80]} outcome={outcome}"
+                )
                 metrics: dict[str, Any] = {}
                 if metrics_json.strip():
                     try:
                         metrics = json.loads(metrics_json)
                     except json.JSONDecodeError:
                         metrics = {"raw": metrics_json[:500]}
+
+                is_failure = outcome.strip().lower() == "failure"
+                if is_failure:
+                    metrics["outcome"] = "failure"
+                else:
+                    allowed, err, metrics = agent._validate_success_writeback(
+                        strategy_yaml, metrics
+                    )
+                    if not allowed:
+                        return err
+
                 from long_earn.services import StrategyExperience  # noqa: PLC0415
 
                 exp = StrategyExperience(
@@ -648,6 +841,7 @@ class ResearchAgent:
             summary / messages / beam_paths
         """
         self._beam_paths = []
+        self._evidence_cache = {}
         query = idea if not constraints else f"{idea} (约束: {constraints})"
         # 入口自动准备上下文（基础设施，非可选）
         try:

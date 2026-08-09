@@ -112,7 +112,9 @@ def build_entity_ontology() -> tuple[list[OntologyNode], list[OntologyEdge]]:
             ["chinext", "创业板", "gem"],
             "chinext",
         ),
-        _universe("concept:universe:bse", "北交所", ["bse", "北交所", "京市A股"], "bse"),
+        _universe(
+            "concept:universe:bse", "北交所", ["bse", "北交所", "京市A股"], "bse"
+        ),
         _universe(
             "concept:universe:szse_main",
             "深市主板",

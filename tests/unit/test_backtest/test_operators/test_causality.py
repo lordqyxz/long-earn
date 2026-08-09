@@ -13,9 +13,20 @@ import pytest
 from long_earn.backtest.operators import OPERATOR_REGISTRY, list_operators
 from long_earn.backtest.operators.causality import is_causal, math_note, prove_causality
 from long_earn.backtest.operators.compose.arithmetic import ArithmeticParams
+from long_earn.backtest.operators.compose.lowvol_momentum_combo import (
+    LowvolMomentumComboParams,
+)
+from long_earn.backtest.operators.compose.quality_momentum import QualityMomentumParams
+from long_earn.backtest.operators.factor.e2e_volatility import (
+    P as E2EVolatilityParams,
+)
+from long_earn.backtest.operators.factor.gross_margin_stability import (
+    GrossMarginStabilityParams,
+)
 from long_earn.backtest.operators.factor.log_return import LogReturnParams
 from long_earn.backtest.operators.factor.realized_vol import RealizedVolParams
 from long_earn.backtest.operators.factor.returns import ReturnsParams
+from long_earn.backtest.operators.factor.roe_quality import RoeQualityParams
 from long_earn.backtest.operators.factor.shift import ShiftParams
 from long_earn.backtest.operators.factor.windowed import WindowedParams
 from long_earn.backtest.operators.filter.threshold import FilterThresholdParams
@@ -43,6 +54,28 @@ PARAM_CASES = [
     # operator_dev 自主研发写盘算子
     ("log_return", LogReturnParams(field="close", period=5)),
     ("realized_vol", RealizedVolParams(field="close", window=10)),
+    # operator_dev 新增算子（htr_subgraph 接入后由 LLM 生成）
+    (
+        "gross_margin_stability",
+        GrossMarginStabilityParams(field="close", window=60, min_periods=30, eps=1e-10),
+    ),
+    ("roe_quality", RoeQualityParams(field="close", window=20, min_periods=5)),
+    (
+        "lowvol_momentum_combo",
+        LowvolMomentumComboParams(
+            field="close",
+            low_vol_lookback=20,
+            momentum_lookback=20,
+            low_vol_weight=0.7,
+            momentum_weight=0.3,
+            min_obs=5,
+        ),
+    ),
+    (
+        "quality_momentum",
+        QualityMomentumParams(field="close", momentum_window=20, quality_window=60),
+    ),
+    ("e2e_volatility", E2EVolatilityParams(field="close", window=10)),
 ]
 
 
@@ -57,9 +90,8 @@ def test_operator_is_causal(op_name: str, params, panel: pl.DataFrame):
     """每个算子都必须通过未来扰动不变性证明（无未来函数）。"""
     reports = prove_causality(OPERATOR_REGISTRY[op_name], params, panel)
     failed = [r for r in reports if not r.passed]
-    assert not failed, (
-        f"{op_name} 因果性证明失败：\n"
-        + "\n".join(f"  T={r.split_timestamp}: {r.detail}" for r in failed)
+    assert not failed, f"{op_name} 因果性证明失败：\n" + "\n".join(
+        f"  T={r.split_timestamp}: {r.detail}" for r in failed
     )
 
 

@@ -3,7 +3,6 @@
 验证 MarkdownPromptTemplate 正确加载 .md 文件并渲染变量。
 """
 
-
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 
 
@@ -13,7 +12,15 @@ class TestPromptLoaderIntegration:
     def test_load_and_format_prompt(self):
         """prompt 文件应可加载并正确渲染变量"""
         from pathlib import Path
-        prompt_file = Path(__file__).parent.parent.parent / "src" / "long_earn" / "strategy_rd" / "agents" / "strategy_research_prompt.md"
+
+        prompt_file = (
+            Path(__file__).parent.parent.parent
+            / "src"
+            / "long_earn"
+            / "strategy_rd"
+            / "agents"
+            / "strategy_research_prompt.md"
+        )
         template = MarkdownPromptTemplate(
             str(prompt_file),
             caller_file=__file__,
@@ -34,7 +41,15 @@ class TestPromptLoaderIntegration:
     def test_version_and_description_parsed(self):
         """version 和 description 应被正确解析"""
         from pathlib import Path
-        prompt_file = Path(__file__).parent.parent.parent / "src" / "long_earn" / "strategy_rd" / "agents" / "strategy_research_prompt.md"
+
+        prompt_file = (
+            Path(__file__).parent.parent.parent
+            / "src"
+            / "long_earn"
+            / "strategy_rd"
+            / "agents"
+            / "strategy_research_prompt.md"
+        )
         template = MarkdownPromptTemplate(
             str(prompt_file),
             caller_file=__file__,
@@ -45,7 +60,15 @@ class TestPromptLoaderIntegration:
     def test_code_block_braces_preserved(self):
         """代码块内 JSON 大括号应被原样保留（jinja2 不与字面 {} 冲突）"""
         from pathlib import Path
-        prompt_file = Path(__file__).parent.parent.parent / "src" / "long_earn" / "strategy_rd" / "agents" / "strategy_research_prompt.md"
+
+        prompt_file = (
+            Path(__file__).parent.parent.parent
+            / "src"
+            / "long_earn"
+            / "strategy_rd"
+            / "agents"
+            / "strategy_research_prompt.md"
+        )
         template = MarkdownPromptTemplate(
             str(prompt_file),
             caller_file=__file__,

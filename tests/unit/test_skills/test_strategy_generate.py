@@ -167,9 +167,7 @@ class TestAllPersonasSupportStrategyGenerate:
             (PetterPersona, "petter", "彼得·林奇"),
         ],
     )
-    def test_persona_supports_strategy_generate(
-        self, persona_cls, name, display_name
-    ):
+    def test_persona_supports_strategy_generate(self, persona_cls, name, display_name):
         """大师 supported_modes 包含 strategy_generate。"""
         assert "strategy_generate" in persona_cls.supported_modes
         assert persona_cls.name == name
@@ -324,7 +322,9 @@ class TestResearchWithMasterHints:
         }
 
         result = agent.research_strategy_with_context(
-            query="q", knowledge_context="k", master_hints=master_hints  # type: ignore[arg-type]
+            query="q",
+            knowledge_context="k",
+            master_hints=master_hints,  # type: ignore[arg-type]
         )
 
         assert result["description"] == "生成的策略描述"

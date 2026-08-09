@@ -9,7 +9,10 @@ class TestRender:
     """render() 函数测试"""
 
     def test_basic(self):
-        assert render("{{ greeting }}, {{ name }}!", {"greeting": "你好", "name": "张三"}) == "你好, 张三!"
+        assert (
+            render("{{ greeting }}, {{ name }}!", {"greeting": "你好", "name": "张三"})
+            == "你好, 张三!"
+        )
 
     def test_missing_empty_string(self):
         # jinja2 默认缺失变量输出空串（与 safe_substitute 的"原样保留"不同）
@@ -17,7 +20,9 @@ class TestRender:
 
     def test_no_escape(self):
         # jinja2 默认不 HTML 转义（关键：LLM 提示词场景需要原样输出 <>&）
-        assert render("data: {{ x }}", {"x": "<strategy> & y"}) == "data: <strategy> & y"
+        assert (
+            render("data: {{ x }}", {"x": "<strategy> & y"}) == "data: <strategy> & y"
+        )
 
     def test_no_vars(self):
         assert render("hello world", {"x": 1}) == "hello world"
@@ -100,7 +105,9 @@ class TestMarkdownPromptTemplate:
 
     def test_format_prompt(self, tmp_path: Path):
         prompt_file = tmp_path / "test.md"
-        prompt_file.write_text("你好，{{ name }}！欢迎来到{{ place }}。", encoding="utf-8")
+        prompt_file.write_text(
+            "你好，{{ name }}！欢迎来到{{ place }}。", encoding="utf-8"
+        )
         caller_file = tmp_path / "caller.py"
         caller_file.write_text("# caller", encoding="utf-8")
 

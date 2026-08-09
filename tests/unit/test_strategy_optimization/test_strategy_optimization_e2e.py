@@ -31,12 +31,16 @@ class _MockBacktest:
         self._metrics = dict(metrics)
         self.calls = 0
 
-    def run(self, strategy_yaml: str = "", start_date: str = "", end_date: str = "") -> dict[str, Any]:
+    def run(
+        self, strategy_yaml: str = "", start_date: str = "", end_date: str = ""
+    ) -> dict[str, Any]:
         self.calls += 1
         return dict(self._metrics)
 
 
-def _bt(sharpe: float, total_return: float, *, degenerate: bool = False, error: str = "") -> dict[str, Any]:
+def _bt(
+    sharpe: float, total_return: float, *, degenerate: bool = False, error: str = ""
+) -> dict[str, Any]:
     return {
         "sharpe_ratio": sharpe,
         "total_return": total_return,
@@ -49,11 +53,11 @@ class TestAcceptanceGate:
     @pytest.mark.parametrize(
         ("baseline", "optimized", "accepted"),
         [
-            (_bt(1.0, 0.2), _bt(1.5, 0.3), True),                 # sharpe 提升 → 接受
-            (_bt(1.5, 0.3), _bt(1.4, 0.35), False),               # sharpe 未提升 → 拒绝
+            (_bt(1.0, 0.2), _bt(1.5, 0.3), True),  # sharpe 提升 → 接受
+            (_bt(1.5, 0.3), _bt(1.4, 0.35), False),  # sharpe 未提升 → 拒绝
             (_bt(1.0, 0.2), _bt(2.0, 0.5, degenerate=True), False),  # 退化 → 拒绝
             (_bt(1.0, 0.2), _bt(0.0, 0.0, error="数据缺失"), False),  # 回测失败 → 拒绝
-            ({"total_return": 0.1}, _bt(0.8, 0.3), True),          # 基线无 sharpe → 接受
+            ({"total_return": 0.1}, _bt(0.8, 0.3), True),  # 基线无 sharpe → 接受
         ],
     )
     def test_acceptance(self, baseline, optimized, accepted):
@@ -112,9 +116,14 @@ class TestOptimizationPipelineE2E:
 
     def test_lineage_accumulates_across_rounds(self):
         pipeline = self._pipeline(_bt(1.8, 0.35))
-        round1 = pipeline.run(BASE_STRATEGY, "strategy: ...", ["s1"], baseline_backtest=_bt(1.0, 0.2))
+        round1 = pipeline.run(
+            BASE_STRATEGY, "strategy: ...", ["s1"], baseline_backtest=_bt(1.0, 0.2)
+        )
         round2 = pipeline.run(
-            round1.optimized_strategy, "strategy: ...", ["s2"], baseline_backtest=_bt(1.8, 0.35)
+            round1.optimized_strategy,
+            "strategy: ...",
+            ["s2"],
+            baseline_backtest=_bt(1.8, 0.35),
         )
         assert round1.lineage_depth == 1
         assert round2.lineage_depth == 2

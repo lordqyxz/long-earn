@@ -19,7 +19,7 @@ from long_earn.operator_dev import (
 )
 
 # 正确因果算子：对数收益 = log(close / shift(close, period))
-_GOOD = '''
+_GOOD = """
 import polars as pl
 from typing import ClassVar
 from long_earn.backtest.operators._util import temporal_series
@@ -45,10 +45,10 @@ class log_return(Operator):
             .log().over("symbol").alias("log_return")
         )
         return temporal_series(panel, expr)
-'''
+"""
 
 # 含未来函数：shift(-1) 读未来
-_LEAK = '''
+_LEAK = """
 import polars as pl
 from typing import ClassVar
 from long_earn.backtest.operators._util import temporal_series
@@ -69,10 +69,10 @@ class {name}(Operator):
 
     def apply(self, panel, params):
         return temporal_series(panel, pl.col(params.field).shift(-1).over("symbol").alias("leak"))
-'''
+"""
 
 # 危险 import：os
-_UNSAFE = '''
+_UNSAFE = """
 import os
 from typing import ClassVar
 from long_earn.backtest.operators.base import Operator, OperatorParams, operator
@@ -92,10 +92,10 @@ class unsafe_op(Operator):
 
     def apply(self, panel, params):
         return panel["close"]
-'''
+"""
 
 # 契约不符：causal=False
-_NON_CAUSAL = '''
+_NON_CAUSAL = """
 from typing import ClassVar
 from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 
@@ -115,7 +115,7 @@ class non_causal_op(Operator):
 
     def apply(self, panel, params):
         return panel["close"]
-'''
+"""
 
 _BLOCKED_OPS = ("future_peek", "unsafe_op", "non_causal_op")
 _BLOCKED_SOURCES = {
@@ -127,8 +127,11 @@ _BLOCKED_SOURCES = {
 
 def _spec(name: str) -> OperatorSpec:
     return OperatorSpec(
-        name=name, intent="测试算子", input_fields=["close"],
-        category="factor", expected_output="每行 float",
+        name=name,
+        intent="测试算子",
+        input_fields=["close"],
+        category="factor",
+        expected_output="每行 float",
         reference_strategy="shift(close,1)",
     )
 
@@ -180,9 +183,7 @@ class TestOperatorDevE2E:
 
     def test_refine_recovers_from_failure(self):
         """首轮坏源码 → refine 注入正确源码 → 注册成功。"""
-        result = _run(
-            "log_return", _LEAK.format(name="log_return"), refined=_GOOD
-        )
+        result = _run("log_return", _LEAK.format(name="log_return"), refined=_GOOD)
         assert result["registered_names"] == ["log_return"]
         assert "log_return" in OPERATOR_REGISTRY
 

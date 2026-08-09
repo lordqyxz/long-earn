@@ -348,9 +348,7 @@ class CompositeDataConnector:
             return df
         # 测试桩等：ingestor 直接返回已组装面板
         if mq is not None:
-            legacy = mq.get_financial_panel(
-                symbols, start_date, end_date, field_list
-            )
+            legacy = mq.get_financial_panel(symbols, start_date, end_date, field_list)
             if not legacy.empty:
                 self._log_source("miniqmt provider 面板")
                 return legacy
@@ -434,7 +432,10 @@ class CompositeDataConnector:
         # groupby.ffill 会用"原始行序"填充——可能拿未来值填到过去，构成数据层
         # 未来函数泄漏点。
         merged = merged.sort_index()
-        merged = merged.groupby(level=idx_cols[1]).ffill()
+        # 仅财务列前向填充；行情/成交量缺失保持 NaN，禁止价格 ffill
+        fin_cols = [c for c in f.columns if c not in idx_cols]
+        if fin_cols:
+            merged[fin_cols] = merged.groupby(level=idx_cols[1])[fin_cols].ffill()
         result = merged.sort_index()
         if n >= 200:
             logger.info(

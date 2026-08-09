@@ -168,9 +168,7 @@ class TestApplyEscapeHatchOnError:
         assert result.get("escape_hatch_triggered") is True
 
     @patch("long_earn.strategy_rd.escape_hatch.list_operators")
-    @patch(
-        "long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph"
-    )
+    @patch("long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph")
     def test_operator_development_success_returns_none(
         self,
         mock_create_subgraph: MagicMock,
@@ -212,9 +210,7 @@ class TestEscapeHatchWithRetry:
     """逃生口 + 重试完整流程契约"""
 
     @patch("long_earn.strategy_rd.escape_hatch.list_operators")
-    @patch(
-        "long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph"
-    )
+    @patch("long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph")
     def test_full_success_path(
         self,
         mock_create_subgraph: MagicMock,
@@ -253,9 +249,7 @@ class TestEscapeHatchWithRetry:
         backtest_func.assert_called_once()
 
     @patch("long_earn.strategy_rd.escape_hatch.list_operators")
-    @patch(
-        "long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph"
-    )
+    @patch("long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph")
     def test_development_failure_returns_error(
         self,
         mock_create_subgraph: MagicMock,
@@ -315,9 +309,7 @@ class TestEscapeHatchWithRetry:
         backtest_func.assert_not_called()
 
     @patch("long_earn.strategy_rd.escape_hatch.list_operators")
-    @patch(
-        "long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph"
-    )
+    @patch("long_earn.strategy_rd.escape_hatch.create_operator_dev_subgraph")
     def test_retry_failure_returns_error(
         self,
         mock_create_subgraph: MagicMock,

@@ -20,6 +20,10 @@ class e2e_volatility(Operator):  # noqa: N801 算子名须与目录注册名一�
     min_history: ClassVar[int] = 0
 
     def apply(self, panel, params):
+        # 保留原始行序，确保因果性验证通过（面板可能 shuffle）。
+        panel = panel.with_row_index("__e2ev_row_id")
+        if "symbol" in panel.columns and "timestamp" in panel.columns:
+            panel = panel.sort(["symbol", "timestamp"])
         expr = (
             (pl.col(params.field) / pl.col(params.field).shift(1) - 1)
             .pow(2)
@@ -28,4 +32,8 @@ class e2e_volatility(Operator):  # noqa: N801 算子名须与目录注册名一�
             .over("symbol")
             .alias("e2e_volatility")
         )
-        return temporal_series(panel, expr)
+        result = temporal_series(panel, expr)
+        # 恢复原始行序
+        result = panel.select(["__e2ev_row_id"]).with_columns(result)
+        result = result.sort("__e2ev_row_id")
+        return result["e2e_volatility"]

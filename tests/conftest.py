@@ -17,7 +17,9 @@ class MockDataProvider:
     def __init__(self, panel: pl.DataFrame) -> None:
         self._panel = panel
 
-    def get_merged_panel_as_polars(self, symbols: list[str], start: str, end: str) -> pl.DataFrame:
+    def get_merged_panel_as_polars(
+        self, symbols: list[str], start: str, end: str
+    ) -> pl.DataFrame:
         return self._panel.filter(
             (pl.col("symbol").is_in(symbols))
             & (pl.col("timestamp") >= datetime.strptime(start, "%Y-%m-%d"))
@@ -43,9 +45,11 @@ def small_causality_panel() -> pl.DataFrame:
             close = 10.0 + s_idx * 2 + 0.3 * t + (t % 4)
             rows.append(
                 {
-                    "timestamp": ts, "symbol": sym,
+                    "timestamp": ts,
+                    "symbol": sym,
                     "close": round(close, 4),
-                    "high": close + 0.1, "low": close - 0.1,
+                    "high": close + 0.1,
+                    "low": close - 0.1,
                 }
             )
     return pl.DataFrame(rows)

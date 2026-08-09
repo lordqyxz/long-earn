@@ -243,7 +243,9 @@ class TestGetEventContext:
         from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
         mixin = KnowledgeContextMixin()
-        mixin.memory = MagicMock(spec=["search", "save_experience"])  # 无 activate_events
+        mixin.memory = MagicMock(
+            spec=["search", "save_experience"]
+        )  # 无 activate_events
         mixin.logger = MagicMock()
         mixin._event_cache = {}
 
@@ -498,9 +500,7 @@ class TestStrategyRdEventInjection:
         research_agent._get_event_context.return_value = "相关事件: 茅台财报"
 
         logger = MagicMock()
-        result = _initial_retrieval_node(
-            {"query": "茅台策略"}, research_agent, logger
-        )
+        result = _initial_retrieval_node({"query": "茅台策略"}, research_agent, logger)
 
         assert "### 相关市场事件" in result["knowledge_context"]
         assert "相关事件: 茅台财报" in result["knowledge_context"]
@@ -516,8 +516,6 @@ class TestStrategyRdEventInjection:
         research_agent._get_knowledge_context.return_value = "仅知识"
         research_agent._get_event_context.return_value = ""
 
-        result = _initial_retrieval_node(
-            {"query": "查询"}, research_agent, MagicMock()
-        )
+        result = _initial_retrieval_node({"query": "查询"}, research_agent, MagicMock())
         assert "### 相关市场事件" not in result["knowledge_context"]
         assert result["knowledge_context"] == "仅知识"

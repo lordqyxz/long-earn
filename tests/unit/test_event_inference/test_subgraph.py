@@ -262,5 +262,4 @@ class TestMemoryServiceSaveEvents:
         assert relation.source_id == event.sid
 
 
-
 from unittest.mock import MagicMock  # noqa: E402
