@@ -129,6 +129,77 @@ def test_audit_records_events():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# ── AUDIT-P2-17: 审计时点对齐 ─────────────────────────────────
+
+
+def test_audit_equity_curve_alignment():
+    """MARKET_DATA 审计 portfolio_value 应与 equity_curve 逐日一致。
+
+    每 bar 的 MARKET_DATA 事件记录 portfolio_value，equity_curve 在 bar 末尾
+    通过 _sync_equity_curve 追加。二者应长度相同、值逐日对齐。
+    """
+    tmp_dir = Path(tempfile.mkdtemp())
+    db_path = tmp_dir / "test_align.duckdb"
+
+    try:
+        provider = DuckDBAuditProvider(db_path=db_path)
+        engine = EventDrivenBacktestEngine(
+            audit_provider=provider, cost_config=TradingCostConfig()
+        )
+
+        days = 5
+        full_data = pl.DataFrame(
+            {
+                "timestamp": [
+                    datetime(2023, 1, 1) + timedelta(days=i)
+                    for i in range(days)
+                ],
+                "symbol": ["AAPL"] * days,
+                "open": [100.0 + i * 2 for i in range(days)],
+                "high": [101.0 + i * 2 for i in range(days)],
+                "low": [99.0 + i * 2 for i in range(days)],
+                "close": [100.0 + i * 2 for i in range(days)],
+                "volume": [10000.0] * days,
+            }
+        )
+        engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
+
+        strategy = MockStrategy(strategy_id="test_strat")
+        result = engine.run(
+            strategy, "2023-01-01", "2023-01-05", ["AAPL"]
+        )
+
+        import duckdb
+
+        conn = duckdb.connect(str(db_path))
+        mkt_rows = conn.execute(
+            "SELECT payload FROM \"backtest_audit\".logs "
+            "WHERE event_type = 'MARKET_DATA' ORDER BY timestamp ASC"
+        ).fetchall()
+        conn.close()
+
+        audit_values = [
+            (r[0] if isinstance(r[0], dict) else __import__("json").loads(r[0]))[
+                "portfolio_value"
+            ]
+            for r in mkt_rows
+        ]
+
+        equity_curve = [d["value"] for d in (result.daily_returns or [])]
+
+        assert len(audit_values) == len(equity_curve), (
+            f"审计事件数({len(audit_values)}) != 净值曲线点数({len(equity_curve)})"
+        )
+
+        for i, (av, ev) in enumerate(zip(audit_values, equity_curve, strict=True)):
+            assert abs(av - ev) < 1e-9, (
+                f"bar {i}: 审计 portfolio_value={av} != equity_curve={ev}"
+            )
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 # ── P1-16: 缺失事件类型覆盖 ────────────────────────────────────
 
 

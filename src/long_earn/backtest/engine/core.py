@@ -524,6 +524,7 @@ class EventDrivenBacktestEngine:
         strategy: BaseStrategy,
         db_audit: Any,
     ) -> None:
+        bar_start = time.perf_counter()
         guard.set_time(ts)
         slab = guard.read_current_slab()
         mkt_event = MarketDataEvent(
@@ -562,6 +563,18 @@ class EventDrivenBacktestEngine:
             pending = self._pending_signals
             self._pending_signals = []  # 清空，防止重复执行
             for sig in pending:
+                t1_start = time.perf_counter()
+                self._execute_signals(
+                    sig,
+                    portfolio,
+                    slab,
+                    broker,
+                    db_audit,
+                    price_field="open",
+                    execution_ts=ts,
+                    price_dict=price_dict,
+                )
+                t1_latency = (time.perf_counter() - t1_start) * 1000
                 self._log_audit(
                     "SIGNAL_EXECUTE_T1",
                     str(uuid.uuid4()),
@@ -575,16 +588,7 @@ class EventDrivenBacktestEngine:
                         "price_field": "open",
                     },
                     db_audit,
-                )
-                self._execute_signals(
-                    sig,
-                    portfolio,
-                    slab,
-                    broker,
-                    db_audit,
-                    price_field="open",
-                    execution_ts=ts,
-                    price_dict=price_dict,
+                    latency_ms=t1_latency,
                 )
 
         # 检查待成交订单（限价/止损单）— 从 price_dict 提取 close 价格映射
@@ -615,6 +619,7 @@ class EventDrivenBacktestEngine:
         risk_triggered = self._run_risk_checks(
             portfolio, slab, ts, broker, price_dict=price_dict
         )
+        bar_latency = (time.perf_counter() - bar_start) * 1000
         self._log_audit(
             "MARKET_DATA",
             mkt_event.trace_id,
@@ -634,11 +639,14 @@ class EventDrivenBacktestEngine:
                 "slab_volume_sum": self._slab_volume_summary(slab),
             },
             db_audit,
+            latency_ms=bar_latency,
         )
 
         # P2-04：风控清仓与策略信号生成解耦。即使风控触发清仓，
         # 策略仍可生成新信号（如换仓到其他标的），不再整体跳过 on_bar。
+        signal_start = time.perf_counter()
         signal_event = strategy.on_bar(slab, guard.get_context())
+        signal_latency = (time.perf_counter() - signal_start) * 1000
         if signal_event is not None:
             self._log_audit(
                 "SIGNAL",
@@ -652,6 +660,7 @@ class EventDrivenBacktestEngine:
                     "risk_triggered": risk_triggered,
                 },
                 db_audit,
+                latency_ms=signal_latency,
             )
             # P0-05 修复：信号不立即执行，入队等待 T+1 日以 open 价撮合
             self._pending_signals.append(signal_event)
@@ -1324,12 +1333,14 @@ class EventDrivenBacktestEngine:
         full_data: pl.DataFrame,
         last_ts: Any,
     ) -> None:
-        """最终市值结算：更新持仓市值至最后一根 bar 的收盘价"""
+        """最终市值结算：更新持仓市值至最后一根 bar 的收盘价。
+
+        AUDIT-P2-17：不再覆写 equity_curve[-1]。equity_curve 已在
+        _process_timestamp 末尾通过 _sync_equity_curve 记录各 bar 终值，
+        覆写会破坏 MARKET_DATA 审计事件与 equity_curve 的时点对齐。
+        此处仅更新 total_value 供 _build_result 使用。
+        """
         portfolio.update_market_values(full_data.filter(pl.col("timestamp") == last_ts))
-        # equity_curve 已在 _process_timestamp 末尾通过 _sync_equity_curve 记录，
-        # 此处仅需确保 total_value 反映最终市值（供 _build_result 使用）
-        if portfolio.equity_curve:
-            portfolio.equity_curve[-1] = portfolio.total_value
 
     def _build_result(  # noqa: PLR0913
         self,
