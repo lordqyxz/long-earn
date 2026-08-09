@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pandas as pd
@@ -836,6 +837,92 @@ class DataCache:
             with contextlib.suppress(Exception):
                 self._local.conn.close()
             self._local.conn = None
+
+    def check_adjustment_consistency(
+        self,
+        symbols: list[str],
+        start_date: str = "",
+        end_date: str = "",
+        *,
+        max_return_pct: float = 50.0,
+    ) -> list[dict[str, Any]]:
+        """复权一致性检查：检测日间价格跳跃是否暗示复权异常（AUDIT-P2-07）。
+
+        逐股计算日收益率，若任意相邻两日 close 涨跌幅超过 ``max_return_pct``
+        （默认 50%），则标记为可疑跳跃。除权除息日若未正确复权，会出现单日
+        大幅跳空（如 10 送 10 未复权导致 -50%）。
+
+        Args:
+            symbols: 待检查股票列表
+            start_date: 起始日期（空字符串 = 不限制）
+            end_date: 结束日期（空字符串 = 不限制）
+            max_return_pct: 日收益率阈值（百分比），超过此值视为可疑
+
+        Returns:
+            可疑跳跃列表，每项包含 symbol / date / prev_close / close / return_pct
+        """
+        if not symbols:
+            return []
+
+        conn = self._get_conn()
+        params: list[Any] = []
+        where_clauses = [f"symbol IN ({', '.join(['?'] * len(symbols))})"]
+        params.extend(symbols)
+        if start_date:
+            where_clauses.append("date >= ?")
+            params.append(start_date)
+        if end_date:
+            where_clauses.append("date <= ?")
+            params.append(end_date)
+
+        rows = conn.execute(
+            f"""
+            SELECT symbol, date, close
+            FROM price_daily
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY symbol, date
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # 按 symbol 分组，逐股计算日收益率
+        suspicious: list[dict[str, Any]] = []
+        current_symbol = rows[0][0]
+        prev_close: float | None = None
+        prev_date: str = ""
+
+        for symbol, date, close in rows:
+            if symbol != current_symbol:
+                current_symbol = symbol
+                prev_close = None
+                prev_date = ""
+
+            if close is None or close <= 0:
+                prev_close = None
+                prev_date = ""
+                continue
+
+            if prev_close is not None and prev_close > 0:
+                ret = (float(close) - prev_close) / prev_close * 100
+                if abs(ret) > max_return_pct:
+                    suspicious.append(
+                        {
+                            "symbol": symbol,
+                            "date": str(date),
+                            "prev_date": prev_date,
+                            "prev_close": round(prev_close, 4),
+                            "close": round(float(close), 4),
+                            "return_pct": round(ret, 2),
+                        }
+                    )
+
+            prev_close = float(close)
+            prev_date = str(date)
+
+        return suspicious
 
     def __enter__(self):
         return self

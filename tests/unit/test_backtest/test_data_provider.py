@@ -246,6 +246,96 @@ class TestMergedPanelFfillSorted:
         assert sym.loc[pd.Timestamp("2023-06-01"), "roe"] == 0.2
 
 
+# ── AUDIT-P2-07: 复权一致性 ─────────────────────────────────────
+
+
+def test_adjustment_consistency_no_false_positive():
+    """正常复权数据不应产生可疑跳跃（AUDIT-P2-07）。"""
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from long_earn.backtest.data.cache import DataCache
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    db_path = tmp_dir / "test_adj.duckdb"
+
+    try:
+        cache = DataCache(db_path=db_path)
+        # 构造正常数据：每日上涨 1%，无异常跳跃
+        dates = pd.date_range("2024-01-01", periods=100, freq="B")
+        closes = [100.0 * (1.01 ** i) for i in range(len(dates))]
+        df = pd.DataFrame(
+            {
+                "symbol": ["TEST.SH"] * len(dates),
+                "date": dates,
+                "open": closes,
+                "high": [c * 1.01 for c in closes],
+                "low": [c * 0.99 for c in closes],
+                "close": closes,
+                "volume": 10000.0,
+            }
+        )
+        cache.save_prices(df)
+
+        suspicious = cache.check_adjustment_consistency(["TEST.SH"])
+        assert len(suspicious) == 0, (
+            f"正常数据不应产生可疑跳跃，实际 {len(suspicious)} 条"
+        )
+
+        cache.close()
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_adjustment_consistency_detects_jump():
+    """复权异常（单日暴跌 60%）应被检测到（AUDIT-P2-07）。"""
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from long_earn.backtest.data.cache import DataCache
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    db_path = tmp_dir / "test_adj_jump.duckdb"
+
+    try:
+        cache = DataCache(db_path=db_path)
+        dates = pd.date_range("2024-01-01", periods=5, freq="B")
+        closes = [100.0, 101.0, 40.0, 41.0, 42.0]  # 第 3 天暴跌 60%
+        df = pd.DataFrame(
+            {
+                "symbol": ["JUMP.SH"] * len(dates),
+                "date": dates,
+                "open": closes,
+                "high": [c * 1.01 for c in closes],
+                "low": [c * 0.99 for c in closes],
+                "close": closes,
+                "volume": 10000.0,
+            }
+        )
+        cache.save_prices(df)
+
+        suspicious = cache.check_adjustment_consistency(["JUMP.SH"])
+        assert len(suspicious) == 1, (
+            f"应检测到 1 条可疑跳跃，实际 {len(suspicious)} 条"
+        )
+        assert suspicious[0]["symbol"] == "JUMP.SH"
+        assert suspicious[0]["return_pct"] < -50, (
+            f"收益率应为 -60% 左右，实际 {suspicious[0]['return_pct']}%"
+        )
+
+        cache.close()
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 # ── 委托契约：ciccwm/akshare 的 get_merged_panel（无 ffill） ──────────
 
 
