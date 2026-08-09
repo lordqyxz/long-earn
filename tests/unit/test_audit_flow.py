@@ -315,8 +315,9 @@ def test_audit_signal_to_dict_json_serializable():
         strategy = MockStrategy(strategy_id="test_strat")
         engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
 
-        import duckdb
         import json
+
+        import duckdb
 
         conn = duckdb.connect(str(db_path))
         signal_rows = conn.execute(
@@ -592,8 +593,9 @@ def test_stop_loss_risk_trigger_event():
         strategy = BuyAndHoldStrategy(strategy_id="buy_hold")
         engine.run(strategy, "2023-01-01", "2023-01-05", ["AAPL"])
 
-        import duckdb
         import json
+
+        import duckdb
 
         conn = duckdb.connect(str(db_path))
         risk_events = conn.execute(

@@ -112,12 +112,13 @@
 ### ToG 控制面收敛
 
 - [x] **HTR 双轨收缩**：htr_subgraph / config 标记废弃只读兼容；CLI / subgraph.py 文档指向 ResearchAgent；旧代码保留不删除 — 已完成
-- [ ] **参数自动寻优接入 ResearchAgent**：基建已有（`parallel.py` + `param_grid.py`），作 ToG 工具而非 HTR 固定节点（**依赖 Q1 Spike 通过**）
+- [x] **参数自动寻优接入 ResearchAgent**：`run_param_search` 工具已接入 ToG 工具列表，利用 ParamGrid + ParallelRunner 基建，训练集上并行网格搜索最优参数 — 已完成
+- [x] **AUDIT-P2-03** ORDER_SKIPPED 原因统一为结构化枚举 — 已完成（`OrderSkipReason(StrEnum)` 6 种原因，portfolio.py / core.py / 测试全量更新）
 
 ### 建模精度（影响可信度，但非即时污染）
 
 - [ ] **AUDIT-P2-07** 复权一致性跨 provider 校验
-- [ ] **AUDIT-P2-15** 真实交易日历 XSHG 替代 `freq="B"`
+- [x] **AUDIT-P2-15** 真实交易日历 XSHG 替代 `freq="B"` — 已完成（`DataCache.get_trading_dates()` 从 price_daily 查询真实交易日，`build_daily_financial_panel` 优先使用，回退到 freq="B"）
 - [ ] **AUDIT-P2-17** MARKET_DATA 与 equity_curve 审计时点对齐（sortino 对账残差）
 - [ ] **AUDIT-P2-12** 因果性扰动扩展（极值 / 负数 / 随机大数）
 
@@ -131,7 +132,7 @@
 
 > 有「该做」压力（CI 门禁、局部缺口），但不决定回测真伪或飞轮对错。**不要为此打断 Q1。**
 
-- [~] **AUDIT-P2-03** ORDER_SKIPPED 原因未统一为结构化枚举 — 部分完成（改相关文件时顺手）
+- [x] **AUDIT-P2-03** ORDER_SKIPPED 原因统一为结构化枚举 — 已完成
 - [~] **AUDIT-P2-09** data provider 契约套未参数化多源 — 部分完成（ADR-018 后「多源」= 显式点名）
 - [~] **AUDIT-P2-11** Alpha / Beta / IR 与 numpy 对齐测试 — 部分完成
 - [ ] **AUDIT-P2-10** EMA / RSI / MACD / Bollinger 公式对齐测试
