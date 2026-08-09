@@ -120,7 +120,7 @@
 - [x] **AUDIT-P2-07** 复权一致性跨 provider 校验 — 已完成（`DataCache.check_adjustment_consistency()` 逐股日收益率跳跃检测，默认阈值 50%）
 - [x] **AUDIT-P2-15** 真实交易日历 XSHG 替代 `freq="B"` — 已完成（`DataCache.get_trading_dates()` 从 price_daily 查询真实交易日，`build_daily_financial_panel` 优先使用，回退到 freq="B"）
 - [x] **AUDIT-P2-17** MARKET_DATA 与 equity_curve 审计时点对齐（sortino 对账残差）— 已完成（`_finalize_mark_to_market` 不再覆写 equity_curve[-1]，新增对齐测试）
-- [ ] **AUDIT-P2-12** 因果性扰动扩展（极值 / 负数 / 随机大数）
+- [x] **AUDIT-P2-12** 因果性扰动扩展（极值 / 负数 / 随机大数）— 已完成（PerturbStrategy 四策略 + 18 算子×4 策略因果性全覆盖 + 12 算子数值稳定性测试）
 
 ### 观测
 
