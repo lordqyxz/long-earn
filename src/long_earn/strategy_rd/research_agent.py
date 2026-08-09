@@ -208,6 +208,7 @@ class ResearchAgent:
             self._make_compile_strategy_yaml_tool(),
             self._make_run_backtest_tool(),
             self._make_run_oos_gates_tool(),
+            self._make_run_param_search_tool(),
             self._make_prove_causality_tool(),
             self._make_record_path_outcome_tool(),
         ]
@@ -688,6 +689,126 @@ class ResearchAgent:
                 return json.dumps(oos_payload, ensure_ascii=False)
 
         return run_oos_gates
+
+    def _make_run_param_search_tool(self) -> Any:
+        """参数网格搜索工具 — 在训练集上暴力搜索最优参数组合。
+
+        利用 ParamGrid + ParallelRunner 基建，对策略模板的 {{ var }} 占位符
+        做笛卡尔积展开，并行回测所有组合，返回 Top-K 最优结果。
+        """
+        logger = self._logger
+        monitoring = self._monitoring
+        ctx = self.context
+        agent = self
+
+        @tool
+        def run_param_search(
+            strategy_template: str,
+            param_grid_json: str,
+        ) -> str:
+            """参数网格搜索：在训练集上暴力搜索最优参数组合。
+
+            Args:
+                strategy_template: 策略 YAML 模板，使用 {{ var }} 作为参数占位符
+                param_grid_json: JSON 字符串，格式为
+                    {"scalars": {"param1": [v1, v2], ...}, "structs": {"key": [v1, v2], ...}}
+            """
+            with monitoring.track("research.run_param_search"):
+                # 解析参数网格
+                try:
+                    grid_dict: dict[str, Any] = json.loads(param_grid_json)
+                except json.JSONDecodeError as exc:
+                    return json.dumps(
+                        {"error": f"param_grid_json 解析失败: {exc}"},
+                        ensure_ascii=False,
+                    )
+
+                from long_earn.backtest.engine.parallel import (  # noqa: PLC0415
+                    _MAX_GRID_DEFAULT,
+                )
+                from long_earn.backtest.engine.param_grid import (  # noqa: PLC0415
+                    ParamGrid,
+                )
+
+                param_grid = ParamGrid(
+                    scalars=grid_dict.get("scalars", {}),
+                    structs=grid_dict.get("structs", {}),
+                )
+                total = param_grid.total_combinations
+                if total == 0:
+                    return json.dumps(
+                        {"error": "参数网格为空，请提供至少一个参数维度"},
+                        ensure_ascii=False,
+                    )
+                if total > _MAX_GRID_DEFAULT:
+                    return json.dumps(
+                        {
+                            "error": (
+                                f"参数组合 {total} 超过上限 {_MAX_GRID_DEFAULT}，"
+                                "请缩小参数范围或减少维度"
+                            )
+                        },
+                        ensure_ascii=False,
+                    )
+
+                agent._strategy_trial_count += total
+                logger.info(
+                    f"[ToG] run_param_search: {total} 组合，"
+                    f"训练集 {ctx.config.train_start_date}~{ctx.config.train_end_date}"
+                )
+
+                try:
+                    result = ctx.backtest_service.run_grid(
+                        strategy_template=strategy_template,
+                        param_grid=param_grid,
+                        start_date=ctx.config.train_start_date,
+                        end_date=ctx.config.train_end_date,
+                    )
+                except Exception as exc:
+                    return json.dumps(
+                        {"error": f"网格搜索执行失败: {exc}"},
+                        ensure_ascii=False,
+                    )
+
+                outcomes = result.get("outcomes", [])
+                reliable = [o for o in outcomes if o.get("success")]
+                if not reliable:
+                    return json.dumps(
+                        {
+                            "error": "所有参数组合回测均失败",
+                            "total": result.get("total"),
+                            "failure_count": result.get("failure_count"),
+                        },
+                        ensure_ascii=False,
+                    )
+
+                # 按 sharpe 排序取 Top-5
+                sorted_outcomes = sorted(
+                    reliable, key=lambda o: o.get("sharpe_ratio", -999), reverse=True
+                )
+                top_k = sorted_outcomes[:5]
+
+                summary = {
+                    "total_combinations": total,
+                    "success_count": result.get("success_count"),
+                    "failure_count": result.get("failure_count"),
+                    "best_sharpe": result.get("best_sharpe"),
+                    "best_return": result.get("best_return"),
+                    "best_param_desc": result.get("best_param_desc"),
+                    "top_results": [
+                        {
+                            "rank": i + 1,
+                            "sharpe_ratio": o.get("sharpe_ratio"),
+                            "total_return": o.get("total_return"),
+                            "max_drawdown": o.get("max_drawdown"),
+                            "param_desc": o.get("param_desc"),
+                        }
+                        for i, o in enumerate(top_k)
+                    ],
+                }
+                return json.dumps(summary, ensure_ascii=False)
+
+        return run_param_search
 
     def _make_prove_causality_tool(self) -> Any:
         monitoring = self._monitoring
