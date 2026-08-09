@@ -3,6 +3,9 @@
 每个注册算子用 :func:`prove_causality` 做**未来扰动不变性**验证：扰动全部
 ``timestamp > T`` 的数据后，若 ``t <= T`` 输出逐元素不变，则该算子在 T 切面
 不读未来。凡进算子目录的算子必须通过——金融级可信硬约束。
+
+AUDIT-P2-12：四种扰动策略（NaN / 极值 / 负数 / 随机大数）全覆盖，
+防止算子通过 NaN 传播吞掉未来数据泄漏。
 """
 
 from __future__ import annotations
@@ -11,7 +14,12 @@ import polars as pl
 import pytest
 
 from long_earn.backtest.operators import OPERATOR_REGISTRY, list_operators
-from long_earn.backtest.operators.causality import is_causal, math_note, prove_causality
+from long_earn.backtest.operators.causality import (
+    PerturbStrategy,
+    is_causal,
+    math_note,
+    prove_causality,
+)
 from long_earn.backtest.operators.compose.arithmetic import ArithmeticParams
 from long_earn.backtest.operators.compose.lowvol_momentum_combo import (
     LowvolMomentumComboParams,
@@ -78,6 +86,9 @@ PARAM_CASES = [
     ("e2e_volatility", E2EVolatilityParams(field="close", window=10)),
 ]
 
+# AUDIT-P2-12：四种扰动策略全覆盖
+PERTURB_STRATEGIES = list(PerturbStrategy)
+
 
 def test_math_note_documents_definition():
     """因果性证明基于明确的数学定义，非经验拟合。"""
@@ -86,12 +97,18 @@ def test_math_note_documents_definition():
 
 
 @pytest.mark.parametrize("op_name,params", PARAM_CASES)
-def test_operator_is_causal(op_name: str, params, panel: pl.DataFrame):
-    """每个算子都必须通过未来扰动不变性证明（无未来函数）。"""
-    reports = prove_causality(OPERATOR_REGISTRY[op_name], params, panel)
+@pytest.mark.parametrize("strategy", PERTURB_STRATEGIES)
+def test_operator_is_causal(
+    op_name: str, params, strategy: PerturbStrategy, panel: pl.DataFrame
+):
+    """每个算子 × 每种扰动策略都必须通过未来扰动不变性证明（AUDIT-P2-12）。"""
+    reports = prove_causality(
+        OPERATOR_REGISTRY[op_name], params, panel, perturb_strategy=strategy
+    )
     failed = [r for r in reports if not r.passed]
-    assert not failed, f"{op_name} 因果性证明失败：\n" + "\n".join(
-        f"  T={r.split_timestamp}: {r.detail}" for r in failed
+    assert not failed, (
+        f"{op_name}[{strategy.value}] 因果性证明失败：\n"
+        + "\n".join(f"  T={r.split_timestamp}: {r.detail}" for r in failed)
     )
 
 
@@ -101,8 +118,11 @@ def test_all_catalog_operators_covered_by_causality_suite():
     assert not untested, f"未登记因果性用例的算子: {sorted(untested)}"
 
 
-def test_causality_prover_detects_future_leak(panel: pl.DataFrame):
-    """负向：构造读未来的算子（shift(-1)），prover 必须检出。"""
+@pytest.mark.parametrize("strategy", PERTURB_STRATEGIES)
+def test_causality_prover_detects_future_leak(
+    strategy: PerturbStrategy, panel: pl.DataFrame
+):
+    """负向：构造读未来的算子（shift(-1)），prover 必须检出（AUDIT-P2-12）。"""
     from long_earn.backtest.operators._util import temporal_series
     from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 
@@ -120,7 +140,10 @@ def test_causality_prover_detects_future_leak(panel: pl.DataFrame):
     OPERATOR_REGISTRY["_test_future_leak"] = _FutureLeak()
     try:
         assert not is_causal(
-            OPERATOR_REGISTRY["_test_future_leak"], OperatorParams(), panel
-        ), "prover 未能检出未来函数泄漏"
+            OPERATOR_REGISTRY["_test_future_leak"],
+            OperatorParams(),
+            panel,
+            perturb_strategy=strategy,
+        ), f"prover[{strategy.value}] 未能检出未来函数泄漏"
     finally:
         OPERATOR_REGISTRY.pop("_test_future_leak", None)
