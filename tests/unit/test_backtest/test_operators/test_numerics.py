@@ -796,3 +796,195 @@ class TestQualityMomentumStability:
             ),
         )
         assert out is not None
+
+
+# ── AUDIT-P2-10: 技术算子公式对齐测试 ─────────────────────────────
+
+
+def _simple_panel(values: list[float]) -> pl.DataFrame:
+    """构造单 symbol 价格序列面板。"""
+    n = len(values)
+    return pl.DataFrame(
+        {
+            "symbol": ["TEST"] * n,
+            "timestamp": list(range(1, n + 1)),
+            "close": values,
+        }
+    )
+
+
+def _assert_series_approx(
+    got: pl.Series, expected: list[float | None], rel: float = 1e-6
+) -> None:
+    """逐元素对比，None 视为 null。"""
+    assert got.len() == len(expected), f"长度 {got.len()} != {len(expected)}"
+    for i, (g, e) in enumerate(zip(got, expected, strict=True)):
+        if e is None:
+            assert g is None, f"索引 {i}: 期望 None, 实际 {g}"
+        else:
+            assert g == pytest.approx(e, rel=rel), f"索引 {i}: {g} != {e}"
+
+
+class TestEMAFormula:
+    """EMA = alpha * price + (1-alpha) * prev_ema, alpha = 2/(span+1)"""
+
+    def test_ema_span3(self) -> None:
+        prices = [10.0, 12.0, 14.0, 16.0, 18.0]
+        panel = _simple_panel(prices)
+        out = get_operator("ema").apply(panel, EMAParams(field="close", span=3))
+        # span=3 → alpha=2/4=0.5
+        alpha = 0.5
+        expected = [None] * 5
+        expected[0] = 10.0  # 首值 = price
+        for i in range(1, 5):
+            expected[i] = alpha * prices[i] + (1 - alpha) * expected[i - 1]
+        # [10.0, 11.0, 12.5, 14.25, 16.125]
+        _assert_series_approx(out, expected)
+
+    def test_ema_span5(self) -> None:
+        """span=5 → alpha=2/6≈0.3333"""
+        prices = [10.0, 12.0, 9.0, 15.0, 11.0, 14.0]
+        panel = _simple_panel(prices)
+        out = get_operator("ema").apply(panel, EMAParams(field="close", span=5))
+        alpha = 2.0 / 6.0
+        expected = [None] * 6
+        expected[0] = 10.0
+        for i in range(1, 6):
+            expected[i] = alpha * prices[i] + (1 - alpha) * expected[i - 1]
+        _assert_series_approx(out, expected)
+
+
+class TestRSIFormula:
+    """RSI = 100 - 100/(1 + avg_gain/avg_loss), Cutler's RSI (rolling_mean)"""
+
+    def test_rsi_window4(self) -> None:
+        prices = [10.0, 12.0, 11.0, 14.0, 13.0, 15.0]
+        panel = _simple_panel(prices)
+        out = get_operator("rsi").apply(panel, RSIParams(field="close", window=4))
+        # 手算 diff / gain / loss
+        diffs = [0.0] * 6
+        for i in range(1, 6):
+            diffs[i] = prices[i] - prices[i - 1]
+        # diff = [0, 2, -1, 3, -1, 2]
+        gains = [max(d, 0) for d in diffs]  # [0, 2, 0, 3, 0, 2]
+        losses = [max(-d, 0) for d in diffs]  # [0, 0, 1, 0, 1, 0]
+        # rolling_mean(4):
+        expected = [None] * 6
+        for i in range(6):
+            if i < 3:
+                continue  # 前 3 个窗口未满
+            avg_g = sum(gains[i - 3 : i + 1]) / 4.0
+            avg_l = sum(losses[i - 3 : i + 1]) / 4.0
+            if avg_l == 0:
+                expected[i] = 100.0
+            else:
+                rs = avg_g / avg_l
+                expected[i] = 100.0 - 100.0 / (1.0 + rs)
+        _assert_series_approx(out, expected)
+
+    def test_rsi_all_up(self) -> None:
+        """连续上涨 → loss=0 → RSI=100"""
+        prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        panel = _simple_panel(prices)
+        out = get_operator("rsi").apply(panel, RSIParams(field="close", window=4))
+        # 窗口满后 RSI 应为 100
+        for i in range(3, 7):
+            assert out[i] == pytest.approx(100.0, rel=1e-6), f"索引 {i}: {out[i]}"
+
+
+class TestMACDFormula:
+    """MACD = EMA_fast - EMA_slow; Signal = EMA(MACD, signal_span)"""
+
+    def test_macd_basic(self) -> None:
+        prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
+        panel = _simple_panel(prices)
+        out = get_operator("macd").apply(
+            panel, MACDParams(field="close", fast=3, slow=7, signal=3)
+        )
+        # 手算 EMA_fast (span=3, alpha=0.5)
+        alpha_f = 2.0 / 4.0
+        ema_f = [0.0] * 10
+        ema_f[0] = 10.0
+        for i in range(1, 10):
+            ema_f[i] = alpha_f * prices[i] + (1 - alpha_f) * ema_f[i - 1]
+        # 手算 EMA_slow (span=7, alpha=2/8=0.25)
+        alpha_s = 2.0 / 8.0
+        ema_s = [0.0] * 10
+        ema_s[0] = 10.0
+        for i in range(1, 10):
+            ema_s[i] = alpha_s * prices[i] + (1 - alpha_s) * ema_s[i - 1]
+        # MACD = ema_f - ema_s
+        macd_vals = [ema_f[i] - ema_s[i] for i in range(10)]
+        # Signal = EMA(macd, span=3, alpha=0.5)
+        alpha_sig = 2.0 / 4.0
+        signal_vals = [0.0] * 10
+        signal_vals[0] = macd_vals[0]
+        for i in range(1, 10):
+            signal_vals[i] = alpha_sig * macd_vals[i] + (1 - alpha_sig) * signal_vals[i - 1]
+        # Histogram = macd - signal
+        hist_vals = [macd_vals[i] - signal_vals[i] for i in range(10)]
+
+        assert isinstance(out, pl.DataFrame)
+        for i in range(10):
+            assert out["macd"][i] == pytest.approx(macd_vals[i], rel=1e-6)
+            assert out["signal"][i] == pytest.approx(signal_vals[i], rel=1e-6)
+            assert out["histogram"][i] == pytest.approx(hist_vals[i], rel=1e-6)
+
+
+class TestBollingerFormula:
+    """Bollinger: middle=SMA, upper/lower = middle ± k*std (ddof=1)"""
+
+    def test_bollinger_window5_k2(self) -> None:
+        prices = [10.0, 12.0, 11.0, 13.0, 12.0, 14.0, 13.0, 15.0]
+        panel = _simple_panel(prices)
+        out = get_operator("bollinger").apply(
+            panel, BollingerParams(field="close", window=5, k=2.0)
+        )
+        import math
+
+        expected_mid = [None] * 8
+        expected_upper = [None] * 8
+        expected_lower = [None] * 8
+        for i in range(8):
+            if i < 4:
+                continue
+            window = prices[i - 4 : i + 1]
+            mean = sum(window) / 5.0
+            # ddof=1 样本标准差
+            var = sum((x - mean) ** 2 for x in window) / 4.0
+            std = math.sqrt(var)
+            expected_mid[i] = mean
+            expected_upper[i] = mean + 2.0 * std
+            expected_lower[i] = mean - 2.0 * std
+
+        assert isinstance(out, pl.DataFrame)
+        _assert_series_approx(out["middle"], expected_mid)
+        _assert_series_approx(out["upper"], expected_upper)
+        _assert_series_approx(out["lower"], expected_lower)
+
+    def test_bollinger_window3_k1(self) -> None:
+        """k=1.0 小窗口快速验证"""
+        prices = [10.0, 11.0, 12.0, 13.0, 14.0]
+        panel = _simple_panel(prices)
+        out = get_operator("bollinger").apply(
+            panel, BollingerParams(field="close", window=3, k=1.0)
+        )
+        import math
+
+        expected_mid = [None] * 5
+        expected_upper = [None] * 5
+        expected_lower = [None] * 5
+        for i in range(5):
+            if i < 2:
+                continue
+            window = prices[i - 2 : i + 1]
+            mean = sum(window) / 3.0
+            var = sum((x - mean) ** 2 for x in window) / 2.0  # ddof=1
+            std = math.sqrt(var)
+            expected_mid[i] = mean
+            expected_upper[i] = mean + std
+            expected_lower[i] = mean - std
+
+        _assert_series_approx(out["middle"], expected_mid)
+        _assert_series_approx(out["upper"], expected_upper)
+        _assert_series_approx(out["lower"], expected_lower)
