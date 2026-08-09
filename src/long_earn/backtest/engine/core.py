@@ -21,6 +21,7 @@ from long_earn.backtest.domain.entities import (
     PerformanceMetrics,
     SignalEvent,
 )
+from long_earn.backtest.engine.audit import OrderSkipReason
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
@@ -131,10 +132,10 @@ class EventDrivenBacktestEngine:
         db_audit: Any,  # noqa: ARG002
         slab: pl.DataFrame | None = None,
         price_dict: dict[str, dict[str, float]] | None = None,
-    ) -> str | None:
+    ) -> tuple[OrderSkipReason, str] | None:
         """Pre-trade 单笔风控门（P0-08）：聚合多项合规检查。
 
-        在撮合前执行，返回 None 表示通过，返回字符串表示跳过原因。
+        在撮合前执行，返回 None 表示通过，返回 (OrderSkipReason, detail) 表示跳过。
         覆盖检查项：
           - 涨跌停板（P0-07）：涨停拒买、跌停拒卖
           - 价格有效性：NaN / Inf / 非正数
@@ -144,11 +145,16 @@ class EventDrivenBacktestEngine:
         成交量限制（P0-04）在 Broker._fill_market 中完成。
         """
         if price is None or price <= 0 or not math.isfinite(price):
-            return f"pre_trade_price_invalid:{order.symbol} price={price}"
+            return (
+                OrderSkipReason.PRICE_INVALID,
+                f"{order.symbol} price={price}",
+            )
 
-        limit_reason = self._check_limit_up_down(order.symbol, order.order_type, price)
-        if limit_reason is not None:
-            return limit_reason
+        limit_result = self._check_limit_up_down(
+            order.symbol, order.order_type, price
+        )
+        if limit_result is not None:
+            return limit_result
 
         # 停牌检查（P1-09）：is_tradable 为 False 时禁止交易
         # 优先使用 xtquant suspendFlag 字段映射的 is_tradable；
@@ -158,14 +164,20 @@ class EventDrivenBacktestEngine:
                 slab, order.symbol, field="is_tradable", price_dict=price_dict
             )
             if is_tradable is not None and is_tradable == 0.0:
-                return f"停牌拒单:{order.symbol} 当日停牌（is_tradable=False）"
+                return (
+                    OrderSkipReason.SUSPENDED,
+                    f"{order.symbol} is_tradable=False",
+                )
             # 回退：旧数据无 is_tradable 列时用 volume==0 兜底
             if is_tradable is None:
                 volume = self._lookup_price_fast(
                     slab, order.symbol, field="volume", price_dict=price_dict
                 )
                 if volume is not None and volume == 0:
-                    return f"停牌拒单:{order.symbol} 当日成交量为 0（疑似停牌）"
+                    return (
+                        OrderSkipReason.SUSPENDED,
+                        f"{order.symbol} volume==0（疑似停牌）",
+                    )
 
         return None
 
@@ -174,16 +186,22 @@ class EventDrivenBacktestEngine:
         symbol: str,
         order_type: str,
         price: float,
-    ) -> str | None:
-        """检查涨跌停板约束。返回 None 表示通过，返回字符串表示跳过原因。"""
+    ) -> tuple[OrderSkipReason, str] | None:
+        """检查涨跌停板约束。返回 None 表示通过，返回 (OrderSkipReason, detail) 表示跳过。"""
         if symbol not in self._current_limit_up_map:
             return None
         limit_up = self._current_limit_up_map.get(symbol, float("inf"))
         limit_down = self._current_limit_down_map.get(symbol, 0.0)
         if order_type == "BUY" and price >= limit_up:
-            return f"涨停拒买:{symbol} price={price:.2f} >= limit_up={limit_up:.2f}"
+            return (
+                OrderSkipReason.LIMIT_UP_REJECT,
+                f"{symbol} price={price:.2f} >= limit_up={limit_up:.2f}",
+            )
         if order_type == "SELL" and price <= limit_down:
-            return f"跌停拒卖:{symbol} price={price:.2f} <= limit_down={limit_down:.2f}"
+            return (
+                OrderSkipReason.LIMIT_DOWN_REJECT,
+                f"{symbol} price={price:.2f} <= limit_down={limit_down:.2f}",
+            )
         return None
 
     def _maybe_log_bar_progress(
@@ -997,7 +1015,8 @@ class EventDrivenBacktestEngine:
                 "SKIPPED",
                 {
                     "symbol": skipped["symbol"],
-                    "reason": skipped.get("skip_reason", "T+1 locked"),
+                    "reason": skipped.get("skip_reason", OrderSkipReason.T1_LOCKED),
+                    "detail": skipped.get("skip_detail", ""),
                 },
                 db_audit,
             )
@@ -1034,14 +1053,14 @@ class EventDrivenBacktestEngine:
                         "symbol": order.symbol,
                         "order_type": order.order_type,
                         "quantity": order.quantity,
-                        "reason": "price_not_found_in_slab",
+                        "reason": OrderSkipReason.PRICE_NOT_FOUND,
                     },
                     db_audit,
                 )
                 continue
 
             # Pre-trade 单笔风控（P0-08）：聚合涨跌停板、价格有效性等检查
-            pre_trade_reason = self._pre_trade_check(
+            pre_trade_result = self._pre_trade_check(
                 order,
                 price,
                 signal_event.trace_id,
@@ -1049,8 +1068,9 @@ class EventDrivenBacktestEngine:
                 slab=slab,
                 price_dict=price_dict,
             )
-            if pre_trade_reason is not None:
+            if pre_trade_result is not None:
                 self._total_skipped += 1
+                reason, detail = pre_trade_result
                 self._log_audit(
                     "ORDER_SKIPPED",
                     str(uuid.uuid4()),
@@ -1061,7 +1081,8 @@ class EventDrivenBacktestEngine:
                         "symbol": order.symbol,
                         "order_type": order.order_type,
                         "quantity": order.quantity,
-                        "reason": pre_trade_reason,
+                        "reason": reason,
+                        "detail": detail,
                     },
                     db_audit,
                 )
@@ -1137,13 +1158,13 @@ class EventDrivenBacktestEngine:
                         "symbol": order.symbol,
                         "order_type": order.order_type,
                         "quantity": order.quantity,
-                        "reason": "price_not_found_in_slab",
+                        "reason": OrderSkipReason.PRICE_NOT_FOUND,
                     },
                     db_audit,
                 )
                 continue
 
-            pre_trade_reason = self._pre_trade_check(
+            pre_trade_result = self._pre_trade_check(
                 order,
                 price,
                 signal_event.trace_id,
@@ -1151,8 +1172,9 @@ class EventDrivenBacktestEngine:
                 slab=slab,
                 price_dict=price_dict,
             )
-            if pre_trade_reason is not None:
+            if pre_trade_result is not None:
                 self._total_skipped += 1
+                reason, detail = pre_trade_result
                 self._log_audit(
                     "ORDER_SKIPPED",
                     str(uuid.uuid4()),
@@ -1163,7 +1185,8 @@ class EventDrivenBacktestEngine:
                         "symbol": order.symbol,
                         "order_type": order.order_type,
                         "quantity": order.quantity,
-                        "reason": pre_trade_reason,
+                        "reason": reason,
+                        "detail": detail,
                     },
                     db_audit,
                 )

@@ -160,9 +160,10 @@ def test_t1_portfolio_locks_sell_before_available_date():
 
     白盒测试 T+1 锁定分支（portfolio.py:247-260）——属于关键风控路径
     （AGENTS.md 测试原则：系统关键环节必须测试），非实现细节测试。
-    验证 skip_reason 含 'T+1 锁定' 且不生成卖出订单。
+    验证 skip_reason = OrderSkipReason.T1_LOCKED 且不生成卖出订单。
     """
     from long_earn.backtest.domain.entities import FillEvent
+    from long_earn.backtest.engine.audit import OrderSkipReason
     from long_earn.backtest.engine.portfolio import Portfolio
 
     portfolio = Portfolio()
@@ -205,8 +206,8 @@ def test_t1_portfolio_locks_sell_before_available_date():
     )
     skipped = [i for i in infos if i.get("skipped")]
     assert len(skipped) >= 1, "ts < available_date 时卖出应被标记 skipped"
-    assert "T+1 锁定" in skipped[0]["skip_reason"], (
-        f"skip_reason 应含 'T+1 锁定'，实际: {skipped[0]['skip_reason']}"
+    assert skipped[0]["skip_reason"] == OrderSkipReason.T1_LOCKED, (
+        f"skip_reason 应为 T1_LOCKED，实际: {skipped[0]['skip_reason']}"
     )
 
     # 在 available_date 当天（01-03）尝试卖出 → 应正常生成卖出订单
@@ -365,35 +366,43 @@ def test_limit_up_blocks_buy():
 
     直接测试 _check_limit_up_down 逻辑，绕过 T+1 延迟影响。
     """
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
     engine = EventDrivenBacktestEngine(data_provider=None)
     # 手动设置涨跌停限价
     engine._current_limit_up_map["A.SZ"] = 10.5
     engine._current_limit_down_map["A.SZ"] = 8.5
 
     # 价格 11.0 >= 涨停价 10.5，应拒绝
-    reason = engine._check_limit_up_down("A.SZ", "BUY", 11.0)
-    assert reason is not None, "涨停价之上买入应被拒绝"
-    assert "涨停" in reason, f"拒绝原因应包含'涨停': {reason}"
+    result = engine._check_limit_up_down("A.SZ", "BUY", 11.0)
+    assert result is not None, "涨停价之上买入应被拒绝"
+    assert result[0] == OrderSkipReason.LIMIT_UP_REJECT, (
+        f"拒绝原因应为 LIMIT_UP_REJECT: {result}"
+    )
 
     # 价格 10.0 < 涨停价 10.5，应通过
-    reason2 = engine._check_limit_up_down("A.SZ", "BUY", 10.0)
-    assert reason2 is None, "涨停价之下买入应通过"
+    result2 = engine._check_limit_up_down("A.SZ", "BUY", 10.0)
+    assert result2 is None, "涨停价之下买入应通过"
 
 
 def test_limit_down_blocks_sell():
     """跌停板：跌停日卖出订单被 ORDER_SKIPPED。"""
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
     engine = EventDrivenBacktestEngine(data_provider=None)
     engine._current_limit_up_map["A.SZ"] = 11.0
     engine._current_limit_down_map["A.SZ"] = 9.0
 
     # 价格 8.5 <= 跌停价 9.0，应拒绝
-    reason = engine._check_limit_up_down("A.SZ", "SELL", 8.5)
-    assert reason is not None, "跌停价之下卖出应被拒绝"
-    assert "跌停" in reason, f"拒绝原因应包含'跌停': {reason}"
+    result = engine._check_limit_up_down("A.SZ", "SELL", 8.5)
+    assert result is not None, "跌停价之下卖出应被拒绝"
+    assert result[0] == OrderSkipReason.LIMIT_DOWN_REJECT, (
+        f"拒绝原因应为 LIMIT_DOWN_REJECT: {result}"
+    )
 
     # 价格 9.5 > 跌停价 9.0，应通过
-    reason2 = engine._check_limit_up_down("A.SZ", "SELL", 9.5)
-    assert reason2 is None, "跌停价之上卖出应通过"
+    result2 = engine._check_limit_up_down("A.SZ", "SELL", 9.5)
+    assert result2 is None, "跌停价之上卖出应通过"
 
 
 def test_compute_price_limits_formula():
@@ -408,7 +417,7 @@ def test_compute_price_limits_formula():
 
 def test_limit_up_blocks_buy_integration(mock_data_provider):
     """涨停板集成测试：引擎级 _process_timestamp 基于 _prev_close_map 动态计算涨跌停，
-    涨停日买入订单应被 ORDER_SKIPPED（reason 含"涨停拒买"）。
+    涨停日买入订单应被 ORDER_SKIPPED（reason=OrderSkipReason.LIMIT_UP_REJECT）。
 
     构造场景：第 0-1 日 close=10（_prev_close_map 建立），
     第 2 日 close=11.5（涨幅 15% > 10%），open=11.5*0.99=11.385 >= 涨停价 11.0，
@@ -442,15 +451,17 @@ def test_limit_up_blocks_buy_integration(mock_data_provider):
     assert result.success
 
     # 至少存在一个涨停拒买的 ORDER_SKIPPED
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
     trail = engine.audit_logger.get_full_trail()
     limit_skips = [
         e
         for e in trail
         if e.get("event_type") == "ORDER_SKIPPED"
-        and "涨停" in e.get("payload", {}).get("reason", "")
+        and e.get("payload", {}).get("reason") == OrderSkipReason.LIMIT_UP_REJECT
     ]
     assert len(limit_skips) >= 1, (
-        "涨停日买入应被 ORDER_SKIPPED（reason 含'涨停拒买'），"
+        "涨停日买入应被 ORDER_SKIPPED（reason=LIMIT_UP_REJECT），"
         f"实际 ORDER_SKIPPED: "
         f"{[e.get('payload', {}).get('reason') for e in trail if e.get('event_type') == 'ORDER_SKIPPED']}"
     )
@@ -460,9 +471,9 @@ def test_limit_up_blocks_buy_integration(mock_data_provider):
 
 
 def test_suspend_zero_volume_blocks_trade(mock_data_provider):
-    """停牌：当日成交量为 0 时订单应被 ORDER_SKIPPED（reason 含'停牌'）。
+    """停牌：当日成交量为 0 时订单应被 ORDER_SKIPPED（reason=OrderSkipReason.SUSPENDED）。
 
-    _pre_trade_check（core.py:150-154）在 volume==0 时返回停牌拒单原因。
+    _pre_trade_check 在 volume==0 时返回 SUSPENDED。
     """
     # 构造面板：第 2 日 volume=0（停牌），其余正常
     rows = []
@@ -508,15 +519,17 @@ def test_suspend_zero_volume_blocks_trade(mock_data_provider):
     result = engine.run(_AlwaysBuy(), "2024-01-01", "2024-01-07", ["A.SZ"])
     assert result.success
 
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
     trail = engine.audit_logger.get_full_trail()
     suspend_skips = [
         e
         for e in trail
         if e.get("event_type") == "ORDER_SKIPPED"
-        and "停牌" in e.get("payload", {}).get("reason", "")
+        and e.get("payload", {}).get("reason") == OrderSkipReason.SUSPENDED
     ]
     assert len(suspend_skips) >= 1, (
-        "停牌日（volume=0）订单应被 ORDER_SKIPPED（reason 含'停牌'），"
+        "停牌日（volume=0）订单应被 ORDER_SKIPPED（reason=SUSPENDED），"
         f"实际 ORDER_SKIPPED: "
         f"{[e.get('payload', {}).get('reason') for e in trail if e.get('event_type') == 'ORDER_SKIPPED']}"
     )

@@ -17,6 +17,7 @@ from long_earn.backtest.domain.entities import (
     Position,
     SignalEvent,
 )
+from long_earn.backtest.engine.audit import OrderSkipReason
 
 if TYPE_CHECKING:
     from long_earn.backtest.engine.broker import TradingCostConfig
@@ -269,7 +270,11 @@ class Portfolio:
                             "diff_val": diff_val,
                             "price": price,
                             "skipped": True,
-                            "skip_reason": f"T+1 锁定：{symbol} 在 {current_pos.available_date.date()} 前不可卖出（当前 {ts.date()}）",
+                            "skip_reason": OrderSkipReason.T1_LOCKED,
+                            "skip_detail": (
+                                f"{symbol} 在 {current_pos.available_date.date()} "
+                                f"前不可卖出（当前 {ts.date()}）"
+                            ),
                         }
                     )
                     continue

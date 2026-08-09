@@ -220,10 +220,14 @@ def test_high_skip_ratio_marks_metrics_unreliable(mock_data_provider):
         f"trade_count={result.trade_count}"
     )
     # P2-B 加强：验证跳过原因确实是涨跌停，且跳过比例较高
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
     trail = engine.audit_logger.get_full_trail()
     skipped = [e for e in trail if e.get("event_type") == "ORDER_SKIPPED"]
     limit_skips = [
-        e for e in skipped if "涨停" in e.get("payload", {}).get("reason", "")
+        e
+        for e in skipped
+        if e.get("payload", {}).get("reason") == OrderSkipReason.LIMIT_UP_REJECT
     ]
     assert len(limit_skips) > 0, "应存在涨跌停拒单的 ORDER_SKIPPED 事件"
     orders = [e for e in trail if e.get("event_type") == "ORDER"]

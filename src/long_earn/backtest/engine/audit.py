@@ -2,6 +2,7 @@ import json
 import threading
 from collections.abc import Sequence
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,32 @@ from long_earn.core.storage import backtest_cache_path
 _QUERY_FILTER_WHITELIST = frozenset(
     {"event_type", "trace_id", "parent_id", "component", "status", "latency_ms"}
 )
+
+
+class OrderSkipReason(StrEnum):
+    """订单跳过原因枚举（AUDIT-P2-03）。
+
+    替代自由文本字符串，使审计日志中 ORDER_SKIPPED 事件的 reason 字段
+    结构化、可查询、可聚合。
+    """
+
+    T1_LOCKED = "T1_LOCKED"
+    """T+1 锁定：卖出日早于持仓可用日"""
+
+    LIMIT_UP_REJECT = "LIMIT_UP_REJECT"
+    """涨停拒买：买入价达到涨停价"""
+
+    LIMIT_DOWN_REJECT = "LIMIT_DOWN_REJECT"
+    """跌停拒卖：卖出价达到跌停价"""
+
+    SUSPENDED = "SUSPENDED"
+    """停牌拒单：is_tradable=False 或成交量==0"""
+
+    PRICE_NOT_FOUND = "PRICE_NOT_FOUND"
+    """价格缺失：slab 中找不到该标的的价格"""
+
+    PRICE_INVALID = "PRICE_INVALID"
+    """价格无效：NaN / Inf / 非正数"""
 
 
 class DuckDBAuditProvider(AuditProvider):
