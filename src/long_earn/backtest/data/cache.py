@@ -198,6 +198,27 @@ class DataCache:
             )
         return result
 
+    def get_trading_dates(self, start_date: str, end_date: str) -> list[str]:
+        """获取区间内 XSHG 真实交易日列表（AUDIT-P2-15）。
+
+        从 price_daily 表查询实际有行情数据的日期，替代 ``pd.date_range(freq="B")``
+        的 US 工作日历，避免与中国节假日（春节、国庆等）不匹配。
+
+        Returns:
+            YYYY-MM-DD 格式的日期字符串列表，按时间升序排列。
+        """
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT CAST(date AS TEXT) AS dt
+            FROM price_daily
+            WHERE date >= ? AND date <= ?
+            ORDER BY dt
+            """,
+            [start_date, end_date],
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def get_prices(
         self,
         symbols: list[str],

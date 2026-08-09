@@ -17,6 +17,26 @@ from long_earn.backtest.data.cache import DataCache
 _PANEL_LOG_MIN_SYMBOLS = 200
 
 
+def _get_xshg_trading_dates(
+    cache: DataCache,
+    start_date: str,
+    end_date: str,
+) -> pd.DatetimeIndex:
+    """从 DuckDB 缓存获取 XSHG 真实交易日历，回退到 freq="B"（AUDIT-P2-15）。
+
+    优先从 price_daily 表查询实际交易日，避免 US 工作日历与中国节假日
+    （春节、国庆等）不匹配的问题。
+    """
+    try:
+        dates = cache.get_trading_dates(start_date, end_date)
+        if dates:
+            return pd.DatetimeIndex(dates)
+    except Exception as exc:
+        logger.warning(f"[交易日历] 从缓存获取失败，回退到 freq='B': {exc}")
+
+    return pd.date_range(start=start_date, end=end_date, freq="B")
+
+
 def quarterly_to_daily_asof(
     quarterly_df: pd.DataFrame,
     symbols: list[str],
@@ -128,7 +148,7 @@ def build_daily_financial_panel(
     if n >= _PANEL_LOG_MIN_SYMBOLS:
         logger.info(f"[财务面板] 缓存季频: {len(quarterly)} 行, asof对齐到日级...")
 
-    trading_dates = pd.date_range(start=start_date, end=end_date, freq="B")
+    trading_dates = _get_xshg_trading_dates(cache, start_date, end_date)
     t_daily = time.perf_counter()
     panel = quarterly_to_daily_asof(quarterly, symbols, trading_dates, fields)
     if n >= _PANEL_LOG_MIN_SYMBOLS:
