@@ -13,6 +13,7 @@ Phase 2 串行模式：dispatch 只选 1 个假设，executor 内部复用现有
 from __future__ import annotations
 
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
@@ -70,6 +71,21 @@ HTR_MERGE_THRESHOLD = 0.05
 
 # 已尝试假设摘要截断长度（避免 ideate prompt 膨胀）
 _TRUNCATE_HYPOTHESIS_LEN = 120
+
+
+def _training_window(
+    context: RuntimeContext | None,
+    backtest_service: BacktestService,
+) -> tuple[str, str]:
+    """取得 HTR 开发回测的强制训练集窗口。"""
+    config = context.config if context is not None else getattr(
+        backtest_service, "config", SimpleNamespace()
+    )
+    start_date = getattr(config, "train_start_date", "")
+    end_date = getattr(config, "train_end_date", "")
+    if not start_date or not end_date:
+        raise ValueError("HTR executor 缺少训练集日期配置")
+    return start_date, end_date
 
 # ADR-014 任务4：默认 universe 与股票数量上限
 # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
@@ -721,6 +737,8 @@ def _handle_executor_exception(  # noqa: PLR0913
     if context is None or not strategy_yaml:
         return {"node_id": node_id, "error": str(error)}
 
+    train_start, train_end = _training_window(context, backtest_service)
+
     # ── 阶段 2：算子缺口逃生口 ──────────────────────────────────
     # 检测算子缺口 → 同步研发 → 重试 develop + backtest
     hatch_outcome = escape_hatch_with_retry(
@@ -732,8 +750,8 @@ def _handle_executor_exception(  # noqa: PLR0913
         develop_func=develop_agent.develop_strategy,
         backtest_func=lambda yaml: backtest_service.run(
             strategy_yaml=yaml,
-            start_date="",
-            end_date="",
+            start_date=train_start,
+            end_date=train_end,
         ),
         logger=logger,
     )
@@ -751,6 +769,8 @@ def _handle_executor_exception(  # noqa: PLR0913
             previous_backtest=previous_backtest,
             gate=gate,
             logger=logger,
+            train_start=train_start,
+            train_end=train_end,
         )
 
     # 算子研发失败或重试失败
@@ -785,6 +805,8 @@ def _apply_failure_path_escape_hatch(  # noqa: PLR0913
     previous_backtest: dict[str, Any],
     gate: AcceptanceGate | None,
     logger: LoggerService | None,
+    train_start: str,
+    train_end: str,
 ) -> dict[str, Any]:
     """阶段 3 失败路径逃生口 — LLM 分类后选择 refine 或 prune。"""
     failure_outcome = escape_hatch_failure_path(
@@ -796,8 +818,8 @@ def _apply_failure_path_escape_hatch(  # noqa: PLR0913
         refine_func=develop_agent.refine_code,
         backtest_func=lambda yaml: backtest_service.run(
             strategy_yaml=yaml,
-            start_date="",
-            end_date="",
+            start_date=train_start,
+            end_date=train_end,
         ),
         logger=logger,
     )
@@ -984,6 +1006,7 @@ def _executor_node(  # noqa: PLR0913
     # 所有候选共享的 state 级输入（无候选间状态耦合）
     strategy = state.get("strategy", {}) or {}
     previous_backtest = state.get("backtest_result", {})
+    train_start, train_end = _training_window(context, backtest_service)
 
     # ── 阶段 1：逐候选 optimize -> develop（LLM，IO 密集）──
     developed: list[dict[str, Any]] = []
@@ -1015,8 +1038,8 @@ def _executor_node(  # noqa: PLR0913
         try:
             outcomes = backtest_service.run_candidates(
                 strategy_yamls=yamls,
-                start_date="",
-                end_date="",
+                start_date=train_start,
+                end_date=train_end,
             )
         except Exception as e:
             if logger:

@@ -318,7 +318,7 @@ class BacktestServiceImpl(BacktestService):
         except Exception:
             return True  # 检查失败 → 保守警告
 
-    def run(
+    def run(  # noqa: PLR0912
         self,
         strategy_yaml: str,
         start_date: str = "",
@@ -601,6 +601,14 @@ class BacktestServiceImpl(BacktestService):
         start_date = start_date or getattr(self.config, "test_start_date", "2025-01-01")
         end_date = end_date or getattr(self.config, "test_end_date", "2026-03-24")
 
+        test_start = getattr(self.config, "test_start_date", "2025-01-01")
+        test_end = getattr(self.config, "test_end_date", "2026-03-24")
+        boundary_error = self._validate_oos_window(
+            start_date, end_date, test_start, test_end
+        )
+        if boundary_error:
+            return self._empty_oos_result(n_splits, boundary_error)
+
         if self.logger:
             self.logger.info(
                 f"[OOS] Walk-Forward {start_date}~{end_date} n_splits={n_splits}"
@@ -660,6 +668,27 @@ class BacktestServiceImpl(BacktestService):
             return self._empty_oos_result(n_splits, wf_result["error"])
 
         return self._aggregate_oos_result(wf_result, n_splits)
+
+    @staticmethod
+    def _validate_oos_window(
+        start_date: str,
+        end_date: str,
+        test_start: str,
+        test_end: str,
+    ) -> str:
+        """验证 OOS 请求严格位于配置的测试集内。"""
+        try:
+            requested_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+            requested_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+            allowed_start = datetime.strptime(test_start, "%Y-%m-%d").date()
+            allowed_end = datetime.strptime(test_end, "%Y-%m-%d").date()
+        except ValueError as exc:
+            return f"OOS 日期格式无效: {exc}"
+        if requested_start >= requested_end:
+            return "OOS 日期倒序"
+        if requested_start < allowed_start or requested_end > allowed_end:
+            return f"OOS 区间必须位于测试集 {test_start}~{test_end} 内"
+        return ""
 
     def _empty_oos_result(self, n_splits: int, error: str) -> dict[str, Any]:
         """构造空的 OOS 结果（失败/错误路径）。"""

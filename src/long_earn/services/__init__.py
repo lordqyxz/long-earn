@@ -167,6 +167,20 @@ class MemoryService(Protocol):
 # ── LLM Service ──────────────────────────────────────────────────
 
 
+class ContextPreparationService(Protocol):
+    """研究与分析入口的上下文准备服务。"""
+
+    def prepare(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        force_refresh: bool = False,
+    ) -> str:
+        """激活已有事件，必要时采集事件后再次激活。"""
+        ...
+
+
 class LLMService(Protocol):
     """LLM 调用服务"""
 

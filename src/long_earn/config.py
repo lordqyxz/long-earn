@@ -6,16 +6,21 @@
 
 import os
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 from long_earn.core import storage as _storage
 from long_earn.services import (
     BacktestService,
+    ContextPreparationService,
     LLMService,
     LoggerService,
     MemoryService,
     MonitoringService,
     StockService,
+)
+from long_earn.services.context_preparation_service import (
+    ContextPreparationServiceImpl,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +81,8 @@ class RuntimeContext:
     connector: "Connector | None" = None
     # 本体论注册表（可选，ADR-014；承载 OntologyGraph 供记忆激活图遍历用）
     ontology_registry: "OntologyRegistry | None" = None
+    # 上下文准备服务；生产环境由组合根注入，None 仅兼容直接构造 RuntimeContext 的旧调用。
+    context_preparation: ContextPreparationService | None = None
 
     # ── 新名字别名属性 ─────────────────────────────────────────────────
     # ADR-014 阶段 F：data_provider 字段类型已升级为 DataConnector，新代码
@@ -136,55 +143,11 @@ class RuntimeContext:
         k: int = 5,
         force_refresh: bool = False,
     ) -> str:
-        """激活研究/分析上下文（ADR-018 基础设施）。
-
-        1. 尝试 ``memory.activate_events``
-        2. 若为空或 ``force_refresh``，用默认 Collector 跑轻量事件推理后再激活
-        3. 返回可注入 prompt 的字符串（可能为空）
-        """
-        if not query.strip():
-            return ""
-
-        memory = self.memory
-        activated: list[str] = []
-        if hasattr(memory, "activate_events") and not force_refresh:
-            try:
-                raw = memory.activate_events(query, k=k)
-                activated = [str(x) for x in (raw or [])]
-            except Exception as exc:
-                self.logger.warning(f"prepare_context activate 失败: {exc}")
-
-        if activated and not force_refresh:
-            return "\n".join(activated)
-
-        # miss / 强制刷新 → 轻量事件推理
-        try:
-            from long_earn.event_inference import (  # noqa: PLC0415
-                create_event_inference_subgraph,
-            )
-            from long_earn.event_inference.collectors import (  # noqa: PLC0415
-                create_default_collector_registry,
-            )
-
-            registry = create_default_collector_registry(
-                market_intelligence=self.market_intelligence,
-            )
-            subgraph = create_event_inference_subgraph(
-                self,
-                registry=registry,
-            )
-            subgraph.invoke({"query": query})
-        except Exception as exc:
-            self.logger.warning(f"prepare_context 事件推理跳过: {exc}")
-
-        if hasattr(memory, "activate_events"):
-            try:
-                raw = memory.activate_events(query, k=k)
-                activated = [str(x) for x in (raw or [])]
-            except Exception as exc:
-                self.logger.warning(f"prepare_context 二次激活失败: {exc}")
-                return ""
-        return "\n".join(activated)
+        """向后兼容入口；实际编排委托给上下文准备服务。"""
+        service = self.__dict__.get("context_preparation")
+        if service is None:
+            service = ContextPreparationServiceImpl(self.memory, self.logger)
+        return service.prepare(query, k=k, force_refresh=force_refresh)
 
 
 @dataclass
@@ -360,5 +323,37 @@ class AppConfig:
         # 验证迭代次数
         if self.max_iterations < 1:
             errors.append(f"最大迭代次数必须大于 0: {self.max_iterations}")
+
+        split_fields = (
+            ("TRAIN_START", self.train_start_date),
+            ("TRAIN_END", self.train_end_date),
+            ("TEST_START", self.test_start_date),
+            ("TEST_END", self.test_end_date),
+            ("VALIDATION_START", self.validation_start_date),
+            ("VALIDATION_END", self.validation_end_date),
+        )
+        parsed_dates: dict[str, date] = {}
+        for name, value in split_fields:
+            try:
+                parsed_date = date.fromisoformat(value)
+                if parsed_date.isoformat() != value:
+                    raise ValueError
+                parsed_dates[name] = parsed_date
+            except ValueError:
+                errors.append(f"{name} 必须是 YYYY-MM-DD 格式的有效日期: {value}")
+
+        if len(parsed_dates) == len(split_fields):
+            if parsed_dates["TRAIN_START"] >= parsed_dates["TRAIN_END"]:
+                errors.append("训练集日期倒序：TRAIN_START 必须早于 TRAIN_END")
+            if parsed_dates["TEST_START"] >= parsed_dates["TEST_END"]:
+                errors.append("测试集日期倒序：TEST_START 必须早于 TEST_END")
+            if parsed_dates["VALIDATION_START"] >= parsed_dates["VALIDATION_END"]:
+                errors.append(
+                    "验证集日期倒序：VALIDATION_START 必须早于 VALIDATION_END"
+                )
+            if parsed_dates["TRAIN_END"] >= parsed_dates["TEST_START"]:
+                errors.append("训练集与测试集必须严格有序且不重叠")
+            if parsed_dates["TEST_END"] >= parsed_dates["VALIDATION_START"]:
+                errors.append("测试集与验证集必须严格有序且不重叠")
 
         return errors

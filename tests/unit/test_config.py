@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from long_earn.config import AppConfig, RuntimeContext
 
 
@@ -32,6 +34,32 @@ class TestAppConfigValidate:
         errors = config.validate()
         assert len(errors) == 2
 
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"train_start_date": "2025-01-02", "train_end_date": "2025-01-01"},
+                "训练集日期倒序",
+            ),
+            ({"test_start_date": "2024-12-31"}, "训练集与测试集必须严格有序且不重叠"),
+            (
+                {"validation_start_date": "2026-03-24"},
+                "测试集与验证集必须严格有序且不重叠",
+            ),
+            ({"train_start_date": "2022/01/01"}, "TRAIN_START 必须是 YYYY-MM-DD"),
+            (
+                {"test_start_date": "2025-01-01", "test_end_date": "2025-01-01"},
+                "测试集日期倒序",
+            ),
+        ],
+    )
+    def test_rejects_invalid_data_splits(self, overrides, message):
+        config = AppConfig(**overrides)
+
+        errors = config.validate()
+
+        assert any(message in error for error in errors)
+
 
 class TestRuntimeContext:
     def test_construction(self):
@@ -41,6 +69,7 @@ class TestRuntimeContext:
         mock_backtest = MagicMock()
         mock_logger = MagicMock()
         mock_monitoring = MagicMock()
+        mock_context_preparation = MagicMock()
 
         config = AppConfig()
         ctx = RuntimeContext(
@@ -51,7 +80,13 @@ class TestRuntimeContext:
             logger=mock_logger,
             monitoring=mock_monitoring,
             config=config,
+            context_preparation=mock_context_preparation,
         )
         assert ctx.llm_service is mock_llm
         assert ctx.config is config
         assert ctx.config.llm_type == "deepseek"
+
+        ctx.prepare_context("茅台", k=2, force_refresh=True)
+        mock_context_preparation.prepare.assert_called_once_with(
+            "茅台", k=2, force_refresh=True
+        )

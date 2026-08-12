@@ -519,21 +519,21 @@ class ResearchAgent:
 
         @tool
         def run_backtest(strategy_yaml: str, use_train_split: bool = True) -> str:
-            """在训练集（或显式区间）上跑回测——证据工具，不可用直觉替代。
+            """在训练集上跑回测——证据工具，不可用直觉替代。
 
             Args:
                 strategy_yaml: 策略 YAML
-                use_train_split: True 时强制使用 config 训练集日期
+                use_train_split: 兼容旧调用；仅允许 True
             """
             with monitoring.track("research.run_backtest"):
-                start = ""
-                end = ""
-                if use_train_split:
-                    start = ctx.config.train_start_date
-                    end = ctx.config.train_end_date
-                logger.info(
-                    f"[ToG] run_backtest: {start or '(DSL区间)'}~{end or '(DSL区间)'}"
-                )
+                if not use_train_split:
+                    return json.dumps(
+                        {"error": "开发回测仅允许使用训练集", "rejected": True},
+                        ensure_ascii=False,
+                    )
+                start = ctx.config.train_start_date
+                end = ctx.config.train_end_date
+                logger.info(f"[ToG] run_backtest: {start}~{end}")
                 # DSR 多重检验校正：每调用一次 run_backtest 递增探索计数
                 agent._strategy_trial_count += 1
                 result = ctx.backtest_service.run(
@@ -617,7 +617,7 @@ class ResearchAgent:
                     )
 
                 try:
-                    oos = bt.run_walk_forward_parallel(
+                    oos = bt.run_oos(
                         strategy_yaml=strategy_yaml,
                         start_date=ctx.config.test_start_date,
                         end_date=ctx.config.test_end_date,

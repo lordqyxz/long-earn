@@ -10,9 +10,14 @@ from long_earn.backtest.data.connector import (
     CompositeDataConnector as DataConnectorImpl,
 )
 from long_earn.config import AppConfig, RuntimeContext
+from long_earn.event_inference import create_event_inference_subgraph
+from long_earn.event_inference.collectors import create_default_collector_registry
 from long_earn.ontology import Connector, OntologyRegistry
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.services.backtest_service import BacktestServiceImpl
+from long_earn.services.context_preparation_service import (
+    ContextPreparationServiceImpl,
+)
 from long_earn.services.llm_service import LLMServiceImpl
 from long_earn.services.logger_service import LoggerServiceImpl
 from long_earn.services.memory_service import MemoryServiceImpl
@@ -111,7 +116,28 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         max_workers=getattr(config, "max_workers", 0),
     )
 
-    return RuntimeContext(
+    runtime_context: RuntimeContext | None = None
+
+    def infer_events(query: str) -> None:
+        """通过生产事件推理子图采集并写回事件。"""
+        if runtime_context is None:
+            raise RuntimeError("RuntimeContext 尚未完成装配")
+        registry = create_default_collector_registry(
+            market_intelligence=market_intelligence,
+        )
+        subgraph = create_event_inference_subgraph(
+            runtime_context,
+            registry=registry,
+        )
+        subgraph.invoke({"query": query})
+
+    context_preparation = ContextPreparationServiceImpl(
+        memory,
+        logger,
+        infer_events=infer_events,
+    )
+
+    runtime_context = RuntimeContext(
         config=config,
         logger=logger,
         monitoring=monitoring,
@@ -125,7 +151,9 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         operator_backlog=operator_backlog,
         connector=connector,
         ontology_registry=ontology_registry,
+        context_preparation=context_preparation,
     )
+    return runtime_context
 
 
 def initialize_context(config: AppConfig | None = None) -> RuntimeContext:

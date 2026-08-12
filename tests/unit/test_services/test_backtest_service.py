@@ -62,6 +62,31 @@ class TestRunBacktest:
         assert "error" in result
         assert result["error_category"] == "client_error"
 
+
+class TestRunOosBoundaries:
+    def test_rejects_window_outside_test_split_before_backtest(self):
+        svc = _make_service()
+
+        result = svc.run_oos(
+            strategy_yaml="name: test\nsignals: []",
+            start_date="2024-12-31",
+            end_date="2025-02-01",
+        )
+
+        assert "必须位于测试集" in result["error"]
+        assert result["fold_results"] == []
+
+    def test_rejects_reversed_oos_window_before_backtest(self):
+        svc = _make_service()
+
+        result = svc.run_oos(
+            strategy_yaml="name: test\nsignals: []",
+            start_date="2025-02-01",
+            end_date="2025-01-01",
+        )
+
+        assert result["error"] == "OOS 日期倒序"
+
     def test_returns_error_when_no_strategy(self):
         """未提供任何策略时应返回客户端错误"""
         svc = _make_service()

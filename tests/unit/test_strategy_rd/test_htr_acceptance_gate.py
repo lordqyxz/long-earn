@@ -10,6 +10,7 @@ run_candidates mock 验证批量路径的 AcceptanceGate 语义。
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -50,10 +51,16 @@ class _FakeBacktestService:
 
     def __init__(self, result: dict[str, Any]) -> None:
         self._result = result
+        self.config = SimpleNamespace(
+            train_start_date="2022-01-01",
+            train_end_date="2024-12-31",
+        )
+        self.windows: list[tuple[str, str]] = []
 
     def run_candidates(
         self, *, strategy_yamls, start_date="", end_date="", universe_type=""
     ):
+        self.windows.append((start_date, end_date))
         return [self._result for _ in strategy_yamls]
 
 
@@ -122,16 +129,18 @@ def test_executor_node_accepts_sharpe_improvement() -> None:
         "backtest_result": _bt(1.0),  # baseline sharpe 1.0
     }
     # 优化版 sharpe 1.5 > baseline 1.0 + eps -> AcceptanceGate 接受
+    backtest_service = _FakeBacktestService(_bt(1.5))
     result = _executor_node(
         state,  # type: ignore[arg-type]
         research_agent=_FakeResearchAgent({"name": "optimized"}),
         develop_agent=_FakeDevelopAgent("strategy: name: opt"),
-        backtest_service=_FakeBacktestService(_bt(1.5)),
+        backtest_service=backtest_service,
         logger=_FakeLogger(),
         gate=AcceptanceGate(),
     )
     assert result["executor_results"][0]["dev_score"] == pytest.approx(1.5)
     assert result["executor_results"][0].get("rejected") is not True
+    assert backtest_service.windows == [("2022-01-01", "2024-12-31")]
 
 
 def test_executor_node_skip_gate_when_none() -> None:

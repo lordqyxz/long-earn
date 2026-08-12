@@ -171,9 +171,19 @@ class TestResearchAgentTools:
         assert ev.backtest_reliable is True
         assert ev.backtest_metrics is not None
 
+    def test_run_backtest_rejects_non_train_split(self, agent: ResearchAgent) -> None:
+        tool = next(t for t in agent._build_tools() if t.name == "run_backtest")
+
+        out = json.loads(
+            tool.invoke({"strategy_yaml": "name: test\n", "use_train_split": False})
+        )
+
+        assert out["rejected"] is True
+        agent.context.backtest_service.run.assert_not_called()
+
     def test_run_oos_gates_caches_evidence(self, agent: ResearchAgent) -> None:
         strategy_yaml = "name: oos_test\n"
-        agent.context.backtest_service.run_walk_forward_parallel.return_value = {
+        agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
                 {"sharpe_ratio": 0.8},
                 {"sharpe_ratio": 0.6},
