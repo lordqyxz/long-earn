@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.ciccwm_client import (
     STRING_FIELDS,
     CICCWMCredentialError,
@@ -320,10 +321,8 @@ class TestSymbolConversion:
 class TestProviderAvailability:
     """CiccwmDataProvider.is_available 逻辑测试。"""
 
-    def test_available_with_real_credential(self):
-        """本机有真实凭证时 is_available 返回 True（集成验证）。
-        若本机无凭证则跳过（不强制依赖凭证存在）。
-        """
-        provider = CiccwmDataProvider()
+    def test_available_property_is_boolean(self, tmp_path):
+        """可用性检查不应依赖或打开生产缓存。"""
+        provider = CiccwmDataProvider(DataCache(tmp_path / "ciccwm-test.duckdb"))
         # 不断言具体值，只验证不抛异常且返回 bool
         assert isinstance(provider.is_available, bool)
