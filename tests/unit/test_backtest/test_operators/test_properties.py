@@ -86,17 +86,25 @@ class TestOperatorMonotonicity:
     """
 
     @given(price_panels(min_symbols=2, max_symbols=5))
-    @settings(max_examples=30)
+    @settings(max_examples=200)
     def test_rank_top_ordering_invariant_under_shift(
         self, panel: pl.DataFrame
     ) -> None:
         """rank_top：所有 close 加常数后 top-N 排序不变。"""
+        # 价格以 1e-6 为最小报价单位，确保 +100 后不同价格不会因 IEEE-754
+        # 舍入折叠为同一值。该约束保留真实的加法平移排序不变性质，且不掩盖
+        # rank_top 对原始排序及相同价格 tie 的处理。
+        ranking_panel = panel.with_columns(pl.col("close").round(6).alias("close"))
         top_n = max(1, panel["symbol"].n_unique() // 2)
         op = get_operator("rank_top")
 
-        base = op.apply(panel, RankTopParams(field="close", top=top_n, ascending=False))
+        base = op.apply(
+            ranking_panel, RankTopParams(field="close", top=top_n, ascending=False)
+        )
         # 全部 close + 100
-        shifted = panel.with_columns((pl.col("close") + 100.0).alias("close"))
+        shifted = ranking_panel.with_columns(
+            (pl.col("close") + 100.0).alias("close")
+        )
         shifted_out = op.apply(
             shifted, RankTopParams(field="close", top=top_n, ascending=False)
         )
@@ -104,7 +112,7 @@ class TestOperatorMonotonicity:
         # rank_top 返回 DataFrame，含 "rank" 列
         base_df = base.with_columns(pl.col("rank").alias("_rank"))
         shifted_df = shifted_out.with_columns(pl.col("rank").alias("_rank"))
-        for ts in panel["timestamp"].unique().to_list():
+        for ts in ranking_panel["timestamp"].unique().to_list():
             base_syms = set(
                 base_df.filter(pl.col("timestamp") == ts)
                 .filter(pl.col("_rank").is_not_null())["symbol"]
