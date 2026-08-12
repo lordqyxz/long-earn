@@ -258,16 +258,17 @@ class TestAnnounceDateExtraction:
     真实公告日，四表合并提取 18 个财务字段。
     """
 
-    def test_financial_field_map_has_18_fields(self):
-        """C5.1 FINANCIAL_FIELD_MAP 包含 20 个标准字段（五表合并）
+    def test_financial_field_map_has_24_fields(self):
+        """C5.1 FINANCIAL_FIELD_MAP 包含 24 个标准字段（五表合并 + CashFlow 扩展）
 
-        ADR-014 任务7：纳入 Capital 表 total_shares/float_shares 两字段，
-        从 18 → 20。
+        ADR-014 任务7：纳入 Capital 表 total_shares/float_shares，从 18 → 20。
+        CashFlow 扩展：新增 investing_cf/financing_cf/net_cash_change/cash_from_sales，
+        从 20 → 24。
         """
         from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 
-        assert len(FINANCIAL_FIELD_MAP) == 20, (
-            f"FINANCIAL_FIELD_MAP 应有 20 个字段（五表合并），"
+        assert len(FINANCIAL_FIELD_MAP) == 24, (
+            f"FINANCIAL_FIELD_MAP 应有 24 个字段（五表合并 + CashFlow 扩展），"
             f"实际 {len(FINANCIAL_FIELD_MAP)} 个"
         )
         # 验证各表字段存在
@@ -284,6 +285,10 @@ class TestAnnounceDateExtraction:
             # CashFlow
             "ocf",
             "capex",
+            "investing_cf",
+            "financing_cf",
+            "net_cash_change",
+            "cash_from_sales",
             # Pershareindex
             "bps",
             "ocf_per_share",

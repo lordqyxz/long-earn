@@ -88,6 +88,10 @@ FINANCIAL_FIELD_MAP = {
     # 现金流量表（CashFlow）原始字段
     "ocf": "ocf",
     "capex": "capex",
+    "investing_cf": "investing_cf",
+    "financing_cf": "financing_cf",
+    "net_cash_change": "net_cash_change",
+    "cash_from_sales": "cash_from_sales",
     # 每股指标/主要指标表（Pershareindex）预计算字段
     "bps": "bps",
     "ocf_per_share": "ocf_per_share",
@@ -454,6 +458,38 @@ class MiniQmtClient:
         except Exception as e:
             logger.warning(f"get_sector_list 异常: {e}")
             return []
+
+    def build_sector_mapping(self, prefix: str) -> dict[str, str]:
+        """通过 xtquant 板块分类构建 ``{symbol: 分类名}`` 映射。
+
+        xtquant 板块命名规则：前缀 + 中文名，如 ``THY1银行`` / ``DY1广东省``。
+        本方法遍历所有匹配前缀的板块，调用 ``get_stock_list_in_sector``
+        获取成分股，构建反向映射。
+
+        常用前缀：
+        - ``THY1`` — 同花顺一级行业（31 个，如"银行"/"房地产"/"医药生物"）
+        - ``DY1`` — 地域一级行政区（32 个，如"广东省"/"上海市"/"北京市"）
+
+        Args:
+            prefix: 板块前缀（如 ``"THY1"`` / ``"DY1"``）
+        Returns:
+            ``{symbol: 分类名}`` 映射，如 ``{"000002.SZ": "房地产"}``；
+            xtquant 不可用时返回空字典。
+        """
+        sectors = self.get_sector_list()
+        matched = [s for s in sectors if s.startswith(prefix)]
+        if not matched:
+            logger.warning(f"未找到前缀为 {prefix} 的板块")
+            return {}
+
+        mapping: dict[str, str] = {}
+        for sector in matched:
+            name = sector.replace(prefix, "", 1)
+            stocks = self.get_sector_stocks(sector)
+            for sym in stocks:
+                mapping[sym] = name
+        logger.info(f"{prefix} 板块 {len(matched)} 个，映射 {len(mapping)} 只股票")
+        return mapping
 
     def get_trading_dates(
         self, start_time: str = "", end_time: str = "", market: str = "SSE"

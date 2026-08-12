@@ -168,6 +168,12 @@ CASHFLOW_SCHEMA = FinancialTableSchema(
         _ANNOUNCE_DATE_COL,
         FinancialColumn("ocf", "DOUBLE", ("net_cash_flows_oper_act",)),
         FinancialColumn("capex", "DOUBLE", ("cash_pay_acq_const_fiolta",)),
+        # 阶段 C 扩展：三大活动现金流 + 净增加额 + 销售收现
+        # 字段名来自 xtquant CashFlow 表实测（2026-08-12 验证）
+        FinancialColumn("investing_cf", "DOUBLE", ("net_cash_flows_inv_act",)),
+        FinancialColumn("financing_cf", "DOUBLE", ("net_cash_flows_fnc_act",)),
+        FinancialColumn("net_cash_change", "DOUBLE", ("net_incr_cash_cash_equ",)),
+        FinancialColumn("cash_from_sales", "DOUBLE", ("goods_sale_and_service_render_cash", "m_cashSellingProvidingServices")),
     ),
 )
 
@@ -319,7 +325,7 @@ class FinancialSchemaRegistry:
     ``Connector`` 衍生：``FinancialSchemaRegistry.DERIVED_METRICS``
     """
 
-    SCHEMA_VERSION = 2  # 旧 financial_quarterly 是 v1，升级触发迁移
+    SCHEMA_VERSION = 3  # v1=financial_quarterly, v2=8表拆分, v3=CashFlow扩展
     TABLES: tuple[FinancialTableSchema, ...] = (
         INCOME_SCHEMA,
         BALANCE_SCHEMA,

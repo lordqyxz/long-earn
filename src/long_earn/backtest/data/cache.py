@@ -125,6 +125,18 @@ class DataCache:
                 [schema.table_name, FinancialSchemaRegistry.SCHEMA_VERSION],
             )
 
+        # SCHEMA_VERSION v3：cashflow_stmt 扩展列迁移（幂等，不破坏已有数据）
+        for col_def in (
+            "investing_cf DOUBLE",
+            "financing_cf DOUBLE",
+            "net_cash_change DOUBLE",
+            "cash_from_sales DOUBLE",
+        ):
+            with contextlib.suppress(Exception):
+                conn.execute(
+                    f"ALTER TABLE cashflow_stmt ADD COLUMN IF NOT EXISTS {col_def}"
+                )
+
         # ADR-014 阶段 B：检测旧 financial_quarterly 宽表，自动迁移到 4 张新标量表
         # 迁移幂等（新表已有数据则跳过），旧表重命名为 _v1_deprecated 保留不删。
         try:
@@ -145,6 +157,22 @@ class DataCache:
                 symbol VARCHAR NOT NULL,
                 date DATE NOT NULL,
                 PRIMARY KEY (index_code, symbol, date)
+            )
+        """)
+
+        # 标的详情（公司名称、行业、上市日期等）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS instrument_details (
+                symbol VARCHAR PRIMARY KEY,
+                name VARCHAR NOT NULL DEFAULT '',
+                industry VARCHAR DEFAULT '',
+                region VARCHAR DEFAULT '',
+                listing_date VARCHAR DEFAULT '',
+                total_shares DOUBLE DEFAULT 0,
+                float_shares DOUBLE DEFAULT 0,
+                market_value DOUBLE DEFAULT 0,
+                flow_market_value DOUBLE DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -687,7 +715,14 @@ class DataCache:
         table_field_map = {
             "income_stmt": ["revenue", "net_profit", "eps", "research_expenses"],
             "balance_sheet": ["total_equity", "total_assets", "total_liabilities"],
-            "cashflow_stmt": ["ocf", "capex"],
+            "cashflow_stmt": [
+                "ocf",
+                "capex",
+                "investing_cf",
+                "financing_cf",
+                "net_cash_change",
+                "cash_from_sales",
+            ],
             "pershareindex": [
                 "bps",
                 "ocf_per_share",
@@ -830,6 +865,278 @@ class DataCache:
             SELECT index_code, symbol, date FROM temp_univ
         """)
         logger.info(f"缓存成分股: {index_code} @ {date}, {len(symbols)} 只")
+
+    # ── 标的详情 ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_xtquant_detail(detail: dict[str, Any]) -> dict[str, Any]:
+        """从 xtquant get_instrument_detail 响应中提取标准化字段。
+
+        xtquant 返回字段映射：
+        - InstrumentName → name
+        - OpenDate (YYYYMMDD) → listing_date (YYYY-MM-DD)
+        - TotalVolume → total_shares
+        - FloatVolume → float_shares
+        - PreClose × TotalVolume → market_value
+        - PreClose × FloatVolume → flow_market_value
+        - industry / region → get_instrument_detail 不提供，
+          通过 THY1/DY1 板块 API 批量回填（见 batch_update_instrument_sectors）
+        """
+        name = str(detail.get("InstrumentName", detail.get("stockName", detail.get("name", ""))))
+
+        # OpenDate 格式 YYYYMMDD → YYYY-MM-DD
+        _yyyymmdd_len = 8
+        open_date = str(detail.get("OpenDate", detail.get("listDate", "")))
+        listing_date = ""
+        if open_date and len(open_date) == _yyyymmdd_len and open_date.isdigit():
+            listing_date = f"{open_date[:4]}-{open_date[4:6]}-{open_date[6:8]}"
+        elif open_date:
+            listing_date = open_date
+
+        total_shares = float(detail.get("TotalVolume", detail.get("totalShare", 0)) or 0)
+        float_shares = float(detail.get("FloatVolume", detail.get("floatShare", 0)) or 0)
+
+        # 市值 = 昨收价 × 股本
+        pre_close = float(detail.get("PreClose", 0) or 0)
+        market_value = pre_close * total_shares if (pre_close and total_shares) else 0.0
+        flow_market_value = pre_close * float_shares if (pre_close and float_shares) else 0.0
+
+        return {
+            "name": name,
+            "industry": str(detail.get("industry", "")),
+            "region": str(detail.get("region", "")),
+            "listing_date": listing_date,
+            "total_shares": total_shares,
+            "float_shares": float_shares,
+            "market_value": market_value,
+            "flow_market_value": flow_market_value,
+        }
+
+    def save_instrument_detail(self, symbol: str, detail: dict[str, Any]) -> None:
+        """保存单个标的详情到缓存。
+
+        Args:
+            symbol: 标的代码
+            detail: xtquant get_instrument_detail 返回的字典
+        """
+        if not symbol or not detail:
+            return
+        conn = self._get_conn()
+        parsed = self._parse_xtquant_detail(detail)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO instrument_details
+                (symbol, name, industry, region, listing_date,
+                 total_shares, float_shares, market_value, flow_market_value, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [symbol, parsed["name"], parsed["industry"], parsed["region"],
+             parsed["listing_date"], parsed["total_shares"], parsed["float_shares"],
+             parsed["market_value"], parsed["flow_market_value"]],
+        )
+
+    def save_instrument_details_batch(self, items: list[tuple[str, dict[str, Any]]]) -> int:
+        """批量保存标的详情。
+
+        Args:
+            items: [(symbol, detail_dict), ...]
+        Returns:
+            实际写入的条数
+        """
+        if not items:
+            return 0
+        conn = self._get_conn()
+        rows: list[list[Any]] = []
+        for symbol, detail in items:
+            if not symbol or not detail:
+                continue
+            parsed = self._parse_xtquant_detail(detail)
+            rows.append([
+                symbol, parsed["name"], parsed["industry"], parsed["region"],
+                parsed["listing_date"], parsed["total_shares"], parsed["float_shares"],
+                parsed["market_value"], parsed["flow_market_value"],
+            ])
+        if not rows:
+            return 0
+        df = pd.DataFrame(rows, columns=[  # noqa: F841
+            "symbol", "name", "industry", "region", "listing_date",
+            "total_shares", "float_shares", "market_value", "flow_market_value",
+        ])
+        conn.execute("CREATE OR REPLACE TEMP TABLE temp_instr AS SELECT * FROM df")
+        conn.execute("""
+            INSERT OR REPLACE INTO instrument_details
+                (symbol, name, industry, region, listing_date,
+                 total_shares, float_shares, market_value, flow_market_value, updated_at)
+            SELECT symbol, name, industry, region, listing_date,
+                   total_shares, float_shares, market_value, flow_market_value,
+                   CURRENT_TIMESTAMP
+            FROM temp_instr
+        """)
+        logger.info(f"缓存标的详情: {len(rows)} 条")
+        return len(rows)
+
+    def get_instrument_detail_cached(self, symbol: str) -> dict[str, Any] | None:
+        """从缓存读取单个标的详情。"""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM instrument_details WHERE symbol = ?",
+            [symbol],
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "symbol": row[0],
+            "name": row[1],
+            "industry": row[2],
+            "region": row[3],
+            "listing_date": row[4],
+            "total_shares": float(row[5] or 0),
+            "float_shares": float(row[6] or 0),
+            "market_value": float(row[7] or 0),
+            "flow_market_value": float(row[8] or 0),
+        }
+
+    def get_instrument_names_batch(self, symbols: list[str]) -> dict[str, str]:
+        """批量获取标的名称映射。
+
+        Returns:
+            {symbol: name} 映射，缓存中不存在的 symbol 不出现在结果中
+        """
+        if not symbols:
+            return {}
+        conn = self._get_conn()
+        placeholders = ", ".join(["?"] * len(symbols))
+        rows = conn.execute(
+            f"SELECT symbol, name FROM instrument_details WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        return {r[0]: r[1] for r in rows if r[1]}
+
+    def update_instrument_industry(
+        self, symbol: str, industry: str, region: str
+    ) -> None:
+        """更新标的的行业和地区字段。
+
+        仅在 instrument_details 行已存在时更新，不创建新行。
+        """
+        if not symbol:
+            return
+        conn = self._get_conn()
+        conn.execute(
+            """
+            UPDATE instrument_details
+            SET industry = ?, region = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = ?
+            """,
+            [industry, region, symbol],
+        )
+
+    def batch_update_instrument_sectors(
+        self, mapping: dict[str, str], field: str
+    ) -> int:
+        """批量更新 instrument_details 的 industry 或 region 字段。
+
+        通过 xtquant THY1（同花顺行业）/ DY1（地域）板块构建映射后批量回填，
+        仅更新空值行（不覆盖已有数据）。
+
+        Args:
+            mapping: ``{symbol: value}``，如 ``{"000002.SZ": "房地产"}``
+            field: 目标字段名，``"industry"`` 或 ``"region"``
+        Returns:
+            实际更新行数
+        """
+        if not mapping or field not in ("industry", "region"):
+            return 0
+        conn = self._get_conn()
+        updated = 0
+        for symbol, value in mapping.items():
+            result = conn.execute(
+                f"""
+                UPDATE instrument_details
+                SET {field} = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE symbol = ? AND ({field} = '' OR {field} IS NULL)
+                """,
+                [value, symbol],
+            )
+            updated += getattr(result, "rowcount", 0) or 0
+        return updated
+
+    def get_financial_data(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
+        """获取标的历年财务数据（用于前端可视化）。
+
+        从 income_stmt + pershareindex + cashflow_stmt 三张标量表 JOIN 读取，
+        返回按 report_date 降序的字典列表。
+        """
+        conn = self._get_conn()
+        # 检查表是否存在
+        exists = conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_name='income_stmt'"
+        ).fetchone()[0]
+        if not exists:
+            return []
+
+        rows = conn.execute(
+            """
+            SELECT
+                i.report_date,
+                i.announce_date,
+                i.revenue,
+                i.net_profit,
+                i.research_expenses,
+                i.eps,
+                p.bps,
+                p.roe,
+                p.roe_weighted,
+                p.gross_margin,
+                p.net_profit_margin,
+                p.net_profit_yoy,
+                p.revenue_yoy,
+                p.debt_to_assets,
+                c.ocf,
+                c.capex,
+                c.investing_cf,
+                c.financing_cf,
+                c.net_cash_change,
+                c.cash_from_sales
+            FROM income_stmt i
+            LEFT JOIN pershareindex p
+                ON i.symbol = p.symbol AND i.report_date = p.report_date
+            LEFT JOIN cashflow_stmt c
+                ON i.symbol = c.symbol AND i.report_date = c.report_date
+            WHERE i.symbol = ?
+            ORDER BY i.report_date DESC
+            LIMIT ?
+            """,
+            [symbol, limit],
+        ).fetchall()
+        if not rows:
+            return []
+        return [
+            {
+                "report_date": str(r[0]) if r[0] else "",
+                "announce_date": str(r[1]) if r[1] else "",
+                "revenue": float(r[2]) if r[2] is not None else 0,
+                "net_profit": float(r[3]) if r[3] is not None else 0,
+                "research_expenses": float(r[4]) if r[4] is not None else 0,
+                "eps": float(r[5]) if r[5] is not None else 0,
+                "bps": float(r[6]) if r[6] is not None else 0,
+                "roe": float(r[7]) if r[7] is not None else 0,
+                "roe_weighted": float(r[8]) if r[8] is not None else 0,
+                "gross_margin": float(r[9]) if r[9] is not None else 0,
+                "net_profit_margin": float(r[10]) if r[10] is not None else 0,
+                "net_profit_yoy": float(r[11]) if r[11] is not None else 0,
+                "revenue_yoy": float(r[12]) if r[12] is not None else 0,
+                "debt_to_assets": float(r[13]) if r[13] is not None else 0,
+                "ocf": float(r[14]) if r[14] is not None else 0,
+                "capex": float(r[15]) if r[15] is not None else 0,
+                "investing_cf": float(r[16]) if r[16] is not None else 0,
+                "financing_cf": float(r[17]) if r[17] is not None else 0,
+                "net_cash_change": float(r[18]) if r[18] is not None else 0,
+                "cash_from_sales": float(r[19]) if r[19] is not None else 0,
+            }
+            for r in rows
+        ]
 
     def close(self) -> None:
         """关闭当前线程的数据库连接"""

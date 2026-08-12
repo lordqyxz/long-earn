@@ -124,6 +124,6 @@ class TestFinancialSchemaRegistry:
         assert "total_equity" in total_equity.xt_fields
         assert "tot_shrhldr_eqy_excl_min_int" in total_equity.xt_fields
 
-    def test_schema_version_is_2(self) -> None:
-        """schema 版本 = 2（旧宽表是 v1）。"""
-        assert FinancialSchemaRegistry.SCHEMA_VERSION == 2
+    def test_schema_version_is_3(self) -> None:
+        """schema 版本 = 3（v1=旧宽表, v2=8表拆分, v3=CashFlow扩展）。"""
+        assert FinancialSchemaRegistry.SCHEMA_VERSION == 3

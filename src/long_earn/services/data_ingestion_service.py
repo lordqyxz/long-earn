@@ -580,6 +580,9 @@ class DataIngestionService:
         # P1-01：采集成分股快照，积累历史 PIT 数据
         self._collect_universe_snapshots()
 
+        # 采集标的详情（公司名称、行业等），写入 instrument_details 表
+        self._download_instrument_details(price_symbols)
+
         self._info("=" * 60)
         self._info(f"数据下载完成！缓存路径: {self.cache.db_path}")
         self._info("=" * 60)
@@ -631,6 +634,77 @@ class DataIngestionService:
                 self._warning(f"[成分股快照] {name} 采集失败: {exc}")
 
         self._info(f"[成分股快照] 完成：{collected}/{len(targets)} 个指数/板块")
+
+    # ── 标的详情采集 ──────────────────────────────────────────────
+
+    def _download_instrument_details(self, symbols: list[str]) -> None:
+        """批量下载标的详情（公司名称、行业、上市日期等）并写入缓存。
+
+        从 xtquant get_instrument_detail 逐个获取，分批写入 DuckDB。
+        下载完成后通过 THY1/DY1 板块 API 批量回填 industry + region
+        （get_instrument_detail 不含行业/地区字段）。
+        xtquant 不可用时跳过（已有缓存数据仍可使用）。
+        """
+        if not self.is_available:
+            self._info("[标的详情] xtquant 不可用，跳过")
+            return
+
+        self._info(f"[标的详情] 开始下载 {len(symbols)} 只标的详情...")
+
+        # 先检查缓存中已有的标的，避免重复下载
+        existing_names = self.cache.get_instrument_names_batch(symbols)
+        missing = [s for s in symbols if s not in existing_names]
+        if not missing:
+            self._info(f"[标的详情] 全部 {len(symbols)} 只标的已缓存，跳过")
+        else:
+            self._info(
+                f"[标的详情] 需下载 {len(missing)}/{len(symbols)} 只"
+                f"（已缓存 {len(existing_names)}）"
+            )
+
+            batch: list[tuple[str, dict[str, Any]]] = []
+            batch_size = 50
+            collected = 0
+            for i, sym in enumerate(missing, 1):
+                try:
+                    detail = self.client.get_instrument_detail(sym)
+                    if detail:
+                        batch.append((sym, detail))
+                        collected += 1
+                    if len(batch) >= batch_size or i == len(missing):
+                        self.cache.save_instrument_details_batch(batch)
+                        batch.clear()
+                    if i % 200 == 0 or i == len(missing):
+                        self._info(f"[标的详情] 进度 {i}/{len(missing)}")
+                except Exception as exc:
+                    self._warning(f"[标的详情] {sym} 获取失败: {exc}")
+
+            self._info(f"[标的详情] 完成：{collected}/{len(missing)} 条新增")
+
+        # 通过 THY1/DY1 板块批量回填 industry + region
+        self._enrich_sectors_from_xtquant()
+
+    def _enrich_sectors_from_xtquant(self) -> None:
+        """通过 xtquant THY1/DY1 板块批量回填 industry + region 到缓存。
+
+        get_instrument_detail 不含行业/地区字段，需通过板块成分股反查。
+        仅更新空值行，不覆盖已有数据。
+        """
+        self._info("[板块回填] 通过 THY1/DY1 板块批量补充行业+地区...")
+
+        # 行业
+        industry_map = self.client.build_sector_mapping("THY1")
+        if industry_map:
+            self.cache.batch_update_instrument_sectors(industry_map, "industry")
+            self._info(f"[板块回填] 行业映射 {len(industry_map)} 只股票")
+
+        # 地域
+        region_map = self.client.build_sector_mapping("DY1")
+        if region_map:
+            self.cache.batch_update_instrument_sectors(region_map, "region")
+            self._info(f"[板块回填] 地区映射 {len(region_map)} 只股票")
+
+        self._info("[板块回填] 完成")
 
     # ── 内部工具 ──────────────────────────────────────────────────
 
