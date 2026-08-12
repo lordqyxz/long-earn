@@ -120,38 +120,43 @@ exclude_lines = [
 root_package = "long_earn"
 
 [[tool.importlinter.contracts]]
-id = "backtest_data_independent"
+id = "backtest_data_forbidden_dependencies"
 name = "数据层不依赖上层模块"
-type = "independence"
-modules = ["long_earn.backtest.data"]
+type = "forbidden"
+source_modules = ["long_earn.backtest.data"]
+forbidden_modules = ["long_earn.backtest.engine", "long_earn.services", "long_earn.tools"]
 message = "backtest.data 层不应依赖 engine/services/tools"
 
 [[tool.importlinter.contracts]]
-id = "service_architecture"
+id = "services_forbidden_tools"
 name = "服务层不依赖 tools"
-type = "independence"
-modules = ["long_earn.services"]
+type = "forbidden"
+source_modules = ["long_earn.services"]
+forbidden_modules = ["long_earn.tools"]
 message = "services 层不应依赖 tools 模块"
 
 [[tool.importlinter.contracts]]
-id = "ontology_independent"
+id = "ontology_forbidden_dependencies"
 name = "本体论层不依赖上层模块"
-type = "independence"
-modules = ["long_earn.ontology"]
+type = "forbidden"
+source_modules = ["long_earn.ontology"]
+forbidden_modules = ["long_earn.backtest", "long_earn.services", "long_earn.tools", "long_earn.strategy_rd"]
 message = "ontology 层不应依赖 backtest/services/tools/strategy_rd 等上层模块"
 
 [[tool.importlinter.contracts]]
-id = "substance_independent"
+id = "substance_forbidden_dependencies"
 name = "物质层不依赖上层模块"
-type = "independence"
-modules = ["long_earn.substance"]
+type = "forbidden"
+source_modules = ["long_earn.substance"]
+forbidden_modules = ["long_earn.services", "long_earn.tools", "long_earn.strategy_rd"]
 message = "substance 层不应依赖 services/tools/strategy_rd 等上层模块"
 
 [[tool.importlinter.contracts]]
-id = "core_independent"
+id = "core_forbidden_dependencies"
 name = "核心层不依赖上层模块"
-type = "independence"
-modules = ["long_earn.core"]
+type = "forbidden"
+source_modules = ["long_earn.core"]
+forbidden_modules = ["long_earn.backtest", "long_earn.services", "long_earn.tools", "long_earn.strategy_rd"]
 message = "core 层不应依赖 backtest/services/tools/strategy_rd 等上层模块"
 
 [dependency-groups]
