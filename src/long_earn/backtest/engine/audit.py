@@ -100,6 +100,22 @@ class DuckDBAuditProvider(AuditProvider):
                 )
         logger.info(f"Audit provider initialized at {self.db_path}")
 
+    def close(self) -> None:
+        """显式关闭连接，确保 WAL 落盘。
+
+        DuckDB 的 auto-commit 保证每条 INSERT 已提交，但 WAL 文件需要
+        连接关闭时才 checkpoint 到主数据库文件。若进程被强制终止
+        （如 Stop-Process -Force），WAL 可能未 flush，导致数据丢失。
+        """
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception as exc:
+                    logger.warning(f"关闭审计 DuckDB 连接时异常: {exc}")
+                finally:
+                    self._conn = None
+
     def log_event(self, record: AuditRecord) -> None:
         def json_serializable(obj):
 

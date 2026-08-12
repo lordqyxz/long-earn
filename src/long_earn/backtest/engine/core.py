@@ -29,6 +29,9 @@ from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.engine.visibility import VisibilityGuard
 from long_earn.backtest.models import BacktestResult
 
+# A股最小交易单位：100股 = 1手
+_BOARD_LOT = 100
+
 
 def _empty_bm() -> dict[str, float]:
     return {
@@ -150,9 +153,7 @@ class EventDrivenBacktestEngine:
                 f"{order.symbol} price={price}",
             )
 
-        limit_result = self._check_limit_up_down(
-            order.symbol, order.order_type, price
-        )
+        limit_result = self._check_limit_up_down(order.symbol, order.order_type, price)
         if limit_result is not None:
             return limit_result
 
@@ -277,9 +278,9 @@ class EventDrivenBacktestEngine:
         # RUN_START：记录回测配置，让审计日志能独立重建本次回测的输入参数
         strategy_hash = ""
         if strategy_yaml:
-            strategy_hash = hashlib.sha256(
-                strategy_yaml.strip().encode()
-            ).hexdigest()[:16]
+            strategy_hash = hashlib.sha256(strategy_yaml.strip().encode()).hexdigest()[
+                :16
+            ]
         self._log_audit(
             "RUN_START",
             run_id,
@@ -608,6 +609,7 @@ class EventDrivenBacktestEngine:
                     "price": pf.fill_price,
                     "quantity": pf.fill_quantity,
                     "from_pending": True,
+                    "bar_date": str(ts),
                     "portfolio_value": portfolio.total_value,
                 },
                 db_audit,
@@ -762,13 +764,17 @@ class EventDrivenBacktestEngine:
                 },
                 self._db_audit,
             )
+            # A股整手取整：向下取整到 _BOARD_LOT 股整倍数
+            qty = int(pos.shares / _BOARD_LOT) * _BOARD_LOT
+            if qty < _BOARD_LOT:
+                continue
             order = OrderEvent(
                 timestamp=ts,
                 trace_id=str(uuid.uuid4()),
                 event_id=f"tp_{ts.isoformat()}_{symbol}",
                 symbol=symbol,
                 order_type="SELL",
-                quantity=pos.shares,
+                quantity=qty,
                 price=check_price,
             )
             fill = broker.execute_order(order, check_price)
@@ -836,13 +842,17 @@ class EventDrivenBacktestEngine:
                     },
                     self._db_audit,
                 )
+                # A股整手取整
+                qty = int(pos.shares / _BOARD_LOT) * _BOARD_LOT
+                if qty < _BOARD_LOT:
+                    continue
                 order = OrderEvent(
                     timestamp=ts,
                     trace_id=str(uuid.uuid4()),
                     event_id=f"sl_{ts.isoformat()}_{symbol}",
                     symbol=symbol,
                     order_type="SELL",
-                    quantity=pos.shares,
+                    quantity=qty,
                     price=ref_price,
                 )
                 # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
@@ -912,13 +922,17 @@ class EventDrivenBacktestEngine:
                 continue
             price = self._lookup_price_fast(slab, symbol, price_dict=price_dict)
             if price is not None:
+                # A股整手取整
+                qty = int(pos.shares / _BOARD_LOT) * _BOARD_LOT
+                if qty < _BOARD_LOT:
+                    continue
                 order = OrderEvent(
                     timestamp=ts,
                     trace_id=str(uuid.uuid4()),
                     event_id=f"dd_{ts.isoformat()}_{symbol}",
                     symbol=symbol,
                     order_type="SELL",
-                    quantity=pos.shares,
+                    quantity=qty,
                     price=price,
                 )
                 fill = broker.execute_order(order, price)
@@ -1126,6 +1140,7 @@ class EventDrivenBacktestEngine:
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
                         "partial_fill": fill.partial_fill,
+                        "bar_date": str(execution_ts) if execution_ts else "",
                         "portfolio_value": portfolio.total_value,
                     },
                     db_audit,
@@ -1224,6 +1239,7 @@ class EventDrivenBacktestEngine:
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
                         "partial_fill": fill.partial_fill,
+                        "bar_date": str(execution_ts) if execution_ts else "",
                         "portfolio_value": portfolio.total_value,
                     },
                     db_audit,

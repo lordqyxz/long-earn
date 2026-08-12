@@ -412,15 +412,20 @@ class BacktestServiceImpl(BacktestService):
                 universe_type, start_date_str
             )
 
-            result = engine.run(
-                strategy_obj,
-                start_date,
-                end_date,
-                formatted_symbols,
-                warmup_days=_compute_warmup_days(dsl),
-                universe_pit_warning=universe_pit_warning,
-                strategy_yaml=strategy_yaml,
-            )
+            try:
+                result = engine.run(
+                    strategy_obj,
+                    start_date,
+                    end_date,
+                    formatted_symbols,
+                    warmup_days=_compute_warmup_days(dsl),
+                    universe_pit_warning=universe_pit_warning,
+                    strategy_yaml=strategy_yaml,
+                )
+            finally:
+                # 显式关闭审计连接，确保 WAL 落盘（防止进程退出后数据丢失）
+                if audit_provider is not None and hasattr(audit_provider, "close"):
+                    audit_provider.close()
 
             if self.logger:
                 self.logger.info(

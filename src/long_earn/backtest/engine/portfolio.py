@@ -43,6 +43,9 @@ class Portfolio:
     3. 每日更新持仓市值。
     """
 
+    # A股最小交易单位：100股 = 1手
+    BOARD_LOT: int = 100
+
     def __init__(
         self,
         initial_capital: float = 1_000_000.0,
@@ -352,6 +355,31 @@ class Portfolio:
 
             qty = abs(diff_val) / price
 
+            # A股整手取整：向下取整到 100 股的整倍数
+            qty = int(qty / self.BOARD_LOT) * self.BOARD_LOT
+            if qty < self.BOARD_LOT:
+                continue  # 不足 1 手，跳过
+
+            # 卖出时不得超过当前持仓（同样向下取整）
+            if order_type == "SELL" and symbol in self.positions:
+                held = (
+                    int(self.positions[symbol].shares / self.BOARD_LOT) * self.BOARD_LOT
+                )
+                qty = min(qty, held)
+                if qty < self.BOARD_LOT:
+                    continue
+
+            # 重新计算实际交易金额（用于现金预估修正）
+            actual_val = qty * price
+            if order_type == "BUY":
+                estimated_cost = self._estimate_buy_cost(actual_val)
+                if estimated_cost > remaining_cash + actual_val - diff_val:
+                    # 取整后现金不足：尝试减 1 手
+                    qty -= self.BOARD_LOT
+                    if qty < self.BOARD_LOT:
+                        continue
+                    actual_val = qty * price
+
             orders.append(
                 OrderEvent(
                     timestamp=order_ts if order_ts is not None else event.timestamp,
@@ -429,6 +457,9 @@ class Portfolio:
             price_rows = current_prices.filter(pl.col("symbol") == symbol)
             if not price_rows.is_empty():
                 price = price_rows.select("close").to_series()[0]
+                # 停牌/缺失数据时 close 可能为 None，跳过以保留上次已知市值
+                if price is None:
+                    continue
                 pos.update_market_value(price)
                 pos.current_price = price
 
