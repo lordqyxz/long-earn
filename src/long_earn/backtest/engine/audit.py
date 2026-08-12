@@ -222,12 +222,6 @@ class DuckDBAuditProvider(AuditProvider):
             )
         return records
 
-    def close(self) -> None:
-        with self._lock:
-            if self._conn:
-                self._conn.close()
-                self._conn = None
-
 
 class AuditLogger:
     """
