@@ -38,15 +38,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -58,6 +68,46 @@ _HERE = Path(__file__).parent
 _WEB_DIST = _HERE.parent.parent.parent / "web" / "dist"
 
 _STAGES = ["collect", "extract", "propagate", "conflict", "save"]
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a bind host is restricted to this machine."""
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_bind_host(host: str, allow_remote: bool) -> None:
+    """Fail closed unless an externally reachable bind was explicitly allowed."""
+    if not _is_loopback_host(host) and not allow_remote:
+        msg = (
+            f"Refusing to bind visualization server to non-loopback host {host!r}. "
+            "Use allow_remote=True (CLI: --allow-remote) only behind appropriate "
+            "network controls and authentication."
+        )
+        raise ValueError(msg)
+
+
+def _origin_matches_host(origin: str, host: str) -> bool:
+    """Check a browser Origin against the HTTP Host header, ignoring the port."""
+    origin_hostname = urlparse(origin).hostname
+    request_hostname = urlparse(f"//{host}").hostname
+    if origin_hostname is None or request_hostname is None:
+        return False
+    return origin_hostname.lower() == request_hostname.lower()
+
+
+def _websocket_origin_allowed(websocket: WebSocket) -> bool:
+    """Require same-origin browser WebSocket connections in remote mode."""
+    if not websocket.app.state.remote_mode:
+        return True
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host", "")
+    return origin is not None and _origin_matches_host(origin, host)
 
 
 def _resolve_paths(
@@ -463,6 +513,9 @@ def _register_ws_routes(
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket):
+        if not _websocket_origin_allowed(websocket):
+            await websocket.close(code=1008, reason="WebSocket Origin is not allowed")
+            return
         await websocket.accept()
         active_ws: set[WebSocket] = app.state.active_ws
         active_ws.add(websocket)
@@ -615,6 +668,9 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
     @app.websocket("/ws/research")
     async def ws_research(websocket: WebSocket):
+        if not _websocket_origin_allowed(websocket):
+            await websocket.close(code=1008, reason="WebSocket Origin is not allowed")
+            return
         await websocket.accept()
         active_ws: set[WebSocket] = app.state.active_ws
         active_ws.add(websocket)
@@ -663,7 +719,7 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
                             config = AppConfig.from_env()
                             config.backtest_start_date = config.train_start_date
-                            config.backtest_end_date = config.test_end_date
+                            config.backtest_end_date = config.train_end_date
                             ctx = initialize_context(config)
 
                             def _send_progress(data: dict[str, Any]) -> None:
@@ -727,7 +783,7 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
                 config = AppConfig.from_env()
                 config.backtest_start_date = config.train_start_date
-                config.backtest_end_date = config.test_end_date
+                config.backtest_end_date = config.train_end_date
                 ctx = initialize_context(config)
 
                 def _send_progress(data: dict[str, Any]) -> None:
@@ -780,6 +836,7 @@ def _register_api_routes(
 def _create_app(
     db_path: str | Path = "",
     substances_path: str | Path = "",
+    remote_mode: bool = False,
 ) -> FastAPI:
     """创建 FastAPI 应用实例。
 
@@ -789,6 +846,20 @@ def _create_app(
     """
     app = FastAPI(title="Long Earn 可视化仪表盘", version="2.0.0")
     app.state.active_ws = set()  # type: ignore[attr-defined]
+    app.state.remote_mode = remote_mode
+
+    @app.middleware("http")
+    async def reject_cross_origin_writes(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """Prevent browser-originated API writes from arbitrary sites in remote mode."""
+        if remote_mode and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            host = request.headers.get("host", "")
+            if origin is not None and not _origin_matches_host(origin, host):
+                return PlainTextResponse("Origin is not allowed", status_code=403)
+        return await call_next(request)
 
     resolved_db, resolved_substances = _resolve_paths(db_path, substances_path)
 
@@ -831,11 +902,12 @@ def _create_app(
 
 
 def serve_visualization_fastapi(
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8090,
     db_path: str | Path = "",
     substances_path: str | Path = "",
     reload: bool = False,
+    allow_remote: bool = False,
 ) -> None:
     """启动 FastAPI 可视化服务。
 
@@ -845,9 +917,12 @@ def serve_visualization_fastapi(
         db_path: DuckDB 审计数据库路径；空字符串时取 AppConfig.backtest_cache_path
         substances_path: SubstanceStore DuckDB 路径；空字符串时取 AppConfig.memory_path
         reload: 是否启用热重载（开发模式）
+        allow_remote: 显式允许绑定非 loopback 地址；远程部署仍需额外认证
     """
+    _validate_bind_host(host, allow_remote)
+    remote_mode = not _is_loopback_host(host)
     app = _create_app(
-        db_path=db_path, substances_path=substances_path
+        db_path=db_path, substances_path=substances_path, remote_mode=remote_mode
     )
 
     logger.info(f"FastAPI 可视化服务启动: http://{host}:{port}")

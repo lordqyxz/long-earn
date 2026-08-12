@@ -11,6 +11,7 @@ ADR-014 阶段 B：``financial_quarterly`` 单一宽表废弃，改为 8 张细�
 import contextlib
 import threading
 import time
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,16 @@ from long_earn.core.storage import backtest_cache_path
 # 缓存大查询 info 日志阈值（避免小查询刷屏）
 _CACHE_SLOW_QUERY_SYMBOLS = 500
 _CACHE_SLOW_QUERY_SECONDS = 1.0
+_WRITE_LOCKS_GUARD = threading.Lock()
+_WRITE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _process_write_lock(db_path: Path) -> threading.RLock:
+    """返回同一数据库路径在当前进程内共享的单写者锁。"""
+
+    key = str(db_path.resolve())
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, threading.RLock())
 
 
 class DataCache:
@@ -44,7 +55,9 @@ class DataCache:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path_str = str(self.db_path)
         self._local = threading.local()
-        self._init_tables()
+        self._write_lock = _process_write_lock(self.db_path)
+        with self._write_lock:
+            self._init_tables()
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
         """获取当前线程的数据库连接（线程安全）。
@@ -55,6 +68,25 @@ class DataCache:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = duckdb.connect(self._db_path_str)
         return self._local.conn
+
+    @contextlib.contextmanager
+    def _write_transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """串行化当前进程写入，并以事务保证单次公共写操作原子化。
+
+        该锁按数据库绝对路径跨 ``DataCache`` 实例共享。它不提供跨进程互斥；
+        生产下载仍须由 ingestion writer 统一落库。
+        """
+
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                yield conn
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
 
     @staticmethod
     def _normalize_date(date_str: str) -> str:
@@ -307,7 +339,6 @@ class DataCache:
         if df.empty:
             return
 
-        conn = self._get_conn()
         required_cols = {"symbol", "date", "close"}
         if not required_cols.issubset(df.columns):
             logger.warning(f"行情数据缺少必要列: {required_cols - set(df.columns)}")
@@ -317,19 +348,20 @@ class DataCache:
         if df["date"].dtype == "object":
             df["date"] = pd.to_datetime(df["date"])
 
-        conn.execute("""
-            CREATE OR REPLACE TEMP TABLE temp_price AS SELECT * FROM df
-        """)
-        # 动态构建 INSERT 列清单：兼容新旧 schema（is_tradable 列可选）
-        insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
-        if "is_tradable" in df.columns:
-            insert_cols.append("is_tradable")
-        cols_str = ", ".join(insert_cols)
-        conn.execute(f"""
-            INSERT OR REPLACE INTO price_daily ({cols_str})
-            SELECT {cols_str}
-            FROM temp_price
-        """)
+        with self._write_transaction() as conn:
+            conn.execute("""
+                CREATE OR REPLACE TEMP TABLE temp_price AS SELECT * FROM df
+            """)
+            # 动态构建 INSERT 列清单：兼容新旧 schema（is_tradable 列可选）
+            insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
+            if "is_tradable" in df.columns:
+                insert_cols.append("is_tradable")
+            cols_str = ", ".join(insert_cols)
+            conn.execute(f"""
+                INSERT OR REPLACE INTO price_daily ({cols_str})
+                SELECT {cols_str}
+                FROM temp_price
+            """)
         logger.info(f"缓存行情数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
 
     def get_financial_range(self, symbol: str) -> tuple[str, str] | None:
@@ -432,7 +464,6 @@ class DataCache:
         if df.empty:
             return
         schema = FinancialSchemaRegistry.get_table(table_name)
-        conn = self._get_conn()
         df = df.copy()
         # 日期列转 datetime
         for date_col in ("report_date", "announce_date"):
@@ -450,10 +481,11 @@ class DataCache:
         if df.empty:
             return
         col_list = ", ".join(schema_cols)
-        conn.execute(
-            f"INSERT OR REPLACE INTO {table_name} ({col_list}) "
-            f"SELECT {col_list} FROM df"
-        )
+        with self._write_transaction() as conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table_name} ({col_list}) "
+                f"SELECT {col_list} FROM df"
+            )
         logger.debug(
             f"缓存 {table_name}: {len(df)} 行, {df['symbol'].nunique()} 只股票"
         )
@@ -844,7 +876,6 @@ class DataCache:
         if not symbols:
             return
 
-        conn = self._get_conn()
         # 转换日期格式 YYYYMMDD -> YYYY-MM-DD；空则用今天
         date_fmt = self._normalize_date(date)
         if not date_fmt:
@@ -857,13 +888,14 @@ class DataCache:
             }
         )
 
-        conn.execute("""
-            CREATE OR REPLACE TEMP TABLE temp_univ AS SELECT * FROM df
-        """)
-        conn.execute("""
-            INSERT OR REPLACE INTO universe_constituents
-            SELECT index_code, symbol, date FROM temp_univ
-        """)
+        with self._write_transaction() as conn:
+            conn.execute("""
+                CREATE OR REPLACE TEMP TABLE temp_univ AS SELECT * FROM df
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO universe_constituents
+                SELECT index_code, symbol, date FROM temp_univ
+            """)
         logger.info(f"缓存成分股: {index_code} @ {date}, {len(symbols)} 只")
 
     # ── 标的详情 ──────────────────────────────────────────────────
@@ -882,7 +914,11 @@ class DataCache:
         - industry / region → get_instrument_detail 不提供，
           通过 THY1/DY1 板块 API 批量回填（见 batch_update_instrument_sectors）
         """
-        name = str(detail.get("InstrumentName", detail.get("stockName", detail.get("name", ""))))
+        name = str(
+            detail.get(
+                "InstrumentName", detail.get("stockName", detail.get("name", ""))
+            )
+        )
 
         # OpenDate 格式 YYYYMMDD → YYYY-MM-DD
         _yyyymmdd_len = 8
@@ -893,13 +929,19 @@ class DataCache:
         elif open_date:
             listing_date = open_date
 
-        total_shares = float(detail.get("TotalVolume", detail.get("totalShare", 0)) or 0)
-        float_shares = float(detail.get("FloatVolume", detail.get("floatShare", 0)) or 0)
+        total_shares = float(
+            detail.get("TotalVolume", detail.get("totalShare", 0)) or 0
+        )
+        float_shares = float(
+            detail.get("FloatVolume", detail.get("floatShare", 0)) or 0
+        )
 
         # 市值 = 昨收价 × 股本
         pre_close = float(detail.get("PreClose", 0) or 0)
         market_value = pre_close * total_shares if (pre_close and total_shares) else 0.0
-        flow_market_value = pre_close * float_shares if (pre_close and float_shares) else 0.0
+        flow_market_value = (
+            pre_close * float_shares if (pre_close and float_shares) else 0.0
+        )
 
         return {
             "name": name,
@@ -921,21 +963,31 @@ class DataCache:
         """
         if not symbol or not detail:
             return
-        conn = self._get_conn()
         parsed = self._parse_xtquant_detail(detail)
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO instrument_details
-                (symbol, name, industry, region, listing_date,
-                 total_shares, float_shares, market_value, flow_market_value, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """,
-            [symbol, parsed["name"], parsed["industry"], parsed["region"],
-             parsed["listing_date"], parsed["total_shares"], parsed["float_shares"],
-             parsed["market_value"], parsed["flow_market_value"]],
-        )
+        with self._write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO instrument_details
+                    (symbol, name, industry, region, listing_date,
+                     total_shares, float_shares, market_value, flow_market_value, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [
+                    symbol,
+                    parsed["name"],
+                    parsed["industry"],
+                    parsed["region"],
+                    parsed["listing_date"],
+                    parsed["total_shares"],
+                    parsed["float_shares"],
+                    parsed["market_value"],
+                    parsed["flow_market_value"],
+                ],
+            )
 
-    def save_instrument_details_batch(self, items: list[tuple[str, dict[str, Any]]]) -> int:
+    def save_instrument_details_batch(
+        self, items: list[tuple[str, dict[str, Any]]]
+    ) -> int:
         """批量保存标的详情。
 
         Args:
@@ -945,33 +997,51 @@ class DataCache:
         """
         if not items:
             return 0
-        conn = self._get_conn()
         rows: list[list[Any]] = []
         for symbol, detail in items:
             if not symbol or not detail:
                 continue
             parsed = self._parse_xtquant_detail(detail)
-            rows.append([
-                symbol, parsed["name"], parsed["industry"], parsed["region"],
-                parsed["listing_date"], parsed["total_shares"], parsed["float_shares"],
-                parsed["market_value"], parsed["flow_market_value"],
-            ])
+            rows.append(
+                [
+                    symbol,
+                    parsed["name"],
+                    parsed["industry"],
+                    parsed["region"],
+                    parsed["listing_date"],
+                    parsed["total_shares"],
+                    parsed["float_shares"],
+                    parsed["market_value"],
+                    parsed["flow_market_value"],
+                ]
+            )
         if not rows:
             return 0
-        df = pd.DataFrame(rows, columns=[  # noqa: F841
-            "symbol", "name", "industry", "region", "listing_date",
-            "total_shares", "float_shares", "market_value", "flow_market_value",
-        ])
-        conn.execute("CREATE OR REPLACE TEMP TABLE temp_instr AS SELECT * FROM df")
-        conn.execute("""
-            INSERT OR REPLACE INTO instrument_details
-                (symbol, name, industry, region, listing_date,
-                 total_shares, float_shares, market_value, flow_market_value, updated_at)
-            SELECT symbol, name, industry, region, listing_date,
-                   total_shares, float_shares, market_value, flow_market_value,
-                   CURRENT_TIMESTAMP
-            FROM temp_instr
-        """)
+        df = pd.DataFrame(  # noqa: F841 - DuckDB replacement scan 读取局部变量
+            rows,
+            columns=[
+                "symbol",
+                "name",
+                "industry",
+                "region",
+                "listing_date",
+                "total_shares",
+                "float_shares",
+                "market_value",
+                "flow_market_value",
+            ],
+        )
+        with self._write_transaction() as conn:
+            conn.execute("CREATE OR REPLACE TEMP TABLE temp_instr AS SELECT * FROM df")
+            conn.execute("""
+                INSERT OR REPLACE INTO instrument_details
+                    (symbol, name, industry, region, listing_date,
+                     total_shares, float_shares, market_value, flow_market_value, updated_at)
+                SELECT symbol, name, industry, region, listing_date,
+                       total_shares, float_shares, market_value, flow_market_value,
+                       CURRENT_TIMESTAMP
+                FROM temp_instr
+            """)
         logger.info(f"缓存标的详情: {len(rows)} 条")
         return len(rows)
 
@@ -1021,15 +1091,15 @@ class DataCache:
         """
         if not symbol:
             return
-        conn = self._get_conn()
-        conn.execute(
-            """
-            UPDATE instrument_details
-            SET industry = ?, region = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE symbol = ?
-            """,
-            [industry, region, symbol],
-        )
+        with self._write_transaction() as conn:
+            conn.execute(
+                """
+                UPDATE instrument_details
+                SET industry = ?, region = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE symbol = ?
+                """,
+                [industry, region, symbol],
+            )
 
     def batch_update_instrument_sectors(
         self, mapping: dict[str, str], field: str
@@ -1047,18 +1117,18 @@ class DataCache:
         """
         if not mapping or field not in ("industry", "region"):
             return 0
-        conn = self._get_conn()
         updated = 0
-        for symbol, value in mapping.items():
-            result = conn.execute(
-                f"""
-                UPDATE instrument_details
-                SET {field} = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE symbol = ? AND ({field} = '' OR {field} IS NULL)
-                """,
-                [value, symbol],
-            )
-            updated += getattr(result, "rowcount", 0) or 0
+        with self._write_transaction() as conn:
+            for symbol, value in mapping.items():
+                result = conn.execute(
+                    f"""
+                    UPDATE instrument_details
+                    SET {field} = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE symbol = ? AND ({field} = '' OR {field} IS NULL)
+                    """,
+                    [value, symbol],
+                )
+                updated += getattr(result, "rowcount", 0) or 0
         return updated
 
     def get_financial_data(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -1186,7 +1256,7 @@ class DataCache:
             f"""
             SELECT symbol, date, close
             FROM price_daily
-            WHERE {' AND '.join(where_clauses)}
+            WHERE {" AND ".join(where_clauses)}
             ORDER BY symbol, date
             """,
             params,
