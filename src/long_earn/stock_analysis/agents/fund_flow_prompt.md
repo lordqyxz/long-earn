@@ -27,6 +27,9 @@ description: 资金流向视角分析提示词（基于 ciccwm 独占数据）
 ### 资金流向数据（ciccwm，最近 N 个交易日）
 {{ fund_flow_data }}
 
+### 相关市场事件
+{{ event_context }}
+
 ## 输出格式
 
 请用以下 markdown 结构输出，每段 2~4 句，简洁：

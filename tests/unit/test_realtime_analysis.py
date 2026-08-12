@@ -212,6 +212,20 @@ class TestFundFlowAnalyst:
         result = analyst.analyze({"stock_info": {"symbol": "600519.SH"}})
         assert isinstance(result, str)
 
+    def test_analyze_passes_event_context_to_prompt(self) -> None:
+        """资金流向 Prompt 接收股票关联的市场事件。"""
+        from long_earn.stock_analysis.agents.fund_flow_analyst import FundFlowAnalyst
+
+        ctx = self._make_context(market_intelligence=None)
+        analyst = FundFlowAnalyst(ctx)
+        analyst.analyze(
+            {"stock_info": {"symbol": "600519.SH"}},
+            event_context="茅台发布业绩预告",
+        )
+
+        prompt = ctx.require_llm.return_value.get_llm.return_value.invoke.call_args[0][0]
+        assert "茅台发布业绩预告" in prompt
+
     def test_fetch_fund_flow_with_mi(self) -> None:
         """market_intelligence 可用时 fetch_fund_flow 调用接口。"""
         from long_earn.stock_analysis.agents.fund_flow_analyst import FundFlowAnalyst

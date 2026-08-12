@@ -37,7 +37,7 @@ class FundFlowAnalyst:
         self.prompt = MarkdownPromptTemplate(
             template_file="fund_flow_prompt.md",
             caller_file=__file__,
-            input_variables=["stock_data", "fund_flow_data"],
+            input_variables=["stock_data", "fund_flow_data", "event_context"],
         )
 
     def fetch_fund_flow(self, symbol: str) -> pd.DataFrame:
@@ -54,11 +54,12 @@ class FundFlowAnalyst:
             self.logger.warning(f"FundFlow 获取失败（symbol={symbol}）: {exc}")
             return pd.DataFrame()
 
-    def analyze(self, stock_data: dict[str, Any]) -> str:
+    def analyze(self, stock_data: dict[str, Any], event_context: str = "") -> str:
         """从资金流向视角分析股票。
 
         Args:
             stock_data: 上游 ``get_stock_data`` 节点输出的基础数据字典
+            event_context: 相关市场事件上下文，可为空
 
         Returns:
             分析文本（markdown）；数据不可用时返回占位说明
@@ -84,6 +85,7 @@ class FundFlowAnalyst:
         formatted_prompt = self.prompt.format(
             stock_data=stock_data,
             fund_flow_data=ff_text,
+            event_context=event_context,
         )
         response = self.llm.invoke(formatted_prompt)
         return response.content if hasattr(response, "content") else str(response)

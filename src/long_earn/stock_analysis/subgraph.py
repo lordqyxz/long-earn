@@ -235,7 +235,10 @@ def fiske_analysis_node(state, context: "RuntimeContext"):
 def fund_flow_analysis_node(state, context: "RuntimeContext"):
     """资金流向视角分析（ADR-011 第 5 视角）"""
     fund_flow_analyst = FundFlowAnalyst(context=context)
-    analysis = fund_flow_analyst.analyze(state.get("stock_data", {}))
+    analysis = fund_flow_analyst.analyze(
+        state.get("stock_data", {}),
+        event_context=state.get("event_context", ""),
+    )
     return {"fund_flow_analysis": analysis}
 
 

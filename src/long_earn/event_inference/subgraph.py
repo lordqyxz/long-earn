@@ -34,8 +34,6 @@ from langgraph.graph import END, START, StateGraph
 from long_earn.event_inference.agents import (
     EventExtractor,
     EventPropagator,
-    FakeEventExtractor,
-    FakeEventPropagator,
     create_default_extractors,
 )
 from long_earn.event_inference.collectors.base import CollectorRegistry
@@ -46,17 +44,6 @@ if TYPE_CHECKING:
 
     from long_earn.config import RuntimeContext
     from long_earn.services import LoggerService, MemoryService
-
-
-class _SilentLogger:
-    def debug(self, message: str) -> None: ...
-    def info(self, message: str) -> None: ...
-    def warning(self, message: str) -> None: ...
-    def error(self, message: str) -> None: ...
-    def exception(self, message: str) -> None: ...
-
-
-_SILENT_LOGGER = _SilentLogger()
 
 
 # ── 节点 ────────────────────────────────────────────────────────────────
@@ -183,57 +170,68 @@ def _after_collect_cond(state: EventInferenceState) -> str:
 
 
 def create_event_inference_subgraph(
-    context: RuntimeContext | None = None,
-    *,
-    registry: CollectorRegistry | None = None,
-    extractor: EventExtractor | None = None,
-    propagator: EventPropagator | None = None,
-    memory: MemoryService | None = None,
+    context: RuntimeContext,
 ) -> CompiledStateGraph:
-    """创建事件推理子图。
+    """用完整运行时上下文创建生产事件推理子图。"""
+    if context is None:
+        raise ValueError("生产事件推理子图需要 RuntimeContext")
 
-    Args:
-        context: 运行时上下文；未提供 extractor/propagator/memory 时用它构造默认实现。
-        registry: 采集器注册表；不传则用空 registry（collect 节点产出空，流程提前结束）。
-        extractor: 事件抽取器；不传则用 context 构造 LLM 实现。
-        propagator: 影响传播器；不传则用 context 构造 LLM 实现。
-        memory: 记忆服务；不传则从 context.memory 取。
-    """
-    if memory is None:
-        if context is None:
-            raise ValueError("需提供 context 或 memory")
-        memory = context.memory
-    if extractor is None or propagator is None:
-        if context is None:
-            extractor = extractor or FakeEventExtractor()
-            propagator = propagator or FakeEventPropagator()
-        else:
-            llm_extractor, llm_propagator = create_default_extractors(context)
-            extractor = extractor or llm_extractor
-            propagator = propagator or llm_propagator
-    if registry is None:
-        from long_earn.event_inference.collectors import (  # noqa: PLC0415
-            create_default_collector_registry,
-        )
+    from long_earn.event_inference.collectors import (  # noqa: PLC0415
+        create_default_collector_registry,
+    )
 
-        market_intel = context.market_intelligence if context is not None else None
-        registry = create_default_collector_registry(
-            market_intelligence=market_intel,
-        )
+    registry = create_default_collector_registry(
+        market_intelligence=context.market_intelligence,
+    )
+    extractor, propagator = create_default_extractors(context)
+    return _compile_event_inference_subgraph(
+        registry=registry,
+        extractor=extractor,
+        propagator=propagator,
+        memory=context.memory,
+        logger=context.logger,
+    )
 
-    log: LoggerService = context.logger if context is not None else _SILENT_LOGGER  # type: ignore[assignment]
+
+def create_event_inference_subgraph_for_testing(
+    *,
+    registry: CollectorRegistry,
+    extractor: EventExtractor,
+    propagator: EventPropagator,
+    memory: MemoryService,
+    logger: LoggerService,
+) -> CompiledStateGraph:
+    """用完整显式依赖创建确定性测试事件推理子图。"""
+    return _compile_event_inference_subgraph(
+        registry=registry,
+        extractor=extractor,
+        propagator=propagator,
+        memory=memory,
+        logger=logger,
+    )
+
+
+def _compile_event_inference_subgraph(
+    *,
+    registry: CollectorRegistry,
+    extractor: EventExtractor,
+    propagator: EventPropagator,
+    memory: MemoryService,
+    logger: LoggerService,
+) -> CompiledStateGraph:
+    """将已完成构造的事件推理依赖编译为 LangGraph。"""
 
     workflow = StateGraph(EventInferenceState)
 
-    workflow.add_node("collect", partial(_collect_node, registry=registry, logger=log))
+    workflow.add_node("collect", partial(_collect_node, registry=registry, logger=logger))
     workflow.add_node(
-        "extract", partial(_extract_node, extractor=extractor, logger=log)
+        "extract", partial(_extract_node, extractor=extractor, logger=logger)
     )
     workflow.add_node(
-        "propagate", partial(_propagate_node, propagator=propagator, logger=log)
+        "propagate", partial(_propagate_node, propagator=propagator, logger=logger)
     )
-    workflow.add_node("conflict", partial(_conflict_node, logger=log))
-    workflow.add_node("save", partial(_save_node, memory=memory, logger=log))
+    workflow.add_node("conflict", partial(_conflict_node, logger=logger))
+    workflow.add_node("save", partial(_save_node, memory=memory, logger=logger))
 
     workflow.add_edge(START, "collect")
     workflow.add_conditional_edges(

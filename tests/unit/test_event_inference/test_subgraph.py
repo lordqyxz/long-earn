@@ -11,7 +11,10 @@ from typing import Any
 
 from long_earn.event_inference.agents import FakeEventExtractor, FakeEventPropagator
 from long_earn.event_inference.collectors.base import CollectedItem, CollectorRegistry
-from long_earn.event_inference.subgraph import create_event_inference_subgraph
+from long_earn.event_inference.subgraph import (
+    create_event_inference_subgraph,
+    create_event_inference_subgraph_for_testing,
+)
 
 
 class _FakeMemory:
@@ -50,6 +53,20 @@ class _FakeMemory:
         }
 
 
+class _FakeLogger:
+    """测试日志服务，确保测试工厂的依赖完整。"""
+
+    def debug(self, message: str) -> None: pass
+
+    def info(self, message: str) -> None: pass
+
+    def warning(self, message: str) -> None: pass
+
+    def error(self, message: str) -> None: pass
+
+    def exception(self, message: str) -> None: pass
+
+
 class _FakeCollector:
     """确定性采集器。"""
 
@@ -71,11 +88,12 @@ def _make_subgraph(
     memory = memory or _FakeMemory()
     registry = CollectorRegistry()
     registry.register(_FakeCollector(items))
-    subgraph = create_event_inference_subgraph(
+    subgraph = create_event_inference_subgraph_for_testing(
         registry=registry,
         extractor=FakeEventExtractor(),
         propagator=FakeEventPropagator(),
         memory=memory,
+        logger=_FakeLogger(),
     )
     return subgraph, memory
 
@@ -85,14 +103,22 @@ class TestSubgraphCompile:
         subgraph, _ = _make_subgraph([])
         assert subgraph is not None
 
-    def test_compiles_with_no_deps(self):
-        """无 context/依赖时也能编译（collect 产出空，提前结束）。"""
+    def test_production_factory_requires_runtime_context(self):
+        """生产工厂不允许缺失 RuntimeContext 后静默空跑。"""
+        import pytest
+
+        with pytest.raises(ValueError, match="RuntimeContext"):
+            create_event_inference_subgraph(None)  # type: ignore[arg-type]
+
+    def test_compiles_with_explicit_test_deps(self):
+        """测试工厂在完整显式依赖下注入时能够编译。"""
         memory = _FakeMemory()
-        subgraph = create_event_inference_subgraph(
+        subgraph = create_event_inference_subgraph_for_testing(
             registry=CollectorRegistry(),
             extractor=FakeEventExtractor(),
             propagator=FakeEventPropagator(),
             memory=memory,
+            logger=_FakeLogger(),
         )
         assert subgraph is not None
 
@@ -159,11 +185,12 @@ class TestSubgraphEndToEnd:
         memory = _FakeMemory()
         registry = CollectorRegistry()
         registry.register(_FakeCollector(items))
-        subgraph = create_event_inference_subgraph(
+        subgraph = create_event_inference_subgraph_for_testing(
             registry=registry,
             extractor=_ConflictExtractor(),
             propagator=FakeEventPropagator(),
             memory=memory,
+            logger=_FakeLogger(),
         )
         result = subgraph.invoke({"query": "茅台"})
 
@@ -203,11 +230,12 @@ class TestSubgraphEndToEnd:
         memory = _FakeMemory()
         registry = CollectorRegistry()
         registry.register(_FakeCollector(items))
-        subgraph = create_event_inference_subgraph(
+        subgraph = create_event_inference_subgraph_for_testing(
             registry=registry,
             extractor=_SameSentimentExtractor(),
             propagator=FakeEventPropagator(),
             memory=memory,
+            logger=_FakeLogger(),
         )
         result = subgraph.invoke({"query": "茅台"})
         assert result["conflict_groups"] == {}

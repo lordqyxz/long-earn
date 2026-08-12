@@ -35,7 +35,10 @@ from long_earn.event_inference.collectors import (
     create_default_collector_registry,
 )
 from long_earn.event_inference.state import EventInferenceState
-from long_earn.event_inference.subgraph import create_event_inference_subgraph
+from long_earn.event_inference.subgraph import (
+    create_event_inference_subgraph,
+    create_event_inference_subgraph_for_testing,
+)
 
 __all__ = [
     "CiccwmHotCollector",
@@ -47,4 +50,5 @@ __all__ = [
     "KimiCollector",
     "create_default_collector_registry",
     "create_event_inference_subgraph",
+    "create_event_inference_subgraph_for_testing",
 ]
