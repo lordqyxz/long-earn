@@ -1,7 +1,7 @@
-"""数据下载服务 — 行情与财务数据批量入库。
+"""miniQMT 数据采集执行器 — 行情与财务数据增量入库。
 
-从 scripts/download_data.py 抽取的核心业务逻辑，供 CLI / Web 等入口复用。
-依赖 MiniQMT 客户端（xtquant）与 DuckDB 缓存。
+由 ``IncrementalSyncService`` 协调调用，负责 miniQMT 采集和 DuckDB 写入。
+依赖 MiniQMT 客户端（xtquant）与 DuckDB 本地数据层。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ _FINANCIAL_STALE_DAYS = 120
 
 
 class DataIngestionService:
-    """数据下载服务。
+    """miniQMT 采集与 DuckDB 写入执行器。
 
     封装行情/财务数据的批量下载与入库逻辑，与 CLI 表现层解耦。
     """

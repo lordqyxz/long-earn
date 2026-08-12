@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载全量行情与财务数据到 DuckDB 缓存（薄入口，等价于 ``long-earn download``）。
+"""从 miniQMT 增量同步数据到 DuckDB 主数据层（薄入口）。
 
 核心逻辑位于 long_earn.services.data_ingestion_service，
 本脚本以子进程方式运行 typer CLI 的 download 子命令，并加守护重启：
@@ -25,7 +25,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import time
@@ -56,7 +55,7 @@ def main() -> None:
         sys.executable,
         "-m",
         "long_earn",
-        "download",
+        "sync",
         *clean_argv,
     ]
 
@@ -67,7 +66,7 @@ def main() -> None:
             flush=True,
         )
         # 子进程继承当前 stdout/stderr，实时输出日志
-        r = subprocess.run(cmd, cwd=str(project_root))
+        r = subprocess.run(cmd, cwd=str(project_root), check=False)
 
         if r.returncode == 0:
             print("[守护] 下载子进程正常退出", flush=True)
@@ -90,8 +89,7 @@ def main() -> None:
         time.sleep(restart_delay)
 
     print(
-        f"[守护] 达到最大重启次数 {max_restarts}，放弃。"
-        f"可重新运行本脚本继续断点续传。",
+        f"[守护] 达到最大重启次数 {max_restarts}，放弃。可重新运行本脚本继续断点续传。",
         flush=True,
     )
     sys.exit(1)

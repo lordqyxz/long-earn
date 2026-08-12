@@ -57,23 +57,23 @@ def main() -> None:
     print(f"同步耗时: {t1 - t0:.1f}s")
     print(f"同步结果: {result}")
 
-    # 验证同步后已切换到纯缓存模式
+    # 同步完成后仍保持“本地优先，按需从 miniQMT 补齐”的默认策略。
     print(f"\n同步后 is_cache_only: {is_cache_only()}")
-    if not is_cache_only():
-        print("❌ 同步后未切换到纯缓存模式")
+    if is_cache_only():
+        print("❌ 同步不应自动锁定纯缓存模式")
         return
 
-    # 验证 MiniQmtClient.is_available 现在返回 False
+    # miniQMT 仍保留为按需同步上游。
     from long_earn.backtest.data.miniqmt_provider import MiniQmtClient
 
     client = MiniQmtClient.get()
     available = client.is_available
     print(f"同步后 MiniQmtClient.is_available: {available}")
-    if available:
-        print("❌ 纯缓存模式下 xtquant 仍标记为可用")
+    if not available:
+        print("❌ 同步后 miniQMT 应仍可用于按需同步")
         return
 
-    print("\n✅ 冒烟测试通过：同步 → 切换纯缓存 → xtquant 禁用")
+    print("\n✅ 冒烟测试通过：同步 → DuckDB 优先访问 → miniQMT 按需补齐")
 
 
 if __name__ == "__main__":

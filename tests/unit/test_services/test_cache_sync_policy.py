@@ -1,4 +1,4 @@
-"""cache_sync：启动同步后不再强制 CACHE_ONLY。"""
+"""cache_sync：启动同步后保持 DuckDB 主数据层优先访问。"""
 
 from __future__ import annotations
 
@@ -8,31 +8,29 @@ from unittest.mock import MagicMock, patch
 from long_earn.services import cache_sync
 
 
-def test_sync_data_cache_does_not_set_cache_only_on_success(
-    monkeypatch: object,
-) -> None:
+def test_sync_data_cache_does_not_set_cache_only_on_success() -> None:
     os.environ.pop(cache_sync.CACHE_ONLY_ENV, None)
 
     mock_client = MagicMock()
     mock_client.is_available = True
 
     mock_service = MagicMock()
-    mock_service.run.return_value = {
-        "status": "ok",
-        "price_symbols": 10,
-        "financial_symbols": 10,
-        "cache_path": "dummy.duckdb",
-    }
-
     with (
         patch.object(cache_sync.MiniQmtClient, "get", return_value=mock_client),
         patch.object(cache_sync, "DataCache") as mock_cache_cls,
         patch(
-            "long_earn.services.data_ingestion_service.DataIngestionService",
+            "long_earn.services.incremental_sync.IncrementalSyncService",
             return_value=mock_service,
         ),
     ):
         mock_cache_cls.return_value.db_path = "dummy.duckdb"
+        mock_service.sync.return_value.as_dict.return_value = {
+            "status": "ok",
+            "price_symbols": 10,
+            "financial_symbols": 10,
+            "cache_path": "dummy.duckdb",
+        }
+        mock_service.sync.return_value.status = "ok"
         result = cache_sync.sync_data_cache(universe="csi300")
 
     assert result["status"] == "ok"

@@ -1,12 +1,12 @@
-"""数据缓存同步：缓存优先，适时从 miniqmt 增量更新。
+"""数据主库同步：本地 DuckDB 优先，按需从 miniQMT 增量补齐。
 
 本模块位于 ``services`` 层（编排层），协调 ``backtest.data``（数据层）和
-``DataIngestionService``（同层服务）完成同步。不放在 ``backtest.data`` 下，
+``IncrementalSyncService``（同层服务）完成同步。不放在 ``backtest.data`` 下，
 因为 import-linter 契约禁止数据层依赖 services。
 
 数据策略（缓存优先 + 自动更新）::
 
-1. **读路径（常态）**：:class:`MiniQmtDataProvider` 先读 DuckDB；
+1. **读路径（常态）**：:class:`MiniQmtDataProvider` 先读 DuckDB 主数据层；
    缺失 / 过期时若 miniqmt 可用则增量下载并写回缓存。
 2. **启动时机**：:func:`sync_data_cache` 对股票池做一次智能增量批量同步
    （缺什么补什么），**不再**事后强制 ``LONG_EARN_CACHE_ONLY``，
@@ -15,8 +15,8 @@
    ``LONG_EARN_DISABLE_XTQUANT``，避免 xtquant C++ 崩溃；主进程可先刷新再共享内存。
 4. **显式纯缓存**：仅当用户 / CI 设置 ``LONG_EARN_CACHE_ONLY=1`` 时锁定只读缓存。
 
-与 :class:`DataIngestionService` 的关系：
-- ``DataIngestionService.run(full=True)`` — CLI 全量下载（``long-earn download``）
+与 :class:`IncrementalSyncService` 的关系：
+- ``IncrementalSyncService.sync(full=True)`` — CLI 显式同步（``long-earn sync``）
 - :func:`sync_data_cache` — 启动时智能增量，委托同一 ingestion 服务
 """
 
@@ -73,7 +73,7 @@ def sync_data_cache(
 ) -> dict[str, object]:
     """启动时增量同步行情+财务到 DuckDB（合适的批量更新时机）。
 
-    内部委托 :class:`DataIngestionService.run`（智能增量）：只补缺失/过期。
+    内部委托 :class:`IncrementalSyncService.sync`（智能增量）：只补缺失/过期。
     同步完成后**保持** miniqmt 可用，以便后续读面板时仍可按需补洞。
 
     Args:
@@ -120,13 +120,13 @@ def sync_data_cache(
             "cache_path": str(cache.db_path),
         }
 
-    from long_earn.services.data_ingestion_service import (  # noqa: PLC0415
-        DataIngestionService,
+    from long_earn.services.incremental_sync import (  # noqa: PLC0415
+        IncrementalSyncService,
     )
 
-    service = DataIngestionService(logger=logger_service)
+    service = IncrementalSyncService(logger=logger_service)
     try:
-        result = service.run(
+        report = service.sync(
             universe=universe,
             end_date=end_date,
             skip_financial=skip_financial,
@@ -142,7 +142,8 @@ def sync_data_cache(
             "cache_path": str(cache.db_path),
         }
 
-    status = result.get("status", "error")
+    result = report.as_dict()
+    status = report.status
     if status != "ok":
         _log(f"数据同步未完成: {result}", "warning")
     else:

@@ -3,7 +3,7 @@
 子命令:
     research   策略研究循环（多轮 Reflexion 研发）
     optimize   离线策略优化（AcceptanceGate 验收，ADR-009 收尾）
-    download   下载行情与财务数据到 DuckDB 缓存
+    sync       从 miniQMT 增量同步行情与财务到 DuckDB 主数据层
     agent      主 Agent 调用（意图路由到子图）
     web        启动回测可视化 Web 服务
 
@@ -275,11 +275,10 @@ def optimize(
     typer.echo("\n优化结束。")
 
 
-# ── download: 数据下载 ───────────────────────────────────────────
+# ── sync: miniQMT 增量同步 ───────────────────────────────────────
 
 
-@app.command()
-def download(
+def _run_sync(
     universe: str = typer.Option(
         "all",
         "--universe",
@@ -303,11 +302,11 @@ def download(
         help="强制全量重下（默认智能增量：只下载缺失/过期的数据）",
     ),
 ) -> None:
-    """下载行情与财务数据到 DuckDB 缓存。默认智能增量，--full 强制全量。"""
-    from long_earn.services.data_ingestion_service import DataIngestionService
+    """从 miniQMT 同步行情与财务到 DuckDB 主数据层。"""
+    from long_earn.services.incremental_sync import IncrementalSyncService
 
-    service = DataIngestionService(logger=logger)
-    result = service.run(
+    service = IncrementalSyncService(logger=logger)
+    report = service.sync(
         universe=universe,
         start_date=start,
         end_date=end,
@@ -317,8 +316,12 @@ def download(
         full=full,
     )
 
-    if result.get("status") != "ok":
+    if report.status != "ok":
         raise typer.Exit(code=1)
+
+
+app.command(name="sync")(_run_sync)
+app.command(name="download", hidden=True)(_run_sync)
 
 
 # ── agent: 主 Agent 调用 ─────────────────────────────────────────
