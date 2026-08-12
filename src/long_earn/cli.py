@@ -383,9 +383,7 @@ def web(
             substances_path=substances,
         )
     else:
-        from long_earn.dashboard.api import serve_visualization
-
-        serve_visualization(
+        serve_visualization_fastapi(
             host=host,
             port=port,
             db_path=db,

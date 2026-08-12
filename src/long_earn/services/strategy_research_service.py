@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
@@ -320,7 +321,7 @@ class StrategyResearchService:
 
     # ── 多轮循环编排 ──────────────────────────────────────────────
 
-    def run_loop(  # noqa: PLR0913
+    def run_loop(  # noqa: PLR0913, PLR0915
         self,
         idea: str,
         max_rounds: int = 5,
@@ -329,6 +330,7 @@ class StrategyResearchService:
         *,
         checkpointer: Any = None,
         thread_id_prefix: str = "research",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ResearchLoopSummary:
         """运行完整策略研究循环。
 
@@ -363,6 +365,15 @@ class StrategyResearchService:
                 f"# 第 {round_num}/{max_rounds} 轮 (家族索引 {family_idx})"
             )
             self.logger.info("#" * 60)
+
+            if progress_callback:
+                progress_callback({
+                    "type": "round_start",
+                    "round": round_num,
+                    "total_rounds": max_rounds,
+                    "family_idx": family_idx,
+                    "idea": current_idea[:120],
+                })
 
             thread_id = (
                 f"{thread_id_prefix}-round{round_num}-family{family_idx}"
@@ -413,6 +424,20 @@ class StrategyResearchService:
                 else:
                     stagnation_count += 1
 
+            if progress_callback:
+                progress_callback({
+                    "type": "round_complete",
+                    "round": round_num,
+                    "total_rounds": max_rounds,
+                    "improved": bool(best_yaml),
+                    "metrics": (
+                        self._metrics_to_dict(metrics) if metrics
+                        else {"round": round_num, "status": "no_strategy"}
+                    ),
+                    "best_recent_return": best_recent_return,
+                    "stagnation_count": stagnation_count,
+                })
+
             # 家族切换判定：连续无改善达阈值 → 换家族 idea 继续
             if should_stop or stagnation_count >= _FAMILY_PIVOT_THRESHOLD:
                 if family_idx + 1 < len(_IDEA_FAMILY_POOL):
@@ -426,10 +451,26 @@ class StrategyResearchService:
                         f"切换到策略家族 #{family_idx}: {current_idea[:60]}..."
                     )
                     self.logger.info("=" * 60)
+                    if progress_callback:
+                        progress_callback({
+                            "type": "family_switch",
+                            "family_idx": family_idx,
+                            "idea": current_idea[:120],
+                            "total_families": len(_IDEA_FAMILY_POOL),
+                        })
                     continue
                 else:
                     self.logger.info("[循环] 策略家族池已耗尽，停止迭代")
                     break
+
+        if progress_callback:
+            progress_callback({
+                "type": "research_complete",
+                "best_recent_return": best_recent_return,
+                "best_round": best_round_info.get("round", 0),
+                "best_history_return": best_round_info.get("history_return", 0.0),
+                "total_rounds_completed": len(all_results),
+            })
 
         summary = ResearchLoopSummary(
             idea=idea,

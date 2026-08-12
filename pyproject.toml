@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.24.0",
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
+    "websockets>=12.0",
     "langgraph>=0.2.0",
     "langchain>=0.2.0",
     "langchain-core>=0.2.0",
@@ -82,6 +83,8 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "src/long_earn/cli.py" = ["PLC0415", "PLR0913"]
 # 数据下载服务：start_date 保留 for API 一致性；run/download 签名参数多属设计选择
 "src/long_earn/services/data_ingestion_service.py" = ["ARG002", "PLR0913"]
+# FastAPI 服务入口函数参数多属设计选择
+"src/long_earn/dashboard/fastapi_app.py" = ["PLR0913"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

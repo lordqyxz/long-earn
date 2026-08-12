@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html, body, #root {
+    @apply h-full;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', 'Noto Sans SC', sans-serif;
+  }
+}
+
+@layer components {
+  .metric-card {
+    @apply rounded-lg border bg-card p-4 transition-colors hover:border-primary/30;
+  }
+  .metric-value {
+    @apply text-2xl font-bold tracking-tight;
+  }
+  .metric-label {
+    @apply text-xs text-muted-foreground;
+  }
+  .section-title {
+    @apply text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(240 4.8% 95.9%);
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(240 5% 80%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(240 5% 65%);
+}
+
+/* Recharts light theme */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: hsl(240 5.9% 90%);
+}
+.recharts-text {
+  fill: hsl(240 3.8% 46.1%);
+  font-size: 12px;
+}

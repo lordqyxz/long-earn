@@ -37,8 +37,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -52,9 +54,8 @@ from long_earn.dashboard.analyzer import BacktestAnalyzer
 from long_earn.dashboard.event_analyzer import EventAnalyzer
 
 _HERE = Path(__file__).parent
-_TEMPLATES_DIR = _HERE / "templates"
-_DASHBOARD_HTML = _TEMPLATES_DIR / "dashboard.html"
-_EVENT_FLOW_HTML = _TEMPLATES_DIR / "event_flow.html"
+# 前端生产构建产物目录
+_WEB_DIST = _HERE.parent.parent.parent / "web" / "dist"
 
 _STAGES = ["collect", "extract", "propagate", "conflict", "save"]
 
@@ -73,23 +74,7 @@ def _resolve_paths(
     return resolved_db, resolved_substances
 
 
-def _register_page_routes(app: FastAPI) -> None:
-    """注册页面路由。"""
-
-    @app.get("/", response_class=HTMLResponse)
-    async def index():
-        if _DASHBOARD_HTML.exists():
-            return HTMLResponse(_DASHBOARD_HTML.read_text(encoding="utf-8"))
-        raise HTTPException(404, "Dashboard not found")
-
-    @app.get("/event-flow", response_class=HTMLResponse)
-    async def event_flow_page():
-        if _EVENT_FLOW_HTML.exists():
-            return HTMLResponse(_EVENT_FLOW_HTML.read_text(encoding="utf-8"))
-        raise HTTPException(404, "Event flow page not found")
-
-
-def _register_run_routes(
+def _register_run_routes(  # noqa: C901
     app: FastAPI, analyzer: BacktestAnalyzer
 ) -> None:
     """注册回测运行查询端点。"""
@@ -100,17 +85,27 @@ def _register_run_routes(
 
     @app.get("/api/runs")
     async def list_runs():
-        df = analyzer.run_custom_query(
-            "SELECT DISTINCT run_id, MIN(timestamp) as started "
-            "FROM backtest_audit.logs GROUP BY run_id ORDER BY started DESC"
-        )
-        if df.is_empty():
-            return {"runs": []}
-        runs = [
-            {"run_id": row["run_id"], "started": str(row["started"])}
-            for row in df.iter_rows(named=True)
-        ]
+        runs = analyzer.get_runs_summary()
         return {"runs": runs}
+
+    @app.delete("/api/runs/clean")
+    async def clean_empty_runs():
+        """删除空跑或错误运行的回测数据。"""
+        bad_ids = analyzer.get_empty_or_error_runs()
+        deleted = 0
+        for rid in bad_ids:
+            deleted += analyzer.delete_run(rid)
+        logger.info(f"清理完成: 删除 {len(bad_ids)} 个问题 run, {deleted} 条记录")
+        return {"deleted_runs": len(bad_ids), "deleted_records": deleted}
+
+    @app.delete("/api/runs/{run_id}")
+    async def delete_run(run_id: str):
+        """删除指定回测运行的所有审计日志。"""
+        deleted = analyzer.delete_run(run_id)
+        if not deleted:
+            raise HTTPException(404, f"Run {run_id} not found")
+        logger.info(f"删除回测运行: {run_id}, {deleted} 条记录")
+        return {"deleted_run_id": run_id, "deleted_records": deleted}
 
     @app.get("/api/runs/{run_id}/summary")
     async def run_summary(run_id: str):
@@ -161,15 +156,6 @@ def _register_run_routes(
             return {"run_id": run_id, "daily_returns": []}
         returns_list = daily.select(["date", "daily_return"]).to_dicts()
         return {"run_id": run_id, "daily_returns": returns_list}
-
-    @app.get("/api/runs/{run_id}/attribution")
-    async def run_attribution(run_id: str):
-        data = analyzer.export_dashboard_data(run_id)
-        return {
-            "run_id": run_id,
-            "equity_curve": data.get("equity_curve", []),
-            "benchmark": data.get("benchmark", {}),
-        }
 
 
 def _register_chart_export_routes(
@@ -223,6 +209,190 @@ def _register_chart_export_routes(
             raise HTTPException(400, "run_ids is required")
         comparison = analyzer.compare_runs(run_ids)
         return {"comparison": comparison.to_dicts()}
+
+
+def _enrich_sectors_batch(cache: Any) -> None:
+    """通过 xtquant THY1/DY1 板块批量回填 industry + region。
+
+    遍历同花顺一级行业（THY1）和地域一级行政区（DY1）板块，
+    构建 ``{symbol: 分类名}`` 映射，批量 UPDATE 到 instrument_details 表。
+    仅更新空值行，不覆盖已有数据。
+
+    xtquant 不可用时静默跳过（缓存已有数据仍可正常服务）。
+    """
+    try:
+        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
+            MiniQmtClient,
+        )
+
+        client = MiniQmtClient.get()
+        if not client.is_available():
+            logger.debug("xtquant 不可用，跳过板块批量回填")
+            return
+
+        # 行业
+        industry_map = client.build_sector_mapping("THY1")
+        if industry_map:
+            cache.batch_update_instrument_sectors(industry_map, "industry")
+
+        # 地域
+        region_map = client.build_sector_mapping("DY1")
+        if region_map:
+            cache.batch_update_instrument_sectors(region_map, "region")
+
+    except Exception as e:
+        logger.warning(f"板块批量回填失败: {e}")
+
+
+# 避免每次请求都重跑批量回填（进程内标记）
+_sector_enrichment_done = False
+
+
+def _fetch_symbol_detail(cache: Any, symbol: str) -> dict[str, Any] | None:
+    """获取标的详情，优先缓存 → xtquant 回退 → THY1/DY1 板块批量补充行业/地区。
+
+    Args:
+        cache: DataCache 实例
+        symbol: 标的代码
+    Returns:
+        标的详情字典或 None
+    """
+    global _sector_enrichment_done  # noqa: PLW0603
+    detail = cache.get_instrument_detail_cached(symbol)
+
+    # 缓存命中但 industry 为空 → 触发一次批量回填（进程内仅执行一次）
+    if detail and not detail.get("industry") and not _sector_enrichment_done:
+        _sector_enrichment_done = True
+        _enrich_sectors_batch(cache)
+        detail = cache.get_instrument_detail_cached(symbol)
+
+    if detail is not None:
+        return detail
+
+    # 缓存未命中 → xtquant get_instrument_detail 回退
+    try:
+        from xtquant import xtdata  # noqa: PLC0415
+
+        raw = xtdata.get_instrument_detail(symbol)
+        if raw:
+            cache.save_instrument_detail(symbol, raw)
+            detail = cache.get_instrument_detail_cached(symbol)
+            if detail and not detail.get("industry") and not _sector_enrichment_done:
+                _sector_enrichment_done = True
+                _enrich_sectors_batch(cache)
+                detail = cache.get_instrument_detail_cached(symbol)
+    except ImportError:
+        logger.warning("xtquant 不可用，无法获取标的详情")
+    except Exception as e:
+        logger.warning(f"获取标的详情失败: {e}")
+
+    return detail
+
+
+def _get_sector_stats(cache: Any) -> dict[str, int]:
+    """统计 instrument_details 表中行业/地区填充情况。"""
+    conn = cache._get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM instrument_details").fetchone()[0]
+    with_industry = conn.execute(
+        "SELECT COUNT(*) FROM instrument_details WHERE industry != ''"
+    ).fetchone()[0]
+    with_region = conn.execute(
+        "SELECT COUNT(*) FROM instrument_details WHERE region != ''"
+    ).fetchone()[0]
+    return {
+        "total": total,
+        "with_industry": with_industry,
+        "with_region": with_region,
+    }
+
+
+def _register_symbol_routes(app: FastAPI) -> None:
+    """注册标的详情查询端点。"""
+
+    @app.get("/api/symbols/names")
+    async def symbol_names(symbols: str = Query("")):
+        """批量获取标的中文名。
+
+        优先从 DuckDB 缓存 instrument_details 表读取；
+        缓存未命中的标的回退到 xtquant get_instrument_detail 实时获取。
+        """
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        if not symbol_list:
+            return {"names": {}}
+
+        # 1. 优先从缓存批量读取
+        from long_earn.backtest.data.cache import DataCache  # noqa: PLC0415
+
+        cache = DataCache()
+        names = cache.get_instrument_names_batch(symbol_list)
+
+        # 2. 缓存未命中的标的，回退到 xtquant 实时获取
+        missing = [s for s in symbol_list if s not in names]
+        if missing:
+            try:
+                from xtquant import xtdata  # noqa: PLC0415
+
+                for sym in missing:
+                    detail = xtdata.get_instrument_detail(sym)
+                    if detail and detail.get("InstrumentName"):
+                        names[sym] = str(detail["InstrumentName"])
+                        # 顺便写入缓存，下次命中
+                        cache.save_instrument_detail(sym, detail)
+            except ImportError:
+                logger.warning("xtquant 不可用，无法获取标的名称")
+            except Exception as e:
+                logger.warning(f"获取标的名称失败: {e}")
+
+        with contextlib.suppress(Exception):
+            cache.close()
+
+        return {"names": names}
+
+    @app.get("/api/symbols/{symbol}/detail")
+    async def symbol_detail(symbol: str):
+        """获取单个标的的详情（公司信息弹窗用）。
+
+        优先从 DuckDB 缓存读取；缓存未命中或 industry 为空时回退到
+        xtquant get_instrument_detail + THY1/DY1 板块批量补充。
+        """
+        from long_earn.backtest.data.cache import DataCache  # noqa: PLC0415
+
+        cache = DataCache()
+        detail = _fetch_symbol_detail(cache, symbol)
+        with contextlib.suppress(Exception):
+            cache.close()
+        if detail is None:
+            raise HTTPException(404, f"标的 {symbol} 详情未找到")
+        return detail
+
+    @app.post("/api/symbols/refresh-sectors")
+    async def refresh_sectors():
+        """手动触发行业+地区批量回填（通过 xtquant THY1/DY1 板块）。
+
+        重置进程内标记，允许下一次请求重新执行批量回填。
+        """
+        global _sector_enrichment_done  # noqa: PLW0603
+        _sector_enrichment_done = False
+        from long_earn.backtest.data.cache import DataCache  # noqa: PLC0415
+
+        cache = DataCache()
+        _enrich_sectors_batch(cache)
+        stats = _get_sector_stats(cache)
+        with contextlib.suppress(Exception):
+            cache.close()
+        _sector_enrichment_done = True
+        return stats
+
+    @app.get("/api/symbols/{symbol}/financials")
+    async def symbol_financials(symbol: str):
+        """获取标的历年财务数据（用于前端可视化）。"""
+        from long_earn.backtest.data.cache import DataCache  # noqa: PLC0415
+
+        cache = DataCache()
+        financials = cache.get_financial_data(symbol, limit=20)
+        with contextlib.suppress(Exception):
+            cache.close()
+        return {"symbol": symbol, "financials": financials}
 
 
 def _register_event_routes(
@@ -378,7 +548,7 @@ async def _run_pipeline_and_broadcast(
             },
         )
 
-        from long_earn.config import create_runtime_context  # noqa: PLC0415
+        from long_earn.context_init import create_runtime_context  # noqa: PLC0415
 
         ctx = create_runtime_context()
 
@@ -435,11 +605,188 @@ async def _run_pipeline_and_broadcast(
         )
 
 
+def _register_research_routes(  # noqa: C901, PLR0915
+    app: FastAPI,
+    _db_path: Path,
+) -> None:
+    """注册策略研究 WebSocket 和 REST 端点。"""
+
+    _research_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="research")
+
+    @app.websocket("/ws/research")
+    async def ws_research(websocket: WebSocket):
+        await websocket.accept()
+        active_ws: set[WebSocket] = app.state.active_ws
+        active_ws.add(websocket)
+        logger.info(f"研究 WebSocket 客户端已连接 (活跃: {len(active_ws)})")
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                action = msg.get("action", "")
+
+                if action == "ping":
+                    await websocket.send_json({"type": "pong"})
+
+                elif action == "start":
+                    idea = msg.get("idea", "")
+                    if not idea:
+                        await websocket.send_json({
+                            "type": "error",
+                            "detail": "idea 不能为空",
+                        })
+                        continue
+
+                    max_rounds = int(msg.get("max_rounds", 3))
+                    max_iterations = int(msg.get("max_iterations", 2))
+                    min_improvement = float(msg.get("min_improvement", 0.005))
+
+                    await websocket.send_json({
+                        "type": "research_started",
+                        "idea": idea,
+                        "max_rounds": max_rounds,
+                        "max_iterations": max_iterations,
+                    })
+
+                    def _run_in_thread(
+                            _idea: str = idea,
+                            _max_rounds: int = max_rounds,
+                            _max_iterations: int = max_iterations,
+                            _min_improvement: float = min_improvement,
+                        ) -> None:
+                            from long_earn.config import AppConfig  # noqa: PLC0415
+                            from long_earn.context_init import (  # noqa: PLC0415
+                                initialize_context,
+                            )
+                            from long_earn.services.strategy_research_service import (  # noqa: PLC0415
+                                StrategyResearchService,
+                            )
+
+                            config = AppConfig.from_env()
+                            config.backtest_start_date = config.train_start_date
+                            config.backtest_end_date = config.test_end_date
+                            ctx = initialize_context(config)
+
+                            def _send_progress(data: dict[str, Any]) -> None:
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    asyncio.run_coroutine_threadsafe(
+                                        _broadcast_event(active_ws, data), loop
+                                    )
+                                except Exception:
+                                    pass
+
+                            service = StrategyResearchService(ctx)
+                            try:
+                                service.run_loop(
+                                    idea=_idea,
+                                    max_rounds=_max_rounds,
+                                    max_iterations=_max_iterations,
+                                    min_improvement=_min_improvement,
+                                    progress_callback=_send_progress,
+                                )
+                            except Exception as e:
+                                logger.exception("策略研究失败")
+                                _send_progress({
+                                    "type": "research_error",
+                                    "detail": str(e),
+                                })
+
+                    _research_executor.submit(_run_in_thread)
+
+        except WebSocketDisconnect:
+            logger.info("研究 WebSocket 客户端已断开")
+        except Exception:
+            logger.exception("研究 WebSocket 错误")
+        finally:
+            active_ws.discard(websocket)
+
+    @app.post("/api/research/start")
+    async def start_research(req: dict[str, Any]):
+        """触发策略研究（REST 入口，通过 WebSocket 广播进度）。"""
+        idea = req.get("idea", "")
+        if not idea:
+            raise HTTPException(400, "idea is required")
+
+        max_rounds = int(req.get("max_rounds", 3))
+        max_iterations = int(req.get("max_iterations", 2))
+        min_improvement = float(req.get("min_improvement", 0.005))
+
+        active_ws: set[WebSocket] = app.state.active_ws
+
+        def _run_in_thread(
+                _idea: str = idea,
+                _max_rounds: int = max_rounds,
+                _max_iterations: int = max_iterations,
+                _min_improvement: float = min_improvement,
+            ) -> None:
+                from long_earn.config import AppConfig  # noqa: PLC0415
+                from long_earn.context_init import initialize_context  # noqa: PLC0415
+                from long_earn.services.strategy_research_service import (  # noqa: PLC0415
+                    StrategyResearchService,
+                )
+
+                config = AppConfig.from_env()
+                config.backtest_start_date = config.train_start_date
+                config.backtest_end_date = config.test_end_date
+                ctx = initialize_context(config)
+
+                def _send_progress(data: dict[str, Any]) -> None:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        asyncio.run_coroutine_threadsafe(
+                            _broadcast_event(active_ws, data), loop
+                        )
+                    except Exception:
+                        pass
+
+                service = StrategyResearchService(ctx)
+                try:
+                    service.run_loop(
+                        idea=_idea,
+                        max_rounds=_max_rounds,
+                        max_iterations=_max_iterations,
+                        min_improvement=_min_improvement,
+                        progress_callback=_send_progress,
+                    )
+                except Exception as e:
+                    logger.exception("策略研究失败")
+                    _send_progress({
+                        "type": "research_error",
+                        "detail": str(e),
+                    })
+
+        _research_executor.submit(_run_in_thread)
+
+        return {
+            "status": "started",
+            "idea": idea,
+            "max_rounds": max_rounds,
+            "max_iterations": max_iterations,
+        }
+
+def _register_api_routes(
+    app: FastAPI,
+    analyzer: BacktestAnalyzer,
+    event_analyzer: EventAnalyzer,
+) -> None:
+    """注册所有 API 和 WebSocket 路由（不含页面路由）。"""
+    _register_run_routes(app, analyzer)
+    _register_chart_export_routes(app, analyzer)
+    _register_symbol_routes(app)
+    _register_event_routes(app, event_analyzer)
+    _register_ws_routes(app, event_analyzer)
+
+
 def _create_app(
     db_path: str | Path = "",
     substances_path: str | Path = "",
 ) -> FastAPI:
-    """创建 FastAPI 应用实例。"""
+    """创建 FastAPI 应用实例。
+
+    Args:
+        db_path: DuckDB 审计数据库路径
+        substances_path: SubstanceStore DuckDB 路径
+    """
     app = FastAPI(title="Long Earn 可视化仪表盘", version="2.0.0")
     app.state.active_ws = set()  # type: ignore[attr-defined]
 
@@ -457,17 +804,28 @@ def _create_app(
         else:
             logger.warning(f"事件物质加载失败: {resolved_substances}")
 
-    app.mount(
-        "/static",
-        StaticFiles(directory=str(_TEMPLATES_DIR)),
-        name="static",
-    )
+    # 先注册 API 和 WebSocket 路由（优先级高）
+    _register_api_routes(app, analyzer, event_analyzer)
+    _register_research_routes(app, resolved_db)
 
-    _register_page_routes(app)
-    _register_run_routes(app, analyzer)
-    _register_chart_export_routes(app, analyzer)
-    _register_event_routes(app, event_analyzer)
-    _register_ws_routes(app, event_analyzer)
+    if _WEB_DIST.exists() and (_WEB_DIST / "index.html").exists():
+        # 生产模式：React SPA
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(_WEB_DIST / "assets")),
+            name="web_assets",
+        )
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str = ""):
+            if full_path.startswith("api/") or full_path.startswith("ws/"):
+                raise HTTPException(404)
+            index_path = _WEB_DIST / "index.html"
+            return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
+        logger.info("前端模式: React SPA (web/dist/)")
+    else:
+        logger.warning("前端构建产物不存在 (web/dist/)，请先运行 `cd web && npm run build`")
 
     return app
 
@@ -488,7 +846,9 @@ def serve_visualization_fastapi(
         substances_path: SubstanceStore DuckDB 路径；空字符串时取 AppConfig.memory_path
         reload: 是否启用热重载（开发模式）
     """
-    app = _create_app(db_path=db_path, substances_path=substances_path)
+    app = _create_app(
+        db_path=db_path, substances_path=substances_path
+    )
 
     logger.info(f"FastAPI 可视化服务启动: http://{host}:{port}")
     logger.info("  页面:")
@@ -496,11 +856,13 @@ def serve_visualization_fastapi(
     logger.info("    GET /event-flow         事件流可视化")
     logger.info("  WebSocket:")
     logger.info("    WS  /ws/events          实时事件流推送")
+    logger.info("    WS  /ws/research        策略研究实时进度")
     logger.info("  API:")
     logger.info("    GET /api/health")
     logger.info("    GET /api/runs")
     logger.info("    GET /api/runs/{run_id}/dashboard")
     logger.info("    POST /api/events/trigger  触发事件推理管线")
+    logger.info("    POST /api/research/start  触发策略研究")
 
     uvicorn.run(
         app,

@@ -31,9 +31,169 @@ class BacktestAnalyzer:
         self.db_path = db_path if db_path is not None else backtest_cache_path()
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.db_path))
+        # 只读连接：避免与 DuckDBAuditProvider 的写入连接竞争写锁，
+        # 防止 Web 服务启动时 WAL checkpoint 导致审计数据丢失。
+        return duckdb.connect(str(self.db_path), read_only=True)
+
+    def _get_writable_conn(self) -> duckdb.DuckDBPyConnection:
+        # 可写连接：仅在删除操作时短暂使用，用完立即关闭。
+        return duckdb.connect(str(self.db_path), read_only=False)
 
     # ── 基础查询接口 ──────────────────────────────────────────────────
+
+    def get_runs_summary(self) -> list[dict[str, Any]]:
+        """获取所有回测运行的汇总信息（含总收益、夏普、交易数、事件数、策略名）。
+
+        从 RUN_END 事件 payload 提取 total_return/sharpe_ratio/trade_count，
+        从 RUN_START 事件 payload 提取 strategy_id（作为回测方法标题），
+        同时统计每个 run 的 FILL 事件数（trade_count）和总事件数（event_count）。
+
+        Returns:
+            按启动时间降序排列的 run 列表
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT
+                    r.run_id,
+                    r.started,
+                    r.payload,
+                    COALESCE(f.fill_count, 0) AS fill_count,
+                    COALESCE(e.event_count, 0) AS event_count,
+                    s.strategy_id
+                FROM (
+                    SELECT run_id, MIN(timestamp) AS started,
+                        FIRST(payload) AS payload
+                    FROM backtest_audit.logs
+                    WHERE event_type = 'RUN_END'
+                    GROUP BY run_id
+                ) r
+                LEFT JOIN (
+                    SELECT run_id, COUNT(*) AS fill_count
+                    FROM backtest_audit.logs
+                    WHERE event_type = 'FILL'
+                    GROUP BY run_id
+                ) f ON r.run_id = f.run_id
+                LEFT JOIN (
+                    SELECT run_id, COUNT(*) AS event_count
+                    FROM backtest_audit.logs
+                    GROUP BY run_id
+                ) e ON r.run_id = e.run_id
+                LEFT JOIN (
+                    SELECT run_id,
+                        FIRST(JSON_EXTRACT_STRING(payload, '$.strategy_id')) AS strategy_id
+                    FROM backtest_audit.logs
+                    WHERE event_type = 'RUN_START'
+                    GROUP BY run_id
+                ) s ON r.run_id = s.run_id
+                ORDER BY r.started DESC
+            """).fetchall()
+        except Exception:
+            conn.close()
+            return []
+
+        conn.close()
+        runs: list[dict[str, Any]] = []
+        for row in rows:
+            run_id, started, payload_str, fill_count, event_count, strategy_id = row
+            total_return = 0.0
+            sharpe = 0.0
+            trade_count = fill_count
+            if payload_str and isinstance(payload_str, str):
+                try:
+                    pl_data = json.loads(payload_str)
+                    total_return = float(pl_data.get("total_return", 0))
+                    sharpe = float(pl_data.get("sharpe_ratio", 0))
+                    trade_count = int(pl_data.get("trade_count", fill_count))
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "started": str(started) if started else "",
+                    "total_return": round(total_return, 6),
+                    "sharpe": round(sharpe, 4),
+                    "trade_count": trade_count,
+                    "event_count": event_count,
+                    "strategy_id": str(strategy_id) if strategy_id else "",
+                }
+            )
+        return runs
+
+    def delete_run(self, run_id: str) -> int:
+        """删除指定回测运行的所有审计日志。
+
+        Returns:
+            删除的记录数
+        """
+        conn = self._get_writable_conn()
+        try:
+            # 先统计待删除记录数（DELETE 不返回影响行数）
+            row = conn.execute(
+                "SELECT COUNT(*) FROM backtest_audit.logs WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            count = row[0] if row else 0
+            if count == 0:
+                conn.close()
+                return 0
+            conn.execute(
+                "DELETE FROM backtest_audit.logs WHERE run_id = ?",
+                [run_id],
+            )
+            conn.close()
+            logger.info(f"删除回测运行 {run_id}: {count} 条记录")
+            return count
+        except Exception as e:
+            logger.error(f"删除回测运行 {run_id} 失败: {e}")
+            conn.close()
+            return 0
+
+    def get_empty_or_error_runs(self) -> list[str]:
+        """获取空跑或错误运行的 run_id 列表。
+
+        空跑：无 FILL 事件
+        错误：有 RUN_ERROR 事件
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT DISTINCT r.run_id
+                FROM backtest_audit.logs r
+                WHERE r.run_id NOT IN (
+                    SELECT DISTINCT run_id FROM backtest_audit.logs
+                    WHERE event_type = 'FILL'
+                )
+                UNION
+                SELECT DISTINCT run_id FROM backtest_audit.logs
+                WHERE event_type = 'RUN_ERROR'
+            """).fetchall()
+            conn.close()
+            return [row[0] for row in rows]
+        except Exception:
+            conn.close()
+            return []
+
+    def get_zero_return_runs(self) -> list[str]:
+        """获取收益率为 0 的回测运行 run_id 列表。
+
+        从 RUN_END 事件 payload 中提取 total_return，筛选出精确等于 0 的 run。
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT run_id
+                FROM backtest_audit.logs
+                WHERE event_type = 'RUN_END'
+                  AND payload IS NOT NULL
+                  AND CAST(JSON_EXTRACT(payload, '$.total_return') AS DOUBLE) = 0
+                GROUP BY run_id
+            """).fetchall()
+            conn.close()
+            return [row[0] for row in rows]
+        except Exception:
+            conn.close()
+            return []
 
     def get_run_summary(self, run_id: str) -> pl.DataFrame:
         """获取特定运行 ID 的审计统计概要"""
@@ -390,9 +550,17 @@ class BacktestAnalyzer:
             payload: dict[str, Any] = (
                 json.loads(row[3]) if isinstance(row[3], str) else (row[3] or {})
             )
+            # 优先使用 payload 中的 bar_date（市场交易日），
+            # 旧数据无 bar_date 时回退到 timestamp（引擎时间，不够准确）
+            bar_date = payload.get("bar_date", "")
+            if not bar_date:
+                ts_str = str(row[0]) if row[0] else ""
+                bar_date = ts_str[:10] if ts_str else ""
+            else:
+                bar_date = str(bar_date)[:10]
             journal.append(
                 {
-                    "time": str(row[0]) if row[0] else "",
+                    "time": bar_date,
                     "trace_id": row[1],
                     "symbol": payload.get("symbol", ""),
                     "type": payload.get("type", ""),
@@ -533,9 +701,17 @@ class BacktestAnalyzer:
             )
             price = float(payload.get("price", 0))
             quantity = float(payload.get("quantity", 0))
+            # 优先使用 payload 中的 bar_date（市场交易日），
+            # 旧数据无 bar_date 时回退到 timestamp（引擎时间，不够准确）
+            bar_date = payload.get("bar_date", "")
+            if not bar_date:
+                ts_str = str(row[0]) if row[0] else ""
+                bar_date = ts_str[:10] if ts_str else ""
+            else:
+                bar_date = str(bar_date)[:10]
             traces.append(
                 {
-                    "time": str(row[0]) if row[0] else "",
+                    "time": bar_date,
                     "trace_id": row[1],
                     "symbol": payload.get("symbol", ""),
                     "direction": payload.get("type", ""),
@@ -665,9 +841,17 @@ class BacktestAnalyzer:
                 continue
             price = float(payload.get("price", 0))
             quantity = float(payload.get("quantity", 0))
+            # 优先使用 payload 中的 bar_date（市场交易日），
+            # 旧数据无 bar_date 时回退到 timestamp（引擎时间，不够准确）
+            bar_date = payload.get("bar_date", "")
+            if not bar_date:
+                ts_str = str(row[0]) if row[0] else ""
+                bar_date = ts_str[:10] if ts_str else ""
+            else:
+                bar_date = str(bar_date)[:10]
             trade_points.append(
                 {
-                    "time": str(row[0]) if row[0] else "",
+                    "time": bar_date,
                     "direction": payload.get("type", ""),
                     "price": price,
                     "quantity": quantity,
