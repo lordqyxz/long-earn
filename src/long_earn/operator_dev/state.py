@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from long_earn.backtest.operators.causality import CausalityProof
 from long_earn.operator_dev.spec import OperatorSpec
 
 
@@ -21,6 +22,7 @@ class OperatorDevState(TypedDict, total=False):
     source_code: str
     code_ready: bool
     failure_report: str
+    causality_proof: CausalityProof
 
     # 输出
     results: list[dict[str, Any]]  # 每个 spec 的最终结果摘要

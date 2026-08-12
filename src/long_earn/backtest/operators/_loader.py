@@ -34,6 +34,11 @@ from long_earn.backtest.operators.base import (
     OperatorContractError,
     validate_contract,
 )
+from long_earn.backtest.operators.causality import (
+    CausalityProof,
+    prove_registration_causality,
+    validate_causality_proof,
+)
 
 _REGISTRY_DIR = Path(__file__).resolve().parent
 # 算子包的规范 dotted 前缀（与本文件在源码树中的位置一致）
@@ -116,11 +121,21 @@ def _register_class(cls: type[Operator]) -> None:
         raise OperatorContractError(
             f"算子 {cls.name} 实例化失败: {type(exc).__name__}: {exc}"
         ) from exc
+    try:
+        prove_registration_causality(instance)
+    except ValueError as exc:
+        raise OperatorContractError(str(exc)) from exc
     OPERATOR_REGISTRY[cls.name] = instance
     logger.debug(f"已注册算子: {cls.name} ({cls.category})")
 
 
-def register_operator(op: Operator, source_code: str = "", category: str = "") -> None:
+def register_operator(
+    op: Operator,
+    source_code: str = "",
+    category: str = "",
+    *,
+    causality_proof: CausalityProof | None = None,
+) -> None:
     """运行期热注册一个算子实例（写盘后让当进程立即可用）。
 
     用于算子开发子图 ``register`` 节点：可选写盘 + 内存热注册，
@@ -133,10 +148,19 @@ def register_operator(op: Operator, source_code: str = "", category: str = "") -
             为空时只做内存热注册（重启丢失）。
         category: 算子类别（factor/filter/rank/compose/technical），
             决定写盘子目录。``source_code`` 非空时必填。
+        causality_proof: 可选的实现绑定证明。operator_dev 可复用验证节点产出的证明，
+            避免重复数值验证；缺省时本函数同步执行完整注册证明。
     """
 
     cls = type(op)
     validate_contract(cls)
+    try:
+        if causality_proof is None:
+            prove_registration_causality(op)
+        else:
+            validate_causality_proof(op, causality_proof)
+    except ValueError as exc:
+        raise OperatorContractError(str(exc)) from exc
     if cls.name in OPERATOR_REGISTRY and type(OPERATOR_REGISTRY[cls.name]) is not cls:
         raise OperatorContractError(
             f"热注册冲突: {cls.name} 已由 {type(OPERATOR_REGISTRY[cls.name]).__name__} 占用"

@@ -22,8 +22,11 @@ AUDIT-P2-12：支持四种扰动策略，覆盖 NaN 置空、极值放大、符�
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +67,188 @@ class CausalityReport:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CausalityProof:
+    """绑定到算子实现与参数集合的启动期因果证明。"""
+
+    implementation_hash: str
+    parameter_hashes: tuple[str, ...]
+
+
+_TEMPORAL_PARAMETER_NAMES = frozenset(
+    {
+        "period",
+        "periods",
+        "window",
+        "span",
+        "fast",
+        "slow",
+        "signal",
+        "lookback",
+        "low_vol_lookback",
+        "momentum_lookback",
+        "momentum_window",
+        "quality_window",
+        "min_obs",
+        "min_periods",
+    }
+)
+
+
+def operator_implementation_hash(op: Operator) -> str:
+    """计算实现指纹；代码或参数 schema 改变后旧证明立即失效。"""
+
+    code = type(op).apply.__code__
+    apply_code = repr((code.co_code, code.co_consts, code.co_names)).encode()
+    schema = json.dumps(
+        type(op).params_cls.model_json_schema(), sort_keys=True, ensure_ascii=True
+    ).encode()
+    return hashlib.sha256(apply_code + schema).hexdigest()
+
+
+def _parameter_hash(params: OperatorParams) -> str:
+    payload = params.model_dump_json(exclude_none=False).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def make_registration_panel() -> pl.DataFrame:
+    """构造启动/热注册共用的确定性验证面板（3 标的 × 30 日）。"""
+
+    rows: list[dict[str, Any]] = []
+    base = datetime(2024, 1, 1)
+    for i in range(30):
+        for symbol_index, symbol in enumerate(("A.SZ", "B.SH", "C.SZ")):
+            step = i + 1
+            close = 10.0 + symbol_index * 3 + 0.4 * step + (step % 5)
+            rows.append(
+                {
+                    "timestamp": base + timedelta(days=i),
+                    "symbol": symbol,
+                    "open": close - 0.1,
+                    "high": close + 0.2,
+                    "low": close - 0.2,
+                    "close": close,
+                    "volume": 1000.0 * step,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def _default_parameter_data(op: Operator) -> dict[str, Any]:
+    """为无完整默认值的目录算子合成一组保守、合法的基线参数。"""
+
+    fields = type(op).params_cls.model_fields
+    values: dict[str, Any] = {}
+    fallbacks: dict[str, Any] = {
+        "field": "close",
+        "lhs": "high",
+        "rhs": "low",
+        "period": 2,
+        "periods": 2,
+        "window": 5,
+        "top": 2,
+    }
+    for name, field in fields.items():
+        if not field.is_required():
+            values[name] = field.get_default(call_default_factory=True)
+        elif name in fallbacks:
+            values[name] = fallbacks[name]
+        else:
+            raise ValueError(f"缺少参数 {name!r} 的默认值，无法执行启动期因果验证")
+    return values
+
+
+def _registration_parameter_cases(
+    op: Operator, current_params: list[OperatorParams] | None
+) -> list[OperatorParams]:
+    """生成当前参数及显式时序边界（最小 1、验证面板上界 29）。"""
+
+    cls = type(op).params_cls
+    cases = list(current_params or [cls.model_validate(_default_parameter_data(op))])
+    base = cases[0].model_dump()
+    temporal_names = _TEMPORAL_PARAMETER_NAMES.intersection(base)
+    for name in sorted(temporal_names):
+        for boundary in (1, 29):
+            candidate = dict(base)
+            candidate[name] = boundary
+            if not _adjust_parameter_dependencies(candidate, name, boundary):
+                continue
+            try:
+                cases.append(cls.model_validate(candidate))
+            except ValueError:
+                continue
+    unique: dict[str, OperatorParams] = {}
+    for params in cases:
+        unique[_parameter_hash(params)] = params
+    return list(unique.values())
+
+
+def _adjust_parameter_dependencies(
+    candidate: dict[str, Any], name: str, boundary: int
+) -> bool:
+    """让单参数边界保持跨字段约束合法。"""
+
+    if name == "fast" and "slow" in candidate:
+        candidate["slow"] = max(int(candidate["slow"]), boundary + 1)
+    elif name == "slow" and "fast" in candidate:
+        candidate["fast"] = min(int(candidate["fast"]), boundary - 1)
+        if candidate["fast"] < 1:
+            return False
+    elif name == "min_periods" and "window" in candidate:
+        candidate["window"] = max(int(candidate["window"]), boundary)
+    elif name == "window" and "min_periods" in candidate:
+        candidate["min_periods"] = min(int(candidate["min_periods"]), boundary)
+    elif name == "min_obs":
+        for lookback in ("low_vol_lookback", "momentum_lookback"):
+            if lookback in candidate:
+                candidate[lookback] = max(int(candidate[lookback]), boundary)
+    elif name in ("low_vol_lookback", "momentum_lookback") and "min_obs" in candidate:
+        candidate["min_obs"] = min(int(candidate["min_obs"]), boundary)
+    return True
+
+
+def prove_registration_causality(
+    op: Operator,
+    current_params: list[OperatorParams] | None = None,
+) -> CausalityProof:
+    """执行注册门：当前参数和高风险时序边界均须通过四类未来扰动。"""
+
+    parameter_cases = _registration_parameter_cases(op, current_params)
+    panel = make_registration_panel()
+    failures: list[str] = []
+    for params in parameter_cases:
+        for strategy in PerturbStrategy:
+            try:
+                reports = prove_causality(op, params, panel, perturb_strategy=strategy)
+            except Exception as exc:
+                failures.append(
+                    f"params={params.model_dump()} [{strategy.value}] 执行异常: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+            failures.extend(
+                f"params={params.model_dump()} [{strategy.value}] {report.detail}"
+                for report in reports
+                if not report.passed
+            )
+    if failures:
+        detail = "; ".join(failures[:5])
+        raise ValueError(f"算子 {type(op).name} 因果性注册证明失败: {detail}")
+    return CausalityProof(
+        implementation_hash=operator_implementation_hash(op),
+        parameter_hashes=tuple(sorted(_parameter_hash(p) for p in parameter_cases)),
+    )
+
+
+def validate_causality_proof(op: Operator, proof: CausalityProof) -> None:
+    """拒绝被代码/schema 变更失效的证明对象。"""
+
+    if proof.implementation_hash != operator_implementation_hash(op):
+        raise ValueError(f"算子 {type(op).name} 的因果性证明已因实现变更失效")
+    if not proof.parameter_hashes:
+        raise ValueError(f"算子 {type(op).name} 的因果性证明未覆盖参数")
+
+
 def _perturb_future(
     panel: pl.DataFrame,
     split_ts: Any,
@@ -93,23 +278,16 @@ def _perturb_future(
                 pl.when(future_mask).then(pl.lit(float("nan"))).otherwise(pl.col(c))
             )
         elif strategy == PerturbStrategy.EXTREME:
-            perturbed = (
-                pl.when(future_mask)
-                .then(pl.col(c) * 1e6)
-                .otherwise(pl.col(c))
-            )
+            perturbed = pl.when(future_mask).then(pl.col(c) * 1e6).otherwise(pl.col(c))
         elif strategy == PerturbStrategy.NEGATE:
-            perturbed = (
-                pl.when(future_mask)
-                .then(pl.col(c) * -1.0)
-                .otherwise(pl.col(c))
-            )
+            perturbed = pl.when(future_mask).then(pl.col(c) * -1.0).otherwise(pl.col(c))
         elif strategy == PerturbStrategy.RANDOM_LARGE:
             perturbed = (
                 pl.when(future_mask)
                 .then(
-                    pl.Series("_rnd", [random.uniform(-1e6, 1e6) for _ in range(panel.height)])
-                    .alias("_rnd")
+                    pl.Series(
+                        "_rnd", [random.uniform(-1e6, 1e6) for _ in range(panel.height)]
+                    ).alias("_rnd")
                 )
                 .otherwise(pl.col(c))
             )
@@ -239,7 +417,8 @@ def is_causal(
     """便捷封装：所有切点都通过即返回 True。"""
 
     return all(
-        r.passed for r in prove_causality(
+        r.passed
+        for r in prove_causality(
             op, params, panel, split_timestamps, perturb_strategy=perturb_strategy
         )
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
 from long_earn.backtest.operators import (
@@ -125,3 +126,36 @@ class TestHotRegister:
             assert get_operator("_tmp_test_op").name == "_tmp_test_op"
         finally:
             OPERATOR_REGISTRY.pop("_tmp_test_op", None)
+
+    def test_register_operator_rejects_future_leak_despite_causal_flag(self):
+        """直接注册不能靠默认 causal=True 绕过数值因果门。"""
+
+        @operator
+        class FutureLeak(Operator):
+            name = "_tmp_future_leak"
+            category = "factor"
+            params_cls = OperatorParams
+
+            def apply(self, panel, params):  # type: ignore[no-untyped-def]
+                return panel["close"].shift(-1)
+
+        with pytest.raises(OperatorContractError, match="因果性注册证明失败"):
+            register_operator(FutureLeak())
+        assert "_tmp_future_leak" not in OPERATOR_REGISTRY
+
+    def test_directory_registration_rejects_future_leak(self):
+        """启动目录扫描共用同一个 fail-closed 注册门。"""
+        from long_earn.backtest.operators._loader import _register_class
+
+        @operator
+        class FutureLeak(Operator):
+            name = "_tmp_directory_future_leak"
+            category = "factor"
+            params_cls = OperatorParams
+
+            def apply(self, panel, params):  # type: ignore[no-untyped-def]
+                return pl.Series("leak", panel["close"].shift(-1))
+
+        with pytest.raises(OperatorContractError, match="因果性注册证明失败"):
+            _register_class(FutureLeak)
+        assert "_tmp_directory_future_leak" not in OPERATOR_REGISTRY

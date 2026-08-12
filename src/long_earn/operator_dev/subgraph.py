@@ -30,15 +30,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-import polars as pl
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.backtest.operators import OPERATOR_REGISTRY, register_operator
-from long_earn.backtest.operators.causality import prove_causality
+from long_earn.backtest.operators.causality import prove_registration_causality
 from long_earn.operator_dev.agents import LLMImplementer, OperatorImplementer
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.operator_dev.sandbox import OperatorLoadError, load_operator_class
@@ -63,28 +61,6 @@ class _SilentLogger:
 
 
 _SILENT_LOGGER = _SilentLogger()
-
-
-def _make_causality_panel() -> pl.DataFrame:
-    """构造确定性面板供因果性证明：3 symbol × 30 日。"""
-    rows = []
-    base = datetime(2024, 1, 1)
-    for i in range(30):
-        ts = base + timedelta(days=i)
-        for s_idx, sym in enumerate(["A.SZ", "B.SH", "C.SZ"]):
-            t = i + 1
-            close = 10.0 + s_idx * 3 + 0.4 * t + (t % 5) - 0.02 * (t % 11)
-            rows.append(
-                {
-                    "timestamp": ts,
-                    "symbol": sym,
-                    "close": round(close, 4),
-                    "high": close + 0.2,
-                    "low": close - 0.2,
-                    "volume": 1000.0 * t,
-                }
-            )
-    return pl.DataFrame(rows)
 
 
 def _append_result(
@@ -188,20 +164,17 @@ def _test_and_validate_node(
         return {"code_ready": False, "failure_report": report}
 
     try:
-        reports = prove_causality(instance, params, _make_causality_panel())
+        proof = prove_registration_causality(instance, current_params=[params])
     except Exception as exc:
         report = f"因果性证明执行异常: {type(exc).__name__}: {exc}"
         return {"code_ready": False, "failure_report": report}
 
-    failed = [r for r in reports if not r.passed]
-    if failed:
-        detail = "; ".join(f"T={r.split_timestamp}: {r.detail}" for r in failed)
-        report = f"因果性证明失败（含未来函数）: {detail}"
-        logger.error(f"[op_dev] {spec.name} {report}")
-        return {"code_ready": False, "failure_report": report}
-
     logger.info(f"[op_dev] {spec.name} 审计+契约+因果性全部通过")
-    return {"code_ready": True, "failure_report": ""}
+    return {
+        "code_ready": True,
+        "failure_report": "",
+        "causality_proof": proof,
+    }
 
 
 def _refine_node(
@@ -235,7 +208,13 @@ def _register_node(
     instance = load_operator_class(source, expected_name=spec.name)()
     # 传 source_code + category：让 register_operator 同时写盘，
     # 下次进程启动时 _bootstrap 扫描自动发现，跨进程持久化。
-    register_operator(instance, source_code=source, category=spec.category)
+    proof = state.get("causality_proof")
+    register_operator(
+        instance,
+        source_code=source,
+        category=spec.category,
+        causality_proof=proof,
+    )
     backlog.update_status(spec.name, "registered")
     logger.info(f"[op_dev] {spec.name} 已注册上线（源码写盘 + 内存热注册）")
     registered = [*state.get("registered_names", []), spec.name]
