@@ -1,39 +1,52 @@
-"""可视化 API 接口测试
+"""FastAPI visualization public-interface tests."""
 
-验证 BacktestAPIHandler 的公共接口行为，而非仅 hasattr。
-"""
+from pathlib import Path
 
-from unittest.mock import MagicMock
+import pytest
 
-from long_earn.dashboard.api import BacktestAPIHandler, serve_visualization
+from long_earn.dashboard import serve_visualization_fastapi
+from long_earn.dashboard.fastapi_app import _create_app, _is_loopback_host
 
 
-class TestBacktestAPIHandler:
-    """BacktestAPIHandler 接口行为测试"""
+def test_fastapi_visualization_entrypoint_is_callable() -> None:
+    """The public server entrypoint remains available to CLI callers."""
+    assert callable(serve_visualization_fastapi)
 
-    def test_handler_routes_exist(self):
-        """Handler 应定义所有必要的路由处理方法"""
-        required_methods = [
-            "do_GET",
-            "_health",
-            "_list_runs",
-            "_run_summary",
-            "_run_equity",
-            "_run_trades",
-            "_run_signals",
-            "_run_dashboard",
-        ]
-        for method in required_methods:
-            assert hasattr(BacktestAPIHandler, method), f"缺少方法: {method}"
-            assert callable(getattr(BacktestAPIHandler, method)), f"{method} 不可调用"
 
-    def test_serve_visualization_is_callable(self):
-        """serve_visualization 应可调用"""
-        assert callable(serve_visualization)
+def test_fastapi_app_registers_core_run_routes(tmp_path: Path) -> None:
+    """The application exposes the established backtest REST interface."""
+    app = _create_app(db_path=tmp_path / "audit.duckdb")
+    routes = {route.path for route in app.routes}
+    assert "/api/health" in routes
+    assert "/api/runs" in routes
+    assert "/api/runs/{run_id}/dashboard" in routes
 
-    def test_handler_initializes_with_analyzer(self):
-        """Handler 实例化时应接受 analyzer 参数"""
-        mock_analyzer = MagicMock()
-        handler = BacktestAPIHandler.__new__(BacktestAPIHandler)
-        handler.analyzer = mock_analyzer
-        assert handler.analyzer is mock_analyzer
+
+def test_loopback_hosts_are_recognized() -> None:
+    """The server only accepts local binds by default."""
+    assert _is_loopback_host("127.0.0.1")
+    assert _is_loopback_host("::1")
+    assert _is_loopback_host("localhost")
+    assert not _is_loopback_host("0.0.0.0")
+
+
+def test_remote_bind_requires_explicit_opt_in() -> None:
+    """An externally reachable host fails closed without authorization."""
+    with pytest.raises(ValueError, match="allow_remote=True"):
+        serve_visualization_fastapi(host="0.0.0.0")
+
+
+def test_remote_bind_runs_only_with_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The opt-in reaches Uvicorn and marks the app as remote."""
+    captured: dict[str, object] = {}
+
+    def fake_run(app: object, **kwargs: object) -> None:
+        captured["app"] = app
+        captured.update(kwargs)
+
+    monkeypatch.setattr("long_earn.dashboard.fastapi_app.uvicorn.run", fake_run)
+
+    serve_visualization_fastapi(host="0.0.0.0", allow_remote=True)
+
+    assert captured["host"] == "0.0.0.0"
+    assert captured["app"].state.remote_mode is True  # type: ignore[union-attr]

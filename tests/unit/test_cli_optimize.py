@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from typer.testing import CliRunner
 
 from long_earn.cli import app
@@ -43,3 +44,41 @@ def test_optimize_command_max_iterations_option() -> None:
     result = runner.invoke(app, ["optimize", "--help"], color=False)
     assert result.exit_code == 0
     assert "--max-iterations" in _plain(result.stdout)
+
+
+def test_web_command_defaults_to_loopback_and_forwards_remote_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI exposes an explicit opt-in before passing a remote bind onward."""
+    calls: list[dict[str, object]] = []
+
+    def fake_serve(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "long_earn.dashboard.fastapi_app.serve_visualization_fastapi", fake_serve
+    )
+
+    default_result = runner.invoke(app, ["web"], color=False)
+    remote_result = runner.invoke(
+        app, ["web", "--host", "0.0.0.0", "--allow-remote"], color=False
+    )
+
+    assert default_result.exit_code == 0
+    assert remote_result.exit_code == 0
+    assert calls == [
+        {
+            "host": "127.0.0.1",
+            "port": 8090,
+            "db_path": "",
+            "substances_path": "",
+            "allow_remote": False,
+        },
+        {
+            "host": "0.0.0.0",
+            "port": 8090,
+            "db_path": "",
+            "substances_path": "",
+            "allow_remote": True,
+        },
+    ]

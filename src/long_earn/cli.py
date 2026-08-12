@@ -86,8 +86,8 @@ def research(
     idea_str = idea or _DEFAULT_IDEA
     config = AppConfig.from_env()
 
-    history_window = f"{config.train_start_date} ~ {config.test_end_date}"
-    recent_window = f"{config.validation_start_date} ~ {config.validation_end_date}"
+    history_window = f"{config.train_start_date} ~ {config.train_end_date}"
+    recent_window = f"训练集内近 6 个月（截止 {config.train_end_date}）"
 
     _print_research_banner(idea_str, config, history_window, recent_window)
 
@@ -96,7 +96,7 @@ def research(
         raise typer.Exit()
 
     config.backtest_start_date = config.train_start_date
-    config.backtest_end_date = config.test_end_date
+    config.backtest_end_date = config.train_end_date
     ctx = initialize_context(config)
 
     service = StrategyResearchService(ctx)
@@ -361,7 +361,7 @@ def agent(
 
 @app.command()
 def web(
-    host: str = typer.Option("0.0.0.0", "--host", help="监听地址"),
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
     port: int = typer.Option(8090, "--port", help="监听端口"),
     db: str = typer.Option("", "--db", help="DuckDB 审计数据库路径"),
     substances: str = typer.Option(
@@ -369,6 +369,11 @@ def web(
     ),
     fastapi: bool = typer.Option(
         True, "--fastapi/--no-fastapi", help="使用 FastAPI + WebSocket（默认启用）"
+    ),
+    allow_remote: bool = typer.Option(
+        False,
+        "--allow-remote",
+        help="明确允许绑定非本机地址；远程部署仍需认证和网络访问控制",
     ),
 ) -> None:
     """启动回测可视化 Web 服务。
@@ -384,6 +389,7 @@ def web(
             port=port,
             db_path=db,
             substances_path=substances,
+            allow_remote=allow_remote,
         )
     else:
         serve_visualization_fastapi(
@@ -391,6 +397,7 @@ def web(
             port=port,
             db_path=db,
             substances_path=substances,
+            allow_remote=allow_remote,
         )
 
 
