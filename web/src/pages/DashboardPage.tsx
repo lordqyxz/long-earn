@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { BarChart3, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
-import { RunList } from '@/components/RunList'
-import { BacktestDetail } from '@/components/BacktestDetail'
+import { deleteRun } from '@/api'
+import { RunList } from '@/components/dashboard/RunList'
+import { BacktestDetail } from '@/components/dashboard/BacktestDetail'
 import { useRuns } from '@/hooks/useRuns'
 import { formatPercent } from '@/lib/utils'
 
@@ -37,10 +38,10 @@ export function DashboardPage() {
 
   const handleDeleteRun = async (runId: string) => {
     try {
-      const resp = await fetch(`/api/runs/${runId}`, { method: 'DELETE' })
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: '删除失败' }))
-        alert(err.detail || '删除失败')
+      const { error } = await deleteRun({ path: { run_id: runId } })
+      if (error) {
+        const detail = (error as { detail?: string })?.detail
+        alert(detail || '删除失败')
         return
       }
       // 关闭已打开的 tab

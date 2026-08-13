@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { X, Building2, Loader2 } from 'lucide-react'
+import { symbolDetail, symbolFinancials } from '@/api'
 import {
   ResponsiveContainer,
   BarChart,
@@ -54,8 +55,6 @@ interface Props {
   onClose: () => void
 }
 
-const API_BASE = '/api'
-
 // ── 配色 ──
 const COLORS = {
   revenue: '#3b82f6',
@@ -90,23 +89,20 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
     }
     setLoading(true)
     setError(null)
-    fetch(`${API_BASE}/symbols/${symbol}/detail`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
+    symbolDetail({ path: { symbol } })
+      .then(({ data, error }) => {
+        if (error || !data) throw new Error('获取详情失败')
+        setDetail(data as unknown as SymbolDetail)
       })
-      .then(setDetail)
-      .catch((e) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
 
     // 并行获取财务数据
     setLoadingFin(true)
-    fetch(`${API_BASE}/symbols/${symbol}/financials`)
-      .then((res) => {
-        if (!res.ok) return { financials: [] }
-        return res.json()
-      })
-      .then((data) => setFinancials(data.financials || []))
+    symbolFinancials({ path: { symbol } })
+      .then(({ data }) =>
+        setFinancials((data?.financials as FinancialRecord[] | undefined) ?? []),
+      )
       .catch(() => setFinancials([]))
       .finally(() => setLoadingFin(false))
   }, [symbol])

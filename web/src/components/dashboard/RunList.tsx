@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatShortDateTime, formatPercent } from '@/lib/utils'
-import type { RunInfo } from '@/types'
+import type { RunInfo } from '@/api'
 
 interface Props {
   runs: RunInfo[]

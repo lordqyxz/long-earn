@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { PipelineMessage, EventStats, EventItem, RelationItem, TimelinePoint } from '@/types'
-
-const API_BASE = '/api'
+import { eventStats, eventTimeline, listEvents, listRelations } from '@/api'
+import type { EventStats, EventItem, RelationItem, TimelinePoint } from '@/api'
+import type { PipelineMessage } from '@/types'
 
 export function useWebSocket() {
   const [connected, setConnected] = useState(false)
@@ -95,24 +95,15 @@ export function useEventData() {
     setLoading(true)
     try {
       const [statsRes, timelineRes, eventsRes, relationsRes] = await Promise.all([
-        fetch(`${API_BASE}/events/stats`),
-        fetch(`${API_BASE}/events/timeline?days=30`),
-        fetch(`${API_BASE}/events?limit=100`),
-        fetch(`${API_BASE}/events/relations?limit=50`),
+        eventStats(),
+        eventTimeline({ query: { days: 30 } }),
+        listEvents({ query: { limit: 100 } }),
+        listRelations({ query: { limit: 50 } }),
       ])
-      if (statsRes.ok) setStats(await statsRes.json())
-      if (timelineRes.ok) {
-        const t = await timelineRes.json()
-        setTimeline(t.timeline || [])
-      }
-      if (eventsRes.ok) {
-        const e = await eventsRes.json()
-        setEvents(e.events || [])
-      }
-      if (relationsRes.ok) {
-        const r = await relationsRes.json()
-        setRelations(r.relations || [])
-      }
+      if (statsRes.data) setStats(statsRes.data)
+      if (timelineRes.data?.timeline) setTimeline(timelineRes.data.timeline)
+      if (eventsRes.data?.events) setEvents(eventsRes.data.events)
+      if (relationsRes.data?.relations) setRelations(relationsRes.data.relations)
     } catch {
       // ignore
     } finally {

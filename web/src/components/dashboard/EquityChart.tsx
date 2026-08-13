@@ -10,9 +10,9 @@ import {
   Tooltip,
   Legend,
 } from 'recharts'
-import { CollapsibleSection } from '@/components/CollapsibleSection'
+import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
 import { TrendingUp } from 'lucide-react'
-import type { EquityPoint } from '@/types'
+import type { EquityPoint } from '@/api'
 
 interface Props {
   equityCurve: EquityPoint[]

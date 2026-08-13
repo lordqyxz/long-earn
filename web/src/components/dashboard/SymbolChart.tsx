@@ -15,7 +15,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TrendingUp, Loader2, ArrowUp, ArrowDown } from 'lucide-react'
 import { formatNumber } from '@/lib/utils'
-import type { SymbolChartData } from '@/types'
+import type { SymbolChartData } from '@/api'
 
 // ── 数量格式化：万/亿 ──
 function formatQty(qty: number): string {
@@ -329,20 +329,20 @@ export function SymbolChart({ data, loading, symbolName }: Props) {
   const { buyPoints, sellPoints } = useMemo(() => {
     if (!data) return { buyPoints: [], sellPoints: [] }
     return {
-      buyPoints: data.trade_points.filter((p) => p.direction === 'BUY'),
-      sellPoints: data.trade_points.filter((p) => p.direction === 'SELL'),
+      buyPoints: (data.trade_points ?? []).filter((p) => p.direction === 'BUY'),
+      sellPoints: (data.trade_points ?? []).filter((p) => p.direction === 'SELL'),
     }
   }, [data])
 
   const { totalBuyQty, totalSellQty } = useMemo(() => ({
-    totalBuyQty: buyPoints.reduce((s, p) => s + p.quantity, 0),
-    totalSellQty: sellPoints.reduce((s, p) => s + p.quantity, 0),
+    totalBuyQty: buyPoints.reduce((s, p) => s + (p.quantity ?? 0), 0),
+    totalSellQty: sellPoints.reduce((s, p) => s + (p.quantity ?? 0), 0),
   }), [buyPoints, sellPoints])
 
   const chartData = useMemo(() => {
-    if (!data || data.price_history.length === 0) return [] as CandleData[]
+    if (!data || (data.price_history ?? []).length === 0) return [] as CandleData[]
 
-    const tradeDates = data.trade_points
+    const tradeDates = (data.trade_points ?? [])
       .map((tp) => tp.time?.slice(0, 10) || '')
       .filter(Boolean)
       .sort()
@@ -358,7 +358,7 @@ export function SymbolChart({ data, loading, symbolName }: Props) {
       endDate = maxDate.toISOString().slice(0, 10)
     }
 
-    return data.price_history
+    return (data.price_history ?? [])
       .filter((p) => {
         if (!startDate) return true
         const d = p.date?.slice(0, 10) || ''
@@ -382,10 +382,10 @@ export function SymbolChart({ data, loading, symbolName }: Props) {
           sellPrice: daySells.length > 0 ? (p.close ?? null) : null,
           buyCount: dayBuys.length,
           sellCount: daySells.length,
-          buyQuantity: dayBuys.reduce((s, tp) => s + tp.quantity, 0),
-          sellQuantity: daySells.reduce((s, tp) => s + tp.quantity, 0),
-          buyAmount: dayBuys.reduce((s, tp) => s + tp.amount, 0),
-          sellAmount: daySells.reduce((s, tp) => s + tp.amount, 0),
+          buyQuantity: dayBuys.reduce((s, tp) => s + (tp.quantity ?? 0), 0),
+          sellQuantity: daySells.reduce((s, tp) => s + (tp.quantity ?? 0), 0),
+          buyAmount: dayBuys.reduce((s, tp) => s + (tp.amount ?? 0), 0),
+          sellAmount: daySells.reduce((s, tp) => s + (tp.amount ?? 0), 0),
         }
       })
   }, [data, buyPoints, sellPoints])

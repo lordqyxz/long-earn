@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { RunInfo, DashboardData, SymbolChartData } from '@/types'
-
-const API_BASE = '/api'
+import { listRuns, runDashboard, symbolChart, symbolNames } from '@/api'
+import type { RunInfo, DashboardData, SymbolChartData } from '@/api'
 
 /** 批量获取标的中文名映射 */
 export function useSymbolNames(symbols: string[]): Record<string, string> {
@@ -14,13 +13,11 @@ export function useSymbolNames(symbols: string[]): Record<string, string> {
     }
     const controller = new AbortController()
     const key = symbols.join(',')
-    fetch(`${API_BASE}/symbols/names?symbols=${encodeURIComponent(key)}`, {
-      signal: controller.signal,
-    })
-      .then((res) => res.json())
-      .then((data) => setNames(data.names || {}))
+    symbolNames({ query: { symbols: key }, signal: controller.signal })
+      .then(({ data }) => setNames(data?.names ?? {}))
       .catch(() => setNames({}))
     return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbols.join(',')])
 
   return names
@@ -35,12 +32,11 @@ export function useRuns() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE}/runs`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-      setRuns(data.runs || [])
-    } catch (e: any) {
-      setError(e.message)
+      const { data, error } = await listRuns()
+      if (error) throw new Error('获取回测列表失败')
+      setRuns(data?.runs ?? [])
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -64,13 +60,12 @@ export function useDashboard(runId: string | null) {
     setLoading(true)
     setError(null)
     setData(null)  // 切换 run 时清空旧数据
-    fetch(`${API_BASE}/runs/${runId}/dashboard`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
+    runDashboard({ path: { run_id: runId } })
+      .then(({ data, error }) => {
+        if (error) throw new Error('加载回测详情失败')
+        setData(data ?? null)
       })
-      .then(setData)
-      .catch((e) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [runId])
 
@@ -87,12 +82,8 @@ export function useSymbolChart(runId: string | null, symbol: string | null) {
       return
     }
     setLoading(true)
-    fetch(`${API_BASE}/runs/${runId}/symbol/${symbol}/chart`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
-      .then(setData)
+    symbolChart({ path: { run_id: runId, symbol } })
+      .then(({ data }) => setData(data ?? null))
       .catch(() => setData(null))
       .finally(() => setLoading(false))
   }, [runId, symbol])

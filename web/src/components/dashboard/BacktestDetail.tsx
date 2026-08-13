@@ -2,15 +2,15 @@ import { useState, useMemo, useEffect } from 'react'
 import { Loader2, ArrowUp, ArrowDown, BarChart3, Info } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { MetricCards } from '@/components/MetricCards'
-import { RiskMetricsPanel } from '@/components/RiskMetrics'
-import { EquityChart } from '@/components/EquityChart'
-import { SymbolChart } from '@/components/SymbolChart'
-import { CollapsibleSection } from '@/components/CollapsibleSection'
-import { SymbolDetailDialog } from '@/components/SymbolDetailDialog'
+import { MetricCards } from '@/components/dashboard/MetricCards'
+import { RiskMetricsPanel } from '@/components/dashboard/RiskMetrics'
+import { EquityChart } from '@/components/dashboard/EquityChart'
+import { SymbolChart } from '@/components/dashboard/SymbolChart'
+import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
+import { SymbolDetailDialog } from '@/components/dashboard/SymbolDetailDialog'
 import { useDashboard, useSymbolChart, useSymbolNames } from '@/hooks/useRuns'
 import { formatDate, formatNumber } from '@/lib/utils'
-import type { TradeRecord } from '@/types'
+import type { TradeRecord } from '@/api'
 
 interface Props {
   runId: string
@@ -62,10 +62,10 @@ export function BacktestDetail({ runId }: Props) {
       </CollapsibleSection>
 
       {/* 风险指标 */}
-      <RiskMetricsPanel risk={data.risk_metrics} benchmark={data.benchmark} />
+      <RiskMetricsPanel risk={data.risk_metrics ?? null} benchmark={data.benchmark ?? null} />
 
       {/* 权益曲线 */}
-      <EquityChart equityCurve={data.equity_curve} />
+      <EquityChart equityCurve={data.equity_curve ?? []} />
 
       {/* 交易标的 + 个股图表 */}
       <CollapsibleSection title={<span className="flex items-center gap-2"><BarChart3 className="h-4 w-4" />交易标的</span>}>
@@ -143,12 +143,12 @@ export function BacktestDetail({ runId }: Props) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.trade_journal.length === 0 ? (
+            {(data.trade_journal ?? []).length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground py-8">暂无交易记录</TableCell>
               </TableRow>
             ) : (
-              data.trade_journal.slice(-50).reverse().map((t: TradeRecord, i: number) => {
+              (data.trade_journal ?? []).slice(-50).reverse().map((t: TradeRecord, i: number) => {
                 const name = symbolNames[t.symbol]
                 const isBuy = t.type === 'BUY'
                 return (
@@ -179,9 +179,9 @@ export function BacktestDetail({ runId }: Props) {
                         {isBuy ? '买入' : '卖出'}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right font-mono text-xs">¥{formatNumber(t.price)}</TableCell>
-                    <TableCell className="text-right text-xs">{t.quantity}</TableCell>
-                    <TableCell className="text-right font-mono text-xs">¥{formatNumber(t.price * t.quantity, 0)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs">¥{formatNumber(t.price ?? 0)}</TableCell>
+                    <TableCell className="text-right text-xs">{t.quantity ?? 0}</TableCell>
+                    <TableCell className="text-right font-mono text-xs">¥{formatNumber((t.price ?? 0) * (t.quantity ?? 0), 0)}</TableCell>
                     <TableCell>
                       <span className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                         成交

@@ -1,7 +1,7 @@
-import { TrendingUp, TrendingDown, Minus, DollarSign, BarChart3, Activity, Zap } from 'lucide-react'
+import { TrendingUp, TrendingDown, DollarSign, BarChart3, Activity, Zap } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { DashboardData } from '@/types'
+import type { DashboardData } from '@/api'
 
 interface Props {
   data: DashboardData | null
@@ -19,7 +19,7 @@ const iconMap: Record<string, React.ReactNode> = {
 export function MetricCards({ data }: Props) {
   if (!data) return null
 
-  const equity = data.equity_curve
+  const equity = data.equity_curve ?? []
   const finalEquity = equity.length > 0 ? equity[equity.length - 1].value : 0
   const initialEquity = equity.length > 0 ? equity[0].value : 0
   const totalReturn = data.risk_metrics?.total_return ?? 0

@@ -4,10 +4,10 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { PipelineStages } from '@/components/PipelineStages'
+import { PipelineStages } from '@/components/event-flow/PipelineStages'
 import { useWebSocket, useEventData } from '@/hooks/useWebSocket'
 import { formatDateTime } from '@/lib/utils'
-import type { EventItem } from '@/types'
+import type { EventItem } from '@/api'
 
 const SENTIMENT_MAP: Record<string, { label: string; variant: 'success' | 'destructive' | 'outline' | 'secondary' }> = {
   positive: { label: '利好', variant: 'success' },
@@ -154,16 +154,16 @@ export function EventFlowPage() {
                   </TableRow>
                 ) : (
                   events.map((e: EventItem) => {
-                    const sent = SENTIMENT_MAP[e.sentiment] || SENTIMENT_MAP.neutral
+                    const sent = SENTIMENT_MAP[e.sentiment ?? 'neutral'] || SENTIMENT_MAP.neutral
                     return (
                       <TableRow key={e.sid}>
-                        <TableCell className="text-xs text-muted-foreground">{formatDateTime(e.created_at)}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{formatDateTime(e.created_at ?? '')}</TableCell>
                         <TableCell>
                           <Badge variant={sent.variant} className="text-xs">{sent.label}</Badge>
                         </TableCell>
                         <TableCell className="font-mono text-xs">{e.symbols?.join(', ') || '-'}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">{e.category || '-'}</TableCell>
-                        <TableCell className="text-xs max-w-[400px] truncate">{e.name || e.content?.slice(0, 80)}</TableCell>
+                        <TableCell className="text-xs max-w-[400px] truncate">{e.content?.slice(0, 80)}</TableCell>
                       </TableRow>
                     )
                   })

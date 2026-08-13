@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { TrendingUp, TrendingDown, Clock, FileText, MessageSquare } from 'lucide-react'
+import { TrendingUp, Clock, FileText, MessageSquare } from 'lucide-react'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
