@@ -67,6 +67,8 @@ interface CandleData {
   sellQuantity: number
   buyAmount: number
   sellAmount: number
+  buyReasons: string[]
+  sellReasons: string[]
 }
 
 // ── 自定义 K 线 Shape ──
@@ -255,6 +257,11 @@ function TradeTooltip({ active, payload }: {
           <span>¥{formatNumber(p.buyAmount)}</span>
         </div>
       )}
+      {(p.buyReasons ?? []).length > 0 && (
+        <div style={{ color: COLORS.buy, fontSize: '11px', marginBottom: '2px' }}>
+          {p.buyReasons.join('、')}
+        </div>
+      )}
       {p.sellCount > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: COLORS.sell }}>
           <span>▼ 卖出 {p.sellCount} 笔</span>
@@ -262,6 +269,11 @@ function TradeTooltip({ active, payload }: {
           <span>{formatQty(p.sellQuantity)} 股</span>
           <span style={{ color: COLORS.textMuted }}>|</span>
           <span>¥{formatNumber(p.sellAmount)}</span>
+        </div>
+      )}
+      {(p.sellReasons ?? []).length > 0 && (
+        <div style={{ color: COLORS.sell, fontSize: '11px' }}>
+          {p.sellReasons.join('、')}
         </div>
       )}
     </div>
@@ -386,6 +398,8 @@ export function SymbolChart({ data, loading, symbolName }: Props) {
           sellQuantity: daySells.reduce((s, tp) => s + (tp.quantity ?? 0), 0),
           buyAmount: dayBuys.reduce((s, tp) => s + (tp.amount ?? 0), 0),
           sellAmount: daySells.reduce((s, tp) => s + (tp.amount ?? 0), 0),
+          buyReasons: [...new Set(dayBuys.map((tp) => tp.reason || '').filter(Boolean))],
+          sellReasons: [...new Set(daySells.map((tp) => tp.reason || '').filter(Boolean))],
         }
       })
   }, [data, buyPoints, sellPoints])

@@ -136,6 +136,7 @@ export function BacktestDetail({ runId }: Props) {
               <TableHead>交易日</TableHead>
               <TableHead>标的</TableHead>
               <TableHead>方向</TableHead>
+              <TableHead>原因</TableHead>
               <TableHead className="text-right">价格</TableHead>
               <TableHead className="text-right">数量</TableHead>
               <TableHead className="text-right">金额</TableHead>
@@ -145,7 +146,7 @@ export function BacktestDetail({ runId }: Props) {
           <TableBody>
             {(data.trade_journal ?? []).length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">暂无交易记录</TableCell>
+                <TableCell colSpan={8} className="text-center text-muted-foreground py-8">暂无交易记录</TableCell>
               </TableRow>
             ) : (
               (data.trade_journal ?? []).slice(-50).reverse().map((t: TradeRecord, i: number) => {
@@ -178,6 +179,13 @@ export function BacktestDetail({ runId }: Props) {
                         {isBuy ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
                         {isBuy ? '买入' : '卖出'}
                       </span>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground max-w-[160px]">
+                      {t.reason ? (
+                        <span className="line-clamp-1" title={t.reason}>{t.reason}</span>
+                      ) : (
+                        <span className="text-muted-foreground/50">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs">¥{formatNumber(t.price ?? 0)}</TableCell>
                     <TableCell className="text-right text-xs">{t.quantity ?? 0}</TableCell>

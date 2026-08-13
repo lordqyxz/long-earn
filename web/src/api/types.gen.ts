@@ -932,6 +932,10 @@ export type TradePoint = {
      * Amount
      */
     amount?: number;
+    /**
+     * Reason
+     */
+    reason?: string;
 };
 
 /**
@@ -968,6 +972,10 @@ export type TradeRecord = {
      * Portfolio Value
      */
     portfolio_value?: number;
+    /**
+     * Reason
+     */
+    reason?: string;
 };
 
 /**
