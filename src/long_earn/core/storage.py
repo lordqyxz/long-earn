@@ -52,14 +52,20 @@ def resolve_paths(data_dir: str | Path | None = None) -> dict[str, Path]:
         data_dir: 显式数据根目录；None 时读取 ``LONG_EARN_DATA_DIR`` env
 
     Returns:
-        ``{data_dir, backtest_cache, substances_db, hypothesis_tree_dir,
-          strategy_results, best_strategy}`` 路径字典
+        ``{data_dir, backtest_cache, backtest_audit, substances_db,
+          hypothesis_tree_dir, strategy_results, best_strategy}`` 路径字典
     """
     base = Path(data_dir).expanduser().resolve() if data_dir else get_data_dir()
     base.mkdir(parents=True, exist_ok=True)
     return {
         "data_dir": base,
         "backtest_cache_path": base / "backtest_cache.duckdb",
+        # 审计日志独立库：与价格缓存分库，避免 Web 只读连接与回测写连接
+        # 竞争同一文件锁（单写者纪律：审计库仅 DuckDBAuditProvider 写入，
+        # 其余消费者一律 read_only 连接）。
+        # 注意：文件名不能是 backtest_audit.duckdb —— DuckDB catalog 名取
+        # 文件名 stem，会与 schema 名 backtest_audit 冲突（ambiguous reference）。
+        "backtest_audit_path": base / "audit.duckdb",
         "substances_db_path": base / "substances.duckdb",
         "hypothesis_tree_dir": base / "hypothesis_trees",
         "strategy_results_path": base / "strategy_research_results.json",
@@ -73,6 +79,20 @@ def resolve_paths(data_dir: str | Path | None = None) -> dict[str, Path]:
 def backtest_cache_path() -> Path:
     """回测行情/财务缓存 DuckDB 路径。"""
     return get_data_dir() / "backtest_cache.duckdb"
+
+
+def backtest_audit_path() -> Path:
+    """回测审计日志独立 DuckDB 路径。
+
+    审计与价格缓存分库存储：高频小写入的审计日志（backtest_audit.logs）
+    不再与 GB 级列式价格缓存共享一个文件，消除「Web 只读连接 vs 回测写
+    连接」在同一文件上的锁竞争与 WAL checkpoint 数据丢失风险。
+
+    文件名取 ``audit.duckdb`` 而非 ``backtest_audit.duckdb``：DuckDB catalog
+    名取文件名 stem，若与 schema 名 ``backtest_audit`` 相同会导致
+    ``"backtest_audit".logs`` 引用歧义（BinderError）。
+    """
+    return get_data_dir() / "audit.duckdb"
 
 
 def substances_db_path() -> Path:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
@@ -88,6 +89,71 @@ class BacktestOutcome:
 def _worker_db_path(base: Path, task_id: str) -> Path:
     """派生 worker 专属 DuckDB 路径，避免多进程共享连接写冲突。"""
     return base.parent / f"{base.stem}_{task_id}{base.suffix}"
+
+
+def _merge_worker_audit(base: Path, task_ids: list[str]) -> None:
+    """把并行 worker 的审计日志合并回主审计库并清理临时文件。
+
+    并行回测中每个 worker 写入独立 DuckDB 文件（``_worker_db_path``，
+    避免跨进程共享连接），任务全部结束后由主进程统一合并回
+    ``base`` 指定的主审计库，保证并行回测的审计数据在可视化/导出层
+    可见，不再散落或丢失（P0-11 缺口修正）。
+
+    合并采用 ATTACH + INSERT INTO SELECT 跨库搬运；worker 文件合并后
+    立即删除。失败仅告警，不阻断回测结果返回。
+    """
+    import duckdb
+
+    if not task_ids:
+        return
+
+    # 主审计库可能尚不存在 backtest_audit schema/表：先初始化
+    from long_earn.backtest.engine.audit import DuckDBAuditProvider  # noqa: PLC0415
+
+    try:
+        boot = DuckDBAuditProvider(db_path=base)
+        boot.close()
+    except Exception as exc:  # pragma: no cover - 防御性
+        logger.warning(f"初始化主审计库失败，跳过 worker 审计合并: {exc}")
+        return
+
+    conn = duckdb.connect(str(base), read_only=False)
+    # 显式列名映射：避免 SELECT * 按位置对应时与后加列（seq）的 schema 错位
+    _COLS = (
+        "run_id, seq, timestamp, event_type, trace_id, parent_id, "
+        "component, status, payload, latency_ms"
+    )
+    merged = 0
+    try:
+        for task_id in task_ids:
+            worker_db = _worker_db_path(base, task_id)
+            if not worker_db.exists():
+                continue
+            try:
+                esc_path = str(worker_db).replace("'", "''")
+                conn.execute(f"ATTACH '{esc_path}' AS w")
+                count = conn.execute(
+                    'SELECT COUNT(*) FROM w."backtest_audit".logs'
+                ).fetchone()[0]
+                if count:
+                    conn.execute(
+                        f'INSERT INTO "backtest_audit".logs ({_COLS}) '
+                        f'SELECT {_COLS} FROM w."backtest_audit".logs'
+                    )
+                conn.execute("DETACH w")
+                merged += int(count)
+                # 合并成功后才清理 worker 临时文件；失败保留供排查
+                with contextlib.suppress(Exception):
+                    worker_db.unlink()
+                logger.info(f"worker 审计合并 {worker_db.name}: {count} 条")
+            except Exception as exc:
+                logger.warning(f"合并 worker 审计 {worker_db.name} 失败: {exc}")
+                with contextlib.suppress(Exception):
+                    conn.execute("DETACH w")
+    finally:
+        conn.close()
+    if merged:
+        logger.info(f"并行审计合并完成: 共 {merged} 条")
 
 
 def _shift_start_date(start_date: str, warmup_days: int) -> str:
@@ -421,6 +487,10 @@ class ParallelRunner:
 
             outcomes = self._execute_tasks(tasks)
 
+        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
+        if audit_base:
+            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
+
         result = GridResult(outcomes=outcomes)
         logger.info(
             f"[grid] 完成: {result.success_count}/{total} 成功, "
@@ -526,6 +596,10 @@ class ParallelRunner:
                 )
 
             outcomes = self._execute_tasks(tasks)
+
+        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
+        if audit_base:
+            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
 
         # 按 fold 汇总
         fold_results: list[dict[str, Any]] = []
@@ -692,6 +766,10 @@ class ParallelRunner:
             ]
 
             outcomes = self._execute_tasks(tasks)
+
+        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
+        if audit_base:
+            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
 
         success_count = sum(1 for o in outcomes if o.success)
         logger.info(f"[candidates] 完成: {success_count}/{len(candidates)} 成功")

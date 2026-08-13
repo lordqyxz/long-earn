@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from long_earn.backtest.engine.audit import AuditLogger, DuckDBAuditProvider
-from long_earn.dashboard.analyzer import BacktestAnalyzer
+from long_earn.app.analyzer import BacktestAnalyzer
 
 
 def _make_provider_and_logger(

@@ -45,6 +45,7 @@ plan/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
+web/openapi.json
 check_audit.py
 
 # ZCode 会话计划与本地状态

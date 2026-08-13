@@ -6,7 +6,7 @@ import duckdb
 import polars as pl
 from loguru import logger
 
-from long_earn.core.storage import backtest_cache_path
+from long_earn.core.storage import backtest_audit_path
 
 
 class BacktestAnalyzer:
@@ -18,7 +18,7 @@ class BacktestAnalyzer:
     """
 
     def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path if db_path is not None else backtest_cache_path()
+        self.db_path = db_path if db_path is not None else backtest_audit_path()
 
     def _get_conn(self):
         return duckdb.connect(str(self.db_path))

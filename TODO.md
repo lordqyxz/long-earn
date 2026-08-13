@@ -16,6 +16,19 @@
 
 ---
 
+## 当前冲刺（进行中）
+
+> Q2 信任项闭环，进入模拟盘审计间隙；**当前主线为 Web 前端开发**（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket）。
+
+- [~] **Web 前端开发**（`web/`）— 进行中
+  - [x] 三页面骨架：`/` 回测看板（RunList + BacktestDetail 多标签）、`/event-flow` 事件分析（管线进度 + WebSocket 日志 + 事件列表）、`/research` 策略研发（ToG 轮次追踪）
+  - [x] **OpenAPI 自动生成 API 客户端**：后端 27 个 REST 端点声明 `response_model`（Pydantic schemas 按领域分模块 `schemas/`）+ `operationId`；前端引入 `@hey-api/openapi-ts`，`npm run api:gen` 从 `/openapi.json` 生成类型化客户端 `src/api/`，替换全部手写 fetch 与 `types/` 中 REST 类型
+  - [x] **包重命名**：`src/long_earn/dashboard/` → `src/long_earn/app/`（`fastapi_app.py` → `app.py`），全量引用/测试/文档更新
+  - [x] 业务组件按 feature 分组（`components/dashboard|research|event-flow/`）；tsconfig 严格化（`noUnused*`）；`vite-env.d.ts`；`catch (e: unknown)`；`components.json`；`web/README.md`
+  - 进行中：按需继续开发（具体子任务见代码与后续冲刺规划）
+
+---
+
 ## 本周冲刺（2026-08-08 Q2）
 
 > Q1 数据真相与飞轮验证已闭环，进入 Q2 模拟盘准入与信任加固。
@@ -159,9 +172,9 @@
 - [ ] **配置中心化**：多环境 `config.yaml`
 - [ ] **AUDIT-P3-01** `@pytest.mark.regression` 集中回归套件
 - [ ] **AUDIT-P3-02** broker 异常输入（NaN/Inf/负数/0）
-- [ ] **AUDIT-P3-03** 部分成交（大单分批）
+- [ ] **AUDIT-P3-03** 部分成交（大单分批）— **暂不做**（2026-08 决定：大单分批暂不实现）
 - [ ] **AUDIT-P3-04** 性能/压力（全 A、长周期、并发）
-- [ ] **AUDIT-P3-05** 敏感信息脱敏（`password=` / `token=` / `api_key=`）
+- [ ] **AUDIT-P3-05** 敏感信息脱敏（`password=` / `token=` / `api_key=`）— **暂不做**（2026-08 决定：非功能需求，暂不排期）
 - [ ] **AUDIT-P3-06** telemetry 与审计集成
 - [ ] **AUDIT-P3-07** miniqmt 内联常量清理
 - [ ] **AUDIT-P3-08** `get_financials` 日期范围过滤（纵深防御）

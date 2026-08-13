@@ -84,7 +84,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 # 数据下载服务：start_date 保留 for API 一致性；run/download 签名参数多属设计选择
 "src/long_earn/services/data_ingestion_service.py" = ["ARG002", "PLR0913"]
 # FastAPI 服务入口函数参数多属设计选择
-"src/long_earn/dashboard/fastapi_app.py" = ["PLR0913"]
+"src/long_earn/app/app.py" = ["PLR0913"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

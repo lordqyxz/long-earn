@@ -205,7 +205,8 @@ class AppConfig:
         llm_base_url: LLM API 基础 URL
         data_dir: 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
         memory_path: 记忆持久化路径（DuckDB）
-        backtest_cache_path: 回测缓存 DuckDB 路径
+        backtest_cache_path: 回测缓存 DuckDB 路径（价格/财务数据）
+        backtest_audit_path: 回测审计日志独立 DuckDB 路径
         hypothesis_tree_dir: 假设树 JSON 存储目录
         init_dir: 知识库初始化目录
         max_iterations: 最大迭代次数
@@ -224,6 +225,8 @@ class AppConfig:
     memory_path: str = str(_storage.substances_db_path())
     # 回测缓存 DuckDB 路径（由 data_dir 派生）
     backtest_cache_path: str = str(_storage.backtest_cache_path())
+    # 回测审计日志独立 DuckDB 路径（由 data_dir 派生）
+    backtest_audit_path: str = str(_storage.backtest_audit_path())
     # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；ADR-018 后仅供兼容）
     hypothesis_tree_dir: str = str(_storage.hypothesis_tree_dir())
     # 策略研发产物路径（由 data_dir 派生）
@@ -281,6 +284,7 @@ class AppConfig:
             data_dir=str(paths["data_dir"]),
             memory_path=str(paths["substances_db_path"]),
             backtest_cache_path=str(paths["backtest_cache_path"]),
+            backtest_audit_path=str(paths["backtest_audit_path"]),
             hypothesis_tree_dir=str(paths["hypothesis_tree_dir"]),
             strategy_results_path=str(paths["strategy_results_path"]),
             best_strategy_path=str(paths["best_strategy_path"]),

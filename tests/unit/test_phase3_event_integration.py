@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
-from long_earn.dashboard.event_analyzer import EventAnalyzer
+from long_earn.app.event_analyzer import EventAnalyzer
 from long_earn.services.memory_service import MemoryServiceImpl
 from long_earn.substance.model import Substance, SubstanceForm
 from long_earn.substance.store import SubstanceStore

@@ -13,7 +13,7 @@ import duckdb
 import polars as pl
 from loguru import logger
 
-from long_earn.core.storage import backtest_cache_path
+from long_earn.core.storage import backtest_audit_path, backtest_cache_path
 
 # 风险指标计算所需的最小日收益率数据点数
 _MIN_DAILY_RETURNS_FOR_RISK = 2
@@ -25,10 +25,22 @@ class BacktestAnalyzer:
 
     允许 Agent 通过 SQL 查询 DuckDB 审计日志，使用 Polars 进行数据分析，
     并导出可视化所需的结构化 JSON 数据。
+
+    审计日志位于**独立审计库**（默认 ``backtest_audit_path``），与价格缓存
+    分库；个股图表（``export_symbol_chart_data``）所需的 ``price_daily``
+    行情数据位于缓存库（``cache_db_path``，默认 ``backtest_cache_path``）。
+    所有连接默认 read_only，遵循单写者纪律（写者仅 DuckDBAuditProvider）。
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = db_path if db_path is not None else backtest_cache_path()
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        cache_db_path: Path | None = None,
+    ) -> None:
+        self.db_path = db_path if db_path is not None else backtest_audit_path()
+        self.cache_db_path = (
+            cache_db_path if cache_db_path is not None else backtest_cache_path()
+        )
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
         # 只读连接：避免与 DuckDBAuditProvider 的写入连接竞争写锁，
@@ -795,8 +807,10 @@ class BacktestAnalyzer:
         """
         conn = self._get_conn()
 
-        # 1. 读取该标的的价格走势（从 price_daily 表）
-        price_rows = conn.execute(
+        # 1. 读取该标的的价格走势（从缓存库 price_daily 表，
+        #    审计库与缓存库分库，价格行情只读缓存库）
+        cache_conn = duckdb.connect(str(self.cache_db_path), read_only=True)
+        price_rows = cache_conn.execute(
             """
             SELECT date, open, high, low, close, volume
             FROM price_daily
@@ -805,6 +819,7 @@ class BacktestAnalyzer:
             """,
             [symbol],
         ).fetchall()
+        cache_conn.close()
 
         price_history: list[dict[str, Any]] = []
         for row in price_rows:

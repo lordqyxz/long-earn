@@ -56,7 +56,7 @@ def test_web_command_defaults_to_loopback_and_forwards_remote_opt_in(
         calls.append(kwargs)
 
     monkeypatch.setattr(
-        "long_earn.dashboard.fastapi_app.serve_visualization_fastapi", fake_serve
+        "long_earn.app.app.serve_visualization_fastapi", fake_serve
     )
 
     default_result = runner.invoke(app, ["web"], color=False)

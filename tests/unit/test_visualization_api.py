@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from long_earn.dashboard import serve_visualization_fastapi
-from long_earn.dashboard.fastapi_app import _create_app, _is_loopback_host
+from long_earn.app import serve_visualization_fastapi
+from long_earn.app.app import _create_app, _is_loopback_host
 
 
 def test_fastapi_visualization_entrypoint_is_callable() -> None:
@@ -44,7 +44,7 @@ def test_remote_bind_runs_only_with_explicit_opt_in(monkeypatch: pytest.MonkeyPa
         captured["app"] = app
         captured.update(kwargs)
 
-    monkeypatch.setattr("long_earn.dashboard.fastapi_app.uvicorn.run", fake_run)
+    monkeypatch.setattr("long_earn.app.app.uvicorn.run", fake_run)
 
     serve_visualization_fastapi(host="0.0.0.0", allow_remote=True)
 

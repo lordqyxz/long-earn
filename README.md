@@ -204,7 +204,7 @@ src/long_earn/backtest/
 启动可视化服务：
 
 ```sh
-uv run python -m long_earn.dashboard.api
+uv run python -m long_earn web
 ```
 
 浏览器访问 `http://localhost:8090` 即可查看仪表盘，包含：
@@ -230,7 +230,7 @@ uv run python -m long_earn.dashboard.api
 **代码调用导出**
 
 ```python
-from long_earn.dashboard.analyzer import BacktestAnalyzer
+from long_earn.app.analyzer import BacktestAnalyzer
 
 analyzer = BacktestAnalyzer()
 

@@ -60,8 +60,9 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from long_earn.dashboard.analyzer import BacktestAnalyzer
-from long_earn.dashboard.event_analyzer import EventAnalyzer
+from long_earn.app import schemas
+from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.app.event_analyzer import EventAnalyzer
 
 _HERE = Path(__file__).parent
 # 前端生产构建产物目录
@@ -113,11 +114,15 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
 def _resolve_paths(
     db_path: str | Path, substances_path: str | Path
 ) -> tuple[Path, Path]:
-    """解析数据库路径。"""
+    """解析数据库路径。
+
+    db_path 语义为**审计数据库**路径（BacktestAnalyzer 消费），默认取
+    ``AppConfig.backtest_audit_path``（独立审计库，与价格缓存分库）。
+    """
     from long_earn.config import AppConfig  # noqa: PLC0415
 
     cfg = AppConfig.from_env()
-    resolved_db = Path(db_path) if db_path else Path(cfg.backtest_cache_path)
+    resolved_db = Path(db_path) if db_path else Path(cfg.backtest_audit_path)
     resolved_substances = (
         Path(substances_path) if substances_path else Path(cfg.memory_path)
     )
@@ -129,16 +134,20 @@ def _register_run_routes(  # noqa: C901
 ) -> None:
     """注册回测运行查询端点。"""
 
-    @app.get("/api/health")
+    @app.get("/api/health", response_model=schemas.HealthResponse, operation_id="health")
     async def health():
         return {"status": "ok"}
 
-    @app.get("/api/runs")
+    @app.get("/api/runs", response_model=schemas.RunsResponse, operation_id="list_runs")
     async def list_runs():
         runs = analyzer.get_runs_summary()
         return {"runs": runs}
 
-    @app.delete("/api/runs/clean")
+    @app.delete(
+        "/api/runs/clean",
+        response_model=schemas.CleanRunsResponse,
+        operation_id="clean_empty_runs",
+    )
     async def clean_empty_runs():
         """删除空跑或错误运行的回测数据。"""
         bad_ids = analyzer.get_empty_or_error_runs()
@@ -148,7 +157,11 @@ def _register_run_routes(  # noqa: C901
         logger.info(f"清理完成: 删除 {len(bad_ids)} 个问题 run, {deleted} 条记录")
         return {"deleted_runs": len(bad_ids), "deleted_records": deleted}
 
-    @app.delete("/api/runs/{run_id}")
+    @app.delete(
+        "/api/runs/{run_id}",
+        response_model=schemas.DeleteRunResponse,
+        operation_id="delete_run",
+    )
     async def delete_run(run_id: str):
         """删除指定回测运行的所有审计日志。"""
         deleted = analyzer.delete_run(run_id)
@@ -157,7 +170,11 @@ def _register_run_routes(  # noqa: C901
         logger.info(f"删除回测运行: {run_id}, {deleted} 条记录")
         return {"deleted_run_id": run_id, "deleted_records": deleted}
 
-    @app.get("/api/runs/{run_id}/summary")
+    @app.get(
+        "/api/runs/{run_id}/summary",
+        response_model=schemas.RunSummaryResponse,
+        operation_id="run_summary",
+    )
     async def run_summary(run_id: str):
         summary = analyzer.get_run_summary(run_id)
         if summary.is_empty():
@@ -172,34 +189,58 @@ def _register_run_routes(  # noqa: C901
         ]
         return {"run_id": run_id, "summary": rows}
 
-    @app.get("/api/runs/{run_id}/equity")
+    @app.get(
+        "/api/runs/{run_id}/equity",
+        response_model=schemas.EquityResponse,
+        operation_id="run_equity",
+    )
     async def run_equity(run_id: str):
         curve = analyzer.export_equity_curve(run_id)
         return {"run_id": run_id, "equity_curve": curve}
 
-    @app.get("/api/runs/{run_id}/trades")
+    @app.get(
+        "/api/runs/{run_id}/trades",
+        response_model=schemas.TradesResponse,
+        operation_id="run_trades",
+    )
     async def run_trades(run_id: str):
         journal = analyzer.export_trade_journal(run_id)
         return {"run_id": run_id, "trades": journal}
 
-    @app.get("/api/runs/{run_id}/signals")
+    @app.get(
+        "/api/runs/{run_id}/signals",
+        response_model=schemas.SignalsResponse,
+        operation_id="run_signals",
+    )
     async def run_signals(run_id: str):
         signals = analyzer.export_signal_history(run_id)
         return {"run_id": run_id, "signals": signals}
 
-    @app.get("/api/runs/{run_id}/dashboard")
+    @app.get(
+        "/api/runs/{run_id}/dashboard",
+        response_model=schemas.DashboardData,
+        operation_id="run_dashboard",
+    )
     async def run_dashboard(run_id: str):
         data = analyzer.export_dashboard_data(run_id)
         if not data.get("equity_curve"):
             raise HTTPException(404, "Run not found")
         return data
 
-    @app.get("/api/runs/{run_id}/risk")
+    @app.get(
+        "/api/runs/{run_id}/risk",
+        response_model=schemas.RiskResponse,
+        operation_id="run_risk",
+    )
     async def run_risk(run_id: str):
         risk = analyzer.get_risk_metrics(run_id)
         return {"run_id": run_id, "risk_metrics": risk}
 
-    @app.get("/api/runs/{run_id}/daily_returns")
+    @app.get(
+        "/api/runs/{run_id}/daily_returns",
+        response_model=schemas.DailyReturnsResponse,
+        operation_id="run_daily_returns",
+    )
     async def run_daily_returns(run_id: str):
         daily = analyzer.get_daily_returns(run_id)
         if daily.is_empty():
@@ -213,22 +254,37 @@ def _register_chart_export_routes(
 ) -> None:
     """注册图表和导出端点。"""
 
-    @app.get("/api/runs/{run_id}/symbols")
+    @app.get(
+        "/api/runs/{run_id}/symbols",
+        response_model=schemas.SymbolsResponse,
+        operation_id="traded_symbols",
+    )
     async def traded_symbols(run_id: str):
         symbols = analyzer.get_traded_symbols(run_id)
         return {"run_id": run_id, "symbols": symbols}
 
-    @app.get("/api/runs/{run_id}/symbol_charts")
+    @app.get(
+        "/api/runs/{run_id}/symbol_charts",
+        response_model=schemas.SymbolChartsResponse,
+        operation_id="all_symbol_charts",
+    )
     async def all_symbol_charts(run_id: str):
         charts = analyzer.export_all_symbol_charts(run_id)
         return {"run_id": run_id, "symbols": len(charts), "charts": charts}
 
-    @app.get("/api/runs/{run_id}/symbol/{symbol}/chart")
+    @app.get(
+        "/api/runs/{run_id}/symbol/{symbol}/chart",
+        response_model=schemas.SymbolChartData,
+        operation_id="symbol_chart",
+    )
     async def symbol_chart(run_id: str, symbol: str):
         data = analyzer.export_symbol_chart_data(run_id, symbol)
         return data
 
-    @app.get("/api/runs/{run_id}/export")
+    @app.get(
+        "/api/runs/{run_id}/export",
+        operation_id="export_trades",
+    )
     async def export_trades(run_id: str, format: str = Query("csv")):
         if format not in {"csv", "json"}:
             raise HTTPException(400, "format 仅支持 csv / json")
@@ -252,9 +308,13 @@ def _register_chart_export_routes(
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    @app.post("/api/compare")
-    async def compare_runs(req: dict[str, Any]):
-        run_ids: list[str] = req.get("run_ids", [])
+    @app.post(
+        "/api/compare",
+        response_model=schemas.CompareResponse,
+        operation_id="compare_runs",
+    )
+    async def compare_runs(req: schemas.CompareRequest):
+        run_ids = req.run_ids
         if not run_ids:
             raise HTTPException(400, "run_ids is required")
         comparison = analyzer.compare_runs(run_ids)
@@ -359,7 +419,11 @@ def _get_sector_stats(cache: Any) -> dict[str, int]:
 def _register_symbol_routes(app: FastAPI) -> None:
     """注册标的详情查询端点。"""
 
-    @app.get("/api/symbols/names")
+    @app.get(
+        "/api/symbols/names",
+        response_model=schemas.SymbolNamesResponse,
+        operation_id="symbol_names",
+    )
     async def symbol_names(symbols: str = Query("")):
         """批量获取标的中文名。
 
@@ -398,7 +462,11 @@ def _register_symbol_routes(app: FastAPI) -> None:
 
         return {"names": names}
 
-    @app.get("/api/symbols/{symbol}/detail")
+    @app.get(
+        "/api/symbols/{symbol}/detail",
+        response_model=schemas.SymbolDetailResponse,
+        operation_id="symbol_detail",
+    )
     async def symbol_detail(symbol: str):
         """获取单个标的的详情（公司信息弹窗用）。
 
@@ -415,7 +483,11 @@ def _register_symbol_routes(app: FastAPI) -> None:
             raise HTTPException(404, f"标的 {symbol} 详情未找到")
         return detail
 
-    @app.post("/api/symbols/refresh-sectors")
+    @app.post(
+        "/api/symbols/refresh-sectors",
+        response_model=schemas.SectorStatsResponse,
+        operation_id="refresh_sectors",
+    )
     async def refresh_sectors():
         """手动触发行业+地区批量回填（通过 xtquant THY1/DY1 板块）。
 
@@ -433,7 +505,11 @@ def _register_symbol_routes(app: FastAPI) -> None:
         _sector_enrichment_done = True
         return stats
 
-    @app.get("/api/symbols/{symbol}/financials")
+    @app.get(
+        "/api/symbols/{symbol}/financials",
+        response_model=schemas.FinancialsResponse,
+        operation_id="symbol_financials",
+    )
     async def symbol_financials(symbol: str):
         """获取标的历年财务数据（用于前端可视化）。"""
         from long_earn.backtest.data.cache import DataCache  # noqa: PLC0415
@@ -450,7 +526,11 @@ def _register_event_routes(
 ) -> None:
     """注册事件流 REST 端点。"""
 
-    @app.get("/api/events")
+    @app.get(
+        "/api/events",
+        response_model=schemas.EventsResponse,
+        operation_id="list_events",
+    )
     async def list_events(
         limit: int = Query(50),
         symbol: str | None = Query(None),
@@ -462,16 +542,28 @@ def _register_event_routes(
         )
         return {"count": len(events), "events": events}
 
-    @app.get("/api/events/stats")
+    @app.get(
+        "/api/events/stats",
+        response_model=schemas.EventStats,
+        operation_id="event_stats",
+    )
     async def event_stats():
         return event_analyzer.event_stats()
 
-    @app.get("/api/events/timeline")
+    @app.get(
+        "/api/events/timeline",
+        response_model=schemas.TimelineResponse,
+        operation_id="event_timeline",
+    )
     async def event_timeline(days: int = Query(30)):
         timeline = event_analyzer.event_timeline(days=days)
         return {"timeline": timeline}
 
-    @app.get("/api/events/relations")
+    @app.get(
+        "/api/events/relations",
+        response_model=schemas.RelationsResponse,
+        operation_id="list_relations",
+    )
     async def list_relations(
         limit: int = Query(50),
         target: str | None = Query(None),
@@ -482,7 +574,11 @@ def _register_event_routes(
         )
         return {"count": len(relations), "relations": relations}
 
-    @app.get("/api/events/{sid}")
+    @app.get(
+        "/api/events/{sid}",
+        response_model=schemas.EventDetail,
+        operation_id="get_event",
+    )
     async def get_event(sid: str):
         if not sid:
             raise HTTPException(400, "sid is required")
@@ -491,10 +587,14 @@ def _register_event_routes(
             raise HTTPException(404, "Event not found")
         return event
 
-    @app.post("/api/events/trigger")
-    async def trigger_event_inference(req: dict[str, Any]):
+    @app.post(
+        "/api/events/trigger",
+        response_model=schemas.TriggerResponse,
+        operation_id="trigger_event_inference",
+    )
+    async def trigger_event_inference(req: schemas.TriggerRequest):
         """触发事件推理管线。"""
-        query = req.get("query", "")
+        query = req.query
         if not query:
             raise HTTPException(400, "query is required")
         # 在后台任务中运行管线，通过 WebSocket 广播进度
@@ -756,16 +856,20 @@ def _register_research_routes(  # noqa: C901, PLR0915
         finally:
             active_ws.discard(websocket)
 
-    @app.post("/api/research/start")
-    async def start_research(req: dict[str, Any]):
+    @app.post(
+        "/api/research/start",
+        response_model=schemas.ResearchStartResponse,
+        operation_id="start_research",
+    )
+    async def start_research(req: schemas.ResearchStartRequest):
         """触发策略研究（REST 入口，通过 WebSocket 广播进度）。"""
-        idea = req.get("idea", "")
+        idea = req.idea
         if not idea:
             raise HTTPException(400, "idea is required")
 
-        max_rounds = int(req.get("max_rounds", 3))
-        max_iterations = int(req.get("max_iterations", 2))
-        min_improvement = float(req.get("min_improvement", 0.005))
+        max_rounds = req.max_rounds
+        max_iterations = req.max_iterations
+        min_improvement = req.min_improvement
 
         active_ws: set[WebSocket] = app.state.active_ws
 
@@ -914,7 +1018,8 @@ def serve_visualization_fastapi(
     Args:
         host: 监听地址
         port: 监听端口
-        db_path: DuckDB 审计数据库路径；空字符串时取 AppConfig.backtest_cache_path
+        db_path: DuckDB 审计数据库路径；空字符串时取 AppConfig.backtest_audit_path
+            （独立审计库；价格行情仍从缓存库读取）
         substances_path: SubstanceStore DuckDB 路径；空字符串时取 AppConfig.memory_path
         reload: 是否启用热重载（开发模式）
         allow_remote: 显式允许绑定非 loopback 地址；远程部署仍需额外认证

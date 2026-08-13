@@ -10,7 +10,7 @@ import duckdb
 from loguru import logger
 
 from long_earn.backtest.domain.interfaces import AuditProvider, AuditRecord
-from long_earn.core.storage import backtest_cache_path
+from long_earn.core.storage import backtest_audit_path
 
 # query_events 过滤字段白名单 — 防止 key 拼接 SQL 注入（P2-13）
 _QUERY_FILTER_WHITELIST = frozenset(
@@ -47,6 +47,11 @@ class OrderSkipReason(StrEnum):
 class DuckDBAuditProvider(AuditProvider):
     """DuckDB 实现的审计存储提供者
 
+    审计日志写入**独立审计库**（``backtest_audit_path``，默认
+    ``<data_dir>/backtest_audit.duckdb``），与价格缓存分库：
+    高频小写入的审计不参与缓存库的锁竞争，Web 只读连接不会再与写连接
+    争用同一文件（消除 WAL checkpoint 数据丢失风险）。
+
     线程安全：所有 DuckDB 连接访问通过 ``_lock`` 串行化，避免多线程并发写
     导致 DuckDB 单连接非线程安全问题（P2-14）。
 
@@ -55,7 +60,7 @@ class DuckDBAuditProvider(AuditProvider):
     """
 
     def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path if db_path is not None else backtest_cache_path()
+        self.db_path = db_path if db_path is not None else backtest_audit_path()
         self._conn: duckdb.DuckDBPyConnection | None = None
         self._lock = threading.Lock()
         self._seq = 0

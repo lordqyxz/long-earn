@@ -1,5 +1,5 @@
-from long_earn.dashboard.analyzer import BacktestAnalyzer
-from long_earn.dashboard.fastapi_app import serve_visualization_fastapi
+from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.app.app import serve_visualization_fastapi
 
 from .md_splitter import MarkdownHeadingSplitter
 from .store import init_system

@@ -512,6 +512,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             benchmark_symbol=benchmark_symbol,
             allow_large_grid=allow_large_grid,
+            audit_db_path=self.config.backtest_audit_path,
         )
 
         return {
@@ -572,6 +573,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             n_splits=n_splits,
             benchmark_symbol=benchmark_symbol,
+            audit_db_path=self.config.backtest_audit_path,
         )
 
         return result
@@ -657,6 +659,7 @@ class BacktestServiceImpl(BacktestService):
                 end_date=end_date,
                 symbols=formatted_symbols,
                 n_splits=n_splits,
+                audit_db_path=self.config.backtest_audit_path,
             )
         except Exception as e:
             if self.logger:
@@ -846,6 +849,7 @@ class BacktestServiceImpl(BacktestService):
             start_date=start_date,
             end_date=end_date,
             symbols=formatted_symbols,
+            audit_db_path=self.config.backtest_audit_path,
         )
 
         # BacktestOutcome -> run() 同结构 dict（diagnostics 保真，ADR-008 B6）

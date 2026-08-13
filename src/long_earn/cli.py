@@ -382,7 +382,7 @@ def web(
     使用 --no-fastapi 回退到 stdlib http.server 旧版。
     """
     if fastapi:
-        from long_earn.dashboard.fastapi_app import serve_visualization_fastapi
+        from long_earn.app.app import serve_visualization_fastapi
 
         serve_visualization_fastapi(
             host=host,
