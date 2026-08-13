@@ -9,8 +9,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from long_earn.backtest.engine.audit import AuditLogger, DuckDBAuditProvider
 from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.backtest.engine.audit import AuditLogger, DuckDBAuditProvider
 
 
 def _make_provider_and_logger(
@@ -119,6 +119,7 @@ def test_export_trade_traces():
             "quantity",
             "amount",
             "portfolio_value",
+            "reason",
         }
         # 验证金额计算
         assert first["symbol"] == "600000.SH"
@@ -127,6 +128,67 @@ def test_export_trade_traces():
         # 验证方向字段（从 payload.type 映射）
         assert traces[2]["direction"] == "SELL"
         assert traces[2]["amount"] == round(11.8 * 1000.0, 2)  # 11800.0
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_reason_flows_through_exports():
+    """FILL 载荷的 reason 应透传到交易日志/交易明细/个股图表买卖点"""
+    tmp_dir = Path(tempfile.mkdtemp())
+    db_path = tmp_dir / "audit.duckdb"
+    try:
+        logger, provider = _make_provider_and_logger(db_path, "run-reason")
+        logger.log_transition(
+            event_type="FILL",
+            trace_id="r1",
+            component="Broker",
+            status="SUCCESS",
+            payload={
+                "symbol": "600000.SH",
+                "type": "BUY",
+                "price": 10.5,
+                "quantity": 1000.0,
+                "portfolio_value": 1_000_000.0,
+                "reason": "信号买入·建仓",
+            },
+            timestamp=datetime(2023, 1, 3, 9, 30),
+        )
+        logger.log_transition(
+            event_type="FILL",
+            trace_id="r2",
+            component="RiskControl",
+            status="SUCCESS",
+            payload={
+                "symbol": "600000.SH",
+                "type": "SELL",
+                "price": 11.8,
+                "quantity": 1000.0,
+                "portfolio_value": 1_010_000.0,
+                "reason": "止损卖出",
+            },
+            timestamp=datetime(2023, 2, 1, 9, 30),
+        )
+        provider.close()
+        _write_prices(db_path)
+
+        analyzer = BacktestAnalyzer(db_path)
+
+        # 交易明细
+        journal = analyzer.export_trade_journal("run-reason")
+        assert [t["reason"] for t in journal] == ["信号买入·建仓", "止损卖出"]
+
+        # 交易日志（含 reason）
+        traces = analyzer.export_trade_traces("run-reason")
+        assert [t["reason"] for t in traces] == ["信号买入·建仓", "止损卖出"]
+
+        # 个股图表买卖点
+        chart = analyzer.export_symbol_chart_data("run-reason", "600000.SH")
+        assert [p["reason"] for p in chart["trade_points"]] == [
+            "信号买入·建仓",
+            "止损卖出",
+        ]
     finally:
         import shutil
 

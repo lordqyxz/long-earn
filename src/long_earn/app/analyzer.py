@@ -579,6 +579,7 @@ class BacktestAnalyzer:
                     "price": float(payload.get("price", 0)),
                     "quantity": float(payload.get("quantity", 0)),
                     "portfolio_value": float(payload.get("portfolio_value", 0)),
+                    "reason": payload.get("reason", ""),
                 }
             )
         return journal
@@ -731,6 +732,7 @@ class BacktestAnalyzer:
                     "quantity": quantity,
                     "amount": round(price * quantity, 2),
                     "portfolio_value": float(payload.get("portfolio_value", 0)),
+                    "reason": payload.get("reason", ""),
                 }
             )
         return traces
@@ -871,6 +873,7 @@ class BacktestAnalyzer:
                     "price": price,
                     "quantity": quantity,
                     "amount": round(price * quantity, 2),
+                    "reason": payload.get("reason", ""),
                 }
             )
 

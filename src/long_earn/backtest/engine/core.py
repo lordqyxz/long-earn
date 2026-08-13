@@ -609,6 +609,12 @@ class EventDrivenBacktestEngine:
                     "price": pf.fill_price,
                     "quantity": pf.fill_quantity,
                     "from_pending": True,
+                    # 待成交订单（限价/止损单触发）的原因
+                    "reason": (
+                        "高级订单买入·限价/止损触发"
+                        if pf.order_type == "BUY"
+                        else "高级订单卖出·限价/止损触发"
+                    ),
                     "bar_date": str(ts),
                     "portfolio_value": portfolio.total_value,
                 },
@@ -779,6 +785,24 @@ class EventDrivenBacktestEngine:
             )
             fill = broker.execute_order(order, check_price)
             portfolio.update_from_fill(fill)
+            # 止盈卖出写入 FILL 审计（原因可追溯）
+            self._log_audit(
+                "FILL",
+                fill.trace_id,
+                order.trace_id,
+                "RiskControl",
+                "SUCCESS",
+                {
+                    "symbol": fill.symbol,
+                    "type": fill.order_type,
+                    "price": fill.fill_price,
+                    "quantity": fill.fill_quantity,
+                    "reason": "止盈卖出",
+                    "bar_date": str(ts),
+                    "portfolio_value": portfolio.total_value,
+                },
+                self._db_audit,
+            )
             triggered = True
         return triggered
 
@@ -858,6 +882,24 @@ class EventDrivenBacktestEngine:
                 # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
                 fill = broker.execute_order(order, ref_price)
                 portfolio.update_from_fill(fill)
+                # 止损卖出写入 FILL 审计（原因可追溯）
+                self._log_audit(
+                    "FILL",
+                    fill.trace_id,
+                    order.trace_id,
+                    "RiskControl",
+                    "SUCCESS",
+                    {
+                        "symbol": fill.symbol,
+                        "type": fill.order_type,
+                        "price": fill.fill_price,
+                        "quantity": fill.fill_quantity,
+                        "reason": "止损卖出",
+                        "bar_date": str(ts),
+                        "portfolio_value": portfolio.total_value,
+                    },
+                    self._db_audit,
+                )
             triggered = True
         return triggered
 
@@ -937,6 +979,24 @@ class EventDrivenBacktestEngine:
                 )
                 fill = broker.execute_order(order, price)
                 portfolio.update_from_fill(fill)
+                # 最大回撤清仓写入 FILL 审计（原因可追溯）
+                self._log_audit(
+                    "FILL",
+                    fill.trace_id,
+                    order.trace_id,
+                    "RiskControl",
+                    "SUCCESS",
+                    {
+                        "symbol": fill.symbol,
+                        "type": fill.order_type,
+                        "price": fill.fill_price,
+                        "quantity": fill.fill_quantity,
+                        "reason": "最大回撤清仓",
+                        "bar_date": str(ts),
+                        "portfolio_value": portfolio.total_value,
+                    },
+                    self._db_audit,
+                )
         return True
 
     @staticmethod
@@ -1005,6 +1065,25 @@ class EventDrivenBacktestEngine:
         return float(result) if result is not None else None
 
     # ── 信号执行 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _signal_fill_reason(
+        order_type: str,
+        symbol: str,
+        portfolio: Portfolio,
+        fill_quantity: float,
+    ) -> str:
+        """生成信号驱动成交的买入/卖出原因。
+
+        买入按是否已有持仓分为建仓/加仓；卖出按数量是否覆盖全部持仓
+        分为清仓/减仓。供 FILL 审计载荷的 ``reason`` 字段使用。
+        """
+        pos = portfolio.positions.get(symbol)
+        current_shares = pos.shares if pos is not None else 0.0
+        if order_type == "BUY":
+            return "信号买入·建仓" if current_shares <= 0 else "信号买入·加仓"
+        # SELL
+        return "信号卖出·清仓" if fill_quantity >= current_shares else "信号卖出·减仓"
 
     def _execute_signals(  # noqa: PLR0913
         self,
@@ -1124,6 +1203,10 @@ class EventDrivenBacktestEngine:
             # submit_order 返回 list[FillEvent]（可能空列表 = 待成交/未触发）。
             fills = broker.submit_order(order, price, daily_volume=daily_volume)
             for fill in fills:
+                # 在更新持仓前计算原因（建仓/加仓、清仓/减仓依赖持仓状态）
+                reason = self._signal_fill_reason(
+                    fill.order_type, fill.symbol, portfolio, fill.fill_quantity
+                )
                 portfolio.update_from_fill(fill)
                 if fill.partial_fill:
                     self._total_partial_fills += 1
@@ -1140,6 +1223,7 @@ class EventDrivenBacktestEngine:
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
                         "partial_fill": fill.partial_fill,
+                        "reason": reason,
                         "bar_date": str(execution_ts) if execution_ts else "",
                         "portfolio_value": portfolio.total_value,
                     },
@@ -1239,6 +1323,11 @@ class EventDrivenBacktestEngine:
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
                         "partial_fill": fill.partial_fill,
+                        "reason": (
+                            "高级订单买入"
+                            if fill.order_type == "BUY"
+                            else "高级订单卖出"
+                        ),
                         "bar_date": str(execution_ts) if execution_ts else "",
                         "portfolio_value": portfolio.total_value,
                     },

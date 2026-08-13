@@ -78,6 +78,7 @@ class TradeRecord(BaseModel):
     price: float = 0.0
     quantity: float = 0.0
     portfolio_value: float = 0.0
+    reason: str = ""
 
 
 class TradesResponse(BaseModel):
@@ -192,6 +193,7 @@ class TradePoint(BaseModel):
     price: float = 0.0
     quantity: float = 0.0
     amount: float = 0.0
+    reason: str = ""
 
 
 class SymbolChartData(BaseModel):
