@@ -21,6 +21,11 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+# Windows 中文乱码修复：spawn worker 子进程不继承主进程编码，脚本入口先切 UTF-8
+from long_earn.core.stdio import ensure_utf8_stdio  # noqa: E402
+
+ensure_utf8_stdio()
+
 # 静默噪声日志（xtquant/portfolio WARNING 会淹没进度行 + 拖慢 I/O）
 from loguru import logger as _loguru_logger  # noqa: E402
 

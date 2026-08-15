@@ -30,6 +30,7 @@ from long_earn.backtest.engine.param_grid import (
     render_template,
 )
 from long_earn.backtest.engine.shared_data import SharedDataContext
+from long_earn.core.stdio import ensure_utf8_stdio
 
 
 @dataclass(slots=True)
@@ -130,8 +131,17 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
 
     P2-06：环境变量用 contextmanager 包裹，函数退出后自动清理，
     避免 max_workers<=1 顺序执行时污染主进程环境。
+
+    Windows 乱码修复：ProcessPoolExecutor 以 spawn 方式创建 worker 子进程，
+    子进程的 sys.stdout/stderr 会按 GBK 重建（不继承主进程的 UTF-8 reconfigure），
+    导致 worker 内中文日志/print 在 UTF-8 终端上乱码。worker 入口显式切 UTF-8。
     """
     try:
+        ensure_utf8_stdio()
+
+        full_data = SharedDataContext.attach(
+            task.shm_token, task.shm_size, task.pickle_data
+        )
         full_data = SharedDataContext.attach(
             task.shm_token, task.shm_size, task.pickle_data
         )

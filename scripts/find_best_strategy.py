@@ -41,6 +41,11 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+# Windows 中文乱码修复：脚本入口先切 UTF-8（spawn worker 子进程不继承主进程编码）
+from long_earn.core.stdio import ensure_utf8_stdio  # noqa: E402
+
+ensure_utf8_stdio()
+
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
