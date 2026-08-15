@@ -95,7 +95,9 @@ class DSLStrategy(BaseStrategy):
             return None
 
         try:
-            selected = self._op_executor.execute(history_pl, context.current_timestamp)
+            selected, rationale = self._op_executor.execute_with_rationale(
+                history_pl, context.current_timestamp
+            )
         except Exception as exc:
             self.step_failures.append(
                 {
@@ -116,7 +118,20 @@ class DSLStrategy(BaseStrategy):
             event_id=f"op_{context.current_timestamp.isoformat()}",
             signals=final_weights,
             strategy_id=self.strategy_id,
+            metadata={"rationale": self._rationale_with_weights(rationale)},
         )
+
+    def _rationale_with_weights(self, rationale: dict[str, Any]) -> dict[str, Any]:
+        """给执行器的决策依据补上权重口径与人类可读公式（供审计归因展示）。"""
+        weights = getattr(self.dsl, "weights", None)
+        method = getattr(weights, "method", "") if weights is not None else ""
+        criteria = rationale.get("criteria", [])
+        formula = "；".join(c.get("desc", "") for c in criteria)
+        if method == "equal":
+            formula = f"{formula}；等权"
+        rationale["formula"] = formula
+        rationale["weights"] = {"method": method} if method else {}
+        return rationale
 
     def _equal_weights(self, selected: list) -> dict[str, float]:
         if not selected:

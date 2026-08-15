@@ -370,6 +370,22 @@ def _write_attribution_chain(logger: AuditLogger, run_id: str) -> None:
             "signals": {"A": 0.5, "B": 0.5},
             "strategy_id": "test-mom",
             "risk_triggered": False,
+            "rationale": {
+                "formula": "mom = close 的 20 期收益率；筛选 mom > 0；按 mom 降序取前 2；等权",
+                "criteria": [
+                    {"step": "factor", "op": "returns", "alias": "mom", "format": "pct",
+                     "desc": "mom = close 的 20 期收益率", "params": {"field": "close", "period": 20}},
+                    {"step": "signal", "op": "rank_top", "desc": "按 mom 降序取前 2",
+                     "params": {"field": "mom", "top": 2, "ascending": False}},
+                ],
+                "selection": [
+                    {"symbol": "A", "rank": 1, "mom": 0.5},
+                    {"symbol": "B", "rank": 2, "mom": 0.4},
+                ],
+                "universe_size": 10,
+                "selected_count": 2,
+                "weights": {"method": "equal"},
+            },
         },
         timestamp=datetime(2023, 1, 3, 9, 30),
     )
@@ -461,6 +477,12 @@ def test_trade_journal_attribution_reconstructs_chain():
     assert signal_trade["attribution"]["signal"]["strategy_id"] == "test-mom"
     assert signal_trade["attribution"]["signal"]["signals"] == {"A": 0.5, "B": 0.5}
     assert signal_trade["attribution"]["order"]["quantity"] == 500.0
+    # 决策依据（因子公式 + 选股因子值）透传到归因
+    rationale = signal_trade["attribution"]["signal"]["rationale"]
+    assert rationale["formula"]
+    assert rationale["selection"][0]["rank"] == 1
+    assert rationale["selection"][0]["symbol"] == "A"
+    assert rationale["criteria"][0]["format"] == "pct"
 
     risk_trade = next(t for t in journal if t["type"] == "SELL")
     assert risk_trade["attribution"]["kind"] == "risk"
@@ -519,6 +541,19 @@ def test_engine_risk_fill_enriched_reason_and_chain():
                 event_id="sig-eng-ev",
                 signals={"A.SZ": 1.0},
                 strategy_id="test-eng",
+                metadata={
+                    "rationale": {
+                        "formula": "mom = close 的 2 期收益率；按 mom 降序取前 1；等权",
+                        "criteria": [
+                            {"step": "factor", "op": "returns", "alias": "mom", "format": "pct",
+                             "desc": "mom = close 的 2 期收益率", "params": {"field": "close", "period": 2}}
+                        ],
+                        "selection": [{"symbol": "A.SZ", "rank": 1, "mom": 0.1}],
+                        "universe_size": 1,
+                        "selected_count": 1,
+                        "weights": {"method": "equal"},
+                    }
+                },
             )
 
     engine = EventDrivenBacktestEngine(
@@ -548,3 +583,8 @@ def test_engine_risk_fill_enriched_reason_and_chain():
     assert kinds == {"signal", "risk"}
     risk_trade = next(t for t in journal if t["attribution"]["kind"] == "risk")
     assert risk_trade["attribution"]["risk_trigger"]["risk_type"] == "stop_loss"
+    # 引擎把 SignalEvent.metadata["rationale"] 透传到 SIGNAL 审计 → 归因
+    signal_trade = next(t for t in journal if t["attribution"]["kind"] == "signal")
+    rationale = signal_trade["attribution"]["signal"]["rationale"]
+    assert rationale and rationale["formula"]
+    assert rationale["selection"][0]["symbol"] == "A.SZ"

@@ -666,6 +666,8 @@ class EventDrivenBacktestEngine:
                     "signals": self._signal_to_dict(signal_event.signals),
                     "strategy_id": signal_event.strategy_id,
                     "risk_triggered": risk_triggered,
+                    # 决策依据（因子公式 + 选股因子值 + 排名），供前端精准归因
+                    "rationale": signal_event.metadata.get("rationale"),
                 },
                 db_audit,
                 latency_ms=signal_latency,

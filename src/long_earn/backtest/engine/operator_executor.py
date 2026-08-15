@@ -104,23 +104,39 @@ class OperatorStrategyExecutor:
     _EMPTY_CROSS_LOG_INTERVAL = 100
 
     def execute(self, panel: pl.DataFrame, current_timestamp: datetime) -> list[str]:
-        """执行算子链，返回当前时刻选中的 symbol 列表。
+        """执行算子链，返回当前时刻选中的 symbol 列表（兼容旧接口）。"""
+        selected, _ = self.execute_with_rationale(panel, current_timestamp)
+        return selected
 
-        P2-01：filter 结果使 selected_df 变为 0 时记录 failure 日志，
-        与表达式路径对齐（服务层 _equal_weights 也会记 step_failures）。
+    def execute_with_rationale(
+        self, panel: pl.DataFrame, current_timestamp: datetime
+    ) -> tuple[list[str], dict[str, Any]]:
+        """执行算子链，返回 ``(选中标的列表, 决策依据 rationale)``。
 
-        ADR-015 C2: 空信号 WARNING 每 ``_EMPTY_SIGNAL_LOG_INTERVAL`` 次才打印一次，
-        避免长回测（数万个 timestamp）日志爆炸。首次与每 N 次打印。
+        rationale（供审计归因展示）含：
+        - criteria: 算子步骤描述（因子公式 + 信号步骤），含 ``format`` 提示
+          （如 returns 类标记为百分比）
+        - selection: 每只选中标的的因子值 + 排名（rank）
+        - universe_size / selected_count: 信号过滤前截面候选数 / 最终选中数
+
+        因果性：输入面板仅含 ``timestamp <= 当前时刻`` 的数据（VisibilityGuard
+        保证），算子目录每算子均过因果性证明，执行结果无未来函数。
         """
         if panel.height == 0:
             logger.debug("OperatorStrategyExecutor: 输入面板为空，无选中标的")
-            return []
+            return [], self._rationale([], 0, 0)
 
         enriched = panel
-        # 1) factor 算子：把结果列并回面板
+        factor_columns: list[str] = []
+        # 1) factor 算子：把结果列并回面板（记录新增因子列名供归因取值）
         for spec in self.factor_specs:
             result = spec.op.apply(enriched, spec.params)
-            enriched = _merge_result(enriched, result, spec.alias)
+            enriched, added = _merge_factor_result(enriched, result, spec.alias)
+            factor_columns.extend(added)
+
+        # 信号过滤前的当前时刻截面（universe 口径）
+        universe_cross = enriched.filter(pl.col("timestamp") == current_timestamp)
+        universe_size = universe_cross["symbol"].unique().len()
 
         # 2) signal 算子：行选择
         selected_df = enriched
@@ -137,7 +153,7 @@ class OperatorStrategyExecutor:
                     "OperatorStrategyExecutor: signal 算子过滤后 selected_df 为空"
                     f"（timestamp={current_timestamp}），累计 {self._empty_signal_count} 次"
                 )
-            return []
+            return [], self._rationale([], universe_size, 0)
 
         # 3) 取当前时刻截面 → 选中标的
         cross = selected_df.filter(pl.col("timestamp") == current_timestamp)
@@ -150,19 +166,106 @@ class OperatorStrategyExecutor:
                     "OperatorStrategyExecutor: 当前时刻截面无选中标的"
                     f"（timestamp={current_timestamp}），累计 {self._empty_cross_count} 次"
                 )
-            return []
-        return cross["symbol"].unique().to_list()
+            return [], self._rationale([], universe_size, 0)
+        symbols = cross["symbol"].unique().to_list()
+        selection = self._build_selection(cross, factor_columns)
+        # 按排名升序（#1 在前），让归因展示与排名一致；symbols 跟随同一顺序
+        selection.sort(
+            key=lambda s: s.get("rank")
+            if isinstance(s.get("rank"), int)
+            else float("inf")
+        )
+        symbols = [s["symbol"] for s in selection]
+        return symbols, self._rationale(selection, universe_size, len(symbols))
+
+    def _rationale(
+        self,
+        selection: list[dict[str, Any]],
+        universe_size: int,
+        selected_count: int,
+    ) -> dict[str, Any]:
+        """组装决策依据字典。"""
+        return {
+            "criteria": self._criteria(),
+            "selection": selection,
+            "universe_size": int(universe_size),
+            "selected_count": int(selected_count),
+        }
+
+    def _criteria(self) -> list[dict[str, Any]]:
+        """生成算子步骤的人类可读描述列表（因子公式 + 信号步骤）。"""
+        steps: list[dict[str, Any]] = []
+        for spec in self.factor_specs:
+            steps.append(_describe_step(spec, is_factor=True))
+        for spec in self.signal_specs:
+            steps.append(_describe_step(spec, is_factor=False))
+        return steps
+
+    def _build_selection(
+        self, cross: pl.DataFrame, factor_columns: list[str]
+    ) -> list[dict[str, Any]]:
+        """把当前时刻截面抽成 ``{symbol, rank, <因子>: 值}`` 列表（供归因展示）。"""
+        selection: list[dict[str, Any]] = []
+        for row in cross.iter_rows(named=True):
+            item: dict[str, Any] = {"symbol": row.get("symbol")}
+            rank = row.get("rank")
+            if rank is not None:
+                item["rank"] = int(rank)
+            for col in factor_columns:
+                val = row.get(col)
+                if val is not None:
+                    item[col] = float(val) if isinstance(val, (int, float)) else val
+            selection.append(item)
+        return selection
 
 
-def _merge_result(
+def _merge_factor_result(
     panel: pl.DataFrame, result: pl.Series | pl.DataFrame, alias: str
-) -> pl.DataFrame:
-    """把算子输出并回面板：Series → 以 alias 为列名追加；DataFrame → 追加全部列。"""
+) -> tuple[pl.DataFrame, list[str]]:
+    """把算子输出并回面板，返回 (新面板, 新增列名列表)（新增列名供归因取值）。"""
     if isinstance(result, pl.Series):
-        return panel.with_columns(result.alias(alias))
+        return panel.with_columns(result.alias(alias)), [alias]
     # DataFrame（如 macd/bollinger 多列）：追加其全部列
     cols = {c: result[c] for c in result.columns}
-    return panel.with_columns(**cols)
+    return panel.with_columns(**cols), list(result.columns)
+
+
+def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:
+    """生成单步算子的人类可读描述（公式片段）+ 数值格式提示。
+
+    常见算子走模板给出干净中文描述；未知算子回退到 docstring 首行。
+    ``format`` 字段供前端决定数值渲染（pct=百分比，其余按原值）。
+    """
+    op_name = type(spec.op).name
+    p = spec.params
+    alias = spec.alias if is_factor else ""
+    params = p.model_dump()
+    fmt = ""
+    if op_name == "returns":
+        period = getattr(p, "period", 1)
+        field = getattr(p, "field", "close")
+        head = f"{alias} = " if alias else ""
+        desc = f"{head}{field} 的 {period} 期收益率"
+        fmt = "pct"
+    elif op_name == "filter_threshold":
+        desc = (
+            f"筛选 {getattr(p, 'field', '')} {getattr(p, 'op', '>')} "
+            f"{getattr(p, 'value', 0)}"
+        )
+    elif op_name == "rank_top":
+        order = "降序" if not getattr(p, "ascending", False) else "升序"
+        desc = f"按 {getattr(p, 'field', '')} {order} 取前 {getattr(p, 'top', 10)}"
+    else:
+        doc = (type(spec.op).__doc__ or "").strip().split("\n")[0]
+        desc = doc.strip("` ") or op_name
+    return {
+        "step": "factor" if is_factor else "signal",
+        "op": op_name,
+        "alias": alias,
+        "params": params,
+        "desc": desc,
+        "format": fmt,
+    }
 
 
 def _apply_signal_result(
@@ -177,6 +280,10 @@ def _apply_signal_result(
         mask = result.fill_null(False)
         return panel.filter(mask)
     if "rank" in result.columns:
-        # rank 列已对齐 panel 行序；保留 rank 非空（即入选 top N）
-        return panel.filter(result["rank"].is_not_null())
+        # rank 列在 result 上（与 panel 行序对齐），过滤 panel 后把 rank 值并回，
+        # 供归因展示每只选中标的的排名
+        mask = result["rank"].is_not_null()
+        filtered = panel.filter(mask)
+        rank_values = result["rank"].filter(mask)
+        return filtered.with_columns(rank_values.alias("rank"))
     return panel

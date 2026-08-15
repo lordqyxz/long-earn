@@ -38,15 +38,27 @@ function fmtPct(v: unknown): string {
 function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
   if (!att) return null
   const risk = att.risk_trigger
+  const signal = att.signal
+  const rationale = signal?.rationale
+  // 因子别名 → 数值格式（pct=百分比，其余按原值），供选股依据列渲染
+  const fmtMap: Record<string, string> = {}
+  for (const c of rationale?.criteria ?? []) {
+    if (c.alias && c.format) fmtMap[c.alias] = c.format
+  }
+  const fmtVal = (v: unknown, alias: string) => {
+    if (typeof v !== 'number') return String(v ?? '—')
+    if (fmtMap[alias] === 'pct') return `${(v * 100).toFixed(1)}%`
+    return v.toFixed(2)
+  }
   return (
-    <div className="text-xs space-y-1.5 py-1">
-      <div className="flex items-center gap-2">
+    <div className="text-xs space-y-2 py-1">
+      <div className="flex items-center gap-2 flex-wrap">
         <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
           {ATTR_KIND_LABEL[att.kind || ''] || att.kind || '未知'}
         </span>
-        {att.signal?.strategy_id && (
+        {signal?.strategy_id && (
           <span className="text-muted-foreground">
-            策略: <span className="font-mono text-foreground">{att.signal.strategy_id}</span>
+            策略: <span className="font-mono text-foreground">{signal.strategy_id}</span>
           </span>
         )}
         {!!risk?.risk_type && (
@@ -55,10 +67,66 @@ function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
           </span>
         )}
       </div>
-      {att.signal?.signals && Object.keys(att.signal.signals).length > 0 && (
+
+      {rationale && (
+        <>
+          {rationale.formula && (
+            <div className="text-muted-foreground">
+              决策公式: <span className="text-foreground">{rationale.formula}</span>
+            </div>
+          )}
+          {(rationale.universe_size || rationale.selected_count) && (
+            <div className="text-muted-foreground">
+              候选 <span className="font-mono text-foreground">{rationale.universe_size}</span> 只 → 选中{' '}
+              <span className="font-mono text-foreground">{rationale.selected_count}</span> 只
+              {rationale.weights?.method === 'equal' && '（等权）'}
+            </div>
+          )}
+          {Array.isArray(rationale.selection) && rationale.selection.length > 0 && (
+            <div>
+              <div className="mb-0.5 text-muted-foreground">选股依据（按排名）:</div>
+              <div className="space-y-0.5">
+                {rationale.selection.map((s) => {
+                  const sym = String(s.symbol ?? '')
+                  const rank = typeof s.rank === 'number' ? s.rank : null
+                  const factors = Object.entries(s).filter(
+                    ([k]) => k !== 'symbol' && k !== 'rank',
+                  )
+                  return (
+                    <div key={sym} className="flex items-center gap-1.5">
+                      {rank != null && (
+                        <span className="inline-flex h-4 min-w-[20px] items-center justify-center rounded bg-primary/10 px-1 font-mono text-[10px] text-primary">
+                          #{rank}
+                        </span>
+                      )}
+                      <span className="font-mono text-foreground">{sym}</span>
+                      {factors.map(([k, v]) => (
+                        <span key={k} className="text-muted-foreground">
+                          <span className="text-muted-foreground/60">{k}</span>={fmtVal(v, k)}
+                        </span>
+                      ))}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          {Array.isArray(rationale.criteria) && rationale.criteria.length > 0 && (
+            <div className="leading-relaxed text-muted-foreground/80">
+              步骤:
+              {rationale.criteria.map((c, i) => (
+                <span key={i} className="mr-2">
+                  {i + 1}. {c.desc || `${c.op}(${JSON.stringify(c.params ?? {})})`}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      {!rationale && signal?.signals && Object.keys(signal.signals).length > 0 && (
         <div className="text-muted-foreground">
           当日信号选股:
-          {Object.entries(att.signal.signals).map(([s, w]) => (
+          {Object.entries(signal.signals).map(([s, w]) => (
             <span key={s} className="mr-2 inline-flex items-center gap-1">
               <span className="font-mono text-foreground">{s}</span>
               <span>{fmtPct(w)}</span>
@@ -85,11 +153,16 @@ function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
         </div>
       )}
       {att.chain && (
-        <div className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed break-all">
-          审计链: FILL={att.chain.fill || '—'}
-          {att.chain.order && <> → ORDER={att.chain.order}</>}
-          {att.chain.upstream && <> → {att.kind === 'risk' ? '风控' : 'SIGNAL'}={att.chain.upstream}</>}
-        </div>
+        <details className="text-muted-foreground/60">
+          <summary className="cursor-pointer select-none text-[10px]">
+            审计链（trace id，供二次核验）
+          </summary>
+          <div className="mt-1 text-[10px] font-mono leading-relaxed break-all">
+            FILL={att.chain.fill || '—'}
+            {att.chain.order && <> → ORDER={att.chain.order}</>}
+            {att.chain.upstream && <> → {att.kind === 'risk' ? '风控' : 'SIGNAL'}={att.chain.upstream}</>}
+          </div>
+        </details>
       )}
     </div>
   )

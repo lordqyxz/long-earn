@@ -1002,6 +1002,23 @@ export type TradeAttribution = {
         strategy_id?: string;
         signals?: Record<string, number>;
         risk_triggered?: boolean;
+        rationale?: {
+            formula?: string;
+            criteria?: Array<{
+                step?: string;
+                op?: string;
+                alias?: string;
+                params?: Record<string, unknown>;
+                desc?: string;
+                format?: string;
+            }>;
+            selection?: Array<Record<string, unknown>>;
+            universe_size?: number;
+            selected_count?: number;
+            weights?: {
+                method?: string;
+            } | null;
+        } | null;
     } | null;
     /**
      * Risk Trigger
