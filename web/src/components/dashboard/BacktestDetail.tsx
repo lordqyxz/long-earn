@@ -3,11 +3,15 @@ import type { ReactNode } from 'react'
 import {
   Loader2, ArrowUp, ArrowDown, BarChart3, Info, ChevronDown, ChevronRight, ArrowRight,
   Zap, ShieldAlert, CheckCircle2, ClipboardList, GitBranch, Filter, ListOrdered, Scale,
-  Sigma, Database, Clock,
+  Sigma, Database, Clock, ScrollText,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
 import { MetricCards } from '@/components/dashboard/MetricCards'
 import { RiskMetricsPanel } from '@/components/dashboard/RiskMetrics'
 import { EquityChart } from '@/components/dashboard/EquityChart'
@@ -16,7 +20,8 @@ import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
 import { SymbolDetailDialog } from '@/components/dashboard/SymbolDetailDialog'
 import { useDashboard, useSymbolChart, useSymbolNames } from '@/hooks/useRuns'
 import { formatDate, formatNumber } from '@/lib/utils'
-import type { TradeAttribution, TradeRecord } from '@/api'
+import { runAuditEvent } from '@/api'
+import type { AuditChainEvent, AuditEventItem, TradeAttribution, TradeRecord } from '@/api'
 
 interface Props {
   runId: string
@@ -201,30 +206,111 @@ function RiskStat({ label, value, valueCls }: { label: string; value: string; va
   )
 }
 
-/** 审计链节点胶囊：图标 + 环节名 + trace id（等宽小字，title 悬浮完整 id） */
-function TraceNode({ icon: Icon, label, traceId, cls }: { icon: LucideIcon; label: string; traceId?: string; cls: string }) {
-  return (
-    <span
-      className={`inline-flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 ${cls}`}
-      title={traceId || undefined}
-    >
+/** 审计事件 status -> 语义色：SUCCESS 绿 / WARNING 琥珀 / ERROR·FAIL 红 / 其余中性 */
+function statusCls(status: string): string {
+  const s = status.toUpperCase()
+  if (s.includes('SUCCESS') || s === 'OK') return 'text-success'
+  if (s.includes('WARN')) return 'text-warning'
+  if (s.includes('ERROR') || s.includes('FAIL')) return 'text-destructive'
+  return 'text-muted-foreground'
+}
+
+/**
+ * 审计链节点胶囊：图标 + 环节名 + trace id。
+ * - hover：Tooltip 显示后端预计算的紧凑摘要（第一行醒目等宽）+ 事件元信息 + 时间戳；无摘要时退化为 trace id
+ * - 点击：onOpenTrace(traceId) 触发下钻弹窗查看该 trace 的全部原始审计事件
+ */
+function TraceNode({
+  icon: Icon,
+  label,
+  traceId,
+  cls,
+  event,
+  onOpenTrace,
+}: {
+  icon: LucideIcon
+  label: string
+  traceId?: string
+  cls: string
+  event?: AuditChainEvent | null
+  onOpenTrace?: (traceId: string) => void
+}) {
+  const clickable = Boolean(traceId && onOpenTrace)
+  const summary = event?.summary?.trim()
+  const status = event?.status
+  const hasMeta = Boolean(event?.event_type || event?.component || status)
+  const inner = (
+    <>
       <Icon className="h-3 w-3 shrink-0" />
       <span className="shrink-0 text-[10px] font-medium">{label}</span>
       <span className="min-w-0 truncate font-mono text-[9px] opacity-70">{traceId || '-'}</span>
-    </span>
+    </>
+  )
+  const baseCls = `inline-flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 ${cls}`
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {clickable ? (
+          <button
+            type="button"
+            onClick={() => {
+              if (traceId && onOpenTrace) onOpenTrace(traceId)
+            }}
+            className={`${baseCls} cursor-pointer transition-[filter,box-shadow] hover:brightness-110 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50`}
+          >
+            {inner}
+          </button>
+        ) : (
+          <span className={baseCls}>{inner}</span>
+        )}
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        {/* 第一行：摘要醒目等宽；无摘要退化为 trace id */}
+        <div className="font-mono text-xs font-semibold text-foreground">{summary || traceId || '-'}</div>
+        {/* 第二行：事件元信息（status 语义着色） */}
+        {hasMeta && (
+          <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+            {event?.event_type && <span className="font-mono">{event.event_type}</span>}
+            {event?.component && (
+              <>
+                {event?.event_type && <span>·</span>}
+                <span>{event.component}</span>
+              </>
+            )}
+            {status && (
+              <>
+                {hasMeta && (event?.event_type || event?.component) && <span>·</span>}
+                <span className={`font-medium ${statusCls(status)}`}>{status}</span>
+              </>
+            )}
+          </div>
+        )}
+        {/* 第三行：时间戳 */}
+        {event?.timestamp && (
+          <div className="mt-0.5 font-mono text-[10px] text-muted-foreground/70">{event.timestamp}</div>
+        )}
+        {/* 有摘要时补完整 trace id（保留原 title 悬浮核验能力，可选中复制） */}
+        {summary && traceId && (
+          <div className="mt-1 break-all border-t border-border pt-1 font-mono text-[10px] text-muted-foreground/60">
+            {traceId}
+          </div>
+        )}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
-/** 审计链：水平节点路径图（信号/风控触发 -> 订单 -> 成交），<details> 可折叠 */
-function AuditChain({ att }: { att: TradeAttribution }) {
+/** 审计链：水平节点路径图（信号/风控触发 -> 订单 -> 成交），<details> 可折叠；节点 hover 摘要 / 点击下钻 */
+function AuditChain({ att, onOpenTrace }: { att: TradeAttribution; onOpenTrace?: (traceId: string) => void }) {
   const chain = att.chain
   if (!chain) return null
+  const events = chain.events
   const isRisk = att.kind === 'risk'
   return (
     <details className="group mt-0.5">
       <summary className="inline-flex cursor-pointer select-none items-center gap-1 text-[10px] text-muted-foreground/60 transition-colors hover:text-muted-foreground [&::-webkit-details-marker]:hidden">
         <GitBranch className="h-3 w-3" />
-        审计链（trace id，供二次核验）
+        审计链（悬浮看摘要 · 点击节点查原始事件）
         <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
       </summary>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -237,6 +323,8 @@ function AuditChain({ att }: { att: TradeAttribution }) {
               ? 'border-warning/40 bg-warning/10 text-warning'
               : 'border-primary/25 bg-primary/10 text-primary'
           }
+          event={events?.upstream}
+          onOpenTrace={onOpenTrace}
         />
         <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />
         <TraceNode
@@ -244,6 +332,8 @@ function AuditChain({ att }: { att: TradeAttribution }) {
           label="订单"
           traceId={chain.order}
           cls="border-border bg-muted/40 text-foreground"
+          event={events?.order}
+          onOpenTrace={onOpenTrace}
         />
         <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />
         <TraceNode
@@ -251,16 +341,120 @@ function AuditChain({ att }: { att: TradeAttribution }) {
           label="成交"
           traceId={chain.fill}
           cls="border-success/30 bg-success/10 text-success"
+          event={events?.fill}
+          onOpenTrace={onOpenTrace}
         />
       </div>
     </details>
   )
 }
 
+// ============ 审计事件下钻弹窗 ============
+
+/**
+ * 审计事件下钻弹窗：点击审计链节点后按需懒加载
+ * GET /api/runs/{run_id}/audit/{trace_id} 的全部原始事件记录（含完整 payload）。
+ * - loading 态：旋转指示
+ * - 失败态：错误信息 + 可关闭
+ * - 成功态：逐条事件元信息（event_type / component / status / timestamp）+ <pre> 等宽 payload
+ *   内容区域 max-h + overflow-auto（payload 可能很大，单条内部再独立滚动）
+ */
+function AuditTraceDialog({ runId, traceId, onClose }: { runId: string; traceId: string | null; onClose: () => void }) {
+  const [events, setEvents] = useState<AuditEventItem[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // traceId 变化时懒加载该 trace 的全部审计事件（stale 标记防止竞态写入旧结果）
+  useEffect(() => {
+    if (!traceId) return
+    let stale = false
+    setLoading(true)
+    setError(null)
+    setEvents(null)
+    runAuditEvent({ path: { run_id: runId, trace_id: traceId } })
+      .then(({ data, error: apiError }) => {
+        if (stale) return
+        if (apiError) throw new Error('加载审计事件失败')
+        setEvents(data?.events ?? [])
+      })
+      .catch((e: unknown) => {
+        if (!stale) setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!stale) setLoading(false)
+      })
+    return () => {
+      stale = true
+    }
+  }, [runId, traceId])
+
+  return (
+    <Dialog
+      open={Boolean(traceId)}
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DialogContent className="flex max-h-[85vh] w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="shrink-0 border-b border-border px-5 py-4 pr-12">
+          <DialogTitle className="flex items-center gap-2 text-sm font-semibold">
+            <ScrollText className="h-4 w-4 shrink-0 text-primary" />
+            审计事件详情
+          </DialogTitle>
+          <DialogDescription className="break-all font-mono text-[11px] leading-relaxed">
+            {traceId ?? ''}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-12 text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <span className="text-xs">正在拉取审计事件…</span>
+            </div>
+          ) : error ? (
+            <div className="space-y-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-xs">
+              <div className="font-medium text-destructive">加载失败：{error}</div>
+              <div className="text-muted-foreground">请确认后端服务可用后重试；可关闭弹窗继续浏览。</div>
+            </div>
+          ) : !events || events.length === 0 ? (
+            <div className="py-12 text-center text-xs text-muted-foreground">该 trace 无事件记录</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-[11px] text-muted-foreground">共 {events.length} 条事件记录</div>
+              {events.map((ev, i) => (
+                <div key={i} className="overflow-hidden rounded-lg border border-border bg-muted/20">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/60 bg-muted/40 px-3 py-2">
+                    <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary">
+                      {ev.event_type || 'UNKNOWN'}
+                    </span>
+                    {ev.component && <span className="text-[11px] text-muted-foreground">{ev.component}</span>}
+                    {ev.status && (
+                      <span className={`font-mono text-[10px] font-semibold ${statusCls(ev.status)}`}>
+                        {ev.status}
+                      </span>
+                    )}
+                    <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/70">
+                      {ev.timestamp || '无时间戳'}
+                    </span>
+                  </div>
+                  <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-all px-3 py-2.5 font-mono text-[11px] leading-relaxed text-foreground/90">
+                    {JSON.stringify(ev.payload ?? {}, null, 2)}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ============ 审计归因面板主体 ============
 
 /** 单笔交易的审计归因明细（SIGNAL->ORDER->FILL / RISK_TRIGGER->ORDER->FILL） */
-function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
+function TradeAttributionDetail({ att, onOpenTrace }: { att?: TradeAttribution | null; onOpenTrace?: (traceId: string) => void }) {
   if (!att) return null
   const risk = att.risk_trigger
   const signal = att.signal
@@ -460,8 +654,8 @@ function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
         </div>
       )}
 
-      {/* 审计链：trace id 路径图 */}
-      <AuditChain att={att} />
+      {/* 审计链：trace id 路径图（节点可 hover / 点击下钻） */}
+      <AuditChain att={att} onOpenTrace={onOpenTrace} />
     </div>
   )
 }
@@ -475,6 +669,8 @@ export function BacktestDetail({ runId }: Props) {
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null)
   // 交易明细中展开审计归因的行（trace_id）
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null)
+  // 审计链节点下钻：当前打开的 trace id（弹窗内懒加载该 trace 的全部原始事件）
+  const [auditTrace, setAuditTrace] = useState<string | null>(null)
   const tradedSymbols = useMemo(() => data?.traded_symbols || [], [data])
   const { data: symbolData, loading: symbolLoading } = useSymbolChart(runId, selectedSymbol)
 
@@ -507,7 +703,8 @@ export function BacktestDetail({ runId }: Props) {
   }
 
   return (
-    <div className="p-4 space-y-4 overflow-auto">
+    <TooltipProvider delayDuration={150}>
+      <div className="p-4 space-y-4 overflow-auto">
       {/* 指标卡片 */}
       <CollapsibleSection title="指标概览" defaultOpen={true}>
         <MetricCards data={data} />
@@ -667,7 +864,7 @@ export function BacktestDetail({ runId }: Props) {
                   {expanded && (
                     <TableRow key={`${t.trace_id}-attr`}>
                       <TableCell colSpan={8} className="px-4 py-2">
-                        <TradeAttributionDetail att={t.attribution} />
+                        <TradeAttributionDetail att={t.attribution} onOpenTrace={setAuditTrace} />
                       </TableCell>
                     </TableRow>
                   )}
@@ -684,6 +881,14 @@ export function BacktestDetail({ runId }: Props) {
         symbol={detailSymbol}
         onClose={() => setDetailSymbol(null)}
       />
-    </div>
+
+      {/* 审计链节点下钻弹窗（懒加载原始审计事件） */}
+      <AuditTraceDialog
+        runId={runId}
+        traceId={auditTrace}
+        onClose={() => setAuditTrace(null)}
+      />
+      </div>
+    </TooltipProvider>
   )
 }

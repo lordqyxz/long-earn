@@ -5,6 +5,63 @@ export type ClientOptions = {
 };
 
 /**
+ * AuditChainEvent
+ *
+ * 审计链节点事件的紧凑摘要（后端预计算的一句人话摘要 + 元信息），
+ * 供审计链节点 hover Tooltip 展示。
+ */
+export type AuditChainEvent = {
+    /**
+     * Event Type
+     */
+    event_type?: string;
+    /**
+     * Component
+     */
+    component?: string;
+    /**
+     * Status
+     */
+    status?: string;
+    /**
+     * Timestamp
+     */
+    timestamp?: string | null;
+    /**
+     * Summary
+     */
+    summary?: string;
+};
+
+/**
+ * AuditEventItem
+ *
+ * 审计事件原始记录条目（GET /api/runs/{run_id}/audit/{trace_id}）。
+ */
+export type AuditEventItem = {
+    /**
+     * Event Type
+     */
+    event_type?: string;
+    /**
+     * Component
+     */
+    component?: string;
+    /**
+     * Status
+     */
+    status?: string;
+    /**
+     * Timestamp
+     */
+    timestamp?: string | null;
+    /**
+     * Payload
+     */
+    payload?: Record<string, unknown>;
+};
+
+/**
  * Benchmark
  *
  * 基准指标（取自 MARKET_DATA 载荷）。
@@ -636,6 +693,26 @@ export type RiskResponse = {
 };
 
 /**
+ * RunAuditEventResponse
+ *
+ * GET /api/runs/{run_id}/audit/{trace_id} - 指定 trace 的全部审计事件原始记录。
+ */
+export type RunAuditEventResponse = {
+    /**
+     * Run Id
+     */
+    run_id: string;
+    /**
+     * Trace Id
+     */
+    trace_id: string;
+    /**
+     * Events
+     */
+    events: Array<AuditEventItem>;
+};
+
+/**
  * RunInfo
  *
  * 回测运行汇总条目。
@@ -1031,6 +1108,17 @@ export type TradeAttribution = {
         fill?: string;
         order?: string;
         upstream?: string;
+        /**
+         * Events
+         *
+         * 各环节审计事件的紧凑摘要（summary 为后端预计算的人话摘要），
+         * 供审计链节点 hover 展示；旧数据可能缺失该字段。
+         */
+        events?: {
+            upstream?: AuditChainEvent | null;
+            order?: AuditChainEvent | null;
+            fill?: AuditChainEvent | null;
+        };
     };
 };
 
@@ -1273,6 +1361,40 @@ export type RunTradesResponses = {
 };
 
 export type RunTradesResponse = RunTradesResponses[keyof RunTradesResponses];
+
+export type RunAuditEventData = {
+    body?: never;
+    path: {
+        /**
+         * Run Id
+         */
+        run_id: string;
+        /**
+         * Trace Id
+         */
+        trace_id: string;
+    };
+    query?: never;
+    url: '/api/runs/{run_id}/audit/{trace_id}';
+};
+
+export type RunAuditEventErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RunAuditEventError = RunAuditEventErrors[keyof RunAuditEventErrors];
+
+export type RunAuditEventResponses = {
+    /**
+     * Successful Response
+     */
+    200: RunAuditEventResponse;
+};
+
+export type RunAuditEventResponse2 = RunAuditEventResponses[keyof RunAuditEventResponses];
 
 export type RunSignalsData = {
     body?: never;

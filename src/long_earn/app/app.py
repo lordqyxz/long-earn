@@ -9,6 +9,7 @@
     GET  /api/runs/{run_id}/summary   — 运行摘要
     GET  /api/runs/{run_id}/equity    — 权益曲线
     GET  /api/runs/{run_id}/trades    — 交易日志
+    GET  /api/runs/{run_id}/audit/{trace_id} — 按 trace_id 查审计事件完整记录（含原始 payload）
     GET  /api/runs/{run_id}/signals   — 信号历史
     GET  /api/runs/{run_id}/dashboard — 完整仪表盘数据
     GET  /api/runs/{run_id}/risk      — 风险指标
@@ -206,6 +207,17 @@ def _register_run_routes(  # noqa: C901
     async def run_trades(run_id: str):
         journal = analyzer.export_trade_journal(run_id)
         return {"run_id": run_id, "trades": journal}
+
+    @app.get(
+        "/api/runs/{run_id}/audit/{trace_id}",
+        operation_id="run_audit_event",
+    )
+    async def run_audit_event(run_id: str, trace_id: str):
+        """按 trace_id 返回审计事件完整记录（含原始 payload，供归因链点击下钻）。"""
+        events = analyzer.export_audit_event(run_id, trace_id)
+        if not events:
+            raise HTTPException(404, "Audit event not found")
+        return {"run_id": run_id, "trace_id": trace_id, "events": events}
 
     @app.get(
         "/api/runs/{run_id}/signals",

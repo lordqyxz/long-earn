@@ -680,7 +680,7 @@ class BacktestAnalyzer:
         try:
             rows = conn.execute(
                 f"""
-                SELECT trace_id, parent_id, event_type, payload
+                SELECT trace_id, parent_id, event_type, component, status, timestamp, payload
                 FROM {_AUDIT_TABLE}
                 WHERE run_id = %s
                   AND event_type IN ('FILL', 'ORDER', 'SIGNAL', 'RISK_TRIGGER')
@@ -690,11 +690,20 @@ class BacktestAnalyzer:
         finally:
             conn.close()
 
-        by_trace: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        # 每个 trace 一条事件记录：parent/event_type/payload 用于链解析，
+        # component/status/timestamp 用于 hover 摘要
+        by_trace: dict[str, dict[str, Any]] = {}
         fills: list[tuple[str, str, dict[str, Any]]] = []
-        for trace, parent, etype, payload in rows:
+        for trace, parent, etype, component, status, ts, payload in rows:
             p = self._payload_as_dict(payload)
-            by_trace[trace] = (parent or "", etype, p)
+            by_trace[trace] = {
+                "parent": parent or "",
+                "event_type": etype,
+                "payload": p,
+                "component": component,
+                "status": status,
+                "timestamp": ts,
+            }
             if etype == "FILL":
                 fills.append((trace, parent or "", p))
 
@@ -703,11 +712,12 @@ class BacktestAnalyzer:
             for fill_trace, parent, _ in fills
         }
 
-    @staticmethod
+    @classmethod
     def _resolve_trade_attribution(
+        cls,
         fill_trace: str,
         order_trace_id: str,
-        by_trace: dict[str, tuple[str, str, dict[str, Any]]],
+        by_trace: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         """解析单笔 FILL 的上游归因链（2 跳：FILL→ORDER→SIGNAL/RISK_TRIGGER）。"""
         # 待成交单（限价/止损触发）parent 形如 pend_xxx，无独立 ORDER 事件
@@ -717,7 +727,14 @@ class BacktestAnalyzer:
                 "order": None,
                 "signal": None,
                 "risk_trigger": None,
-                "chain": {"fill": fill_trace, "order": "", "upstream": ""},
+                "chain": {
+                    "fill": fill_trace,
+                    "order": "",
+                    "upstream": "",
+                    "events": cls._build_chain_events(
+                        fill_trace, "", "", by_trace
+                    ),
+                },
             }
 
         order_entry = by_trace.get(order_trace_id)
@@ -725,18 +742,21 @@ class BacktestAnalyzer:
         upstream_trace = ""
         upstream_type = ""
         upstream_payload: dict[str, Any] = {}
-        if order_entry is not None and order_entry[1] == "ORDER":
-            order = order_entry[2]
-            upstream_trace = order_entry[0]
+        if order_entry is not None and order_entry["event_type"] == "ORDER":
+            order = order_entry["payload"]
+            upstream_trace = order_entry["parent"]
             up = by_trace.get(upstream_trace)
             if up is not None:
-                upstream_type = up[1]
-                upstream_payload = up[2]
+                upstream_type = up["event_type"]
+                upstream_payload = up["payload"]
 
         chain = {
             "fill": fill_trace,
             "order": order_trace_id,
             "upstream": upstream_trace,
+            "events": cls._build_chain_events(
+                fill_trace, order_trace_id, upstream_trace, by_trace
+            ),
         }
         if upstream_type == "SIGNAL":
             return {
@@ -770,6 +790,104 @@ class BacktestAnalyzer:
             "risk_trigger": None,
             "chain": chain,
         }
+
+    @staticmethod
+    def _event_summary_text(event_type: str, payload: dict[str, Any]) -> str:
+        """把单个审计事件压缩成一句人话摘要（供前端 hover 展示，不暴露完整 payload）。"""
+        sym = str(payload.get("symbol") or "")
+        t = str(payload.get("type") or payload.get("order_type") or "")
+        qty = payload.get("quantity")
+        if not isinstance(qty, (int, float)):
+            qty = payload.get("fill_quantity")
+        price = payload.get("price")
+        if not isinstance(price, (int, float)):
+            price = payload.get("fill_price")
+        if event_type == "SIGNAL":
+            signals = payload.get("signals")
+            n = len(signals) if isinstance(signals, dict) else 0
+            sid = str(payload.get("strategy_id") or "")
+            result = f"策略 {sid} · 选股 {n} 只" if n else f"策略 {sid}"
+        elif event_type == "ORDER":
+            q = qty if isinstance(qty, (int, float)) else "-"
+            result = f"请求 {t} {sym} ×{q}".strip() if sym else f"请求 {t or '订单'}"
+        elif event_type == "FILL":
+            q = qty if isinstance(qty, (int, float)) else "-"
+            p = f"{price:.2f}" if isinstance(price, (int, float)) else "-"
+            reason = payload.get("reason")
+            base = f"{t} {sym} ×{q} @ {p}".strip()
+            result = f"{base} · {reason}" if reason else base
+        elif event_type == "RISK_TRIGGER":
+            risk_type = str(payload.get("risk_type") or "")
+            pnl = payload.get("pnl_pct")
+            pnl_s = f"{pnl * 100:.1f}%" if isinstance(pnl, (int, float)) else "-"
+            dd = payload.get("drawdown")
+            dd_s = f"{dd * 100:.1f}%" if isinstance(dd, (int, float)) else "-"
+            if risk_type == "stop_loss":
+                result = f"止损触发 · {sym}（跌幅 {pnl_s}）"
+            elif risk_type == "take_profit":
+                result = f"止盈触发 · {sym}（涨幅 {pnl_s}）"
+            elif risk_type == "max_drawdown":
+                result = f"最大回撤触发（回撤 {dd_s}）"
+            else:
+                result = f"{risk_type or '风控'}触发 · {sym}".strip(" ·")
+        else:
+            result = event_type
+        return result
+
+    @classmethod
+    def _build_chain_events(
+        cls,
+        fill_trace: str,
+        order_trace: str,
+        upstream_trace: str,
+        by_trace: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """按审计链节点（upstream/order/fill）构造紧凑事件摘要，供前端 hover 展示。"""
+        events: dict[str, dict[str, Any]] = {}
+        for key, trace in (
+            ("upstream", upstream_trace),
+            ("order", order_trace),
+            ("fill", fill_trace),
+        ):
+            if not trace:
+                continue
+            ent = by_trace.get(trace)
+            if ent is None:
+                continue
+            events[key] = {
+                "event_type": ent["event_type"],
+                "component": ent["component"],
+                "status": ent["status"],
+                "timestamp": str(ent["timestamp"]) if ent["timestamp"] else None,
+                "summary": cls._event_summary_text(ent["event_type"], ent["payload"]),
+            }
+        return events
+
+    def export_audit_event(self, run_id: str, trace_id: str) -> list[dict[str, Any]]:
+        """按 trace_id 返回该事件的完整审计行（含原始 payload，供前端点击下钻核验）。"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT event_type, component, status, timestamp, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND trace_id = %s
+                ORDER BY seq ASC
+                """,
+                [run_id, trace_id],
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "event_type": r[0],
+                "component": r[1],
+                "status": r[2],
+                "timestamp": str(r[3]) if r[3] else None,
+                "payload": self._payload_as_dict(r[4]),
+            }
+            for r in rows
+        ]
 
     def export_signal_history(self, run_id: str) -> list[dict[str, Any]]:
         """导出信号历史（用于分析策略决策点）"""

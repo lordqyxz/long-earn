@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AllSymbolChartsData, AllSymbolChartsErrors, AllSymbolChartsResponses, CleanEmptyRunsData, CleanEmptyRunsResponses, CompareRunsData, CompareRunsErrors, CompareRunsResponses, DeleteRunData, DeleteRunErrors, DeleteRunResponses, EventStatsData, EventStatsResponses, EventTimelineData, EventTimelineErrors, EventTimelineResponses, ExportTradesData, ExportTradesErrors, ExportTradesResponses, GetEventData, GetEventErrors, GetEventResponses, HealthData, HealthResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListRelationsData, ListRelationsErrors, ListRelationsResponses, ListRunsData, ListRunsResponses, RefreshSectorsData, RefreshSectorsResponses, RunDailyReturnsData, RunDailyReturnsErrors, RunDailyReturnsResponses, RunDashboardData, RunDashboardErrors, RunDashboardResponses, RunEquityData, RunEquityErrors, RunEquityResponses, RunRiskData, RunRiskErrors, RunRiskResponses, RunSignalsData, RunSignalsErrors, RunSignalsResponses, RunSummaryData, RunSummaryErrors, RunSummaryResponses, RunTradesData, RunTradesErrors, RunTradesResponses, ServeSpaFullPathGetData, ServeSpaFullPathGetErrors, ServeSpaFullPathGetResponses, StartResearchData, StartResearchErrors, StartResearchResponses, SymbolChartData2, SymbolChartErrors, SymbolChartResponses, SymbolDetailData, SymbolDetailErrors, SymbolDetailResponses, SymbolFinancialsData, SymbolFinancialsErrors, SymbolFinancialsResponses, SymbolNamesData, SymbolNamesErrors, SymbolNamesResponses, TradedSymbolsData, TradedSymbolsErrors, TradedSymbolsResponses, TriggerEventInferenceData, TriggerEventInferenceErrors, TriggerEventInferenceResponses } from './types.gen';
+import type { AllSymbolChartsData, AllSymbolChartsErrors, AllSymbolChartsResponses, CleanEmptyRunsData, CleanEmptyRunsResponses, CompareRunsData, CompareRunsErrors, CompareRunsResponses, DeleteRunData, DeleteRunErrors, DeleteRunResponses, EventStatsData, EventStatsResponses, EventTimelineData, EventTimelineErrors, EventTimelineResponses, ExportTradesData, ExportTradesErrors, ExportTradesResponses, GetEventData, GetEventErrors, GetEventResponses, HealthData, HealthResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListRelationsData, ListRelationsErrors, ListRelationsResponses, ListRunsData, ListRunsResponses, RefreshSectorsData, RefreshSectorsResponses, RunAuditEventData, RunAuditEventErrors, RunAuditEventResponses, RunDailyReturnsData, RunDailyReturnsErrors, RunDailyReturnsResponses, RunDashboardData, RunDashboardErrors, RunDashboardResponses, RunEquityData, RunEquityErrors, RunEquityResponses, RunRiskData, RunRiskErrors, RunRiskResponses, RunSignalsData, RunSignalsErrors, RunSignalsResponses, RunSummaryData, RunSummaryErrors, RunSummaryResponses, RunTradesData, RunTradesErrors, RunTradesResponses, ServeSpaFullPathGetData, ServeSpaFullPathGetErrors, ServeSpaFullPathGetResponses, StartResearchData, StartResearchErrors, StartResearchResponses, SymbolChartData2, SymbolChartErrors, SymbolChartResponses, SymbolDetailData, SymbolDetailErrors, SymbolDetailResponses, SymbolFinancialsData, SymbolFinancialsErrors, SymbolFinancialsResponses, SymbolNamesData, SymbolNamesErrors, SymbolNamesResponses, TradedSymbolsData, TradedSymbolsErrors, TradedSymbolsResponses, TriggerEventInferenceData, TriggerEventInferenceErrors, TriggerEventInferenceResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -56,6 +56,13 @@ export const runEquity = <ThrowOnError extends boolean = false>(options: Options
  * Run Trades
  */
 export const runTrades = <ThrowOnError extends boolean = false>(options: Options<RunTradesData, ThrowOnError>): RequestResult<RunTradesResponses, RunTradesErrors, ThrowOnError> => (options.client ?? client).get<RunTradesResponses, RunTradesErrors, ThrowOnError>({ url: '/api/runs/{run_id}/trades', ...options });
+
+/**
+ * Run Audit Event
+ *
+ * 拉取指定 trace 的全部审计事件原始记录（含完整 payload）。
+ */
+export const runAuditEvent = <ThrowOnError extends boolean = false>(options: Options<RunAuditEventData, ThrowOnError>): RequestResult<RunAuditEventResponses, RunAuditEventErrors, ThrowOnError> => (options.client ?? client).get<RunAuditEventResponses, RunAuditEventErrors, ThrowOnError>({ url: '/api/runs/{run_id}/audit/{trace_id}', ...options });
 
 /**
  * Run Signals

@@ -490,6 +490,24 @@ def test_trade_journal_attribution_reconstructs_chain():
     assert risk_trade["attribution"]["risk_trigger"]["pnl_pct"] == -0.12
     assert risk_trade["attribution"]["chain"]["upstream"]
 
+    # 链上每个节点带紧凑事件摘要（hover 展示用）：upstream/order/fill 三节点齐全
+    events = signal_trade["attribution"]["chain"]["events"]
+    assert set(events) == {"upstream", "order", "fill"}
+    assert events["fill"]["event_type"] == "FILL"
+    assert "BUY" in events["fill"]["summary"] and "A" in events["fill"]["summary"]
+    assert events["order"]["event_type"] == "ORDER"
+    assert "策略" in events["upstream"]["summary"] and "选股" in events["upstream"]["summary"]
+    risk_events = risk_trade["attribution"]["chain"]["events"]
+    assert "止损触发" in risk_events["upstream"]["summary"]
+
+    # 按 trace_id 下钻原始事件记录（完整 payload，供点击核验）
+    drill = analyzer.export_audit_event(run_id, signal_trade["attribution"]["chain"]["fill"])
+    assert len(drill) == 1
+    assert drill[0]["event_type"] == "FILL"
+    assert drill[0]["payload"]["symbol"] == "A"
+    assert "status" in drill[0] and "timestamp" in drill[0]
+    assert analyzer.export_audit_event(run_id, "no-such-trace") == []
+
 
 def test_engine_risk_fill_enriched_reason_and_chain():
     """引擎端到端：风控 FILL 原因含触发数值，且 FILL→ORDER→RISK_TRIGGER 归因链可还原。"""
