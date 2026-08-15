@@ -168,4 +168,5 @@ dev = [
     "pytest-cov>=7.1.0",
     "types-pyyaml>=6.0.12.20260510",
     "types-pytz>=2026.2.0.20260506",
+    "hypothesis>=6.130",
 ]
