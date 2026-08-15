@@ -627,7 +627,120 @@ class BacktestAnalyzer:
                     "reason": payload.get("reason", ""),
                 }
             )
+        # 附加每笔成交的审计归因链（SIGNAL→ORDER→FILL / RISK_TRIGGER→ORDER→FILL）
+        attribution = self.export_trade_attribution(run_id)
+        for t in journal:
+            t["attribution"] = attribution.get(t["trace_id"])
         return journal
+
+    def export_trade_attribution(self, run_id: str) -> dict[str, dict[str, Any]]:
+        """还原每条 FILL 的审计归因链。
+
+        通过 parent_id 因果关联，把每笔成交还原到上游 ORDER 与再上游的
+        SIGNAL（策略选股/目标权重）或 RISK_TRIGGER（风控触发数值）。
+
+        Returns:
+            {fill_trace_id: attribution}，attribution 结构：
+            - kind: signal/risk/direct/pending/unknown
+            - order: 订单信息（symbol/type/quantity）
+            - signal: 上游信号（strategy_id/signals/risk_triggered）
+            - risk_trigger: 上游风控触发详情（risk_type/触发数值等）
+            - chain: {fill, order, upstream} 三个 trace_id 供前端展示
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT trace_id, parent_id, event_type, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s
+                  AND event_type IN ('FILL', 'ORDER', 'SIGNAL', 'RISK_TRIGGER')
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
+
+        by_trace: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        fills: list[tuple[str, str, dict[str, Any]]] = []
+        for trace, parent, etype, payload in rows:
+            p = self._payload_as_dict(payload)
+            by_trace[trace] = (parent or "", etype, p)
+            if etype == "FILL":
+                fills.append((trace, parent or "", p))
+
+        return {
+            fill_trace: self._resolve_trade_attribution(fill_trace, parent, by_trace)
+            for fill_trace, parent, _ in fills
+        }
+
+    @staticmethod
+    def _resolve_trade_attribution(
+        fill_trace: str,
+        order_trace_id: str,
+        by_trace: dict[str, tuple[str, str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """解析单笔 FILL 的上游归因链（2 跳：FILL→ORDER→SIGNAL/RISK_TRIGGER）。"""
+        # 待成交单（限价/止损触发）parent 形如 pend_xxx，无独立 ORDER 事件
+        if not order_trace_id or order_trace_id.startswith("pend_"):
+            return {
+                "kind": "pending",
+                "order": None,
+                "signal": None,
+                "risk_trigger": None,
+                "chain": {"fill": fill_trace, "order": "", "upstream": ""},
+            }
+
+        order_entry = by_trace.get(order_trace_id)
+        order = None
+        upstream_trace = ""
+        upstream_type = ""
+        upstream_payload: dict[str, Any] = {}
+        if order_entry is not None and order_entry[1] == "ORDER":
+            order = order_entry[2]
+            upstream_trace = order_entry[0]
+            up = by_trace.get(upstream_trace)
+            if up is not None:
+                upstream_type = up[1]
+                upstream_payload = up[2]
+
+        chain = {
+            "fill": fill_trace,
+            "order": order_trace_id,
+            "upstream": upstream_trace,
+        }
+        if upstream_type == "SIGNAL":
+            return {
+                "kind": "signal",
+                "order": order,
+                "signal": upstream_payload,
+                "risk_trigger": None,
+                "chain": chain,
+            }
+        if upstream_type == "RISK_TRIGGER":
+            return {
+                "kind": "risk",
+                "order": order,
+                "signal": None,
+                "risk_trigger": upstream_payload,
+                "chain": chain,
+            }
+        if order is not None:
+            # 订单存在但上游未知（如 direct_orders 直接提交）
+            return {
+                "kind": "direct",
+                "order": order,
+                "signal": None,
+                "risk_trigger": None,
+                "chain": chain,
+            }
+        return {
+            "kind": "unknown",
+            "order": None,
+            "signal": None,
+            "risk_trigger": None,
+            "chain": chain,
+        }
 
     def export_signal_history(self, run_id: str) -> list[dict[str, Any]]:
         """导出信号历史（用于分析策略决策点）"""

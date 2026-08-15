@@ -976,6 +976,45 @@ export type TradeRecord = {
      * Reason
      */
     reason?: string;
+    /**
+     * Attribution
+     */
+    attribution?: TradeAttribution | null;
+};
+
+export type TradeAttribution = {
+    /**
+     * Kind
+     */
+    kind?: string;
+    /**
+     * Order
+     */
+    order?: {
+        symbol?: string;
+        type?: string;
+        quantity?: number;
+    } | null;
+    /**
+     * Signal
+     */
+    signal?: {
+        strategy_id?: string;
+        signals?: Record<string, number>;
+        risk_triggered?: boolean;
+    } | null;
+    /**
+     * Risk Trigger
+     */
+    risk_trigger?: Record<string, unknown> | null;
+    /**
+     * Chain
+     */
+    chain?: {
+        fill?: string;
+        order?: string;
+        upstream?: string;
+    };
 };
 
 /**

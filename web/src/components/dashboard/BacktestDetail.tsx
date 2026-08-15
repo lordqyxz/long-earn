@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react'
-import { Loader2, ArrowUp, ArrowDown, BarChart3, Info } from 'lucide-react'
+import { Loader2, ArrowUp, ArrowDown, BarChart3, Info, ChevronDown } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { MetricCards } from '@/components/dashboard/MetricCards'
@@ -10,10 +10,89 @@ import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
 import { SymbolDetailDialog } from '@/components/dashboard/SymbolDetailDialog'
 import { useDashboard, useSymbolChart, useSymbolNames } from '@/hooks/useRuns'
 import { formatDate, formatNumber } from '@/lib/utils'
-import type { TradeRecord } from '@/api'
+import type { TradeAttribution, TradeRecord } from '@/api'
 
 interface Props {
   runId: string
+}
+
+const ATTR_KIND_LABEL: Record<string, string> = {
+  signal: '信号驱动',
+  risk: '风控触发',
+  direct: '高级订单',
+  pending: '待成交订单',
+  unknown: '未知',
+}
+
+function fmtNum(v: unknown, digits = 2): string {
+  if (typeof v !== 'number') return v != null ? String(v) : '—'
+  return v.toFixed(digits)
+}
+
+function fmtPct(v: unknown): string {
+  if (typeof v !== 'number') return fmtNum(v)
+  return `${(v * 100).toFixed(1)}%`
+}
+
+/** 单笔交易的审计归因明细（SIGNAL→ORDER→FILL / RISK_TRIGGER→ORDER→FILL） */
+function TradeAttributionDetail({ att }: { att?: TradeAttribution | null }) {
+  if (!att) return null
+  const risk = att.risk_trigger
+  return (
+    <div className="text-xs space-y-1.5 py-1">
+      <div className="flex items-center gap-2">
+        <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+          {ATTR_KIND_LABEL[att.kind || ''] || att.kind || '未知'}
+        </span>
+        {att.signal?.strategy_id && (
+          <span className="text-muted-foreground">
+            策略: <span className="font-mono text-foreground">{att.signal.strategy_id}</span>
+          </span>
+        )}
+        {!!risk?.risk_type && (
+          <span className="text-muted-foreground">
+            触发类型: <span className="font-mono text-foreground">{String(risk.risk_type)}</span>
+          </span>
+        )}
+      </div>
+      {att.signal?.signals && Object.keys(att.signal.signals).length > 0 && (
+        <div className="text-muted-foreground">
+          当日信号选股:
+          {Object.entries(att.signal.signals).map(([s, w]) => (
+            <span key={s} className="mr-2 inline-flex items-center gap-1">
+              <span className="font-mono text-foreground">{s}</span>
+              <span>{fmtPct(w)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {risk?.risk_type === 'stop_loss' && (
+        <div className="text-muted-foreground">
+          止损详情: 跌幅 {fmtPct(risk.pnl_pct)}，成本 {fmtNum(risk.avg_cost)} → 触发 {fmtNum(risk.check_price)}，
+          止损线 -{fmtNum(risk.stop_loss_threshold, 0)}%
+        </div>
+      )}
+      {risk?.risk_type === 'take_profit' && (
+        <div className="text-muted-foreground">
+          止盈详情: 涨幅 {fmtPct(risk.pnl_pct)}，成本 {fmtNum(risk.avg_cost)} → 触发 {fmtNum(risk.check_price)}，
+          止盈线 +{fmtNum(risk.take_profit_threshold, 0)}%
+        </div>
+      )}
+      {risk?.risk_type === 'max_drawdown' && (
+        <div className="text-muted-foreground">
+          回撤详情: 组合回撤 {fmtPct(risk.drawdown)}，峰值 {fmtNum(risk.peak_value, 0)} → 净值 {fmtNum(risk.total_value, 0)}，
+          限 -{fmtNum(risk.max_drawdown_limit, 0)}%
+        </div>
+      )}
+      {att.chain && (
+        <div className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed break-all">
+          审计链: FILL={att.chain.fill || '—'}
+          {att.chain.order && <> → ORDER={att.chain.order}</>}
+          {att.chain.upstream && <> → {att.kind === 'risk' ? '风控' : 'SIGNAL'}={att.chain.upstream}</>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function BacktestDetail({ runId }: Props) {
@@ -23,6 +102,8 @@ export function BacktestDetail({ runId }: Props) {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   // 公司信息弹窗
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null)
+  // 交易明细中展开审计归因的行（trace_id）
+  const [expandedTrace, setExpandedTrace] = useState<string | null>(null)
   const tradedSymbols = useMemo(() => data?.traded_symbols || [], [data])
   const { data: symbolData, loading: symbolLoading } = useSymbolChart(runId, selectedSymbol)
 
@@ -152,8 +233,10 @@ export function BacktestDetail({ runId }: Props) {
               (data.trade_journal ?? []).slice(-50).reverse().map((t: TradeRecord, i: number) => {
                 const name = symbolNames[t.symbol]
                 const isBuy = t.type === 'BUY'
+                const expanded = expandedTrace === t.trace_id
                 return (
-                  <TableRow key={t.trace_id || i}>
+                  <>
+                    <TableRow key={t.trace_id || i} className={expanded ? 'bg-muted/30' : undefined}>
                     <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{formatDate(t.time)}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1.5">
@@ -180,9 +263,23 @@ export function BacktestDetail({ runId }: Props) {
                         {isBuy ? '买入' : '卖出'}
                       </span>
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground max-w-[160px]">
+                    <TableCell className="text-xs max-w-[220px]">
                       {t.reason ? (
-                        <span className="line-clamp-1" title={t.reason}>{t.reason}</span>
+                        <button
+                          onClick={() => setExpandedTrace(expanded ? null : (t.trace_id || null))}
+                          disabled={!t.attribution}
+                          className={`inline-flex max-w-full items-center gap-1 text-left line-clamp-1 transition-colors ${
+                            t.attribution
+                              ? 'cursor-pointer text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground'
+                              : 'text-muted-foreground'
+                          }`}
+                          title={t.attribution ? '点击查看审计归因' : t.reason}
+                        >
+                          <span className="truncate">{t.reason}</span>
+                          {t.attribution && (
+                            <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                          )}
+                        </button>
                       ) : (
                         <span className="text-muted-foreground/50">—</span>
                       )}
@@ -196,6 +293,14 @@ export function BacktestDetail({ runId }: Props) {
                       </span>
                     </TableCell>
                   </TableRow>
+                  {expanded && (
+                    <TableRow key={`${t.trace_id}-attr`}>
+                      <TableCell colSpan={8} className="px-4 py-2">
+                        <TradeAttributionDetail att={t.attribution} />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  </>
                 )
               })
             )}

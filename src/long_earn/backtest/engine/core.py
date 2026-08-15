@@ -752,9 +752,10 @@ class EventDrivenBacktestEngine:
             if pnl_pct < self.take_profit:
                 continue
 
+            risk_trace_id = str(uuid.uuid4())
             self._log_audit(
                 "RISK_TRIGGER",
-                str(uuid.uuid4()),
+                risk_trace_id,
                 None,
                 "RiskControl",
                 "WARNING",
@@ -783,9 +784,23 @@ class EventDrivenBacktestEngine:
                 quantity=qty,
                 price=check_price,
             )
+            # 风控订单补记 ORDER 审计，parent=RISK_TRIGGER，保证归因链完整
+            self._log_audit(
+                "ORDER",
+                order.trace_id,
+                risk_trace_id,
+                "RiskControl",
+                "SUCCESS",
+                {
+                    "symbol": order.symbol,
+                    "type": order.order_type,
+                    "quantity": order.quantity,
+                },
+                self._db_audit,
+            )
             fill = broker.execute_order(order, check_price)
             portfolio.update_from_fill(fill)
-            # 止盈卖出写入 FILL 审计（原因可追溯）
+            # 止盈卖出写入 FILL 审计（原因可追溯，含触发数值）
             self._log_audit(
                 "FILL",
                 fill.trace_id,
@@ -797,7 +812,11 @@ class EventDrivenBacktestEngine:
                     "type": fill.order_type,
                     "price": fill.fill_price,
                     "quantity": fill.fill_quantity,
-                    "reason": "止盈卖出",
+                    "reason": (
+                        f"止盈卖出（涨幅{pnl_pct * 100:.1f}%，"
+                        f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
+                        f"止盈线+{self.take_profit * 100:.0f}%）"
+                    ),
                     "bar_date": str(ts),
                     "portfolio_value": portfolio.total_value,
                 },
@@ -846,10 +865,11 @@ class EventDrivenBacktestEngine:
             )
             if ref_price > 0:
                 # G2: 风控触发独立审计——记录触发原因/持仓详情/触发价格，
-                # 让"为什么产生这个 SELL"可追溯
+                # 让"为什么产生这个 SELL"可追溯。trace_id 供后续 FILL 归因关联
+                risk_trace_id = str(uuid.uuid4())
                 self._log_audit(
                     "RISK_TRIGGER",
-                    str(uuid.uuid4()),
+                    risk_trace_id,
                     None,
                     "RiskControl",
                     "WARNING",
@@ -879,10 +899,25 @@ class EventDrivenBacktestEngine:
                     quantity=qty,
                     price=ref_price,
                 )
+                # 风控订单补记 ORDER 审计，parent=RISK_TRIGGER，保证 FILL→ORDER→
+                # RISK_TRIGGER 归因链完整（与信号单 FILL→ORDER→SIGNAL 对称）
+                self._log_audit(
+                    "ORDER",
+                    order.trace_id,
+                    risk_trace_id,
+                    "RiskControl",
+                    "SUCCESS",
+                    {
+                        "symbol": order.symbol,
+                        "type": order.order_type,
+                        "quantity": order.quantity,
+                    },
+                    self._db_audit,
+                )
                 # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
                 fill = broker.execute_order(order, ref_price)
                 portfolio.update_from_fill(fill)
-                # 止损卖出写入 FILL 审计（原因可追溯）
+                # 止损卖出写入 FILL 审计（原因可追溯，含触发数值）
                 self._log_audit(
                     "FILL",
                     fill.trace_id,
@@ -894,7 +929,11 @@ class EventDrivenBacktestEngine:
                         "type": fill.order_type,
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
-                        "reason": "止损卖出",
+                        "reason": (
+                            f"止损卖出（跌幅{abs(pnl_pct) * 100:.1f}%，"
+                            f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
+                            f"止损线-{self.stop_loss * 100:.0f}%）"
+                        ),
                         "bar_date": str(ts),
                         "portfolio_value": portfolio.total_value,
                     },
@@ -940,10 +979,12 @@ class EventDrivenBacktestEngine:
         if not sellable:
             return False
 
-        # G2: 最大回撤触发独立审计——记录触发时的回撤值/峰值/当前净值
+        # G2: 最大回撤触发独立审计——记录触发时的回撤值/峰值/当前净值，
+        # trace_id 供循环内每笔清仓 FILL 的 ORDER 归因关联
+        risk_trace_id = str(uuid.uuid4())
         self._log_audit(
             "RISK_TRIGGER",
-            str(uuid.uuid4()),
+            risk_trace_id,
             None,
             "RiskControl",
             "WARNING",
@@ -956,6 +997,12 @@ class EventDrivenBacktestEngine:
                 "timestamp": str(ts),
             },
             self._db_audit,
+        )
+        # 触发数值写进原因（同一触发下所有清仓共用）
+        dd_reason = (
+            f"最大回撤清仓（组合回撤{abs(dd) * 100:.1f}%，"
+            f"峰值{peak_value:.0f}→净值{portfolio.total_value:.0f}，"
+            f"限-{self.max_drawdown_limit * 100:.0f}%）"
         )
 
         for symbol, pos in list(portfolio.positions.items()):
@@ -977,9 +1024,23 @@ class EventDrivenBacktestEngine:
                     quantity=qty,
                     price=price,
                 )
+                # 风控订单补记 ORDER 审计，parent=RISK_TRIGGER，保证归因链完整
+                self._log_audit(
+                    "ORDER",
+                    order.trace_id,
+                    risk_trace_id,
+                    "RiskControl",
+                    "SUCCESS",
+                    {
+                        "symbol": order.symbol,
+                        "type": order.order_type,
+                        "quantity": order.quantity,
+                    },
+                    self._db_audit,
+                )
                 fill = broker.execute_order(order, price)
                 portfolio.update_from_fill(fill)
-                # 最大回撤清仓写入 FILL 审计（原因可追溯）
+                # 最大回撤清仓写入 FILL 审计（原因可追溯，含触发数值）
                 self._log_audit(
                     "FILL",
                     fill.trace_id,
@@ -991,7 +1052,7 @@ class EventDrivenBacktestEngine:
                         "type": fill.order_type,
                         "price": fill.fill_price,
                         "quantity": fill.fill_quantity,
-                        "reason": "最大回撤清仓",
+                        "reason": dd_reason,
                         "bar_date": str(ts),
                         "portfolio_value": portfolio.total_value,
                     },
@@ -1072,16 +1133,21 @@ class EventDrivenBacktestEngine:
         symbol: str,
         portfolio: Portfolio,
         fill_quantity: float,
+        target_weight: float | None = None,
     ) -> str:
         """生成信号驱动成交的买入/卖出原因。
 
         买入按是否已有持仓分为建仓/加仓；卖出按数量是否覆盖全部持仓
         分为清仓/减仓。供 FILL 审计载荷的 ``reason`` 字段使用。
+        买入附带目标权重（来自信号选股），让"为什么买"更明确。
         """
         pos = portfolio.positions.get(symbol)
         current_shares = pos.shares if pos is not None else 0.0
         if order_type == "BUY":
-            return "信号买入·建仓" if current_shares <= 0 else "信号买入·加仓"
+            base = "信号买入·建仓" if current_shares <= 0 else "信号买入·加仓"
+            if target_weight:
+                return f"{base}（目标权重{target_weight * 100:.0f}%）"
+            return base
         # SELL
         return "信号卖出·清仓" if fill_quantity >= current_shares else "信号卖出·减仓"
 
@@ -1203,9 +1269,16 @@ class EventDrivenBacktestEngine:
             # submit_order 返回 list[FillEvent]（可能空列表 = 待成交/未触发）。
             fills = broker.submit_order(order, price, daily_volume=daily_volume)
             for fill in fills:
-                # 在更新持仓前计算原因（建仓/加仓、清仓/减仓依赖持仓状态）
+                # 在更新持仓前计算原因（建仓/加仓、清仓/减仓依赖持仓状态），
+                # 买入附带信号目标权重，让"为什么买"更明确
                 reason = self._signal_fill_reason(
-                    fill.order_type, fill.symbol, portfolio, fill.fill_quantity
+                    fill.order_type,
+                    fill.symbol,
+                    portfolio,
+                    fill.fill_quantity,
+                    target_weight=self._signal_to_dict(signal_event.signals).get(
+                        order.symbol
+                    ),
                 )
                 portfolio.update_from_fill(fill)
                 if fill.partial_fill:

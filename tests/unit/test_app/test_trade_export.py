@@ -11,10 +11,15 @@ import json
 from datetime import datetime
 from uuid import uuid4
 
+import polars as pl
 import pytest
 
 from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.backtest.domain.entities import SignalEvent
 from long_earn.backtest.engine.audit import AuditLogger, PostgresAuditProvider
+from long_earn.backtest.engine.broker import TradingCostConfig
+from long_earn.backtest.engine.core import EventDrivenBacktestEngine
+from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.core.pg import pg_connect, pg_version
 
 # 唯一测试标的：共享 PG 含真实历史行情，固定 symbol（如 600000.SH）会
@@ -349,3 +354,197 @@ def test_export_dashboard_data_includes_traded_symbols():
     assert "traded_symbols" in data
     assert len(data["traded_symbols"]) == 2
     assert _PRICE_SYM in data["traded_symbols"]
+
+
+def _write_attribution_chain(logger: AuditLogger, run_id: str) -> None:
+    """写入一条信号单链（SIGNAL→ORDER→FILL）和一条风控单链（RISK_TRIGGER→ORDER→FILL）。"""
+    sig_trace = f"{run_id}-sig"
+    ord_trace = f"{run_id}-ord"
+    fill_trace = f"{run_id}-fill"
+    logger.log_transition(
+        event_type="SIGNAL",
+        trace_id=sig_trace,
+        component="Strategy",
+        status="SUCCESS",
+        payload={
+            "signals": {"A": 0.5, "B": 0.5},
+            "strategy_id": "test-mom",
+            "risk_triggered": False,
+        },
+        timestamp=datetime(2023, 1, 3, 9, 30),
+    )
+    logger.log_transition(
+        event_type="ORDER",
+        trace_id=ord_trace,
+        parent_id=sig_trace,
+        component="Portfolio",
+        status="SUCCESS",
+        payload={"symbol": "A", "type": "BUY", "quantity": 500.0},
+        timestamp=datetime(2023, 1, 3, 9, 31),
+    )
+    logger.log_transition(
+        event_type="FILL",
+        trace_id=fill_trace,
+        parent_id=ord_trace,
+        component="Broker",
+        status="SUCCESS",
+        payload={
+            "symbol": "A",
+            "type": "BUY",
+            "price": 10.0,
+            "quantity": 500.0,
+            "reason": "信号买入·建仓（目标权重50%）",
+            "portfolio_value": 1_000_000.0,
+        },
+        timestamp=datetime(2023, 1, 3, 9, 32),
+    )
+    risk_trace = f"{run_id}-risk"
+    ord2_trace = f"{run_id}-ord2"
+    fill2_trace = f"{run_id}-fill2"
+    logger.log_transition(
+        event_type="RISK_TRIGGER",
+        trace_id=risk_trace,
+        component="RiskControl",
+        status="WARNING",
+        payload={
+            "risk_type": "stop_loss",
+            "symbol": "A",
+            "avg_cost": 10.0,
+            "check_price": 8.8,
+            "pnl_pct": -0.12,
+            "stop_loss_threshold": 0.1,
+            "quantity": 500.0,
+            "timestamp": "2023-02-01 00:00:00",
+        },
+        timestamp=datetime(2023, 2, 1, 9, 30),
+    )
+    logger.log_transition(
+        event_type="ORDER",
+        trace_id=ord2_trace,
+        parent_id=risk_trace,
+        component="RiskControl",
+        status="SUCCESS",
+        payload={"symbol": "A", "type": "SELL", "quantity": 500.0},
+        timestamp=datetime(2023, 2, 1, 9, 31),
+    )
+    logger.log_transition(
+        event_type="FILL",
+        trace_id=fill2_trace,
+        parent_id=ord2_trace,
+        component="RiskControl",
+        status="SUCCESS",
+        payload={
+            "symbol": "A",
+            "type": "SELL",
+            "price": 8.8,
+            "quantity": 500.0,
+            "reason": "止损卖出（跌幅12.0%，成本10.00→触发8.80，止损线-10%）",
+            "portfolio_value": 995_000.0,
+        },
+        timestamp=datetime(2023, 2, 1, 9, 32),
+    )
+
+
+def test_trade_journal_attribution_reconstructs_chain():
+    """export_trade_journal 应还原每笔 FILL 的审计归因链（信号单与风控单）。"""
+    run_id = _fresh_run_id("run-attr")
+    logger, provider = _make_provider_and_logger(run_id)
+    _write_attribution_chain(logger, run_id)
+    provider.close()
+
+    analyzer = BacktestAnalyzer()
+    journal = analyzer.export_trade_journal(run_id)
+    assert len(journal) == 2
+
+    signal_trade = next(t for t in journal if t["type"] == "BUY")
+    assert signal_trade["attribution"]["kind"] == "signal"
+    assert signal_trade["attribution"]["signal"]["strategy_id"] == "test-mom"
+    assert signal_trade["attribution"]["signal"]["signals"] == {"A": 0.5, "B": 0.5}
+    assert signal_trade["attribution"]["order"]["quantity"] == 500.0
+
+    risk_trade = next(t for t in journal if t["type"] == "SELL")
+    assert risk_trade["attribution"]["kind"] == "risk"
+    assert risk_trade["attribution"]["risk_trigger"]["risk_type"] == "stop_loss"
+    assert risk_trade["attribution"]["risk_trigger"]["pnl_pct"] == -0.12
+    assert risk_trade["attribution"]["chain"]["upstream"]
+
+
+def test_engine_risk_fill_enriched_reason_and_chain():
+    """引擎端到端：风控 FILL 原因含触发数值，且 FILL→ORDER→RISK_TRIGGER 归因链可还原。"""
+    provider = PostgresAuditProvider()
+
+    rows = []
+    for i, close in enumerate([10.0, 10.0, 9.1, 8.6, 8.3]):
+        ts = datetime(2024, 2, i + 1)
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "A.SZ",
+                "open": 10.0 if i < 2 else close,
+                "high": max(close, 10.0) * 1.01,
+                "low": close * 0.97,
+                "close": close,
+                "volume": 100000.0,
+            }
+        )
+    panel = pl.DataFrame(rows)
+
+    class _MockProvider:
+        def __init__(self, p):
+            self._panel = p
+
+        def get_merged_panel_as_polars(self, symbols, start, end):
+            return self._panel.filter(
+                (pl.col("symbol").is_in(symbols))
+                & (pl.col("timestamp") >= datetime.strptime(start, "%Y-%m-%d"))
+                & (pl.col("timestamp") <= datetime.strptime(end, "%Y-%m-%d"))
+            )
+
+    class _BuyOnce(BaseStrategy):
+        def __init__(self):
+            super().__init__(strategy_id="test-eng")
+            self._called = False
+
+        def init(self):
+            self._called = False
+
+        def on_bar(self, bars, context):
+            if self._called:
+                return None
+            self._called = True
+            ts = bars.select("timestamp").to_series()[0]
+            return SignalEvent(
+                timestamp=ts,
+                trace_id="sig-eng",
+                event_id="sig-eng-ev",
+                signals={"A.SZ": 1.0},
+                strategy_id="test-eng",
+            )
+
+    engine = EventDrivenBacktestEngine(
+        data_provider=_MockProvider(panel),
+        cost_config=TradingCostConfig(),
+        audit_provider=provider,
+        stop_loss=0.1,
+        max_drawdown_limit=0.3,
+    )
+    engine.run(_BuyOnce(), "2024-02-01", "2024-02-05", ["A.SZ"])
+    engine_run_id = engine._current_run_id
+    _CREATED_RUN_IDS.append(engine_run_id)
+    provider.close()
+
+    # 引擎内存轨迹：信号单带目标权重，风控单带触发数值
+    trail = engine.audit_logger.get_full_trail()
+    fill_reasons = [
+        e["payload"].get("reason") for e in trail if e.get("event_type") == "FILL"
+    ]
+    assert any("目标权重" in r for r in fill_reasons)
+    assert any("止损卖出（跌幅" in r and "止损线" in r for r in fill_reasons)
+
+    # analyzer 归因链还原
+    analyzer = BacktestAnalyzer()
+    journal = analyzer.export_trade_journal(engine_run_id)
+    kinds = {t["attribution"]["kind"] for t in journal}
+    assert kinds == {"signal", "risk"}
+    risk_trade = next(t for t in journal if t["attribution"]["kind"] == "risk")
+    assert risk_trade["attribution"]["risk_trigger"]["risk_type"] == "stop_loss"

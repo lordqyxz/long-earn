@@ -79,6 +79,7 @@ class TradeRecord(BaseModel):
     quantity: float = 0.0
     portfolio_value: float = 0.0
     reason: str = ""
+    attribution: dict | None = None
 
 
 class TradesResponse(BaseModel):
