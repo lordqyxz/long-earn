@@ -61,7 +61,10 @@ def quarterly_to_daily_asof(
     left = (
         pd.MultiIndex.from_product([trading_dates, symbols], names=["date", "symbol"])
         .to_frame(index=False)
-        .assign(date=lambda df: pd.to_datetime(df["date"]))
+        # 统一为 ns 精度：trading_dates 可能来自 PG DATE（psycopg 返回
+        # datetime.date → pd.to_datetime 推断为 datetime64[s]），而右侧
+        # announce_date 为 datetime64[ns]，merge_asof 要求两侧同 dtype
+        .assign(date=lambda df: pd.to_datetime(df["date"]).astype("datetime64[ns]"))
         .sort_values(["symbol", "date"], kind="mergesort")
     )
 
@@ -77,7 +80,11 @@ def quarterly_to_daily_asof(
         return out[fields]
 
     right = quarterly_df.loc[:, ["symbol", "announce_date", *value_cols]].copy()
-    right["announce_date"] = pd.to_datetime(right["announce_date"], errors="coerce")
+    # 统一 ns 精度（PG DATE → datetime.date 时 pd.to_datetime 会推断为
+    # datetime64[s]，需与 left 侧 ns 对齐才能 merge_asof）
+    right["announce_date"] = pd.to_datetime(
+        right["announce_date"], errors="coerce"
+    ).astype("datetime64[ns]")
     right = right.dropna(subset=["announce_date", "symbol"])
     right = right.sort_values(["symbol", "announce_date"], kind="mergesort")
     right_by_symbol = {

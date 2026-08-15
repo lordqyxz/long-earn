@@ -50,3 +50,8 @@ check_audit.py
 
 # ZCode 会话计划与本地状态
 .zcode/
+
+# 本地数据目录（LONG_EARN_DATA_DIR，默认 repo 同级 long-earn-data）
+# 生成数据不入版本控制；该目录有独立 .gitignore（含旧 DuckDB backup/ 归档）
+long-earn-data/
+*.duckdb

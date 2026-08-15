@@ -24,6 +24,7 @@ ADR 提供决策背景与方案选型理由。具体的实施进度、Phase 完�
 | [ADR-016](016-hierarchical-agent-architecture.md) | 分层智能体架构 | 主智能体 ReAct 任务分解 + 子图工具化。**§C「策略研发不做全量 ReAct」已被 ADR-018 Supersede**；Master 仍负责任务分解，策略飞轮改由 ResearchAgent |
 | [ADR-017](017-self-evolution-capability.md) | 自我进化能力 | 经验回写/热启动/元指标/失败反思/prompt自审。全自主 + 版本追溯。状态 Deferred，前置条件：ADR-015 统计门端到端验证 + ADR-016 主智能体落地 + 稳健策略基线产出 |
 | [ADR-018](018-think-on-graph-research-agent.md) | ToG 策略研发飞轮 | HTR 控制器 → ResearchAgent（LLM ⊗ Graph）；假设树/统计门保留为状态与硬约束；事件 `prepare_context` 基础设施化；数据层取消降级叙事 |
+| [ADR-019](019-postgresql-unified-storage.md) | 统一存储迁移至 PostgreSQL | DuckDB 三库（审计/缓存/物质）→ PostgreSQL（Docker 容器 `pg`）；多写者并发安全（并行回测审计不丢行）；psycopg 3 接入，旧 DuckDB 归档 `backup/` |
 
 ## 已废弃 / 已退役
 

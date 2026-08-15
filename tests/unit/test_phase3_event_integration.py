@@ -395,23 +395,24 @@ class TestEventAnalyzer:
         relations = analyzer.list_relations(target="notexist")
         assert relations == []
 
-    def test_load_nonexistent_file(self, tmp_path):
-        """加载不存在的文件返回 False。"""
-        analyzer = EventAnalyzer()
-        assert not analyzer.load(tmp_path / "nonexistent.duckdb")
-        assert not analyzer.is_ready
+    def test_load_from_pg(self, tmp_path):
+        """save 落 PostgreSQL 后 load 能读回新增物质（PG 时代无文件语义）。"""
+        from long_earn.substance.persistence import delete_substance, load_all
 
-    def test_load_valid_file(self, tmp_path):
-        """DuckDB 文件加载往返。"""
         store = SubstanceStore()
+        before = {s.sid for s in load_all()}
         _populate_store(store)
-        path = tmp_path / "events.duckdb"
-        store.save(path)
+        store.save()  # path 参数已废弃，直接落 PG
 
         analyzer = EventAnalyzer()
-        assert analyzer.load(path)
+        assert analyzer.load()
         assert analyzer.is_ready
-        assert len(analyzer.list_events()) == 3
+        # 验证本次写入的物质已持久化（差集法，不依赖库中其他数据）
+        added = {s.sid for s in load_all()} - before
+        assert len(added) >= 3
+        # 清理本次写入，避免污染共享库
+        for sid in added:
+            delete_substance(sid)
 
 
 # ── stock_analysis event_context_node 集成 ─────────────────────────

@@ -41,27 +41,27 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
-import duckdb  # noqa: E402
-
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
 
 
 def probe_data_coverage() -> dict:
-    """查询 DuckDB 缓存数据的实际覆盖范围。
+    """查询 PostgreSQL 缓存数据的实际覆盖范围。
 
     财务数据自 ADR-014 阶段 B 起从单表 ``financial_quarterly`` 拆为 8 张细表
     （income_stmt / balance_sheet / cashflow_stmt / pershareindex 等）。
     这里以 ``pershareindex``（含 ROE/毛利率等衍生指标）作为"是否有财务数据"
     的代理判断；表不存在时视作财务数据未下载。
-    """
-    from long_earn.core.storage import backtest_cache_path
 
-    db = backtest_cache_path()
-    conn = duckdb.connect(str(db), read_only=True)
+    PG 全量迁移后：直接从 PostgreSQL 读取（core.pg 裁决连接参数）。
+    """
+    from long_earn.core.pg import pg_connect
+
+    conn = pg_connect(read_only=True)
     try:
         r = conn.execute(
-            "SELECT MIN(date), MAX(date), COUNT(*), COUNT(DISTINCT symbol) FROM price_daily"
+            "SELECT MIN(date), MAX(date), COUNT(*), COUNT(DISTINCT symbol) "
+            "FROM price_daily"
         ).fetchone()
         price_min, price_max, price_rows, price_symbols = r
 
@@ -73,7 +73,7 @@ def probe_data_coverage() -> dict:
                 "SELECT COUNT(*), COUNT(DISTINCT symbol) FROM pershareindex"
             ).fetchone()
             fin_rows, fin_symbols = int(f[0]), int(f[1])
-        except duckdb.CatalogException:
+        except Exception:
             pass
 
         return {

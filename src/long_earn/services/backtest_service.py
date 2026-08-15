@@ -15,7 +15,7 @@ from long_earn.backtest.data.miniqmt_provider import (
     MiniQmtUniverseProvider,
 )
 from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
-from long_earn.backtest.engine.audit import DuckDBAuditProvider
+from long_earn.backtest.engine.audit import PostgresAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
     StrategyDSL,
@@ -255,16 +255,17 @@ class BacktestServiceImpl(BacktestService):
         }
 
     def _create_audit_provider(self) -> Any:
-        """创建 DuckDB 审计提供者，失败时返回 None（不阻断回测）
+        """创建 PostgreSQL 审计提供者，失败时返回 None（不阻断回测）
 
-        审计为旁路：回测把交易日志（时间/标的/价格/数量/金额）持久化到 DuckDB，
-        供后续导出与可视化消费。初始化失败仅告警，不影响策略计算。
+        审计为旁路：回测把交易日志（时间/标的/价格/数量/金额）持久化到
+        PostgreSQL（backtest_audit.logs），供后续导出与可视化消费。
+        初始化失败仅告警，不影响策略计算。
         """
         try:
-            return DuckDBAuditProvider()
+            return PostgresAuditProvider()
         except Exception as exc:
             if self.logger:
-                self.logger.warning(f"审计存储初始化失败，回测将不写 DuckDB: {exc}")
+                self.logger.warning(f"审计存储初始化失败，回测将不写 PG: {exc}")
             return None
 
     def _get_universe_symbols(self, universe_type: str, date: str) -> list[str]:
@@ -512,7 +513,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             benchmark_symbol=benchmark_symbol,
             allow_large_grid=allow_large_grid,
-            audit_db_path=self.config.backtest_audit_path,
+            audit_db_path="pg",
         )
 
         return {
@@ -573,7 +574,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             n_splits=n_splits,
             benchmark_symbol=benchmark_symbol,
-            audit_db_path=self.config.backtest_audit_path,
+            audit_db_path="pg",
         )
 
         return result
@@ -659,7 +660,7 @@ class BacktestServiceImpl(BacktestService):
                 end_date=end_date,
                 symbols=formatted_symbols,
                 n_splits=n_splits,
-                audit_db_path=self.config.backtest_audit_path,
+                audit_db_path="pg",
             )
         except Exception as e:
             if self.logger:
@@ -849,7 +850,7 @@ class BacktestServiceImpl(BacktestService):
             start_date=start_date,
             end_date=end_date,
             symbols=formatted_symbols,
-            audit_db_path=self.config.backtest_audit_path,
+            audit_db_path="pg",
         )
 
         # BacktestOutcome -> run() 同结构 dict（diagnostics 保真，ADR-008 B6）

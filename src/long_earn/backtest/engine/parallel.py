@@ -2,11 +2,12 @@
 
 提供参数网格并行回测和 Walk-Forward 并行回测。
 每个 worker 独立构造引擎实例，通过 SharedMemory 共享数据底座。
+并行 worker 直接并发写 PostgreSQL 审计表（PG MVCC 原生支持多写者），
+不再使用「worker 临时 DuckDB 文件 + 主进程合并」的旧架构。
 """
 
 from __future__ import annotations
 
-import contextlib
 import os
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
@@ -49,6 +50,9 @@ class BacktestTask:
     max_positions: int = 0
     task_id: str = ""
     param_desc: str = ""
+    # 审计开关：非空字符串表示启用 worker 审计（worker 直接并发写 PG 主库
+    # backtest_audit.logs，PostgreSQL MVCC 原生支持多写者）；空串表示关闭。
+    # 不再承载临时文件路径语义。
     audit_db_path: str = ""
     # ADR-008 B5：warmup 注入契约。每 task 独立算（run_grid 每 combo、
     # run_candidates 每候选），worker 透传给 engine.run(warmup_days=...)。
@@ -84,76 +88,6 @@ class BacktestOutcome:
     degenerate: bool = False
     factor_failures: list[dict] = field(default_factory=list)
     step_failures: list[dict] = field(default_factory=list)
-
-
-def _worker_db_path(base: Path, task_id: str) -> Path:
-    """派生 worker 专属 DuckDB 路径，避免多进程共享连接写冲突。"""
-    return base.parent / f"{base.stem}_{task_id}{base.suffix}"
-
-
-def _merge_worker_audit(base: Path, task_ids: list[str]) -> None:
-    """把并行 worker 的审计日志合并回主审计库并清理临时文件。
-
-    并行回测中每个 worker 写入独立 DuckDB 文件（``_worker_db_path``，
-    避免跨进程共享连接），任务全部结束后由主进程统一合并回
-    ``base`` 指定的主审计库，保证并行回测的审计数据在可视化/导出层
-    可见，不再散落或丢失（P0-11 缺口修正）。
-
-    合并采用 ATTACH + INSERT INTO SELECT 跨库搬运；worker 文件合并后
-    立即删除。失败仅告警，不阻断回测结果返回。
-    """
-    import duckdb
-
-    if not task_ids:
-        return
-
-    # 主审计库可能尚不存在 backtest_audit schema/表：先初始化
-    from long_earn.backtest.engine.audit import DuckDBAuditProvider  # noqa: PLC0415
-
-    try:
-        boot = DuckDBAuditProvider(db_path=base)
-        boot.close()
-    except Exception as exc:  # pragma: no cover - 防御性
-        logger.warning(f"初始化主审计库失败，跳过 worker 审计合并: {exc}")
-        return
-
-    conn = duckdb.connect(str(base), read_only=False)
-    # 显式列名映射：避免 SELECT * 按位置对应时与后加列（seq）的 schema 错位
-    _COLS = (
-        "run_id, seq, timestamp, event_type, trace_id, parent_id, "
-        "component, status, payload, latency_ms"
-    )
-    merged = 0
-    try:
-        for task_id in task_ids:
-            worker_db = _worker_db_path(base, task_id)
-            if not worker_db.exists():
-                continue
-            try:
-                esc_path = str(worker_db).replace("'", "''")
-                conn.execute(f"ATTACH '{esc_path}' AS w")
-                count = conn.execute(
-                    'SELECT COUNT(*) FROM w."backtest_audit".logs'
-                ).fetchone()[0]
-                if count:
-                    conn.execute(
-                        f'INSERT INTO "backtest_audit".logs ({_COLS}) '
-                        f'SELECT {_COLS} FROM w."backtest_audit".logs'
-                    )
-                conn.execute("DETACH w")
-                merged += int(count)
-                # 合并成功后才清理 worker 临时文件；失败保留供排查
-                with contextlib.suppress(Exception):
-                    worker_db.unlink()
-                logger.info(f"worker 审计合并 {worker_db.name}: {count} 条")
-            except Exception as exc:
-                logger.warning(f"合并 worker 审计 {worker_db.name} 失败: {exc}")
-                with contextlib.suppress(Exception):
-                    conn.execute("DETACH w")
-    finally:
-        conn.close()
-    if merged:
-        logger.info(f"并行审计合并完成: 共 {merged} 条")
 
 
 def _shift_start_date(start_date: str, warmup_days: int) -> str:
@@ -204,15 +138,15 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
 
         dsl = parse_strategy_yaml(task.strategy_yaml)
 
-        # 注入 DuckDBAuditProvider：每个 worker 使用独立的 db 文件，
-        # 避免 DuckDB 连接跨进程共享（非线程安全）。
+        # 注入 PostgresAuditProvider：worker 直接并发写 PG 主库审计表，
+        # PostgreSQL MVCC 原生支持多写者，无需 worker 临时文件与合并。
         audit_provider = None
         if task.audit_db_path:
             from long_earn.backtest.engine.audit import (  # noqa: PLC0415
-                DuckDBAuditProvider,
+                PostgresAuditProvider,
             )
 
-            audit_provider = DuckDBAuditProvider(db_path=Path(task.audit_db_path))
+            audit_provider = PostgresAuditProvider()
 
         engine = EventDrivenBacktestEngine(
             cost_config=dsl.trading_cost.to_broker_config(),
@@ -477,19 +411,13 @@ class ParallelRunner:
                     max_positions=max_positions,
                     task_id=str(idx),
                     param_desc=td["param_desc"],
-                    audit_db_path=str(_worker_db_path(audit_base, str(idx)))
-                    if audit_base
-                    else "",
+                    audit_db_path="pg" if audit_base else "",
                     warmup_days=td["warmup_days"],
                 )
                 for idx, td in enumerate(tasks_data)
             ]
 
             outcomes = self._execute_tasks(tasks)
-
-        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
-        if audit_base:
-            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
 
         result = GridResult(outcomes=outcomes)
         logger.info(
@@ -567,9 +495,7 @@ class ParallelRunner:
                         max_position_pct=max_position_pct,
                         task_id=train_task_id,
                         param_desc=f"fold {fold_idx} train",
-                        audit_db_path=str(_worker_db_path(audit_base, train_task_id))
-                        if audit_base
-                        else "",
+                        audit_db_path="pg" if audit_base else "",
                         warmup_days=warmup_days,
                     )
                 )
@@ -588,18 +514,12 @@ class ParallelRunner:
                         max_position_pct=max_position_pct,
                         task_id=test_task_id,
                         param_desc=f"fold {fold_idx} test",
-                        audit_db_path=str(_worker_db_path(audit_base, test_task_id))
-                        if audit_base
-                        else "",
+                        audit_db_path="pg" if audit_base else "",
                         warmup_days=warmup_days,
                     )
                 )
 
             outcomes = self._execute_tasks(tasks)
-
-        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
-        if audit_base:
-            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
 
         # 按 fold 汇总
         fold_results: list[dict[str, Any]] = []
@@ -757,19 +677,13 @@ class ParallelRunner:
                     max_position_pct=c["max_position_pct"],
                     max_positions=c["max_positions"],
                     task_id=c["task_id"],
-                    audit_db_path=str(_worker_db_path(audit_base, c["task_id"]))
-                    if audit_base
-                    else "",
+                    audit_db_path="pg" if audit_base else "",
                     warmup_days=c["warmup_days"],
                 )
                 for c in candidates
             ]
 
             outcomes = self._execute_tasks(tasks)
-
-        # 并行 worker 审计合并回主审计库（P0-11 缺口修正）
-        if audit_base:
-            _merge_worker_audit(audit_base, [t.task_id for t in tasks])
 
         success_count = sum(1 for o in outcomes if o.success)
         logger.info(f"[candidates] 完成: {success_count}/{len(candidates)} 成功")

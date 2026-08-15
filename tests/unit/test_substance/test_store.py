@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from long_earn.substance.model import SubstanceForm
+from long_earn.substance.persistence import delete_substance, load_all
 from long_earn.substance.store import SubstanceStore
 
 
@@ -24,17 +26,33 @@ def test_search_with_metadata_filter():
 
 
 def test_persistence_roundtrip(tmp_path: Path):
-    """DuckDB 保存→加载往返一致性（含 relation）。"""
+    """PostgreSQL 保存→加载往返一致性（含 relation）。
+
+    PG 全量迁移后 save/load 落 PostgreSQL（path 参数兼容保留）。
+    共享库隔离：用 sid 差集验证本次写入的物质可读回，用后清理。
+    """
+    before = {s.sid for s in load_all()}
+
     store = SubstanceStore()
     store.add_knowledge("持久化测试", metadata={"key": "value"})
     store.add_relation("A", "B", weight=0.5)
-
-    path = tmp_path / "test.duckdb"
-    store.save(path)
+    store.save()  # path 已废弃，落 PG
 
     store2 = SubstanceStore()
-    assert store2.load(path)
-    assert store2.count >= 2
+    assert store2.load()  # 从 PG 全量加载
+    added = {s.sid for s in load_all()} - before
+    assert len(added) >= 2
+    # 验证写入的物质类型与内容完整读回
+    by_sid = {s.sid: s for s in load_all()}
+    for sid in added:
+        s = by_sid[sid]
+        if s.form is SubstanceForm.RELATION:
+            assert s.source_id == "A" and s.target_id == "B"
+        else:
+            assert s.content == "持久化测试"
+    # 清理本次写入，避免污染共享库
+    for sid in added:
+        delete_substance(sid)
 
 
 def test_load_markdown_by_headings(tmp_path: Path):

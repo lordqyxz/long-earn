@@ -1,11 +1,15 @@
 """数据缓存模块
 
-使用 DuckDB 作为本地缓存数据库，支持高效的向量化查询。
-路径由 ``core.storage.backtest_cache_path`` 统一裁决（LONG_EARN_DATA_DIR）。
+使用 PostgreSQL 作为数据缓存（ADR-014 阶段 B 8 张财务细表保留）。
 
-ADR-014 阶段 B：``financial_quarterly`` 单一宽表废弃，改为 8 张细表
-（6 标量 + 2 长表 Top10），schema 从 ``FinancialSchemaRegistry`` 反射建表。
-启动时检测旧宽表存在则自动迁移（``migrate_financial_quarterly``）。
+全量迁移 PostgreSQL 后（原 DuckDB 缓存库废弃），价格行情 / 财务数据 /
+股票池 / 标的详情统一存储于 PG，连接参数由 ``core.pg`` 统一裁决
+（PG_HOST/PG_PORT/PG_DB/PG_USER/PG_PASSWORD）。
+
+并发纪律（AGENTS.md 缓存保护约定）：
+- 写者：数据下载/增量同步（ingestion writer）唯一落库，进程内按路径
+  共享 RLock 串行化写事务；跨进程写由 PG MVCC 保证，无需文件锁。
+- 读者：查询全部走独立连接，PG 多读单写天然支持。
 """
 
 import contextlib
@@ -16,16 +20,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import pandas as pd
 from loguru import logger
 
-from long_earn.backtest.data.financial.migrations import (
-    migrate_financial_quarterly,
-    needs_migration,
+from long_earn.backtest.data.financial.schemas import (
+    _PG_TYPE_MAP,
+    FinancialSchemaRegistry,
 )
-from long_earn.backtest.data.financial.schemas import FinancialSchemaRegistry
-from long_earn.core.storage import backtest_cache_path
+from long_earn.core.pg import pg_connect
 
 # 缓存大查询 info 日志阈值（避免小查询刷屏）
 _CACHE_SLOW_QUERY_SYMBOLS = 500
@@ -35,7 +37,10 @@ _WRITE_LOCKS: dict[str, threading.RLock] = {}
 
 
 def _process_write_lock(db_path: Path) -> threading.RLock:
-    """返回同一数据库路径在当前进程内共享的单写者锁。"""
+    """返回同一数据库路径在当前进程内共享的单写者锁。
+
+    PG 迁移后 db_path 仅作锁命名空间保留（兼容旧调用方）。
+    """
 
     key = str(db_path.resolve())
     with _WRITE_LOCKS_GUARD:
@@ -43,43 +48,50 @@ def _process_write_lock(db_path: Path) -> threading.RLock:
 
 
 class DataCache:
-    """DuckDB 数据缓存管理器"""
+    """PostgreSQL 数据缓存管理器"""
 
     def __init__(self, db_path: str | Path = ""):
         """初始化缓存
 
         Args:
-            db_path: 数据库文件路径，空字符串默认取 core.storage.backtest_cache_path()
+            db_path: [已废弃] DuckDB 时代路径参数，保留仅为兼容旧调用方；
+                PG 时代连接参数由 core.pg 统一裁决（PG_HOST 等环境变量）
         """
-        self.db_path = Path(db_path) if db_path else backtest_cache_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db_path_str = str(self.db_path)
+        # 锁命名空间：沿用 db_path 保证同进程多 DataCache 实例共享写锁
+        self._lock_key = Path(db_path) if db_path else Path("pg_default")
         self._local = threading.local()
-        self._write_lock = _process_write_lock(self.db_path)
+        self._write_lock = _process_write_lock(self._lock_key)
         with self._write_lock:
             self._init_tables()
 
-    def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        """获取当前线程的数据库连接（线程安全）。
+    def _get_conn(self) -> Any:
+        """获取当前线程的 PostgreSQL 连接（线程安全）。
 
-        每个线程持有独立 DuckDB 连接，避免多线程并发访问同一连接
-        导致的 access violation 崩溃。
+        psycopg 连接非线程安全，每个线程独立连接；PG 服务端处理并发。
+
+        ``autocommit=True``：只读/高频查询不持有未提交事务，避免 MVCC
+        快照长时间占用而阻塞其它连接的 DDL（如 ``ALTER TABLE`` 需要
+        ACCESS EXCLUSIVE 锁）——P0 级并发死锁隐患。写入走
+        ``_write_transaction`` 的显式 ``BEGIN``/``COMMIT``，仍保持原子性。
+
+        ``row_factory=None``：全模块查询均以 ``row[N]`` 元组下标访问
+        （DuckDB 时代 fetchall 契约），保持一致性。
         """
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = duckdb.connect(self._db_path_str)
+            self._local.conn = pg_connect(autocommit=True, row_factory=None)
         return self._local.conn
 
     @contextlib.contextmanager
-    def _write_transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+    def _write_transaction(self) -> Iterator[Any]:
         """串行化当前进程写入，并以事务保证单次公共写操作原子化。
 
-        该锁按数据库绝对路径跨 ``DataCache`` 实例共享。它不提供跨进程互斥；
-        生产下载仍须由 ingestion writer 统一落库。
+        进程内按锁命名空间共享 RLock（跨 DataCache 实例）；跨进程写由
+        PG MVCC 保证原子性（ingestion writer 仍是生产落库的唯一入口）。
         """
 
         with self._write_lock:
             conn = self._get_conn()
-            conn.execute("BEGIN TRANSACTION")
+            conn.execute("BEGIN")
             try:
                 yield conn
             except Exception:
@@ -87,6 +99,18 @@ class DataCache:
                 raise
             else:
                 conn.execute("COMMIT")
+
+    @staticmethod
+    def _fetchdf(conn: Any, query: str, params: list[Any] | None = None) -> pd.DataFrame:
+        """执行查询并转为 pandas DataFrame（psycopg 无 fetchdf）。"""
+        if params is None:
+            params = []
+        cur = conn.execute(query, params)
+        if cur.description is None:
+            return pd.DataFrame()
+        cols = [d.name for d in cur.description]
+        rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
     def _normalize_date(date_str: str) -> str:
@@ -113,7 +137,7 @@ class DataCache:
         return str(parsed.strftime("%Y-%m-%d"))
 
     def _init_tables(self) -> None:
-        """初始化数据表"""
+        """初始化数据表（PostgreSQL DDL，幂等）"""
         conn = self._get_conn()
 
         # 日行情数据
@@ -121,21 +145,21 @@ class DataCache:
             CREATE TABLE IF NOT EXISTS price_daily (
                 symbol VARCHAR NOT NULL,
                 date DATE NOT NULL,
-                open DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                close DOUBLE,
-                volume DOUBLE,
+                open DOUBLE PRECISION,
+                high DOUBLE PRECISION,
+                low DOUBLE PRECISION,
+                close DOUBLE PRECISION,
+                volume DOUBLE PRECISION,
                 is_tradable BOOLEAN DEFAULT TRUE,
                 PRIMARY KEY (symbol, date)
             )
         """)
-        # P1-09 迁移：为旧表添加 is_tradable 列（IF NOT EXISTS 语法）
+        # P1-09：为旧表添加 is_tradable 列（幂等）
         with contextlib.suppress(Exception):
-            conn.execute("""
-                ALTER TABLE price_daily
-                ADD COLUMN IF NOT EXISTS is_tradable BOOLEAN DEFAULT TRUE
-            """)
+            conn.execute(
+                "ALTER TABLE price_daily "
+                "ADD COLUMN IF NOT EXISTS is_tradable BOOLEAN DEFAULT TRUE"
+            )
 
         # 财务数据 schema 元表（版本管理）
         conn.execute("""
@@ -146,41 +170,29 @@ class DataCache:
         """)
 
         # ADR-014 阶段 B：8 张财务细表（替代旧 financial_quarterly 单一宽表）
-        # DDL 从 FinancialSchemaRegistry 反射生成，不再手写字段清单。
+        # DDL 从 FinancialSchemaRegistry 反射生成（PG 方言）。
         for schema in FinancialSchemaRegistry.TABLES:
             conn.execute(
                 f"CREATE TABLE IF NOT EXISTS {schema.table_name} ({schema.column_ddl()})"
             )
             # 记录每张表的 schema 版本（幂等，不破坏已缓存数据）
             conn.execute(
-                "INSERT OR REPLACE INTO _schema_meta VALUES (?, ?)",
+                "INSERT INTO _schema_meta (table_name, version) VALUES (%s, %s) "
+                "ON CONFLICT (table_name) DO UPDATE SET version = EXCLUDED.version",
                 [schema.table_name, FinancialSchemaRegistry.SCHEMA_VERSION],
             )
 
         # SCHEMA_VERSION v3：cashflow_stmt 扩展列迁移（幂等，不破坏已有数据）
         for col_def in (
-            "investing_cf DOUBLE",
-            "financing_cf DOUBLE",
-            "net_cash_change DOUBLE",
-            "cash_from_sales DOUBLE",
+            "investing_cf DOUBLE PRECISION",
+            "financing_cf DOUBLE PRECISION",
+            "net_cash_change DOUBLE PRECISION",
+            "cash_from_sales DOUBLE PRECISION",
         ):
             with contextlib.suppress(Exception):
                 conn.execute(
                     f"ALTER TABLE cashflow_stmt ADD COLUMN IF NOT EXISTS {col_def}"
                 )
-
-        # ADR-014 阶段 B：检测旧 financial_quarterly 宽表，自动迁移到 4 张新标量表
-        # 迁移幂等（新表已有数据则跳过），旧表重命名为 _v1_deprecated 保留不删。
-        try:
-            if needs_migration(conn):
-                report = migrate_financial_quarterly(conn)
-                if not report.skipped:
-                    logger.info(
-                        f"财务数据自动迁移完成: {report.migrated_rows} 行 → "
-                        f"{report.tables_written}，旧表保留为 {report.deprecated_table}"
-                    )
-        except Exception as e:
-            logger.warning(f"财务数据迁移检查失败（非致命，继续启动）: {e}")
 
         # 指数成分股
         conn.execute("""
@@ -200,15 +212,16 @@ class DataCache:
                 industry VARCHAR DEFAULT '',
                 region VARCHAR DEFAULT '',
                 listing_date VARCHAR DEFAULT '',
-                total_shares DOUBLE DEFAULT 0,
-                float_shares DOUBLE DEFAULT 0,
-                market_value DOUBLE DEFAULT 0,
-                flow_market_value DOUBLE DEFAULT 0,
+                total_shares DOUBLE PRECISION DEFAULT 0,
+                float_shares DOUBLE PRECISION DEFAULT 0,
+                market_value DOUBLE PRECISION DEFAULT 0,
+                flow_market_value DOUBLE PRECISION DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
-        logger.info(f"缓存数据库初始化完成: {self.db_path}")
+        conn.commit()
+        logger.info("缓存数据库初始化完成 (PostgreSQL)")
 
     def get_price_range(self, symbol: str) -> tuple[str, str] | None:
         """获取某只股票缓存的日期范围"""
@@ -217,7 +230,7 @@ class DataCache:
             """
             SELECT MIN(date) as start_date, MAX(date) as end_date
             FROM price_daily
-            WHERE symbol = ?
+            WHERE symbol = %s
             """,
             [symbol],
         ).fetchone()
@@ -239,7 +252,7 @@ class DataCache:
         n = len(symbols)
         start = time.perf_counter()
         conn = self._get_conn()
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         rows = conn.execute(
             f"""
             SELECT symbol, MAX(date) as latest
@@ -271,9 +284,9 @@ class DataCache:
         conn = self._get_conn()
         rows = conn.execute(
             """
-            SELECT DISTINCT CAST(date AS TEXT) AS dt
+            SELECT DISTINCT to_char(date, 'YYYY-MM-DD') AS dt
             FROM price_daily
-            WHERE date >= ? AND date <= ?
+            WHERE date >= %s::date AND date <= %s::date
             ORDER BY dt
             """,
             [start_date, end_date],
@@ -289,14 +302,18 @@ class DataCache:
     ) -> pd.DataFrame | None:
         """从缓存获取行情数据"""
         conn = self._get_conn()
-        select_fields = ", ".join(fields) if fields else "*"
-        placeholders = ", ".join(["?"] * len(symbols))
+        # fields=None 时选全部列；否则仅选指定字段。
+        # 注意避免 `symbol, date, *` 产生重复列名（psycopg/pandas 报
+        # "duplicate keys"），因此 symbol/date 始终显式列出且去重。
+        extra = [f for f in (fields or []) if f not in ("symbol", "date")]
+        select_fields = ", ".join(["symbol", "date", *extra])
+        placeholders = ", ".join(["%s"] * len(symbols))
 
         query = f"""
-            SELECT symbol, date, {select_fields}
+            SELECT {select_fields}
             FROM price_daily
             WHERE symbol IN ({placeholders})
-              AND date >= ? AND date <= ?
+              AND date >= %s::date AND date <= %s::date
             ORDER BY date, symbol
         """
         params = [*symbols, start_date, end_date]
@@ -304,7 +321,7 @@ class DataCache:
         start = time.perf_counter()
 
         try:
-            df = conn.execute(query, params).fetchdf()
+            df = self._fetchdf(conn, query, params)
             elapsed = time.perf_counter() - start
             if df.empty:
                 logger.debug(
@@ -335,7 +352,7 @@ class DataCache:
             return None
 
     def save_prices(self, df: pd.DataFrame) -> None:
-        """保存行情数据到缓存"""
+        """保存行情数据到缓存（批量 COPY + ON CONFLICT 幂等合并）。"""
         if df.empty:
             return
 
@@ -348,20 +365,36 @@ class DataCache:
         if df["date"].dtype == "object":
             df["date"] = pd.to_datetime(df["date"])
 
+        # 动态构建列清单：兼容新旧 schema（is_tradable 列可选）
+        insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
+        if "is_tradable" in df.columns:
+            insert_cols.append("is_tradable")
+        cols_str = ", ".join(insert_cols)
+        update_cols = ", ".join(f"{c} = EXCLUDED.{c}" for c in insert_cols)
+
         with self._write_transaction() as conn:
-            conn.execute("""
-                CREATE OR REPLACE TEMP TABLE temp_price AS SELECT * FROM df
-            """)
-            # 动态构建 INSERT 列清单：兼容新旧 schema（is_tradable 列可选）
-            insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
-            if "is_tradable" in df.columns:
-                insert_cols.append("is_tradable")
-            cols_str = ", ".join(insert_cols)
-            conn.execute(f"""
-                INSERT OR REPLACE INTO price_daily ({cols_str})
-                SELECT {cols_str}
-                FROM temp_price
-            """)
+            # 临时表 + COPY 批量载入（1800 万行级 price_daily 用 COPY 最快）。
+            # 临时表从目标表继承列类型；COPY 用默认 TEXT 格式 —— psycopg3 的
+            # write_row() 输出 tab 分隔文本，配 FORMAT CSV（逗号分隔）会列错位。
+            conn.execute("DROP TABLE IF EXISTS temp_price")
+            conn.execute(
+                f"CREATE TEMP TABLE temp_price AS "
+                f"SELECT {cols_str} FROM price_daily WITH NO DATA"
+            )
+            # NaN → None：psycopg COPY 无法序列化 pandas NaN
+            copy_df = df[insert_cols].where(pd.notnull(df[insert_cols]), None)
+            with conn.cursor() as cur, cur.copy(
+                f"COPY temp_price ({cols_str}) FROM STDIN"
+            ) as copy:
+                for row in copy_df.itertuples(index=False):
+                    copy.write_row(list(row))
+            conn.execute(
+                f"""
+                INSERT INTO price_daily ({cols_str})
+                SELECT {cols_str} FROM temp_price
+                ON CONFLICT (symbol, date) DO UPDATE SET {update_cols}
+                """
+            )
         logger.info(f"缓存行情数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
 
     def get_financial_range(self, symbol: str) -> tuple[str, str] | None:
@@ -371,7 +404,7 @@ class DataCache:
             """
             SELECT MIN(report_date) as start_date, MAX(report_date) as end_date
             FROM income_stmt
-            WHERE symbol = ?
+            WHERE symbol = %s
             """,
             [symbol],
         ).fetchone()
@@ -387,7 +420,7 @@ class DataCache:
         """
         conn = self._get_conn()
         result = conn.execute(
-            "SELECT MAX(announce_date) FROM income_stmt WHERE symbol = ?",
+            "SELECT MAX(announce_date) FROM income_stmt WHERE symbol = %s",
             [symbol],
         ).fetchone()
         if result and result[0]:
@@ -409,7 +442,7 @@ class DataCache:
         n = len(symbols)
         start = time.perf_counter()
         conn = self._get_conn()
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         rows = conn.execute(
             f"""
             SELECT symbol, MAX(announce_date) as latest
@@ -440,7 +473,7 @@ class DataCache:
         if not symbols:
             return {}
         conn = self._get_conn()
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         rows = conn.execute(
             f"""
             SELECT symbol, MAX(announce_date) as latest
@@ -455,10 +488,10 @@ class DataCache:
     # ── 8 张细表通用 CRUD（ADR-014 阶段 B）────────────────────────────
 
     def save_financial_table(self, table_name: str, df: pd.DataFrame) -> None:
-        """按表写入财务数据（INSERT OR REPLACE，主键幂等）。
+        """按表写入财务数据（ON CONFLICT 主键幂等 upsert）。
 
         Args:
-            table_name: DuckDB 表名（必须在 FinancialSchemaRegistry.TABLES 中）
+            table_name: 表名（必须在 FinancialSchemaRegistry.TABLES 中）
             df: DataFrame，列需包含 schema 定义的字段（缺失列自动补 NULL）
         """
         if df.empty:
@@ -481,10 +514,30 @@ class DataCache:
         if df.empty:
             return
         col_list = ", ".join(schema_cols)
+        pk = ", ".join(schema.primary_key)
+        update_cols = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in schema_cols if c not in schema.primary_key
+        )
         with self._write_transaction() as conn:
+            # 临时表继承目标表列类型 + 默认 TEXT COPY（配 psycopg3 write_row）
+            conn.execute("DROP TABLE IF EXISTS temp_fin")
             conn.execute(
-                f"INSERT OR REPLACE INTO {table_name} ({col_list}) "
-                f"SELECT {col_list} FROM df"
+                f"CREATE TEMP TABLE temp_fin AS "
+                f"SELECT {col_list} FROM {table_name} WITH NO DATA"
+            )
+            # NaN → None：psycopg COPY 无法序列化 pandas NaN
+            copy_df = df[schema_cols].where(pd.notnull(df[schema_cols]), None)
+            with conn.cursor() as cur, cur.copy(
+                f"COPY temp_fin ({col_list}) FROM STDIN"
+            ) as copy:
+                for row in copy_df.itertuples(index=False):
+                    copy.write_row(list(row))
+            conn.execute(
+                f"""
+                INSERT INTO {table_name} ({col_list})
+                SELECT {col_list} FROM temp_fin
+                ON CONFLICT ({pk}) DO UPDATE SET {update_cols}
+                """
             )
         logger.debug(
             f"缓存 {table_name}: {len(df)} 行, {df['symbol'].nunique()} 只股票"
@@ -501,7 +554,7 @@ class DataCache:
         """按表读取财务数据。
 
         Args:
-            table_name: DuckDB 表名
+            table_name: 表名
             symbols: 股票代码列表
             fields: 需要的字段列表；None 表示返回全量字段
             start_date: 报告期起始（YYYY-MM-DD），None 不限
@@ -524,14 +577,14 @@ class DataCache:
                     seen.add(c)
                     unique_required.append(c)
             select_clause = ", ".join(unique_required)
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         where_parts = [f"symbol IN ({placeholders})"]
         params: list[str] = list(symbols)
         if start_date:
-            where_parts.append("report_date >= ?")
+            where_parts.append("report_date >= %s::date")
             params.append(start_date)
         if end_date:
-            where_parts.append("report_date <= ?")
+            where_parts.append("report_date <= %s::date")
             params.append(end_date)
         where_clause = " AND ".join(where_parts)
         query = (
@@ -539,7 +592,7 @@ class DataCache:
             f"WHERE {where_clause} ORDER BY report_date, symbol"
         )
         try:
-            df = conn.execute(query, params).fetchdf()
+            df = self._fetchdf(conn, query, params)
             if df.empty:
                 return None
             df["report_date"] = pd.to_datetime(df["report_date"])
@@ -576,21 +629,21 @@ class DataCache:
                     seen.add(c)
                     unique_required.append(c)
             select_clause = ", ".join(unique_required)
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         # 子查询取每个 symbol 在 as_of 之前最新的 report_date
         query = f"""
             SELECT {select_clause} FROM {table_name}
-            WHERE symbol IN ({placeholders}) AND announce_date <= ?
+            WHERE symbol IN ({placeholders}) AND announce_date <= %s::date
             AND (symbol, report_date) IN (
                 SELECT symbol, MAX(report_date) FROM {table_name}
-                WHERE symbol IN ({placeholders}) AND announce_date <= ?
+                WHERE symbol IN ({placeholders}) AND announce_date <= %s::date
                 GROUP BY symbol
             )
             ORDER BY symbol
         """
         params = [*symbols, as_of, *symbols, as_of]
         try:
-            df = conn.execute(query, params).fetchdf()
+            df = self._fetchdf(conn, query, params)
             if df.empty:
                 return None
             df["report_date"] = pd.to_datetime(df["report_date"])
@@ -629,7 +682,7 @@ class DataCache:
         n = len(symbols)
         start = time.perf_counter()
         try:
-            df = self._get_conn().execute(query, params).fetchdf()
+            df = self._fetchdf(self._get_conn(), query, params)
             elapsed = time.perf_counter() - start
             if df.empty:
                 logger.debug(f"缓存未命中 financials: {len(symbols)} 只股票")
@@ -662,6 +715,43 @@ class DataCache:
             return None
 
     @staticmethod
+    def _union_select_fields(
+        scalar_tables: tuple, fields: list[str] | None
+    ) -> list[str]:
+        """构造 UNION 的列清单（去重保序，含主键 + announce_date）。"""
+        all_fields: list[str] = []
+        for schema in scalar_tables:
+            for col in schema.data_columns:
+                if col.name not in all_fields:
+                    all_fields.append(col.name)
+        base = ["symbol", "report_date", "announce_date"]
+        extra = fields if fields is not None else all_fields
+        # 去重保序：all_fields 已含 announce_date，避免同列重复出现导致
+        # UNION 子查询重名列（外层引用 announce_date 时报 ambiguous）
+        return list(dict.fromkeys([*base, *extra]))
+
+    @staticmethod
+    def _union_table_select(
+        schema: Any,
+        select_fields: list[str],
+        field_pg_type: dict[str, str],
+        placeholders: str,
+    ) -> str:
+        """构造单张表的 SELECT 子句（缺失列补 ``NULL::type AS fname``）。"""
+        schema_field_set = {c.name for c in schema.columns}
+        cols: list[str] = []
+        for fname in select_fields:
+            if fname in schema_field_set:
+                cols.append(f"{fname} AS {fname}")
+            else:
+                pg_t = field_pg_type.get(fname, "DOUBLE PRECISION")
+                cols.append(f"NULL::{pg_t} AS {fname}")
+        return (
+            f"SELECT {', '.join(cols)} FROM {schema.table_name} "
+            f"WHERE symbol IN ({placeholders})"
+        )
+
+    @staticmethod
     def _build_union_financials_query(
         scalar_tables: tuple,
         symbols: list[str],
@@ -672,33 +762,23 @@ class DataCache:
         每张表 SELECT 其字段，缺失字段补 ``NULL AS fname``（保证 UNION ALL 列名一致），
         外层按 (symbol, report_date) GROUP BY 聚合，MAX(col) 合并多表同字段。
         """
-        placeholders = ", ".join(["?"] * len(symbols))
-        # 4 张标量表的字段并集（含主键 + announce_date）
-        all_fields: list[str] = []
-        for schema in scalar_tables:
-            for col in schema.data_columns:
-                if col.name not in all_fields:
-                    all_fields.append(col.name)
-        # 若调用方指定 fields，只取那些 + 主键 + announce_date
-        if fields is not None:
-            select_fields = ["symbol", "report_date", "announce_date", *fields]
-        else:
-            select_fields = ["symbol", "report_date", "announce_date", *all_fields]
+        placeholders = ", ".join(["%s"] * len(symbols))
+        select_fields = DataCache._union_select_fields(scalar_tables, fields)
 
-        # 每张表的 SELECT 子句（缺失列补 NULL AS fname）
-        sub_selects: list[str] = []
+        # 字段 → PG 类型映射（补 NULL 时需显式类型，否则 PG 推断为 text，
+        # 与真实 DOUBLE PRECISION 列 UNION ALL 时报 "types text and
+        # double precision cannot be matched"）
+        field_pg_type: dict[str, str] = {}
         for schema in scalar_tables:
-            schema_field_set = {c.name for c in schema.columns}
-            cols: list[str] = []
-            for fname in select_fields:
-                if fname in schema_field_set:
-                    cols.append(f"{fname} AS {fname}")
-                else:
-                    cols.append(f"NULL AS {fname}")
-            sub_selects.append(
-                f"SELECT {', '.join(cols)} FROM {schema.table_name} "
-                f"WHERE symbol IN ({placeholders})"
-            )
+            for col in schema.columns:
+                if col.name not in field_pg_type:
+                    field_pg_type[col.name] = _PG_TYPE_MAP.get(col.dtype, col.dtype)
+
+        # 每张表的 SELECT 子句（缺失列补 NULL AS fname，带类型断言）
+        sub_selects = [
+            DataCache._union_table_select(schema, select_fields, field_pg_type, placeholders)
+            for schema in scalar_tables
+        ]
         union_query = " UNION ALL ".join(sub_selects)
 
         # 外层聚合：MAX(col) 合并（同字段只在一表有值）
@@ -799,7 +879,7 @@ class DataCache:
         try:
             # 先检查表中是否有该 index_code 的数据
             count = conn.execute(
-                "SELECT COUNT(*) FROM universe_constituents WHERE index_code = ?",
+                "SELECT COUNT(*) FROM universe_constituents WHERE index_code = %s",
                 [index_code],
             ).fetchone()
             if not count or count[0] == 0:
@@ -807,30 +887,32 @@ class DataCache:
                 return []
 
             if date_fmt:
-                result = conn.execute(
+                result = self._fetchdf(
+                    conn,
                     """
                     SELECT symbol
                     FROM universe_constituents
-                    WHERE index_code = ? AND date = (
+                    WHERE index_code = %s AND date = (
                         SELECT MAX(date) FROM universe_constituents
-                        WHERE index_code = ? AND date <= ?
+                        WHERE index_code = %s AND date <= %s::date
                     )
                     """,
                     [index_code, index_code, date_fmt],
-                ).fetchdf()
+                )
             else:
                 # 空日期：取该指数最新可用日期的成分股
-                result = conn.execute(
+                result = self._fetchdf(
+                    conn,
                     """
                     SELECT symbol
                     FROM universe_constituents
-                    WHERE index_code = ? AND date = (
+                    WHERE index_code = %s AND date = (
                         SELECT MAX(date) FROM universe_constituents
-                        WHERE index_code = ?
+                        WHERE index_code = %s
                     )
                     """,
                     [index_code, index_code],
-                ).fetchdf()
+                )
 
             if result.empty:
                 logger.debug(f"缓存未命中 universe: {index_code}（无匹配日期）")
@@ -855,13 +937,14 @@ class DataCache:
             return None
         try:
             conn = self._get_conn()
-            result = conn.execute(
+            result = self._fetchdf(
+                conn,
                 """
                 SELECT MAX(date) FROM universe_constituents
-                WHERE index_code = ? AND date <= ?
+                WHERE index_code = %s AND date <= %s::date
                 """,
                 [index_code, date_fmt],
-            ).fetchdf()
+            )
             if result.empty or result.iloc[0, 0] is None:
                 return None
             return str(result.iloc[0, 0])[:10]
@@ -880,22 +963,16 @@ class DataCache:
         date_fmt = self._normalize_date(date)
         if not date_fmt:
             date_fmt = datetime.now().strftime("%Y-%m-%d")
-        df = pd.DataFrame(  # noqa: F841
-            {
-                "index_code": [index_code] * len(symbols),
-                "symbol": symbols,
-                "date": [pd.to_datetime(date_fmt)] * len(symbols),
-            }
-        )
 
         with self._write_transaction() as conn:
-            conn.execute("""
-                CREATE OR REPLACE TEMP TABLE temp_univ AS SELECT * FROM df
-            """)
-            conn.execute("""
-                INSERT OR REPLACE INTO universe_constituents
-                SELECT index_code, symbol, date FROM temp_univ
-            """)
+            conn.executemany(
+                """
+                INSERT INTO universe_constituents (index_code, symbol, date)
+                VALUES (%s, %s, %s::date)
+                ON CONFLICT (index_code, symbol, date) DO NOTHING
+                """,
+                [(index_code, sym, date_fmt) for sym in symbols],
+            )
         logger.info(f"缓存成分股: {index_code} @ {date}, {len(symbols)} 只")
 
     # ── 标的详情 ──────────────────────────────────────────────────
@@ -967,10 +1044,20 @@ class DataCache:
         with self._write_transaction() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO instrument_details
+                INSERT INTO instrument_details
                     (symbol, name, industry, region, listing_date,
                      total_shares, float_shares, market_value, flow_market_value, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    industry = EXCLUDED.industry,
+                    region = EXCLUDED.region,
+                    listing_date = EXCLUDED.listing_date,
+                    total_shares = EXCLUDED.total_shares,
+                    float_shares = EXCLUDED.float_shares,
+                    market_value = EXCLUDED.market_value,
+                    flow_market_value = EXCLUDED.flow_market_value,
+                    updated_at = CURRENT_TIMESTAMP
                 """,
                 [
                     symbol,
@@ -1017,31 +1104,26 @@ class DataCache:
             )
         if not rows:
             return 0
-        df = pd.DataFrame(  # noqa: F841 - DuckDB replacement scan 读取局部变量
-            rows,
-            columns=[
-                "symbol",
-                "name",
-                "industry",
-                "region",
-                "listing_date",
-                "total_shares",
-                "float_shares",
-                "market_value",
-                "flow_market_value",
-            ],
-        )
         with self._write_transaction() as conn:
-            conn.execute("CREATE OR REPLACE TEMP TABLE temp_instr AS SELECT * FROM df")
-            conn.execute("""
-                INSERT OR REPLACE INTO instrument_details
+            conn.executemany(
+                """
+                INSERT INTO instrument_details
                     (symbol, name, industry, region, listing_date,
                      total_shares, float_shares, market_value, flow_market_value, updated_at)
-                SELECT symbol, name, industry, region, listing_date,
-                       total_shares, float_shares, market_value, flow_market_value,
-                       CURRENT_TIMESTAMP
-                FROM temp_instr
-            """)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    industry = EXCLUDED.industry,
+                    region = EXCLUDED.region,
+                    listing_date = EXCLUDED.listing_date,
+                    total_shares = EXCLUDED.total_shares,
+                    float_shares = EXCLUDED.float_shares,
+                    market_value = EXCLUDED.market_value,
+                    flow_market_value = EXCLUDED.flow_market_value,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+            )
         logger.info(f"缓存标的详情: {len(rows)} 条")
         return len(rows)
 
@@ -1049,7 +1131,7 @@ class DataCache:
         """从缓存读取单个标的详情。"""
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT * FROM instrument_details WHERE symbol = ?",
+            "SELECT * FROM instrument_details WHERE symbol = %s",
             [symbol],
         ).fetchone()
         if not row:
@@ -1075,7 +1157,7 @@ class DataCache:
         if not symbols:
             return {}
         conn = self._get_conn()
-        placeholders = ", ".join(["?"] * len(symbols))
+        placeholders = ", ".join(["%s"] * len(symbols))
         rows = conn.execute(
             f"SELECT symbol, name FROM instrument_details WHERE symbol IN ({placeholders})",
             symbols,
@@ -1095,8 +1177,8 @@ class DataCache:
             conn.execute(
                 """
                 UPDATE instrument_details
-                SET industry = ?, region = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE symbol = ?
+                SET industry = %s, region = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE symbol = %s
                 """,
                 [industry, region, symbol],
             )
@@ -1123,8 +1205,8 @@ class DataCache:
                 result = conn.execute(
                     f"""
                     UPDATE instrument_details
-                    SET {field} = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE symbol = ? AND ({field} = '' OR {field} IS NULL)
+                    SET {field} = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE symbol = %s AND ({field} = '' OR {field} IS NULL)
                     """,
                     [value, symbol],
                 )
@@ -1141,7 +1223,7 @@ class DataCache:
         # 检查表是否存在
         exists = conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_schema='main' AND table_name='income_stmt'"
+            "WHERE table_schema='public' AND table_name='income_stmt'"
         ).fetchone()[0]
         if not exists:
             return []
@@ -1174,9 +1256,9 @@ class DataCache:
                 ON i.symbol = p.symbol AND i.report_date = p.report_date
             LEFT JOIN cashflow_stmt c
                 ON i.symbol = c.symbol AND i.report_date = c.report_date
-            WHERE i.symbol = ?
+            WHERE i.symbol = %s
             ORDER BY i.report_date DESC
-            LIMIT ?
+            LIMIT %s
             """,
             [symbol, limit],
         ).fetchall()
@@ -1243,13 +1325,13 @@ class DataCache:
 
         conn = self._get_conn()
         params: list[Any] = []
-        where_clauses = [f"symbol IN ({', '.join(['?'] * len(symbols))})"]
+        where_clauses = [f"symbol IN ({', '.join(['%s'] * len(symbols))})"]
         params.extend(symbols)
         if start_date:
-            where_clauses.append("date >= ?")
+            where_clauses.append("date >= %s::date")
             params.append(start_date)
         if end_date:
-            where_clauses.append("date <= ?")
+            where_clauses.append("date <= %s::date")
             params.append(end_date)
 
         rows = conn.execute(

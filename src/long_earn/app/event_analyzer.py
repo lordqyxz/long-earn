@@ -16,8 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from long_earn.substance.model import Substance, SubstanceForm
 from long_earn.substance.store import SubstanceStore
 
@@ -38,12 +36,12 @@ class EventAnalyzer:
 
     # ── 加载 ──────────────────────────────────────────────────
 
-    def load(self, path: str | Path) -> bool:
-        """从 DuckDB 文件加载物质（路径应来自 AppConfig.memory_path）。"""
-        path = Path(path).expanduser()
-        if not path.exists():
-            logger.warning(f"物质数据库不存在: {path}")
-            return False
+    def load(self, path: str | Path | None = None) -> bool:
+        """从 PostgreSQL 加载物质（PG 全量迁移后 path 参数已废弃，兼容旧签名）。
+
+        PG 时代物质存储位于 PostgreSQL（core.pg 裁决连接参数），
+        path 参数保留仅为兼容旧调用方（如 AppConfig.memory_path）。
+        """
         ok = self._store.load(path)
         self._loaded = ok
         return ok

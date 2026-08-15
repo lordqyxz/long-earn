@@ -322,7 +322,19 @@ class TestProviderAvailability:
     """CiccwmDataProvider.is_available 逻辑测试。"""
 
     def test_available_property_is_boolean(self, tmp_path):
-        """可用性检查不应依赖或打开生产缓存。"""
-        provider = CiccwmDataProvider(DataCache(tmp_path / "ciccwm-test.duckdb"))
+        """可用性检查不应依赖或打开生产缓存。
+
+        PG 全量迁移后 DataCache 忽略 db_path（连接由 core.pg 裁决）；
+        is_available 仅反映 xtquant 客户端状态，不读存储。
+        """
+        from long_earn.core.pg import pg_version
+
+        try:
+            pg_version()
+        except Exception:
+            import pytest
+
+            pytest.skip("PostgreSQL 服务不可用")
+        provider = CiccwmDataProvider(DataCache())
         # 不断言具体值，只验证不抛异常且返回 bool
         assert isinstance(provider.is_available, bool)

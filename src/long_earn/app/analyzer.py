@@ -1,7 +1,11 @@
 """回测审计分析工具
 
-基于 DuckDB 审计日志，提供回测结果分析、风险指标计算、多策略对比等功能。
-同时提供可视化所需的结构化 JSON 数据导出接口。
+基于 PostgreSQL 审计日志，提供回测结果分析、风险指标计算、多策略对比
+等功能。同时提供可视化所需的结构化 JSON 数据导出接口。
+
+全量迁移 PostgreSQL 后，审计日志与价格行情统一存储于 PG（``core.pg``
+裁决连接参数），不再有 DuckDB 本地文件。所有连接默认 read_only，
+遵循单写者纪律（写者仅 PostgresAuditProvider / DataCache 写入路径）。
 """
 
 import json
@@ -9,47 +13,67 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import polars as pl
 from loguru import logger
 
-from long_earn.core.storage import backtest_audit_path, backtest_cache_path
+from long_earn.core.pg import pg_connect
 
 # 风险指标计算所需的最小日收益率数据点数
 _MIN_DAILY_RETURNS_FOR_RISK = 2
+
+# 审计日志表名（PG schema 与 DuckDB 时代一致）
+_AUDIT_TABLE = '"backtest_audit".logs'
 
 
 class BacktestAnalyzer:
     """
     回测审计分析工具
 
-    允许 Agent 通过 SQL 查询 DuckDB 审计日志，使用 Polars 进行数据分析，
+    允许 Agent 通过 SQL 查询 PostgreSQL 审计日志，使用 Polars 进行数据分析，
     并导出可视化所需的结构化 JSON 数据。
 
-    审计日志位于**独立审计库**（默认 ``backtest_audit_path``），与价格缓存
-    分库；个股图表（``export_symbol_chart_data``）所需的 ``price_daily``
-    行情数据位于缓存库（``cache_db_path``，默认 ``backtest_cache_path``）。
-    所有连接默认 read_only，遵循单写者纪律（写者仅 DuckDBAuditProvider）。
+    所有连接默认 read_only（删除等写操作走独立的可写连接并立即提交）。
     """
 
-    def __init__(
-        self,
-        db_path: Path | None = None,
-        cache_db_path: Path | None = None,
-    ) -> None:
-        self.db_path = db_path if db_path is not None else backtest_audit_path()
-        self.cache_db_path = (
-            cache_db_path if cache_db_path is not None else backtest_cache_path()
-        )
+    def __init__(self, db_path: Path | None = None) -> None:
+        # db_path 参数保留仅为兼容旧签名（PG 时代连接参数由 core.pg 统一裁决）
+        del db_path
 
-    def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        # 只读连接：避免与 DuckDBAuditProvider 的写入连接竞争写锁，
-        # 防止 Web 服务启动时 WAL checkpoint 导致审计数据丢失。
-        return duckdb.connect(str(self.db_path), read_only=True)
+    def _get_conn(self) -> Any:
+        # 只读连接：审计/分析消费侧一律只读，遵循单写者纪律。
+        # row_factory=None：全模块查询均以 row[N] 元组下标访问（保持
+        # DuckDB 时代 fetchall 契约；PG jsonb 由 psycopg 反序列化为 dict，
+        # 经 _payload_as_dict 统一兼容）。
+        return pg_connect(read_only=True, row_factory=None)
 
-    def _get_writable_conn(self) -> duckdb.DuckDBPyConnection:
+    def _get_writable_conn(self) -> Any:
         # 可写连接：仅在删除操作时短暂使用，用完立即关闭。
-        return duckdb.connect(str(self.db_path), read_only=False)
+        return pg_connect()
+
+    @staticmethod
+    def _rows_to_pl(conn: Any, query: str, params: list[Any]) -> pl.DataFrame:
+        """执行查询并转为 polars DataFrame（psycopg 无 .pl()）。"""
+        cur = conn.execute(query, params)
+        if cur.description is None:
+            return pl.DataFrame()
+        cols = [d.name for d in cur.description]
+        rows = cur.fetchall()
+        return pl.DataFrame(rows, schema=cols, orient="row")
+
+    @staticmethod
+    def _payload_as_dict(payload: Any) -> dict[str, Any]:
+        """审计 payload 统一转 dict。
+
+        PG jsonb 列经 psycopg 自动反序列化为 dict；兼容旧数据/字符串场景。
+        """
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, str):
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return {}
+        return dict(payload or {})
 
     # ── 基础查询接口 ──────────────────────────────────────────────────
 
@@ -65,7 +89,8 @@ class BacktestAnalyzer:
         """
         conn = self._get_conn()
         try:
-            rows = conn.execute("""
+            rows = conn.execute(
+                f"""
                 SELECT
                     r.run_id,
                     r.started,
@@ -75,31 +100,33 @@ class BacktestAnalyzer:
                     s.strategy_id
                 FROM (
                     SELECT run_id, MIN(timestamp) AS started,
-                        FIRST(payload) AS payload
-                    FROM backtest_audit.logs
+                        (array_agg(payload ORDER BY timestamp))[1] AS payload
+                    FROM {_AUDIT_TABLE}
                     WHERE event_type = 'RUN_END'
                     GROUP BY run_id
                 ) r
                 LEFT JOIN (
                     SELECT run_id, COUNT(*) AS fill_count
-                    FROM backtest_audit.logs
+                    FROM {_AUDIT_TABLE}
                     WHERE event_type = 'FILL'
                     GROUP BY run_id
                 ) f ON r.run_id = f.run_id
                 LEFT JOIN (
                     SELECT run_id, COUNT(*) AS event_count
-                    FROM backtest_audit.logs
+                    FROM {_AUDIT_TABLE}
                     GROUP BY run_id
                 ) e ON r.run_id = e.run_id
                 LEFT JOIN (
                     SELECT run_id,
-                        FIRST(JSON_EXTRACT_STRING(payload, '$.strategy_id')) AS strategy_id
-                    FROM backtest_audit.logs
+                        (array_agg(payload->>'strategy_id' ORDER BY timestamp))[1]
+                            AS strategy_id
+                    FROM {_AUDIT_TABLE}
                     WHERE event_type = 'RUN_START'
                     GROUP BY run_id
                 ) s ON r.run_id = s.run_id
                 ORDER BY r.started DESC
-            """).fetchall()
+                """
+            ).fetchall()
         except Exception:
             conn.close()
             return []
@@ -107,17 +134,17 @@ class BacktestAnalyzer:
         conn.close()
         runs: list[dict[str, Any]] = []
         for row in rows:
-            run_id, started, payload_str, fill_count, event_count, strategy_id = row
+            run_id, started, payload, fill_count, event_count, strategy_id = row
             total_return = 0.0
             sharpe = 0.0
             trade_count = fill_count
-            if payload_str and isinstance(payload_str, str):
+            if payload:
+                pl_data = self._payload_as_dict(payload)
                 try:
-                    pl_data = json.loads(payload_str)
                     total_return = float(pl_data.get("total_return", 0))
                     sharpe = float(pl_data.get("sharpe_ratio", 0))
                     trade_count = int(pl_data.get("trade_count", fill_count))
-                except (json.JSONDecodeError, ValueError, TypeError):
+                except (ValueError, TypeError):
                     pass
             runs.append(
                 {
@@ -140,9 +167,9 @@ class BacktestAnalyzer:
         """
         conn = self._get_writable_conn()
         try:
-            # 先统计待删除记录数（DELETE 不返回影响行数）
+            # 先统计待删除记录数
             row = conn.execute(
-                "SELECT COUNT(*) FROM backtest_audit.logs WHERE run_id = ?",
+                f"SELECT COUNT(*) FROM {_AUDIT_TABLE} WHERE run_id = %s",
                 [run_id],
             ).fetchone()
             count = row[0] if row else 0
@@ -150,9 +177,10 @@ class BacktestAnalyzer:
                 conn.close()
                 return 0
             conn.execute(
-                "DELETE FROM backtest_audit.logs WHERE run_id = ?",
+                f"DELETE FROM {_AUDIT_TABLE} WHERE run_id = %s",
                 [run_id],
             )
+            conn.commit()
             conn.close()
             logger.info(f"删除回测运行 {run_id}: {count} 条记录")
             return count
@@ -169,17 +197,19 @@ class BacktestAnalyzer:
         """
         conn = self._get_conn()
         try:
-            rows = conn.execute("""
+            rows = conn.execute(
+                f"""
                 SELECT DISTINCT r.run_id
-                FROM backtest_audit.logs r
+                FROM {_AUDIT_TABLE} r
                 WHERE r.run_id NOT IN (
-                    SELECT DISTINCT run_id FROM backtest_audit.logs
+                    SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
                     WHERE event_type = 'FILL'
                 )
                 UNION
-                SELECT DISTINCT run_id FROM backtest_audit.logs
+                SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
                 WHERE event_type = 'RUN_ERROR'
-            """).fetchall()
+                """
+            ).fetchall()
             conn.close()
             return [row[0] for row in rows]
         except Exception:
@@ -193,14 +223,16 @@ class BacktestAnalyzer:
         """
         conn = self._get_conn()
         try:
-            rows = conn.execute("""
+            rows = conn.execute(
+                f"""
                 SELECT run_id
-                FROM backtest_audit.logs
+                FROM {_AUDIT_TABLE}
                 WHERE event_type = 'RUN_END'
                   AND payload IS NOT NULL
-                  AND CAST(JSON_EXTRACT(payload, '$.total_return') AS DOUBLE) = 0
+                  AND (payload->>'total_return')::float8 = 0
                 GROUP BY run_id
-            """).fetchall()
+                """
+            ).fetchall()
             conn.close()
             return [row[0] for row in rows]
         except Exception:
@@ -210,87 +242,94 @@ class BacktestAnalyzer:
     def get_run_summary(self, run_id: str) -> pl.DataFrame:
         """获取特定运行 ID 的审计统计概要"""
         conn = self._get_conn()
-        df = conn.execute(
-            """
-            SELECT event_type, status, COUNT(*) as count
-            FROM backtest_audit.logs
-            WHERE run_id = ?
-            GROUP BY event_type, status
-            """,
-            [run_id],
-        ).pl()
-        conn.close()
-        return df
+        try:
+            return self._rows_to_pl(
+                conn,
+                f"""
+                SELECT event_type, status, COUNT(*) as count
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s
+                GROUP BY event_type, status
+                """,
+                [run_id],
+            )
+        finally:
+            conn.close()
 
     def trace_trade_lifecycle(self, trace_id: str) -> pl.DataFrame:
         """还原一个交易的完整因果链条"""
         conn = self._get_conn()
-        related_ids: set[str] = {trace_id}
+        try:
+            related_ids: set[str] = {trace_id}
 
-        current_id = trace_id
-        while True:
-            res = conn.execute(
-                "SELECT parent_id FROM backtest_audit.logs WHERE trace_id = ? LIMIT 1",
-                [current_id],
-            ).fetchone()
-            if not res or not res[0]:
-                break
-            current_id = res[0]
-            related_ids.add(current_id)
+            current_id = trace_id
+            while True:
+                res = conn.execute(
+                    f"SELECT parent_id FROM {_AUDIT_TABLE} "
+                    "WHERE trace_id = %s LIMIT 1",
+                    [current_id],
+                ).fetchone()
+                if not res or not res[0]:
+                    break
+                current_id = res[0]
+                related_ids.add(current_id)
 
-        queue = list(related_ids)
-        visited: set[str] = set()
-        while queue:
-            curr = queue.pop(0)
-            if curr in visited:
-                continue
-            visited.add(curr)
-            res = conn.execute(
-                "SELECT trace_id FROM backtest_audit.logs WHERE parent_id = ?",
-                [curr],
-            ).fetchall()
-            for row in res:
-                if row[0] not in related_ids:
-                    related_ids.add(row[0])
-                    queue.append(row[0])
+            queue = list(related_ids)
+            visited: set[str] = set()
+            while queue:
+                curr = queue.pop(0)
+                if curr in visited:
+                    continue
+                visited.add(curr)
+                res = conn.execute(
+                    f"SELECT trace_id FROM {_AUDIT_TABLE} WHERE parent_id = %s",
+                    [curr],
+                ).fetchall()
+                for row in res:
+                    if row[0] not in related_ids:
+                        related_ids.add(row[0])
+                        queue.append(row[0])
 
-        query = (
-            "SELECT * FROM backtest_audit.logs WHERE trace_id IN ("
-            + ",".join(["?"] * len(related_ids))
-            + ") ORDER BY timestamp ASC"
-        )
-        df = conn.execute(query, list(related_ids)).pl()
-        conn.close()
-        return df
+            query = (
+                f"SELECT * FROM {_AUDIT_TABLE} WHERE trace_id IN ("
+                + ",".join(["%s"] * len(related_ids))
+                + ") ORDER BY timestamp ASC"
+            )
+            return self._rows_to_pl(conn, query, list(related_ids))
+        finally:
+            conn.close()
 
     def analyze_rejected_events(
         self, run_id: str, event_type: str | None = None
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
         conn = self._get_conn()
-        query = (
-            "SELECT * FROM backtest_audit.logs WHERE run_id = ? AND status != 'SUCCESS'"
-        )
-        params: list[Any] = [run_id]
-        if event_type:
-            query += " AND event_type = ?"
-            params.append(event_type)
+        try:
+            query = (
+                f"SELECT * FROM {_AUDIT_TABLE} "
+                "WHERE run_id = %s AND status != 'SUCCESS'"
+            )
+            params: list[Any] = [run_id]
+            if event_type:
+                query += " AND event_type = %s"
+                params.append(event_type)
 
-        df = conn.execute(query, params).pl()
-        conn.close()
-        return df
+            return self._rows_to_pl(conn, query, params)
+        finally:
+            conn.close()
 
     def run_custom_query(
         self, query: str, params: list[Any] | None = None
     ) -> pl.DataFrame:
-        """允许 Agent 执行自定义 SQL 查询"""
+        """允许 Agent 执行自定义 SQL 查询（PostgreSQL 方言，参数占位符 %s）"""
         if params is None:
             params = []
         try:
             conn = self._get_conn()
-            df = conn.execute(query, params).pl()
-            conn.close()
-            return df
+            try:
+                return self._rows_to_pl(conn, query, params)
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Custom audit query failed: {e}")
             return pl.DataFrame()
@@ -308,16 +347,18 @@ class BacktestAnalyzer:
             daily_return (Float64)
         """
         conn = self._get_conn()
-        rows = conn.execute(
-            """
-            SELECT timestamp, payload->>'$.portfolio_value' as value
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'MARKET_DATA'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT timestamp, payload->>'portfolio_value' as value
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'MARKET_DATA'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         if not rows:
             return pl.DataFrame(
@@ -493,13 +534,15 @@ class BacktestAnalyzer:
 
             # 获取交易统计
             conn = self._get_conn()
-            trade_count_row = conn.execute(
-                "SELECT COUNT(*) FROM backtest_audit.logs "
-                "WHERE run_id = ? AND event_type = 'FILL'",
-                [rid],
-            ).fetchone()
+            try:
+                trade_count_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {_AUDIT_TABLE} "
+                    "WHERE run_id = %s AND event_type = 'FILL'",
+                    [rid],
+                ).fetchone()
+            finally:
+                conn.close()
             trade_count = trade_count_row[0] if trade_count_row else 0
-            conn.close()
 
             rows.append(
                 {
@@ -524,16 +567,18 @@ class BacktestAnalyzer:
     def export_equity_curve(self, run_id: str) -> list[dict[str, Any]]:
         """导出权益曲线数据（用于折线图）"""
         conn = self._get_conn()
-        rows = conn.execute(
-            """
-            SELECT timestamp, payload->>'$.portfolio_value' as value
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'MARKET_DATA'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT timestamp, payload->>'portfolio_value' as value
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'MARKET_DATA'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         return [
             {
@@ -546,22 +591,22 @@ class BacktestAnalyzer:
     def export_trade_journal(self, run_id: str) -> list[dict[str, Any]]:
         """导出完整交易日志（用于表格/交易明细）"""
         conn = self._get_conn()
-        fills = conn.execute(
-            """
-            SELECT timestamp, trace_id, parent_id, payload
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'FILL'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        try:
+            fills = conn.execute(
+                f"""
+                SELECT timestamp, trace_id, parent_id, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'FILL'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         journal: list[dict[str, Any]] = []
         for row in fills:
-            payload: dict[str, Any] = (
-                json.loads(row[3]) if isinstance(row[3], str) else (row[3] or {})
-            )
+            payload = self._payload_as_dict(row[3])
             # 优先使用 payload 中的 bar_date（市场交易日），
             # 旧数据无 bar_date 时回退到 timestamp（引擎时间，不够准确）
             bar_date = payload.get("bar_date", "")
@@ -587,25 +632,23 @@ class BacktestAnalyzer:
     def export_signal_history(self, run_id: str) -> list[dict[str, Any]]:
         """导出信号历史（用于分析策略决策点）"""
         conn = self._get_conn()
-        signals = conn.execute(
-            """
-            SELECT timestamp, payload
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'SIGNAL'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        try:
+            signals = conn.execute(
+                f"""
+                SELECT timestamp, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'SIGNAL'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         return [
             {
                 "time": str(row[0]) if row[0] else "",
-                "signals": (
-                    json.loads(row[1]).get("signals", "")
-                    if isinstance(row[1], str)
-                    else ""
-                ),
+                "signals": self._payload_as_dict(row[1]).get("signals", ""),
             }
             for row in signals
         ]
@@ -616,49 +659,47 @@ class BacktestAnalyzer:
         包含权益曲线、交易日志、信号历史、事件统计、基准指标和风险指标。
         """
         conn = self._get_conn()
+        try:
+            perf = conn.execute(
+                f"""
+                SELECT event_type, COUNT(*) as count
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s
+                GROUP BY event_type
+                ORDER BY count DESC
+                """,
+                [run_id],
+            ).fetchall()
 
-        perf = conn.execute(
-            """
-            SELECT event_type, COUNT(*) as count
-            FROM backtest_audit.logs
-            WHERE run_id = ?
-            GROUP BY event_type
-            ORDER BY count DESC
-            """,
-            [run_id],
-        ).fetchall()
+            total_events = sum(row[1] for row in perf)
+            event_breakdown: dict[str, int] = {row[0]: row[1] for row in perf}
 
-        total_events = sum(row[1] for row in perf)
-        event_breakdown: dict[str, int] = {row[0]: row[1] for row in perf}
+            first_ts = conn.execute(
+                f"SELECT MIN(timestamp) FROM {_AUDIT_TABLE} WHERE run_id = %s",
+                [run_id],
+            ).fetchone()[0]
+            last_ts = conn.execute(
+                f"SELECT MAX(timestamp) FROM {_AUDIT_TABLE} WHERE run_id = %s",
+                [run_id],
+            ).fetchone()[0]
 
-        first_ts = conn.execute(
-            "SELECT MIN(timestamp) FROM backtest_audit.logs WHERE run_id = ?",
-            [run_id],
-        ).fetchone()[0]
-        last_ts = conn.execute(
-            "SELECT MAX(timestamp) FROM backtest_audit.logs WHERE run_id = ?",
-            [run_id],
-        ).fetchone()[0]
+            # 尝试从 MARKET_DATA 载荷中提取回测基准指标
+            bm_row = conn.execute(
+                f"""
+                SELECT payload FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'MARKET_DATA'
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                [run_id],
+            ).fetchone()
+        finally:
+            conn.close()
 
-        # 尝试从 MARKET_DATA 载荷中提取回测基准指标
-        bm_row = conn.execute(
-            """
-            SELECT payload FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'MARKET_DATA'
-            ORDER BY timestamp DESC LIMIT 1
-            """,
-            [run_id],
-        ).fetchone()
         bm: dict[str, Any] = {}
-        if bm_row and isinstance(bm_row[0], str):
-            try:
-                pl_data = json.loads(bm_row[0])
-                if "benchmark" in pl_data:
-                    bm = pl_data["benchmark"]
-            except json.JSONDecodeError:
-                pass
-
-        conn.close()
+        if bm_row:
+            pl_data = self._payload_as_dict(bm_row[0])
+            if "benchmark" in pl_data:
+                bm = pl_data["benchmark"]
 
         # 附加风险指标
         risk = self.get_risk_metrics(run_id)
@@ -696,22 +737,22 @@ class BacktestAnalyzer:
         每条记录对应一次成交（FILL 事件），金额 = 价格 × 数量。
         """
         conn = self._get_conn()
-        fills = conn.execute(
-            """
-            SELECT timestamp, trace_id, payload
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'FILL'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        try:
+            fills = conn.execute(
+                f"""
+                SELECT timestamp, trace_id, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'FILL'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         traces: list[dict[str, Any]] = []
         for row in fills:
-            payload: dict[str, Any] = (
-                json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {})
-            )
+            payload = self._payload_as_dict(row[2])
             price = float(payload.get("price", 0))
             quantity = float(payload.get("quantity", 0))
             # 优先使用 payload 中的 bar_date（市场交易日），
@@ -807,21 +848,20 @@ class BacktestAnalyzer:
             dict 包含 symbol、price_history（日期/开/高/低/收/量）、
             trade_points（时间/方向/价格/数量/金额）
         """
-        conn = self._get_conn()
-
-        # 1. 读取该标的的价格走势（从缓存库 price_daily 表，
-        #    审计库与缓存库分库，价格行情只读缓存库）
-        cache_conn = duckdb.connect(str(self.cache_db_path), read_only=True)
-        price_rows = cache_conn.execute(
-            """
-            SELECT date, open, high, low, close, volume
-            FROM price_daily
-            WHERE symbol = ?
-            ORDER BY date ASC
-            """,
-            [symbol],
-        ).fetchall()
-        cache_conn.close()
+        # 1. 读取该标的的价格走势（price_daily 表，PG 统一存储）
+        price_conn = pg_connect(read_only=True, row_factory=None)
+        try:
+            price_rows = price_conn.execute(
+                """
+                SELECT date, open, high, low, close, volume
+                FROM price_daily
+                WHERE symbol = %s
+                ORDER BY date ASC
+                """,
+                [symbol],
+            ).fetchall()
+        finally:
+            price_conn.close()
 
         price_history: list[dict[str, Any]] = []
         for row in price_rows:
@@ -837,23 +877,24 @@ class BacktestAnalyzer:
             )
 
         # 2. 读取该标的的成交点（从审计日志，按 symbol 在 Python 端过滤
-        #    避免 DuckDB JSON 路径提取与比较的类型转换问题）
-        fill_rows = conn.execute(
-            """
-            SELECT timestamp, payload
-            FROM backtest_audit.logs
-            WHERE run_id = ? AND event_type = 'FILL'
-            ORDER BY timestamp ASC
-            """,
-            [run_id],
-        ).fetchall()
-        conn.close()
+        #    避免 JSON 路径提取与比较的类型转换问题）
+        conn = self._get_conn()
+        try:
+            fill_rows = conn.execute(
+                f"""
+                SELECT timestamp, payload
+                FROM {_AUDIT_TABLE}
+                WHERE run_id = %s AND event_type = 'FILL'
+                ORDER BY timestamp ASC
+                """,
+                [run_id],
+            ).fetchall()
+        finally:
+            conn.close()
 
         trade_points: list[dict[str, Any]] = []
         for row in fill_rows:
-            payload: dict[str, Any] = (
-                json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
-            )
+            payload = self._payload_as_dict(row[1])
             if payload.get("symbol", "") != symbol:
                 continue
             price = float(payload.get("price", 0))

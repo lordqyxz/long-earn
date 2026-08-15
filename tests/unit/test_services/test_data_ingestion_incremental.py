@@ -1,4 +1,4 @@
-"""数据下载智能增量单元测试
+"""数据下载智能增量单元测试（PostgreSQL 版）
 
 覆盖点（按项目规范：仅接口层 + 关键环节）：
 1. schema 版本化守卫：版本匹配保留数据，版本不匹配 DROP 重建
@@ -7,24 +7,79 @@
 4. _select_financials_to_refresh 财务增量判定逻辑（关键环节）
 5. _select_prices_to_refresh 行情按交易日精确判定逻辑（关键环节）
 
+PG 全量迁移后：DataCache 忽略 db_path 连 PG（core.pg 裁决连接参数），
+测试数据用唯一 symbol 隔离并清理，避免污染 PG 共享库。
+PG 不可达时整组跳过。
+
 不测：_download_concurrent / _run_batch_subprocess（subprocess + xtquant，集成测试范畴）
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pandas as pd
+import pytest
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.core.pg import pg_version
 from long_earn.services.data_ingestion_service import DataIngestionService
+
+
+def _pg_available() -> bool:
+    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
+    try:
+        pg_version()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _pg_available(), reason="PostgreSQL 服务不可用"
+)
+
+# 唯一前缀：同一 pytest 进程内隔离测试数据（不同 run 互不污染）
+_UNIQ = uuid4().hex[:10]
+
+
+def _sym(base: str) -> str:
+    """给测试 symbol 加唯一前缀（避免污染 PG 共享库真实数据）。"""
+    return f"{base[:-3]}-{_UNIQ}{base[-3:]}"
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_data():
+    """每个测试后清理以 _UNIQ 前缀写入的测试数据（避免污染 PG 共享库）。"""
+    yield
+    cache = DataCache()
+    try:
+        conn = cache._get_conn()
+        conn.execute(
+            "DELETE FROM price_daily WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"]
+        )
+        for table in (
+            "income_stmt",
+            "balance_sheet",
+            "cashflow_stmt",
+            "pershareindex",
+            "capital",
+        ):
+            conn.execute(
+                f"DELETE FROM {table} WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"]
+            )
+        conn.commit()
+    finally:
+        cache.close()
+
 
 # ── 测试夹具 ──────────────────────────────────────────────────────
 
 
 def _make_cache(tmp_path) -> DataCache:
-    """创建临时 DuckDB 缓存（隔离，不污染真实数据）"""
-    return DataCache(db_path=tmp_path / "test_cache.duckdb")
+    """创建连接 PostgreSQL 的 DataCache（隔离，不污染真实数据）"""
+    return DataCache()
 
 
 def _make_service(cache: DataCache) -> DataIngestionService:
@@ -106,15 +161,15 @@ class TestSchemaVersioning:
     def test_version_match_preserves_data(self, tmp_path):
         """版本匹配时重新实例化 DataCache，financial_quarterly 行数不变"""
         cache = _make_cache(tmp_path)
-        _save_financial_rows(cache, "000001.SZ", ["2024-01-01", "2024-04-30"])
-        assert cache.get_financial_latest_announce("000001.SZ") is not None
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2024-01-01", "2024-04-30"])
+        assert cache.get_financial_latest_announce(_sym("000001.SZ")) is not None
 
         # 关闭后重新实例化（模拟下次运行）
         cache.close()
         cache2 = _make_cache(tmp_path)
 
         # 版本匹配 → 数据保留
-        latest = cache2.get_financial_latest_announce("000001.SZ")
+        latest = cache2.get_financial_latest_announce(_sym("000001.SZ"))
         assert latest is not None
         # announce_date 较晚者胜出
         assert "2024-04-30" in str(latest)
@@ -124,7 +179,7 @@ class TestSchemaVersioning:
         不再 DROP 重建。篡改版本号后重新实例化，数据保留（schema 稳定），
         版本号被刷回当前版本。"""
         cache = _make_cache(tmp_path)
-        _save_financial_rows(cache, "000001.SZ", ["2024-01-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2024-01-01"])
 
         # 篡改 income_stmt 版本号为旧版本
         conn = cache._get_conn()
@@ -135,7 +190,7 @@ class TestSchemaVersioning:
 
         # 重新实例化 → CREATE IF NOT EXISTS 幂等，数据保留
         cache2 = _make_cache(tmp_path)
-        latest = cache2.get_financial_latest_announce("000001.SZ")
+        latest = cache2.get_financial_latest_announce(_sym("000001.SZ"))
         # 新架构不 DROP，数据保留
         assert latest is not None
         assert "2024-01-01" in str(latest)
@@ -161,15 +216,15 @@ class TestGetFinancialLatestAnnounce:
     def test_returns_max_announce_date(self, tmp_path):
         cache = _make_cache(tmp_path)
         _save_financial_rows(
-            cache, "600519.SH", ["2023-04-28", "2024-04-30", "2024-01-31"]
+            cache, _sym("600519.SH"), ["2023-04-28", "2024-04-30", "2024-01-31"]
         )
-        latest = cache.get_financial_latest_announce("600519.SH")
+        latest = cache.get_financial_latest_announce(_sym("600519.SH"))
         assert latest is not None
         assert "2024-04-30" in str(latest)
 
     def test_returns_none_for_empty_symbol(self, tmp_path):
         cache = _make_cache(tmp_path)
-        assert cache.get_financial_latest_announce("999999.SZ") is None
+        assert cache.get_financial_latest_announce(_sym("999999.SZ")) is None
 
 
 # ── _select_financials_to_refresh 增量判定 ────────────────────────
@@ -186,9 +241,9 @@ class TestSelectFinancialsToRefresh:
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
-            ["000001.SZ", "000002.SZ"], self.TODAY, start_date="2020-01-01"
+            [_sym("000001.SZ"), _sym("000002.SZ")], self.TODAY, start_date="2020-01-01"
         )
-        assert full_missing == ["000001.SZ", "000002.SZ"]
+        assert full_missing == [_sym("000001.SZ"), _sym("000002.SZ")]
         assert stale == []
         # stale 为空时 stale_start 无意义（返回 today）
         assert stale_start == self.TODAY
@@ -199,9 +254,9 @@ class TestSelectFinancialsToRefresh:
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
-            ["000001.SZ"], self.TODAY, start_date=""
+            [_sym("000001.SZ")], self.TODAY, start_date=""
         )
-        assert full_missing == ["000001.SZ"]
+        assert full_missing == [_sym("000001.SZ")]
         assert stale == []
         assert stale_start == self.TODAY
 
@@ -209,25 +264,25 @@ class TestSelectFinancialsToRefresh:
         """最新公告日距今 > 120 天 → 进 stale 组，起始日 = 公告日 + 1 天"""
         cache = _make_cache(tmp_path)
         # 公告日 2025-01-01，距今 > 120 天 → 过期
-        _save_financial_rows(cache, "000001.SZ", ["2025-01-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
-            ["000001.SZ"], self.TODAY, start_date=""
+            [_sym("000001.SZ")], self.TODAY, start_date=""
         )
         assert full_missing == []
-        assert stale == ["000001.SZ"]
+        assert stale == [_sym("000001.SZ")]
         assert stale_start == "2025-01-02"  # 公告日 + 1 天
 
     def test_fresh_announce_skipped(self, tmp_path):
         """最新公告日距今 ≤ 120 天 → 跳过（既不在 full_missing 也不在 stale）"""
         cache = _make_cache(tmp_path)
         # 公告日 2026-06-01，距今 41 天 ≤ 120 → 新鲜
-        _save_financial_rows(cache, "000001.SZ", ["2026-06-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2026-06-01"])
         svc = _make_service(cache)
 
         full_missing, stale, _ = svc._select_financials_to_refresh(
-            ["000001.SZ"], self.TODAY, start_date=""
+            [_sym("000001.SZ")], self.TODAY, start_date=""
         )
         assert full_missing == []
         assert stale == []
@@ -236,20 +291,20 @@ class TestSelectFinancialsToRefresh:
         """混合场景：无缓存 + 过期 + 新鲜 → 正确分组到 full_missing / stale"""
         cache = _make_cache(tmp_path)
         # 过期（公告日 2025-01-01）
-        _save_financial_rows(cache, "000001.SZ", ["2025-01-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])
         # 新鲜（公告日 2026-06-01）
-        _save_financial_rows(cache, "000002.SZ", ["2026-06-01"])
+        _save_financial_rows(cache, _sym("000002.SZ"), ["2026-06-01"])
         # 000003.SZ 无缓存
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
-            ["000001.SZ", "000002.SZ", "000003.SZ"],
+            [_sym("000001.SZ"), _sym("000002.SZ"), _sym("000003.SZ")],
             self.TODAY,
             start_date="2020-01-01",
         )
         # 000001 过期 → stale；000003 无缓存 → full_missing；000002 新鲜 → 跳过
-        assert full_missing == ["000003.SZ"]
-        assert stale == ["000001.SZ"]
+        assert full_missing == [_sym("000003.SZ")]
+        assert stale == [_sym("000001.SZ")]
         # stale 起始日 = 2025-01-02
         assert stale_start == "2025-01-02"
 
@@ -257,15 +312,15 @@ class TestSelectFinancialsToRefresh:
         """仅过期股票（无全量缺失）→ 起始日取最早过期起始日"""
         cache = _make_cache(tmp_path)
         # 两只都过期，公告日不同
-        _save_financial_rows(cache, "000001.SZ", ["2025-01-01"])  # 起始 2025-01-02
-        _save_financial_rows(cache, "000002.SZ", ["2025-03-01"])  # 起始 2025-03-02
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])  # 起始 2025-01-02
+        _save_financial_rows(cache, _sym("000002.SZ"), ["2025-03-01"])  # 起始 2025-03-02
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
-            ["000001.SZ", "000002.SZ"], self.TODAY, start_date="2020-01-01"
+            [_sym("000001.SZ"), _sym("000002.SZ")], self.TODAY, start_date="2020-01-01"
         )
         assert full_missing == []
-        assert set(stale) == {"000001.SZ", "000002.SZ"}
+        assert set(stale) == {_sym("000001.SZ"), _sym("000002.SZ")}
         # 最早过期起始日 = 2025-01-02
         assert stale_start == "2025-01-02"
 
@@ -279,16 +334,16 @@ class TestBatchLatestInterfaces:
     def test_financial_latest_announces_batch(self, tmp_path):
         """批量返回每只股票最新公告日；缓存中不存在的 symbol 不出现在结果"""
         cache = _make_cache(tmp_path)
-        _save_financial_rows(cache, "000001.SZ", ["2024-01-01", "2024-04-30"])
-        _save_financial_rows(cache, "000002.SZ", ["2025-03-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2024-01-01", "2024-04-30"])
+        _save_financial_rows(cache, _sym("000002.SZ"), ["2025-03-01"])
 
         result = cache.get_financial_latest_announces(
-            ["000001.SZ", "000002.SZ", "999999.SZ"]
+            [_sym("000001.SZ"), _sym("000002.SZ"), _sym("999999.SZ")]
         )
-        assert "000001.SZ" in result
-        assert "2024-04-30" in str(result["000001.SZ"])
-        assert "000002.SZ" in result
-        assert "999999.SZ" not in result  # 不存在的不出现在 dict
+        assert _sym("000001.SZ") in result
+        assert "2024-04-30" in str(result[_sym("000001.SZ")])
+        assert _sym("000002.SZ") in result
+        assert _sym("999999.SZ") not in result  # 不存在的不出现在 dict
 
     def test_financial_latest_announces_empty_input(self, tmp_path):
         """空输入返回空 dict"""
@@ -298,14 +353,14 @@ class TestBatchLatestInterfaces:
     def test_price_latest_dates_batch(self, tmp_path):
         """批量返回每只股票最新交易日；缓存中不存在的 symbol 不出现在结果"""
         cache = _make_cache(tmp_path)
-        _save_price_rows(cache, "000001.SZ", ["2026-07-01", "2026-07-08"])
-        _save_price_rows(cache, "000002.SZ", ["2026-07-05"])
+        _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-01", "2026-07-08"])
+        _save_price_rows(cache, _sym("000002.SZ"), ["2026-07-05"])
 
-        result = cache.get_price_latest_dates(["000001.SZ", "000002.SZ", "999999.SZ"])
-        assert "000001.SZ" in result
-        assert "2026-07-08" in str(result["000001.SZ"])
-        assert "000002.SZ" in result
-        assert "999999.SZ" not in result
+        result = cache.get_price_latest_dates([_sym("000001.SZ"), _sym("000002.SZ"), _sym("999999.SZ")])
+        assert _sym("000001.SZ") in result
+        assert "2026-07-08" in str(result[_sym("000001.SZ")])
+        assert _sym("000002.SZ") in result
+        assert _sym("999999.SZ") not in result
 
     def test_price_latest_dates_empty_input(self, tmp_path):
         """空输入返回空 dict"""
@@ -327,9 +382,9 @@ class TestSelectPricesToRefresh:
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_prices_to_refresh(
-            ["000001.SZ", "000002.SZ"], self.END, start_date="2020-01-01"
+            [_sym("000001.SZ"), _sym("000002.SZ")], self.END, start_date="2020-01-01"
         )
-        assert full_missing == ["000001.SZ", "000002.SZ"]
+        assert full_missing == [_sym("000001.SZ"), _sym("000002.SZ")]
         assert stale == []
         assert stale_start == self.END  # stale 为空时返回 end_date
 
@@ -339,9 +394,9 @@ class TestSelectPricesToRefresh:
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_prices_to_refresh(
-            ["000001.SZ"], self.END, start_date=""
+            [_sym("000001.SZ")], self.END, start_date=""
         )
-        assert full_missing == ["000001.SZ"]
+        assert full_missing == [_sym("000001.SZ")]
         assert stale == []
         assert stale_start == self.END
 
@@ -349,25 +404,25 @@ class TestSelectPricesToRefresh:
         """最新交易日 < end_date → 进 stale 组，起始日 = 最新交易日 + 1 天"""
         cache = _make_cache(tmp_path)
         # 缓存到 2026-07-08，目标 2026-07-12 → 缺 4 天
-        _save_price_rows(cache, "000001.SZ", ["2026-07-08"])
+        _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-08"])
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_prices_to_refresh(
-            ["000001.SZ"], self.END, start_date=""
+            [_sym("000001.SZ")], self.END, start_date=""
         )
         assert full_missing == []
-        assert stale == ["000001.SZ"]
+        assert stale == [_sym("000001.SZ")]
         assert stale_start == "2026-07-09"  # 最新日 + 1 天
 
     def test_up_to_date_skipped(self, tmp_path):
         """最新交易日 >= end_date → 跳过（既不在 full_missing 也不在 stale）"""
         cache = _make_cache(tmp_path)
         # 缓存到 2026-07-12，目标 2026-07-12 → 已齐
-        _save_price_rows(cache, "000001.SZ", ["2026-07-12"])
+        _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-12"])
         svc = _make_service(cache)
 
         full_missing, stale, _ = svc._select_prices_to_refresh(
-            ["000001.SZ"], self.END, start_date=""
+            [_sym("000001.SZ")], self.END, start_date=""
         )
         assert full_missing == []
         assert stale == []
@@ -376,20 +431,20 @@ class TestSelectPricesToRefresh:
         """混合场景：无缓存 + 待补 + 已齐 → 正确分组到 full_missing / stale"""
         cache = _make_cache(tmp_path)
         # 待补（缓存到 2026-07-08，缺 4 天）
-        _save_price_rows(cache, "000001.SZ", ["2026-07-08"])
+        _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-08"])
         # 已齐（缓存到 2026-07-12）
-        _save_price_rows(cache, "000002.SZ", ["2026-07-12"])
+        _save_price_rows(cache, _sym("000002.SZ"), ["2026-07-12"])
         # 000003.SZ 无缓存
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_prices_to_refresh(
-            ["000001.SZ", "000002.SZ", "000003.SZ"],
+            [_sym("000001.SZ"), _sym("000002.SZ"), _sym("000003.SZ")],
             self.END,
             start_date="2020-01-01",
         )
         # 000001 待补 → stale；000003 无缓存 → full_missing；000002 已齐 → 跳过
-        assert full_missing == ["000003.SZ"]
-        assert stale == ["000001.SZ"]
+        assert full_missing == [_sym("000003.SZ")]
+        assert stale == [_sym("000001.SZ")]
         # stale 起始日 = 2026-07-09
         assert stale_start == "2026-07-09"
 
@@ -397,14 +452,14 @@ class TestSelectPricesToRefresh:
         """仅待补股票（无全量缺失）→ 起始日取最早待补起始日"""
         cache = _make_cache(tmp_path)
         # 两只都待补，缓存最新日不同
-        _save_price_rows(cache, "000001.SZ", ["2026-07-08"])  # 起始 2026-07-09
-        _save_price_rows(cache, "000002.SZ", ["2026-07-10"])  # 起始 2026-07-11
+        _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-08"])  # 起始 2026-07-09
+        _save_price_rows(cache, _sym("000002.SZ"), ["2026-07-10"])  # 起始 2026-07-11
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_prices_to_refresh(
-            ["000001.SZ", "000002.SZ"], self.END, start_date="2020-01-01"
+            [_sym("000001.SZ"), _sym("000002.SZ")], self.END, start_date="2020-01-01"
         )
         assert full_missing == []
-        assert set(stale) == {"000001.SZ", "000002.SZ"}
+        assert set(stale) == {_sym("000001.SZ"), _sym("000002.SZ")}
         # 最早待补起始日 = 2026-07-09
         assert stale_start == "2026-07-09"

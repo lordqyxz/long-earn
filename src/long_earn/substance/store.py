@@ -21,7 +21,6 @@ from long_earn.substance.persistence import (
     delete_substance,
     load_all,
     save_many,
-    save_meta,
     save_substance,
 )
 
@@ -261,29 +260,25 @@ class SubstanceStore:
 
     # ── 持久化 ────────────────────────────────────────────────
 
-    def save(self, path: str | Path) -> None:
-        """全量同步到 DuckDB（批量原子写入）。
+    def save(self, path: str | Path | None = None) -> None:
+        """全量同步到 PostgreSQL（批量原子写入）。
 
-        适用于初始化导入、compress 批量变更后的落盘。
+        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
+        裁决。适用于初始化导入、compress 批量变更后的落盘。
         日常 add 已在 ``add()`` 内原子追加，无需调本方法。
         """
         save_many(self._substances, path)
-        self._persist_path = path
+        self._persist_path = path or self._persist_path
 
-    def load(self, path: str | Path) -> bool:
-        """从 DuckDB 加载全部物质到内存热存储。
+    def load(self, path: str | Path | None = None) -> bool:
+        """从 PostgreSQL 加载全部物质到内存热存储。
 
-        Args:
-            path: DuckDB 文件路径
+        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
+        裁决。
 
         Returns:
-            是否成功加载（文件存在且有物质）
+            是否成功加载（PG 中有物质）
         """
-        path = Path(path).expanduser()
-        if not path.exists():
-            logger.warning(f"物质数据库不存在: {path}")
-            return False
-
         self._substances = load_all(path)
         self._sid_to_index = {s.sid: idx for idx, s in enumerate(self._substances)}
         # 重建图索引
@@ -296,17 +291,17 @@ class SubstanceStore:
                     weight=s.confidence,
                 )
         self._dirty = True
-        self._persist_path = path
-        # 同步 meta.json（与 DuckDB COUNT 对齐）
-        try:
-            save_meta(path.parent, len(self._substances))
-        except Exception as e:
-            logger.warning(f"meta.json 同步失败: {e}")
+        if path is not None:
+            self._persist_path = path
         return len(self._substances) > 0
 
-    def bind_persistence(self, path: str | Path) -> None:
-        """绑定持久化路径 — 之后每次 ``add`` 自动原子追加到 DuckDB。"""
-        self._persist_path = Path(path).expanduser()
+    def bind_persistence(self, path: str | Path | None = None) -> None:
+        """绑定持久化 — 之后每次 ``add`` 自动原子追加到 PostgreSQL。
+
+        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
+        裁决；传任意非空值即可激活自动落盘。
+        """
+        self._persist_path = path or "pg"
 
     def remove(self, sid: str) -> bool:
         """删除物质（motion.compress 压缩后调用）。

@@ -646,20 +646,16 @@ def _register_ws_routes(
                     )
 
                 elif action == "reload":
-                    from long_earn.config import AppConfig  # noqa: PLC0415
-
-                    cfg = AppConfig.from_env()
-                    sp = Path(cfg.memory_path)
-                    if sp.exists():
-                        event_analyzer.load(sp)
-                        await websocket.send_json(
-                            {
-                                "type": "reloaded",
-                                "count": event_analyzer.store.count
-                                if event_analyzer.is_ready
-                                else 0,
-                            }
-                        )
+                    # PG 全量迁移后：物质存储位于 PostgreSQL，直接重载（路径参数兼容）
+                    event_analyzer.load()
+                    await websocket.send_json(
+                        {
+                            "type": "reloaded",
+                            "count": event_analyzer.store.count
+                            if event_analyzer.is_ready
+                            else 0,
+                        }
+                    )
 
         except WebSocketDisconnect:
             logger.info("WebSocket 客户端已断开")
@@ -722,12 +718,8 @@ async def _run_pipeline_and_broadcast(
 
         ctx.prepare_context(query, force_refresh=True)
 
-        from long_earn.config import AppConfig  # noqa: PLC0415
-
-        cfg = AppConfig.from_env()
-        sp = Path(cfg.memory_path)
-        if sp.exists():
-            ea.load(sp)
+        # PG 全量迁移后：物质存储位于 PostgreSQL，直接重载（路径参数兼容）
+        ea.load()
 
         stats = ea.event_stats()
         await _broadcast_event(
@@ -967,17 +959,21 @@ def _create_app(
 
     resolved_db, resolved_substances = _resolve_paths(db_path, substances_path)
 
+    from long_earn.config import AppConfig  # noqa: PLC0415
+
+    cfg = AppConfig.from_env()
+    # PG 全量迁移后：BacktestAnalyzer 直接连 PostgreSQL（core.pg 裁决连接
+    # 参数），resolved_db 仅保留用于向后兼容显式传库路径的场景（本地 duckdb
+    # 已废弃，传了也忽略——BacktestAnalyzer 构造签名兼容）。
     analyzer = BacktestAnalyzer()
-    if resolved_db.exists():
-        analyzer = BacktestAnalyzer(resolved_db)
-        logger.info(f"审计数据库已连接: {resolved_db}")
+    logger.info(f"审计分析器已连接: PostgreSQL ({cfg.pg_host}:{cfg.pg_port}/{cfg.pg_db})")
 
     event_analyzer = EventAnalyzer()
-    if resolved_substances.exists():
-        if event_analyzer.load(resolved_substances):
-            logger.info(f"事件物质已加载: {resolved_substances}")
-        else:
-            logger.warning(f"事件物质加载失败: {resolved_substances}")
+    # PG 全量迁移后：物质存储位于 PostgreSQL，直接加载（resolved_substances
+    # 仅保留用于向后兼容显式传路径的场景，本地 duckdb 已废弃）。
+    event_analyzer.load(resolved_substances)
+    if event_analyzer.is_ready:
+        logger.info(f"事件物质已加载: PostgreSQL ({event_analyzer.store.count} 条)")
 
     # 先注册 API 和 WebSocket 路由（优先级高）
     _register_api_routes(app, analyzer, event_analyzer)

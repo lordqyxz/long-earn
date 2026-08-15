@@ -7,8 +7,8 @@
 覆盖 xtquant ``get_financial_data`` 全部 8 张表（旧实现只接 4 张，遗漏
 Capital/Holdernum/Top10holder/Top10flowholder）：
 
-| xtquant 表 | DuckDB 表 | 形态 | 主键 |
-|------------|-----------|------|------|
+| xtquant 表 | PG 表 | 形态 | 主键 |
+|------------|-------|------|------|
 | Income | income_stmt | 标量宽表 | (symbol, report_date) |
 | Balance | balance_sheet | 标量宽表 | (symbol, report_date) |
 | CashFlow | cashflow_stmt | 标量宽表 | (symbol, report_date) |
@@ -37,13 +37,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-# DuckDB 列类型别名
-DuckType = Literal["VARCHAR", "DOUBLE", "DATE", "INTEGER", "BIGINT"]
+# 列类型别名（PostgreSQL 方言；DOUBLE 在 column_ddl 时映射为 DOUBLE PRECISION）
+PgType = Literal["VARCHAR", "DOUBLE", "DATE", "INTEGER", "BIGINT"]
+
+# DuckDB 时代类型 → PostgreSQL 类型映射（DDL 生成时应用）
+_PG_TYPE_MAP: dict[str, str] = {
+    "VARCHAR": "VARCHAR",
+    "DOUBLE": "DOUBLE PRECISION",
+    "DATE": "DATE",
+    "INTEGER": "INTEGER",
+    "BIGINT": "BIGINT",
+}
 
 
 @dataclass(frozen=True)
 class FinancialColumn:
-    """单列定义：标准列名 + DuckDB 类型 + xtquant 原始字段候选 + 可空性。
+    """单列定义：标准列名 + 类型 + xtquant 原始字段候选 + 可空性。
 
     ``xt_fields`` 按优先级排序，``_extract_by_schema`` 取第一个存在的原始列。
     主键列（symbol/report_date/rank）的 ``xt_fields`` 为空——它们由
@@ -51,7 +60,7 @@ class FinancialColumn:
     """
 
     name: str
-    dtype: DuckType
+    dtype: PgType
     xt_fields: tuple[str, ...] = field(default_factory=tuple)
     nullable: bool = True
 
@@ -63,14 +72,14 @@ class FinancialColumn:
 
 @dataclass(frozen=True)
 class FinancialTableSchema:
-    """单张财务表的 schema：xtquant 表名 + DuckDB 表名 + 列定义 + 主键 + 形态。
+    """单张财务表的 schema：xtquant 表名 + PG 表名 + 列定义 + 主键 + 形态。
 
     ``is_scalar=True`` 表示标量宽表（季度一行），``False`` 表示长表（每季多行，
     如 Top10 每季 10 行，主键含 rank）。
     """
 
     xt_table: str  # xtquant 原始表名（如 "Income"）
-    table_name: str  # DuckDB 表名（如 "income_stmt"）
+    table_name: str  # PG 表名（如 "income_stmt"）
     columns: tuple[FinancialColumn, ...]
     primary_key: tuple[str, ...]  # 主键列名
     is_scalar: bool = True  # 标量宽表 vs 长表
@@ -93,11 +102,12 @@ class FinancialTableSchema:
         return tuple(c.name for c in self.columns)
 
     def column_ddl(self) -> str:
-        """生成 DuckDB ``CREATE TABLE`` 的列定义 + 主键 DDL（从 schema 反射）。"""
+        """生成 PostgreSQL ``CREATE TABLE`` 的列定义 + 主键 DDL（从 schema 反射）。"""
         col_defs: list[str] = []
         for col in self.columns:
             null_spec = "" if col.nullable else " NOT NULL"
-            col_defs.append(f"{col.name} {col.dtype}{null_spec}")
+            pg_type = _PG_TYPE_MAP.get(col.dtype, col.dtype)
+            col_defs.append(f"{col.name} {pg_type}{null_spec}")
         pk = ", ".join(self.primary_key)
         col_defs.append(f"PRIMARY KEY ({pk})")
         return ",\n    ".join(col_defs)

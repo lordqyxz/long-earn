@@ -6,15 +6,38 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-import duckdb
+import psycopg
 from loguru import logger
 
 from long_earn.backtest.domain.interfaces import AuditProvider, AuditRecord
-from long_earn.core.storage import backtest_audit_path
+from long_earn.core.pg import pg_connect
 
 # query_events 过滤字段白名单 — 防止 key 拼接 SQL 注入（P2-13）
 _QUERY_FILTER_WHITELIST = frozenset(
     {"event_type", "trace_id", "parent_id", "component", "status", "latency_ms"}
+)
+
+# 审计表 DDL（PostgreSQL 方言，schema 名与 DuckDB 时代一致）
+_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS backtest_audit.logs (
+    run_id VARCHAR,
+    seq BIGINT,
+    timestamp TIMESTAMP,
+    event_type VARCHAR,
+    trace_id VARCHAR,
+    parent_id VARCHAR,
+    component VARCHAR,
+    status VARCHAR,
+    payload JSONB,
+    latency_ms DOUBLE PRECISION,
+    PRIMARY KEY (run_id, trace_id, seq)
+)
+"""
+_AUDIT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_logs_run "
+    "ON backtest_audit.logs(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_logs_trace "
+    "ON backtest_audit.logs(trace_id)",
 )
 
 
@@ -44,86 +67,63 @@ class OrderSkipReason(StrEnum):
     """价格无效：NaN / Inf / 非正数"""
 
 
-class DuckDBAuditProvider(AuditProvider):
-    """DuckDB 实现的审计存储提供者
+class PostgresAuditProvider(AuditProvider):
+    """PostgreSQL 实现的审计存储提供者
 
-    审计日志写入**独立审计库**（``backtest_audit_path``，默认
-    ``<data_dir>/backtest_audit.duckdb``），与价格缓存分库：
-    高频小写入的审计不参与缓存库的锁竞争，Web 只读连接不会再与写连接
-    争用同一文件（消除 WAL checkpoint 数据丢失风险）。
+    审计日志写入 PostgreSQL（``backtest_audit.logs``），替代 DuckDB 时代
+    的本地文件存储。多进程并行回测的 worker 直接并发写同一 PG 表——
+    PostgreSQL MVCC 原生支持多写者并发，消除「worker 临时文件 + 主进程
+    合并」的旧架构（P0-11 缺口根治）。
 
-    线程安全：所有 DuckDB 连接访问通过 ``_lock`` 串行化，避免多线程并发写
-    导致 DuckDB 单连接非线程安全问题（P2-14）。
+    线程安全：进程内所有 DuckDB 时代的锁语义不再需要——psycopg 连接
+    每次操作独立提交，PG 服务端处理并发；本实现保留单连接 + 锁以兼容
+    单进程多线程写入（引擎审计为旁路，性能非瓶颈）。
 
     单调序列号：``seq`` 列确保即使墙钟回退（``datetime.now()`` 非单调）也能
     保证主键唯一性与因果排序（P1-10）。
     """
 
-    def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path if db_path is not None else backtest_audit_path()
-        self._conn: duckdb.DuckDBPyConnection | None = None
+    def __init__(self, db_path: Path | None = None) -> None:
+        # db_path 参数保留仅为兼容旧签名；PG 时代连接参数由 core.pg 统一裁决
+        del db_path
+        self._conn: psycopg.Connection | None = None
         self._lock = threading.Lock()
         self._seq = 0
         self._init_db()
 
-    def _get_conn(self) -> duckdb.DuckDBPyConnection:
+    def _get_conn(self) -> psycopg.Connection:
         # 锁保护：调用方已持锁，或通过 _with_conn 上下文访问
         if self._conn is None:
-            self._conn = duckdb.connect(str(self.db_path))
+            # 元组行：query_events / get_causal_chain 用 row[N] 下标访问，
+            # 保持 DuckDB 时代 fetchall 返回元组的契约（PG jsonb 由
+            # psycopg 反序列化为 dict，兼容性由调用方处理）
+            self._conn = pg_connect(row_factory=None)
         return self._conn
 
     def _init_db(self) -> None:
         with self._lock:
             conn = self._get_conn()
-            # 创建审计专用 Schema（使用唯一名称避免与数据库文件名冲突）
+            # 创建审计专用 Schema（与 DuckDB 时代同名，迁移无缝）
             conn.execute('CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
-            # 创建审计日志表 — seq 自增序列号保证单调性（P1-10）
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS "backtest_audit".logs (
-                    run_id VARCHAR,
-                    seq BIGINT,
-                    timestamp TIMESTAMP,
-                    event_type VARCHAR,
-                    trace_id VARCHAR,
-                    parent_id VARCHAR,
-                    component VARCHAR,
-                    status VARCHAR,
-                    payload JSON,
-                    latency_ms DOUBLE,
-                    PRIMARY KEY (run_id, trace_id, seq)
-                )
-            """)
-            # 旧表迁移：若 seq 列不存在则添加（向后兼容已有缓存）
-            cols = conn.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema='backtest_audit' AND table_name='logs'"
-            ).fetchall()
-            col_names = {c[0] for c in cols}
-            if "seq" not in col_names and len(col_names) > 0:
-                conn.execute(
-                    'ALTER TABLE "backtest_audit".logs ADD COLUMN seq BIGINT DEFAULT 0'
-                )
-        logger.info(f"Audit provider initialized at {self.db_path}")
+            conn.execute(_AUDIT_DDL)
+            for idx in _AUDIT_INDEXES:
+                conn.execute(idx)
+            conn.commit()
+        logger.info("Audit provider initialized (PostgreSQL)")
 
     def close(self) -> None:
-        """显式关闭连接，确保 WAL 落盘。
-
-        DuckDB 的 auto-commit 保证每条 INSERT 已提交，但 WAL 文件需要
-        连接关闭时才 checkpoint 到主数据库文件。若进程被强制终止
-        （如 Stop-Process -Force），WAL 可能未 flush，导致数据丢失。
-        """
+        """显式关闭连接。"""
         with self._lock:
             if self._conn is not None:
                 try:
                     self._conn.close()
                 except Exception as exc:
-                    logger.warning(f"关闭审计 DuckDB 连接时异常: {exc}")
+                    logger.warning(f"关闭审计 PostgreSQL 连接时异常: {exc}")
                 finally:
                     self._conn = None
 
     def log_event(self, record: AuditRecord) -> None:
         def json_serializable(obj):
-
             if isinstance(obj, datetime):
                 return obj.isoformat()
             if hasattr(obj, "__dict__"):
@@ -140,7 +140,7 @@ class DuckDBAuditProvider(AuditProvider):
                 """
                 INSERT INTO "backtest_audit".logs
                     (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     record.run_id,
@@ -155,6 +155,7 @@ class DuckDBAuditProvider(AuditProvider):
                     record.latency_ms,
                 ],
             )
+            conn.commit()
 
     def query_events(
         self, run_id: str, filters: dict[str, Any]
@@ -170,12 +171,12 @@ class DuckDBAuditProvider(AuditProvider):
         query = (
             "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
             "component, status, payload, latency_ms "
-            'FROM "backtest_audit".logs WHERE run_id = ?'
+            'FROM "backtest_audit".logs WHERE run_id = %s'
         )
         params: list[Any] = [run_id]
 
         for key, value in filters.items():
-            query += f" AND {key} = ?"
+            query += f" AND {key} = %s"
             params.append(value)
 
         with self._lock:
@@ -193,7 +194,7 @@ class DuckDBAuditProvider(AuditProvider):
                     parent_id=row[4],
                     component=row[5],
                     status=row[6],
-                    payload=json.loads(row[7]),
+                    payload=json.loads(row[7]) if isinstance(row[7], str) else row[7],
                     latency_ms=row[8],
                 )
             )
@@ -206,7 +207,7 @@ class DuckDBAuditProvider(AuditProvider):
             res = conn.execute(
                 "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
                 "component, status, payload, latency_ms "
-                'FROM "backtest_audit".logs WHERE trace_id = ? ORDER BY seq ASC',
+                'FROM "backtest_audit".logs WHERE trace_id = %s ORDER BY seq ASC',
                 [trace_id],
             ).fetchall()
 
@@ -221,7 +222,7 @@ class DuckDBAuditProvider(AuditProvider):
                     parent_id=row[4],
                     component=row[5],
                     status=row[6],
-                    payload=json.loads(row[7]),
+                    payload=json.loads(row[7]) if isinstance(row[7], str) else row[7],
                     latency_ms=row[8],
                 )
             )

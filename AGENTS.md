@@ -62,7 +62,7 @@ agent = ResearchAgent()
 
 1. **策略生成与持续进化**：ResearchAgent（ToG）能产出可回测的策略 YAML；合并须通过 held-out OOS 与 ADR-015 统计门，保证策略质量单调提升。
 2. **回测金融级可靠性**：事件驱动引擎在架构层面绝对杜绝未来函数，撮合/风控/审计可追溯、可重放。详见 [ADR-005](docs/adr/005-event-driven-backtest.md)。
-3. **数据利用充分性**：DuckDB Cache + 显式多源（miniqmt 面板 / ciccwm 情报 / 实时）按能力点名接入，PIT 对齐严格，缓存加速可观测。
+3. **数据利用充分性**：PostgreSQL Cache + 显式多源（miniqmt 面板 / ciccwm 情报 / 实时）按能力点名接入，PIT 对齐严格，缓存加速可观测。
 4. **多核 CPU 利用**：并行回测编排 + 共享数据底座 + 子进程隔离下载，发挥多核优势。
 
 ---
@@ -183,13 +183,13 @@ prompt = prompt_template.format(query=query)
 
 ### 6.2 数据层
 
-- **数据缓存**：回测引擎使用 DuckDB 本地缓存（`<数据目录>/backtest_cache.duckdb`），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。**ADR-018**：面板路径为 DuckDB Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **数据缓存**：回测引擎使用 PostgreSQL 本地缓存（`long_earn` 库，Docker 容器 `pg`，连接参数由 `core/pg.py` 统一裁决），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。**ADR-018**：面板路径为 PostgreSQL Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **数据层三组接口**：`DataConnector`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。具体能力清单与方法签名以 `services/__init__.py` 与 `backtest/data/connector.py` 代码为准。
-- **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 DuckDB 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 DuckDB 连接冲突），通过 stdout 解析结果。
+- **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 PostgreSQL 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 PG 连接冲突），通过 stdout 解析结果。
 
 ### 6.3 记忆系统
 
-- 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 `<数据目录>/substances.duckdb`（DuckDB 事务式存储，原子追加 + WAL 崩溃安全）。旧 `memory/` 模块（ADR-004）已删除。
+- 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 PostgreSQL 的 `substances` 表（PG 事务式存储，`save_many` 幂等 UPSERT，原子追加）。旧 `memory/` 模块（ADR-004）已删除。
 - **ADR-018**：研究/分析入口统一走 `RuntimeContext.prepare_context(query)`（激活事件；miss 时默认 Collector 轻量推理后再激活）。`Connector` 注入 `memory_provider`。
 
 ### 6.4 集成测试
@@ -210,11 +210,11 @@ uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
 uv run lint-imports                        # 架构依赖校验
 uv run python scripts/check_deprecated_syntax.py  # 退役语法 grep 卡口（检测 ${var} / 路径 2 回退）
-uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 DuckDB 缓存（需 miniQMT 连接）
+uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 PostgreSQL 缓存（需 miniQMT 连接）
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
 
-> **缓存保护约定**：`<数据目录>/backtest_cache.duckdb` 是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
+> **缓存保护约定**：PostgreSQL `long_earn` 库的 `price_daily` / 财务表是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。旧 DuckDB 源库已归档至 `<LONG_EARN_DATA_DIR>/backup/`（含独立 `.gitignore`），仅供审计保留。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
 
 ---
 

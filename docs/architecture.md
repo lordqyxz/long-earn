@@ -66,7 +66,7 @@ flowchart TB
 | L1 领域子图工具 | 深度能力，非编排中枢 | `stock_analysis` · `event_inference` · `operator_dev` · `htr_subgraph`（脚手架） |
 | L2 服务与技能 | DI、Persona、监控、LLM | `RuntimeContext` · `services/*` · `skills/personas` |
 | L3 领域内核 | 证据机与知识图 | `backtest` · `substance` · `ontology` · 算子目录 |
-| L4 数据与存储 | 显式多源 + Cache | DuckDB Cache · miniqmt · ciccwm 情报 · `LONG_EARN_DATA_DIR` |
+| L4 数据与存储 | 显式多源 + Cache | PostgreSQL Cache · miniqmt · ciccwm 情报 · `LONG_EARN_DATA_DIR` |
 
 依赖方向：`tools` → `services` → `domain`（import-linter 卡口）。
 
@@ -102,7 +102,7 @@ HTR 假设树：保留为 **beam 谱系 / 状态存储**；`create_htr_subgraph`
 
 | 能力组 | 接口 | 源选择 |
 |--------|------|--------|
-| 历史面板 | `DataConnector` | DuckDB Cache + **显式主源 miniqmt**；失败即失败 |
+| 历史面板 | `DataConnector` | PostgreSQL Cache + **显式主源 miniqmt**；失败即失败 |
 | 市场情报 | `MarketIntelligenceProvider` | **ciccwm 独占**（资金流/热榜等） |
 | 实时行情 | `RealtimeDataProvider` | 主源 miniqmt；不可用时**显式切换** ciccwm 并打日志 |
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 
-from long_earn.core import storage as _storage
+from long_earn.core import pg as _pg, storage as _storage
 from long_earn.services import (
     BacktestService,
     ContextPreparationService,
@@ -178,6 +178,11 @@ class AppConfig:
     | HTR_MAX_SELECT | 1 | HTR 每轮选择的最大假设数（1=串行，>1 激活 LangGraph Send 并行 fan-out） |
     | HTR_MAX_CYCLES | 10 | HTR 六步循环最大周期数（达到时强制停止） |
     | LONG_EARN_MAX_WORKERS | 0 | 回测并行 worker 数（0=自动 cpu_count，1=串行，>1=指定核数） |
+    | PG_HOST | 127.0.0.1 | PostgreSQL 主机地址 |
+    | PG_PORT | 5432 | PostgreSQL 端口 |
+    | PG_DB | long_earn | PostgreSQL 数据库名（统一存储：审计/缓存/物质库） |
+    | PG_USER | postgres | PostgreSQL 用户 |
+    | PG_PASSWORD | postgres | PostgreSQL 密码 |
     | STRATEGY_KEYWORDS | 策略,思路,投资策略 | 策略研究路由关键词（逗号分隔） |
     | STOCK_ANALYSIS_KEYWORDS | 股票,分析,公司 | 股票分析路由关键词（逗号分隔） |
     | EVENT_INFERENCE_KEYWORDS | 新闻,事件,热点,资讯,利好,利空 | 事件推理路由关键词（逗号分隔） |
@@ -204,9 +209,9 @@ class AppConfig:
         llm_model: LLM 模型名称
         llm_base_url: LLM API 基础 URL
         data_dir: 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
-        memory_path: 记忆持久化路径（DuckDB）
-        backtest_cache_path: 回测缓存 DuckDB 路径（价格/财务数据）
-        backtest_audit_path: 回测审计日志独立 DuckDB 路径
+        memory_path: 记忆持久化路径（PG 全量迁移后仅作兼容，物质库位于 PostgreSQL）
+        backtest_cache_path: 回测缓存路径（PG 全量迁移后仅作兼容，价格/财务数据位于 PostgreSQL）
+        backtest_audit_path: 回测审计路径（PG 全量迁移后仅作兼容，审计位于 PostgreSQL）
         hypothesis_tree_dir: 假设树 JSON 存储目录
         init_dir: 知识库初始化目录
         max_iterations: 最大迭代次数
@@ -241,6 +246,13 @@ class AppConfig:
     # 回测并行 worker 数（0=自动使用 os.cpu_count()，1=串行，>1=指定核数）
     # 控制 ParallelRunner / Walk-Forward fold 级并行的并发度
     max_workers: int = 0
+    # PostgreSQL 统一存储连接配置（审计/缓存/物质库；从 core.pg 派生，
+    # 不重复默认值字面量 — 与 backtest_cache_path 从 storage 派生同构）
+    pg_host: str = _pg.DEFAULT_PG_HOST
+    pg_port: int = _pg.DEFAULT_PG_PORT
+    pg_db: str = _pg.DEFAULT_PG_DB
+    pg_user: str = _pg.DEFAULT_PG_USER
+    pg_password: str = _pg.DEFAULT_PG_PASSWORD
     backtest_start_date: str = "2020-01-01"
     backtest_end_date: str = "2023-12-31"
     # 量化数据分割（AGENTS.md「量化数据分割规范」）
@@ -276,6 +288,8 @@ class AppConfig:
 
         # 唯一存储环境变量：LONG_EARN_DATA_DIR → 派生全部数据路径
         paths = _storage.resolve_paths(os.getenv("LONG_EARN_DATA_DIR"))
+        # PostgreSQL 连接参数：core.pg 统一裁决（env → 默认值）
+        pg_params = _pg.resolve_pg_params()
 
         return cls(
             llm_type=os.getenv("LLM_TYPE", "deepseek"),
@@ -293,6 +307,11 @@ class AppConfig:
             htr_max_select=int(os.getenv("HTR_MAX_SELECT", "1")),
             htr_max_cycles=int(os.getenv("HTR_MAX_CYCLES", "10")),
             max_workers=int(os.getenv("LONG_EARN_MAX_WORKERS", "0")),
+            pg_host=pg_params["host"],
+            pg_port=int(pg_params["port"]),
+            pg_db=pg_params["dbname"],
+            pg_user=pg_params["user"],
+            pg_password=pg_params["password"],
             backtest_start_date=os.getenv("BACKTEST_START_DATE", "2020-01-01"),
             backtest_end_date=os.getenv("BACKTEST_END_DATE", "2023-12-31"),
             train_start_date=os.getenv("TRAIN_START", "2022-01-01"),

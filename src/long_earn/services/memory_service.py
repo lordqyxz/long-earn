@@ -41,15 +41,20 @@ class MemoryServiceImpl(MemoryService):
         self._ontology_graph = ontology_graph
 
     def initialize(self) -> None:
-        """初始化记忆系统（加载持久化 DuckDB 或从 init 目录构建）。"""
+        """初始化记忆系统（加载 PostgreSQL 持久化或从 init 目录构建）。
+
+        PG 全量迁移后：物质存储位于 PostgreSQL（core.pg 裁决连接参数），
+        memory_path 仅保留为兼容旧签名（文件路径语义废弃）。优先从 PG
+        加载既有物质；PG 为空时从 init 目录构建并落库。
+        """
         if self._initialized:
             return
 
         persistent_path = Path(self.config.memory_path).expanduser()
         self._persistent_path = persistent_path
-        # 绑定持久化路径：之后每次 add 自动原子追加到 DuckDB
+        # 绑定持久化（PG 时代 path 参数仅作开关，连接由 core.pg 裁决）
         self._store.bind_persistence(persistent_path)
-        if persistent_path.exists() and self._store.load(persistent_path):
+        if self._store.load(persistent_path):
             self._initialized = True
             self.logger.info(f"记忆已加载 ({self._store.count} 条物质)")
             return
@@ -58,7 +63,6 @@ class MemoryServiceImpl(MemoryService):
         if init_dir.exists():
             count = self._store.load_directory(init_dir)
             if count > 0:
-                persistent_path.parent.mkdir(parents=True, exist_ok=True)
                 self._store.save(persistent_path)
                 self.logger.info(f"记忆初始化完成 ({count} 条事实)")
 

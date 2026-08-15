@@ -30,6 +30,21 @@ import pandas as pd
 import pytest
 
 from long_earn.backtest.data.miniqmt_provider import MiniQmtDataProvider
+from long_earn.core.pg import pg_version
+
+
+def _pg_available() -> bool:
+    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
+    try:
+        pg_version()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _pg_available(), reason="PostgreSQL 服务不可用"
+)
 
 # ── 统一构造的季频测试数据 ─────────────────────────────────────
 
@@ -64,10 +79,11 @@ def provider_instance(request: pytest.FixtureRequest, tmp_path: Any):
     避免 mock 网络链路导致的测试不稳定。
 
     注：akshare/ciccwm 财务方法已删除，仅 miniqmt 实现财务接口。
+    PG 全量迁移后 DataCache 忽略 db_path（连接由 core.pg 裁决）。
     """
     from long_earn.backtest.data.cache import DataCache
 
-    cache = DataCache(db_path=tmp_path / "test.duckdb")
+    cache = DataCache()
     if request.param == "miniqmt":
         return MiniQmtDataProvider(cache=cache)
     pytest.fail(f"未知 provider: {request.param}")
@@ -232,7 +248,7 @@ class TestEndToEndPITNoFutureFunction:
         """
         from long_earn.backtest.data.cache import DataCache
 
-        cache = DataCache(db_path=tmp_path / "test_freq.duckdb")
+        cache = DataCache()
         provider = MiniQmtDataProvider(cache=cache)
 
         quarterly_df = _make_quarterly_data()
@@ -310,7 +326,7 @@ class TestAnnounceDateExtraction:
         )
 
     def test_cache_table_has_all_financial_columns(self, tmp_path: Any):
-        """C5.2 DuckDB 缓存 8 张细表包含全部财务字段列（ADR-014 阶段 B）
+        """C5.2 PostgreSQL 缓存 8 张细表包含全部财务字段列（ADR-014 阶段 B）
 
         旧 financial_quarterly 单一宽表已废弃，改为 8 张细表。
         验证 4 张旧表对应的细表含原 18 个财务字段。
@@ -320,17 +336,21 @@ class TestAnnounceDateExtraction:
             FinancialSchemaRegistry,
         )
 
-        cache = DataCache(db_path=tmp_path / "test_cols.duckdb")
+        cache = DataCache()
         conn = cache._get_conn()
 
         # 收集 4 张标量表（对应旧宽表）的全部字段
         scalar_tables = FinancialSchemaRegistry.scalar_tables()[:4]
         all_cols: set[str] = set()
         for schema in scalar_tables:
-            columns = conn.execute(
+            cur = conn.execute(
                 "SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name = '{schema.table_name}'"
-            ).fetchdf()
+                "WHERE table_name = %s AND table_schema = 'public'",
+                [schema.table_name],
+            )
+            columns = pd.DataFrame(
+                cur.fetchall(), columns=["column_name"]
+            )
             all_cols.update(columns["column_name"].tolist())
 
         expected_financial_cols = {
@@ -362,13 +382,16 @@ class TestAnnounceDateExtraction:
         旧 save_financials 现为兼容包装，内部拆分写入 4 张标量表；
         get_financials union 4 表返回扁平宽表。验证往返一致。
         """
+        import uuid
+
         from long_earn.backtest.data.cache import DataCache
 
-        cache = DataCache(db_path=tmp_path / "test_rt.duckdb")
+        symbol = f"RT-{uuid.uuid4().hex[:10]}.SH"
+        cache = DataCache()
         # 构造含全部 18 个字段的测试数据
         test_df = pd.DataFrame(
             {
-                "symbol": ["600519.SH"],
+                "symbol": [symbol],
                 "report_date": pd.to_datetime(["2020-03-31"]),
                 "announce_date": pd.to_datetime(["2020-04-25"]),
                 "revenue": [100.0],
@@ -393,30 +416,46 @@ class TestAnnounceDateExtraction:
         )
         cache.save_financials(test_df)
 
-        # 读取（不指定 fields，返回全量 union）
-        result = cache.get_financials(["600519.SH"])
-        assert result is not None
-        assert not result.empty
-        # 验证所有 18 个字段都有值（union 后跨表合并）
-        for col in [
-            "revenue",
-            "net_profit",
-            "eps",
-            "research_expenses",
-            "total_equity",
-            "total_assets",
-            "total_liabilities",
-            "ocf",
-            "capex",
-            "bps",
-            "ocf_per_share",
-            "debt_to_assets",
-            "net_profit_margin",
-            "roe_weighted",
-            "net_profit_yoy",
-            "revenue_yoy",
-            "roe",
-            "gross_margin",
-        ]:
-            assert col in result.columns, f"返回结果缺少字段: {col}"
-            assert pd.notna(result[col].iloc[0]), f"字段 {col} 值为 NaN"
+        try:
+            # 读取（不指定 fields，返回全量 union）
+            result = cache.get_financials([symbol])
+            assert result is not None
+            assert not result.empty
+            # 验证所有 18 个字段都有值（union 后跨表合并）
+            for col in [
+                "revenue",
+                "net_profit",
+                "eps",
+                "research_expenses",
+                "total_equity",
+                "total_assets",
+                "total_liabilities",
+                "ocf",
+                "capex",
+                "bps",
+                "ocf_per_share",
+                "debt_to_assets",
+                "net_profit_margin",
+                "roe_weighted",
+                "net_profit_yoy",
+                "revenue_yoy",
+                "roe",
+                "gross_margin",
+            ]:
+                assert col in result.columns, f"返回结果缺少字段: {col}"
+                assert pd.notna(result[col].iloc[0]), f"字段 {col} 值为 NaN"
+        finally:
+            # 清理测试数据（避免污染 PG 共享库）
+            conn = cache._get_conn()
+            for table in (
+                "income_stmt",
+                "balance_sheet",
+                "cashflow_stmt",
+                "pershareindex",
+                "capital",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE symbol = %s", [symbol]
+                )
+            conn.commit()
+            cache.close()
