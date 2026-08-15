@@ -342,6 +342,11 @@ class BacktestAnalyzer:
         从 MARKET_DATA 事件中提取每日最后的 portfolio_value，
         计算日收益率 (r_t = (v_t - v_{t-1}) / v_{t-1})。
 
+        交易日以 payload 中的 bar 时间戳（``timestamp`` 字段）为准，
+        而不是审计日志的数据库写入时间戳——同一次回测的全部 MARKET_DATA
+        事件在同一时刻批量落库，按写入时间分组会把所有交易日折叠为同一天，
+        导致日收益率退化为 1 行、风险指标全为 0（历史 bug）。
+
         Returns:
             DataFrame 包含 date (Date), portfolio_value (Float64),
             daily_return (Float64)
@@ -350,7 +355,7 @@ class BacktestAnalyzer:
         try:
             rows = conn.execute(
                 f"""
-                SELECT timestamp, payload->>'portfolio_value' as value
+                SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
                 WHERE run_id = %s AND event_type = 'MARKET_DATA'
                 ORDER BY timestamp ASC
@@ -371,12 +376,20 @@ class BacktestAnalyzer:
 
         daily_data: list[dict[str, Any]] = []
         for row in rows:
-            ts = row[0]
-            value = float(row[1]) if row[1] else 0.0
-            if isinstance(ts, datetime):
-                daily_data.append({"date": ts.date(), "value": value, "ts": ts})
-            elif isinstance(ts, str):
-                dt = datetime.fromisoformat(ts)
+            db_ts = row[0]
+            payload = self._payload_as_dict(row[1])
+            value = float(payload.get("portfolio_value", 0) or 0)
+            # 优先取 payload 中的 bar 时间戳（交易日），缺失时回退数据库写入时间
+            bar_ts = payload.get("timestamp", "")
+            dt: datetime | None = None
+            if bar_ts:
+                try:
+                    dt = datetime.fromisoformat(bar_ts)
+                except (ValueError, TypeError):
+                    dt = None
+            if dt is None and isinstance(db_ts, datetime):
+                dt = db_ts
+            if dt is not None:
                 daily_data.append({"date": dt.date(), "value": value, "ts": dt})
             else:
                 daily_data.append({"date": None, "value": value, "ts": None})
@@ -415,9 +428,10 @@ class BacktestAnalyzer:
 
         基于日收益率序列计算:
         - 总收益率 (total_return)
-        - 年化收益率 (annual_return, 假设 252 交易日)
+        - 年化收益率 (annual_return, 算术年化 mean * 252，与引擎一致)
         - 年化波动率 (annual_volatility)
-        - 夏普比率 (sharpe_ratio, 无风险利率假设为 0.02)
+        - 夏普比率 (sharpe_ratio, 与引擎一致：算术年化收益 / 年化波动率，
+          不额外扣除无风险利率)
         - 最大回撤 (max_drawdown)
         - 最大回撤持续天数 (max_drawdown_duration_days)
         - VaR 95% (var_95)
@@ -454,20 +468,18 @@ class BacktestAnalyzer:
             float((end_val - start_val) / start_val) if start_val > 0 else 0.0
         )
 
-        # 年化收益率
-        n_days = daily.height
-        annual_return = (
-            float((1 + total_return) ** (252 / n_days) - 1) if n_days > 0 else 0.0
-        )
-
-        # 年化波动率
+        # 年化收益率：算术年化 mean(daily_return) * 252（与引擎 _calculate_metrics
+        # 一致；几何年化在亏损/短样本下与引擎结果差异显著，会造成列表页与详情页
+        # 数值对不上）
         daily_vol = float(returns_series.std())
         annual_volatility = daily_vol * (252**0.5)
+        annual_return = float(returns_series.mean()) * 252
 
-        # 夏普比率 (无风险利率 2%)
-        risk_free_rate = 0.02
+        # 夏普比率：与引擎一致（算术年化收益 / 年化波动率，不扣无风险利率）。
+        # 原实现额外减 0.02 且年化口径用几何，导致与列表页（引擎 RUN_END 值）
+        # 显示不一致。
         sharpe_ratio = (
-            float((annual_return - risk_free_rate) / annual_volatility)
+            float(annual_return / annual_volatility)
             if annual_volatility > 0
             else 0.0
         )
@@ -490,16 +502,19 @@ class BacktestAnalyzer:
             else:
                 current_duration = 0
 
-        # VaR & CVaR (基于日收益率)
+        # VaR & CVaR (基于日收益率，升序排列后取分位)
         returns_list = returns_series.sort().to_list()
         if returns_list:
             n = len(returns_list)
             var_95 = float(returns_list[max(int(n * 0.05), 0)])
             var_99 = float(returns_list[max(int(n * 0.01), 0)])
 
-            # CVaR 95%: 低于 VaR 95% 的平均值
-            tail_95 = [r for r in returns_list if r <= var_95]
-            cvar_95 = float(sum(tail_95) / len(tail_95)) if tail_95 else var_95
+            # CVaR 95%: 最差 5% 样本的期望损失。原实现用 `r <= var_95` 收集尾部，
+            # 当 var_95 恰好落在常见值（如大量 0 收益）时会纳入远超 5% 的样本，
+            # 把 CVaR 拉向 0 导致低估风险；改为严格取排序后前 k 个最差样本。
+            k = max(int(n * 0.05), 1)
+            tail_95 = returns_list[:k]
+            cvar_95 = float(sum(tail_95) / len(tail_95))
         else:
             var_95 = 0.0
             var_99 = 0.0
@@ -565,12 +580,17 @@ class BacktestAnalyzer:
     # ── 可视化导出接口 ──────────────────────────────────────────────
 
     def export_equity_curve(self, run_id: str) -> list[dict[str, Any]]:
-        """导出权益曲线数据（用于折线图）"""
+        """导出权益曲线数据（用于折线图）
+
+        时间轴取 payload 中的 bar 日期（``timestamp`` 字段）而非数据库写入
+        时间戳——同一次回测的 MARKET_DATA 在同一时刻批量落库，若用写入时间
+        x 轴会全部挤在同一天。
+        """
         conn = self._get_conn()
         try:
             rows = conn.execute(
                 f"""
-                SELECT timestamp, payload->>'portfolio_value' as value
+                SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
                 WHERE run_id = %s AND event_type = 'MARKET_DATA'
                 ORDER BY timestamp ASC
@@ -580,13 +600,22 @@ class BacktestAnalyzer:
         finally:
             conn.close()
 
-        return [
-            {
-                "time": str(row[0]) if row[0] else "",
-                "value": float(row[1]) if row[1] else 0.0,
-            }
-            for row in rows
-        ]
+        points: list[dict[str, Any]] = []
+        for row in rows:
+            db_ts = row[0]
+            payload = self._payload_as_dict(row[1])
+            value = float(payload.get("portfolio_value", 0) or 0)
+            bar_ts = payload.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(bar_ts) if bar_ts else None
+            except (ValueError, TypeError):
+                dt = None
+            if dt is None and isinstance(db_ts, datetime):
+                dt = db_ts
+            points.append(
+                {"time": str(dt.date()) if dt is not None else str(db_ts or ""), "value": value}
+            )
+        return points
 
     def export_trade_journal(self, run_id: str) -> list[dict[str, Any]]:
         """导出完整交易日志（用于表格/交易明细）"""

@@ -28,6 +28,11 @@ export function EquityChart({ equityCurve }: Props) {
     }))
   }, [equityCurve])
 
+  // UI 显示统一保留两位小数
+  const formatEquity = (v: number) =>
+    `¥${v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  const formatReturn = (v: number) => `${v.toFixed(2)}%`
+
   if (equityCurve.length < 2) {
     return (
       <CollapsibleSection title={<span className="flex items-center gap-2"><TrendingUp className="h-4 w-4" />权益曲线</span>}>
@@ -42,11 +47,16 @@ export function EquityChart({ equityCurve }: Props) {
         <ComposedChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
           <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => v?.slice(0, 10) || ''} />
-          <YAxis yAxisId="equity" orientation="left" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `¥${((v ?? 0) / 10000).toFixed(0)}万`} />
-          <YAxis yAxisId="return" orientation="right" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `${(v ?? 0).toFixed(1)}%`} />
+          <YAxis yAxisId="equity" orientation="left" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `¥${((v ?? 0) / 10000).toFixed(2)}万`} />
+          <YAxis yAxisId="return" orientation="right" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `${(v ?? 0).toFixed(2)}%`} />
           <Tooltip
             contentStyle={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px', color: '#1e293b' }}
             labelStyle={{ color: '#64748b' }}
+            formatter={(value, name) => {
+              if (name === '权益') return [formatEquity(Number(value)), name]
+              if (name === '日收益%') return [formatReturn(Number(value)), name]
+              return [String(value), name]
+            }}
           />
           <Legend />
           <Line yAxisId="equity" type="monotone" dataKey="value" name="权益" stroke="#2563eb" strokeWidth={2} dot={false} />
