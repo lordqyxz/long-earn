@@ -1,389 +1,44 @@
 # ADR-007: 物质-运动统一架构（Substance-Motion）
 
 日期: 2026-06
-状态: Accepted, Implemented (Phase 1-4)
+状态: Accepted, Implemented
 
 ## 背景
 
-ADR-004 采纳的 numpy/pandas 三级记忆系统在 v2.0 增强后暴露出结构性缺陷，维护成本已高于迁移成本：
-
-### 结构性缺陷（非修补可解）
-
-1. **事件与关系二元分裂**：`MemoryStore`（list + TF-IDF）与 `RelationGraph`（邻接矩阵）完全解耦。fact 不知 relation，relation 无 provenance（无来源、无时间戳、无置信度）。违反"普遍联系"。
-2. **检索单通道**：只有 TF-IDF 余弦相似度一条路，无 WorldInfo 式关键词触发机制。所有检索被降维为同一种运动形式。
-3. **TF-IDF 特征选择反转**：`fit()` 按文档频率**降序**保留词（保留最高频词），与标准 TF-IDF 应保留区分性强的罕见词相反。
-4. **全量 refit**：`_ensure_vectors()` 每次 dirty 都 `fit_transform` 全量重建，O(n²) 不可扩展。
-5. **线性扫描**：`get_fact_by_id`、`_find_index`、`_get_or_create_index` 全是 O(n) 扫描，无哈希索引。
-6. **400MB 预分配**：`RelationGraph` 邻接矩阵 `np.zeros((10000, 10000), float32)` = 400MB，即使空图。
-7. **边无元数据**：`RelationGraph` 边只有 `(source, target, weight)`，无类型、无时间、无来源。关系是"二等公民"。
-8. **冲突检测硬编码**：16 个中文金融词的情绪判断，不可配置、不可多语言。
-9. **pickle 不安全**：`allow_pickle=True` 的 `.npz` + `.pkl`，无版本号、无 schema 校验、有反序列化安全风险。
-10. **EmbeddingRetriever 脆弱**：`hybrid_search` 按内容字符串对齐 TF-IDF 与 embedding 结果（O(n²)、碰撞）；缓存按 `fact_count` 失效（内容变更不可感知）。
-
-### 影响范围（已验证，可控）
-
-| 层 | 触点 | 风险 |
-|---|---|---|
-| `MemoryService` Protocol（8 → 4 方法） | 破坏性收窄：删僵尸方法 + `tier` 死参 | 中 |
-| DI 注入（`context_init.py`、`config.py`） | `require_memory()` 返回类型收窄 | 低 |
-| 生产消费方（`strategy_rd` 4 文件 5 调用点） | 机械替换 `recall`/`save_experience` 等 | 中 |
-| `stock_analysis` | 不使用记忆 | 零 |
-| `tools/store.py`（遗留兼容层） | 2 行 import 变更 | 低 |
-| `MemoryServiceImpl`（315 行业务逻辑） | 内部存储替换，业务逻辑保留 | 中 |
-| 旧 `memory/`（5 文件 ~1500 行） | 删除 | — |
-| 旧测试（4 单元 + 1 集成） | 重写 | 中 |
+ADR-004 的 numpy/pandas 三级记忆系统存在结构性缺陷（事件/关系二元分裂且关系无 provenance、单通道 TF-IDF 检索且特征选择写反、O(n²) 全量 refit、线性扫描、400MB 邻接矩阵预分配、边无元数据、冲突词库硬编码、pickle 不安全），维护成本高于迁移成本。决定整体替换并立即删除旧 `memory/` 模块。
 
 ## 决策
 
-用"物质-运动"统一架构替换旧记忆系统，**立即删除** `memory/` 模块（数据备份到 temp）。
+用「物质-运动」统一架构替换：事件 / 关系 / 知识 / 策略经验统一为 `Substance`（Pydantic，与 `BacktestResult`/`StrategyDSL` 技术栈一致）。哲学映射：物质=Substance（可持久化/可检索/有来源）；运动=motion 函数（activate/decay/conflict/compress，过程不持久化只产出新物质）；普遍联系=关系是一等物质（完整 provenance）；波粒二象性=同一物质有内容检索与图遍历两种视图。
 
-### 设计哲学
+### 核心模型
 
-马克思主义辩证法映射：
+- **Substance**：`sid` / `form`（event / relation / knowledge / strategy / backtest）/ `content` / `keys`（WorldInfo 触发词）/ `filter_keys` + `filter_logic`（AND/NOT）/ `visible_from` / `expires_at`（PIT 时间窗）/ `source` / `confidence` / `conflict_group`（互斥组）/ `insertion_order` / `decay_half_life_days` / relation 专用 `source_id`/`target_id`/`relation_type`。
+- **运动层**（`motion.py`）：`activate`（WorldInfo 激活：分词 -> 倒排索引查候选 -> filter 过滤 -> conflict 互斥 -> 递归 -> 时间过滤 -> 预算截断）、`decay`（按 form 配不同半衰期）、`detect_conflicts`（可配置词库）、`compress`。ADR-014 后 `activate` 改为图遍历优先。
+- **双索引**：`RetrievalIndex`（关键词倒排 + TF-IDF/语义双通道融合，keyword 命中优先；增量 transform 不 refit；缓存按 content hash 失效）+ `GraphIndex`（dict 邻接表 + BFS 返回路径；ADR-014 升级为 `OntologyGraph`）。
+- **时间过滤不设独立索引**：visible_from/expires_at 是查询后置谓词，<100K 物质下成本可忽略。
 
-| 哲学范畴 | 架构对应 |
-|---|---|
-| **物质**（客观实在） | `Substance`——统一存在基类，可持久化、可检索、有来源 |
-| **物质形态**（粒子/波） | `SubstanceForm`——event（粒子态）/ relation（波态）/ knowledge / strategy / backtest |
-| **运动**（物质的存在方式） | `motion.py` 中的运动函数——activate/decay/conflict/compress。运动不持久化，只产出新物质 |
-| **普遍联系** | 关系是一等物质（有完整 provenance）；GraphIndex 邻接表 |
-| **对立统一** | `conflict_group` 互斥组 + `detect_conflicts` |
-| **量变到质变** | `decay` 量变累积；事件累积到阈值触发策略信号（Phase 3） |
-| **波粒二象性** | 同一 Substance 有两种检索视图：RetrievalIndex（内容/关键词）与 GraphIndex（关系遍历） |
+### MemoryService Protocol（破坏性收窄为 4 方法）
 
-借鉴 SillyTavern WorldInfo：
-- 关键词触发（含正则）+ 可选过滤键（AND/NOT 逻辑）
-- 递归激活（已激活物质的内容再激活其他物质）
-- Inclusion Group（同组互斥，取 insertion_order 最高者）
-- Timed Effects（visible_from 防未来函数、expires_at 失效、decay 衰减）
-- Token 预算控制
+`search` / `save_experience` / `search_experience` / `initialize`。旧 8 方法中 `reflect`/`relate`/`remember`/`recall` 零外部调用或与 `search` 重复，`tier` 死参（MemGPT 三级模型残留）删除。`StrategyExperience` 值对象统一 save/search 数据契约，消灭 markdown 往返 regex。否决「拆 KnowledgeService + ExperienceService」：同一后端同一双索引，区别仅是过滤参数，不是领域边界。
 
-### Substance 数据模型（Pydantic）
+### 持久化
 
-采用 Pydantic `BaseModel`（与项目 `BacktestResult`、`StrategyDSL` 一致），免费获得 schema 校验、JSON 序列化、版本化：
+Phase 1-3 的 JSONL 截断式全量重写（不原子、O(n²) 写放大）暴露工程缺陷后，先升级 DuckDB（`INSERT OR REPLACE` 原子追加 + WAL + 主键幂等 + meta 从 `COUNT(*)` 派生），ADR-019 统一迁移至 **PostgreSQL `substances` 表**（JSONB keys/metadata，`save_many` 幂等 UPSERT）。TF-IDF / Graph 索引不持久化，启动时全量加载到内存热存储。
 
-```python
-class SubstanceForm(str, Enum):
-    EVENT = "event"
-    RELATION = "relation"
-    KNOWLEDGE = "knowledge"
-    STRATEGY = "strategy"
-    BACKTEST = "backtest"
+写入路径收敛：所有生成数据落盘位置由 `core/storage.py` 唯一裁决，唯一控制变量 `LONG_EARN_DATA_DIR`（默认 `D:/dev/long-earn-data`），各业务模块不得 `Path.home()` 或硬编码。
 
-class FilterLogic(str, Enum):
-    AND_ANY = "and_any"
-    AND_ALL = "and_all"
-    NOT_ANY = "not_any"
-    NOT_ALL = "not_all"
+### 事件采集与推理（Phase 2-3）
 
-class Substance(BaseModel):
-    sid: str
-    form: SubstanceForm
-    content: str
-    keys: list[str] = []                # WorldInfo 触发词
-    filter_keys: list[str] = []
-    filter_logic: FilterLogic = FilterLogic.AND_ANY
-    created_at: datetime
-    visible_from: datetime | None = None
-    expires_at: datetime | None = None
-    source: str = "manual"
-    confidence: float = 1.0
-    source_id: str | None = None         # relation 专用
-    target_id: str | None = None
-    relation_type: str | None = None
-    conflict_group: str | None = None
-    insertion_order: int = 0
-    decay_half_life_days: float = 90.0
-    metadata: dict[str, Any] = {}
-```
+Collector registry（Kimi / ciccwm 热榜 / 专题资讯）+ 事件推理子图（collect -> extract -> propagate -> conflict -> save）；`save_events` 落 EVENT/RELATION 物质 + 冲突组检测。ADR-018 将入口基础设施化为 `RuntimeContext.prepare_context(query)`。
 
-### 双索引（波粒二象性）
+## 附录：PIT 数据修复（原独立 ADR-007 分支并入）
 
-**RetrievalIndex**（`indices/retrieval.py`）—— 粒子态检索，双通道融合：
-- **关键词通道**：`dict[str, list[str]]` 倒排索引（key → sid 列表），正则 key 编译存储
-- **语义通道**：TF-IDF（修复特征选择为 IDF 升序 + jieba 分词）或 embedding（可选）
-- **融合**：keyword 命中优先，semantic 补充，alpha 加权
-- **增量更新**：新物质只 transform 不 refit；定期全量 refit
-- **缓存**：按 content hash 失效（不按 count）
-
-**GraphIndex**（`indices/graph.py`）—— 波态检索：
-- **邻接表** `dict[str, list[str]]`（不预分配矩阵，内存高效、无容量上限）
-- 边指向 substance sid，权值/类型/provenance 从对应 relation 物质读取
-- BFS 返回 `(sid, path, distance, weight)`（不再只返回节点名）
-
-> **时间过滤不设独立索引**：visible_from/expires_at 是施加在任意查询结果上的谓词（post-filter），<100K 物质量级下成本可忽略，独立排序索引是过度优化。
-
-### 运动层（motion.py）
-
-运动是过程，不持久化，只产出新物质或变更状态：
-
-- `activate(text, store, budget=2000, max_recursion=3, visible_at=None)` — WorldInfo 激活引擎：分词 → KeyIndex 查候选 → filter_logic 过滤 → conflict_group 互斥 → 递归扫描 → 时间过滤 → 预算截断
-- `decay(store, half_life_map)` — 按 form 配不同半衰期（新闻短、知识长、回测中等）
-- `detect_conflicts(store, substance)` — 可配置词库（不再硬编码 16 词）
-- `compress(store, min_similarity=0.6)` — 修复聚类算法（re-center 或传递闭包）
-
-### 持久化（DuckDB 事务式存储，Phase 4 升级）
-
-```
-<数据目录>/substances.duckdb    # DuckDB 列式存储（WAL 崩溃安全 + 主键幂等）
-<数据目录>/meta.json             # schema_version, substance_count（派生自 COUNT(*)，非独立权威）
-```
-
-数据目录由 **`LONG_EARN_DATA_DIR`** 环境变量唯一控制（默认 repo 同级 `long-earn-data`），
-所有生成数据路径由 `core/storage.py` 统一裁决（见「写入路径收敛」）。
-
-**Phase 1-3 用 JSONL 全量重写，Phase 4 改为 DuckDB 单条原子追加**。动机：
-JSONL 实现用 `open("w")` 截断式全量重写 + 每次 `add` 后 `_auto_save` 全量落盘，
-既不原子（崩溃截断丢失全部数据）也不可扩展（O(n²) 写放大）。DuckDB 方案：
-
-- **原子追加**：`add()` 内 `INSERT OR REPLACE` 单条 O(log n)，WAL 保证崩溃安全
-- **幂等**：主键 `sid` 约束，重复追加自动替换而非重复行
-- **列式检索**：`visible_from`/`form`/`created_at` 建索引，时间过滤与形态过滤走 SQL 谓词下推
-- **meta 与数据对齐**：`save_meta` 在 `load()` 后以 `SELECT COUNT(*)` 派生，消灭元数据撒谎
-- **索引仍内存重建**：TF-IDF / Graph 索引不持久化，启动时从 DuckDB 全量加载到内存热存储
-
-向后兼容：`load_jsonl` / `save_jsonl` 保留为迁移入口；一次性脚本
-`scripts/migrate_memory_to_duckdb.py` 把旧 `substances.jsonl` 导入 DuckDB。
-ADR-004 遗留的 `memory.facts.pkl` / `memory.npz` 不迁移（pickle 不安全，已无代码读取），
-迁移脚本打印可清理清单供人工删除。
-
-写入路径收敛：`core/storage.py` 是所有生成数据落盘位置的**唯一裁决者**，
-通过 `LONG_EARN_DATA_DIR` 环境变量派生 `substances_db_path()` / `backtest_cache_path()` /
-`hypothesis_tree_dir()` / `strategy_results_path()` / `best_strategy_path()`。
-`AppConfig.from_env()` 调用 `core.storage.resolve_paths()` 一次性解析全部路径注入配置字段。
-各业务模块（`DataCache`、`DuckDBAuditProvider`、`HypothesisTreeStore`、
-`StrategyResearchService`、`BacktestAnalyzer`）默认从 `core.storage` 取路径，
-不再 `Path.home()` 或硬编码绝对路径。
-
-### MemoryService Protocol 精简
-
-Phase 1 初版为求"消费方零改动"曾保留旧 8 方法签名不变。落地后复核所有消费点（仅 5 点），发现其中 3 个方法外部零调用、1 个 `tier` 参数被 `# noqa: ARG002` 显式忽略——过渡约束遗留了结构性债务。故 **破坏性收窄为 4 方法**。
-
-#### 真实消费足迹（仅 5 点）
-
-| 消费点 | 调用 |
-|---|---|
-| `KnowledgeContextMixin._search_knowledge` | `search()` |
-| `StrategyResearchAgent._retrieve_past_experience` | `search_experience()` |
-| `subgraph._save_experience_node` | `save_experience()` |
-| `StrategyDevelopAgent._search_experience` | `search_experience()`（原绕行 `recall` 自行 regex parse，现统一） |
-| `context_init` | `initialize()` |
-
-#### 删除项
-
-| 删除 | 理由 |
-|---|---|
-| `reflect` | 0 外部调用；内部硬编码 16 关键词建边是 `motion` 层的职责 |
-| `relate` | 0 外部调用；关系写入是 `save`/`search` 的实现细节 |
-| `remember` | 0 外部调用；是 `save_experience` 的实现细节 |
-| `recall` | 与 `search` 重复；`develop_agent` 绕开它自行 parse 才是病根 |
-| `tier` 参数 | MemGPT 三级模型残留，已被 `SubstanceForm` + decay 取代 |
-
-#### 新接口（4 方法）
-
-```python
-from dataclasses import dataclass
-from typing import Any
-
-@dataclass(frozen=True)
-class StrategyExperience:
-    """策略经验值对象 — 统一 save/search 数据契约，消灭 markdown 往返 regex。"""
-    name: str
-    code: str                          # 策略 YAML / Python
-    rationale: str                     # 设计思路
-    metrics: dict[str, Any]            # 回测指标
-    reflection: str = ""
-    error_history: list[dict[str, Any]] | None = None
-
-
-class MemoryService(Protocol):
-    """记忆服务 — 知识与策略经验的统一存取（Substance 后端）。"""
-
-    def search(self, query: str, k: int = 3, **filters: Any) -> list[str]:
-        """检索知识/经验片段，返回可注入 prompt 的格式化字符串。"""
-        ...
-
-    def save_experience(self, experience: StrategyExperience) -> str:
-        """保存一次策略研发经验，返回经验 ID。"""
-        ...
-
-    def search_experience(
-        self,
-        query: str,
-        k: int = 3,
-        min_sharpe: float | None = None,
-    ) -> list[StrategyExperience]:
-        """按语义检索同类历史策略经验。"""
-        ...
-
-    def initialize(self) -> None:
-        """加载持久化记忆 / init 目录。"""
-        ...
-```
-
-**否决"拆 KnowledgeService + ExperienceService"**：两者在 Substance 模型下无本质区别（同一后端、同一双索引、同 `form=KNOWLEDGE`，区别仅在 metadata 标签——这是过滤参数，不是领域边界）。`research_agent.optimize_strategy` 同时需要历史经验**和**金融概念背景，拆两个接口它反而要注入两个服务。故选单一接口做减法。
-
-## 文件结构
-
-```
-src/long_earn/substance/
-├── __init__.py              # 导出 Substance, SubstanceForm, SubstanceStore 等
-├── model.py                 # Substance(Pydantic) + SubstanceForm + FilterLogic
-├── store.py                 # SubstanceStore（统一存储 + 索引协调 + 时间过滤）
-├── motion.py                # 运动层（activate/decay/conflict/compress）
-├── persistence.py           # JSONL 读写（Pydantic 序列化，~20 行）
-└── indices/
-    ├── __init__.py
-    ├── retrieval.py         # RetrievalIndex（keyword 通道 + semantic 通道 + 融合）
-    └── graph.py             # GraphIndex（dict 邻接表 + BFS 返回路径）
-```
-
-6 个源文件（不含 `__init__`），比旧 `memory/` 5 文件仅多 1，但能力全面超越。
-
-## 实施计划
-
-### Phase 1：SubstanceStore 核心 + 旧系统移除
-
-**Step 1**：`model.py`（Substance Pydantic）+ `store.py`（SubstanceStore）+ `indices/retrieval.py`（RetrievalIndex 双通道）+ `indices/graph.py`（GraphIndex 邻接表）+ `persistence.py`（JSONL）
-
-**Step 2**：`motion.py`（activate WorldInfo 引擎 + decay + detect_conflicts + compress）
-
-**Step 3**：重写 `MemoryServiceImpl` 委托 SubstanceStore + 收窄 Protocol 至 4 方法（删僵尸方法 + `StrategyExperience` 值对象）+ 迁移 5 消费点
-
-**Step 4**：备份旧数据到 temp + 删除 `memory/` + 重写测试 + 更新 `config.py`/`import-linter`/`CLAUDE.md`/`TODO.md`
-
-**验证门槛**：
-```sh
-uv run ruff check src/long_earn/substance/ src/long_earn/services/memory_service.py
-uv run lint-imports                             # substance 独立合约 0 broken
-uv run pytest tests/unit/test_substance/ -v
-uv run pytest tests/unit/test_strategy_rd/ -v   # 5 消费点迁移后全绿
-uv run pytest tests/unit/ -v
-```
-Serena LSP 诊断：每个修改文件 `Error` 级别诊断为空。
-
-### Phase 2：采集器 + 事件推理子图（已实施）
-
-- Collector registry + Kimi（包装现有 `tools/kimi_web_search.py`）/ ciccwm 热榜 / ciccwm 专题资讯采集器
-- 事件推理子图：collect → extract → propagate（L2 影响传播，LLM 辅助） → conflict → save
-- 主图新增 `event_inference` 路由（`EVENT_INFERENCE_KEYWORDS` 关键词触发，优先级最高）
-- `MemoryService.save_events` 落库 EVENT/RELATION 物质 + 冲突组检测（同标的相反情绪归组）
-- 可注入 Fake 实现（FakeEventExtractor / FakeEventPropagator），支持确定性 e2e 测试
-
-### Phase 3：子图集成 + Dashboard
-
-- `stock_analysis` / `strategy_rd` 调 `store.activate()` 注入事件上下文（helper 函数，非独立模块）
-- Dashboard 事件流可视化
-
-### Phase 4：DuckDB 持久化 + 写入路径收敛（已实施）
-
-Phase 1-3 的 JSONL 全量重写暴露 7 处工程缺陷，Phase 4 一次性修复：
-
-| 缺陷 | 修复 |
-|---|---|
-| `open("w")` 截断重写，崩溃丢数据 | DuckDB `INSERT OR REPLACE` 原子追加 + WAL |
-| 每次 `add` 全量重写 O(n²) | `add()` 内单条 O(log n) 追加，`_auto_save` 删除 |
-| `meta.json` 与数据脱钩（曾出现 156 条但文件缺失） | `save_meta` 从 `SELECT COUNT(*)` 派生 |
-| `tools/store.py` 直读 `os.getenv` 绕过配置 | 收敛到 `AppConfig.memory_path` |
-| `dashboard/event_analyzer.py` 硬编码路径 | `serve_visualization` 默认取 `AppConfig.memory_path` |
-| `SubstanceForm.STRATEGY/BACKTEST` 从未使用 | `save_experience` 改用 `STRATEGY` 形态 |
-| ADR-004 `memory.facts.pkl`/`memory.npz` 残留 | 迁移脚本打印清理清单，不自动删 |
-
-**验证门槛**：`uv run pytest tests/unit/ -v`（637 passed）、`uv run ruff check`、`uv run lint-imports`（3 contracts KEPT）。
-
-## 理由
-
-1. **哲学-实现统一**：物质（Substance）与运动（motion 函数）是代码中的一等概念，不是 ADR 注释。减少认知分裂。
-2. **关系升为一等公民**：relation 物质有完整 provenance（来源、时间、置信度、衰减），与 event 对等。
-3. **双通道检索**：WorldInfo 关键词触发 + 语义相似度融合，比旧系统单 TF-IDF 通道表达力强一个量级。
-4. **修复全部已知缺陷**：TF-IDF 特征选择、中文分词、线性扫描、400MB 预分配、pickle 安全、embedding 缓存脆弱——一次性解决。
-5. **Pydantic 一致性**：与项目 `BacktestResult`、`StrategyDSL` 技术栈统一，persistence 从 ~100 行缩到 ~20 行。
-6. **邻接表简化**：dict 邻接表比 numpy 矩阵更简单、更可测、内存高效，BFS 性能在小规模下等同。
-7. **DuckDB 持久化（Phase 4）**：与项目已有 `backtest_cache.duckdb` 技术栈收敛，追加写 O(log n) + WAL 崩溃安全 + 列式谓词下推，彻底消除 JSONL 全量重写的工程缺陷。
+1. **announce_date 必填、无回退**：`_quarterly_to_daily` 唯一逻辑 `visible_from = announce_date`。原 `report_date + 60 天固定延迟` 对年报（法定披露截止 120 天）造成约 40 个交易日未来函数泄漏。缓存表 DROP + CREATE 重建。
+2. **财务接口统一到 miniqmt**：akshare / ciccwm 的财务方法全部删除；ciccwm 保留情报接口（`MarketIntelligenceProvider`）。
+3. **四表合并全量字段**：`FINANCIAL_FIELD_MAP` 7 -> 18 字段（Income / Balance / CashFlow / Pershareindex 四表按 `(symbol, report_date)` 对齐），衍生指标优先用 Pershareindex 预计算值、手算兜底。
 
 ## 后果
 
-- 删除 `src/long_earn/memory/`（5 文件 ~1500 行）+ 旧测试（4 单元 + 1 集成）
-- 新增 `jieba>=0.42.1` 依赖
-- `AppConfig.memory_path` 默认值：`.data/memory.npz` → `.data/substances.jsonl`（Phase 1）→ `.data/substances.duckdb`（Phase 4）
-- 旧数据文件迁移：`scripts/migrate_memory_to_duckdb.py`（JSONL → DuckDB）；ADR-004 `pkl/npz` 不迁移
-- import-linter 新增 `substance_independent` 合约
-- `MemoryService` Protocol 8 → 4 方法（破坏性收窄），5 消费点机械迁移
-- ADR-004 状态改为 Superseded by ADR-007
-- Phase 2/3 完成后新闻事件推理引擎上线
-- Phase 4：`SubstanceForm.STRATEGY` 启用（`save_experience`）；`_auto_save` 全量重写删除；写入路径单一数据源
-
-## 对 CLAUDE.md TODO 的影响
-
-CLAUDE.md "记忆系统" 4 项 TODO（语义增强检索/记忆压缩/记忆衰减/冲突检测）在 TODO.md 标记为"v2.0 完成"，但正是被替换的旧实现。Phase 1 完成后重新标记为"v3.0 物质-运动架构重构"。Phase 4 持久化升级不新增 TODO 项。
-
----
-
-## 附录：PIT 数据修复（原独立 ADR-007 分支，已并入）
-
-> 原文件 `007-real-announce-date-pit.md` 与本 ADR 共用 007 编号但主题不同。为消除编号冲突，将其作为附录并入本文件。状态：已确认（2026-07-09）— Phase 1-3 全部实施。
-
-### 背景
-
-- **Phase 1：PIT 修复**：原数据层 PIT 契约使用 `report_date + 60天固定延迟`，审计发现 AUDIT-P0-01：年报 report_date=12-31，法定披露截止次年 4-30（120 天），60 天延迟导致 3-01 至 4-29 约 40 个交易日的未来函数泄漏。调研发现 akshare 已返回 `公告日期`、miniqmt 已返回 `m_anntime`，但代码完全忽略。
-- **Phase 2：接口统一**：ciccwm/akshare 财务降级分支增加维护成本，且字段口径与 miniqmt 不一致。用户决策：屏蔽 ciccwm/akshare 财务降级，聚焦 miniqmt 打通系统核心目标。
-- **Phase 3：全量字段**：原系统只提取 7 个财务字段（revenue/net_profit/eps/roe/gross_margin/net_profit_yoy/revenue_yoy），xtquant 提供的 8 张财务表仅用了 Income 和 Balance 两张。大量可用字段未入库。
-
-### 决策
-
-#### Phase 1：announce_date 必填，无回退
-
-**announce_date 必填，无回退。** `_quarterly_to_daily` 只有一个逻辑：`visible_from = announce_date`。
-
-- 简洁第一：`_quarterly_to_daily` 不再有 `publication_lag_days` 参数，不再有回退分支
-- 不兼容旧数据：缓存表直接 DROP + CREATE，旧数据全量重建
-- Provider 自治：各 provider 自己负责提取/构造 announce_date 字段（miniqmt 从 `m_anntime` 字段提取，**唯一保留的财务路径**）
-
-```python
-def _quarterly_to_daily(self, quarterly_df, symbols, trading_dates, fields) -> pd.DataFrame:
-    for _, row in symbol_data.iterrows():
-        visible_from = pd.to_datetime(row["announce_date"])  # 唯一逻辑，无回退
-        mask = daily.index >= visible_from
-        ...
-```
-
-#### Phase 2：财务接口统一到 miniqmt
-
-- `CompositeDataProvider` 的 `get_financial_panel` 只走 miniqmt 路径
-- `akshare_provider.py` / `ciccwm_provider.py` **删除全部财务方法**（`get_financial_panel` / `_quarterly_to_daily` / `_normalize_finance_items` / `_lag_by_report_type` / `CICCWM_FINANCIAL_FIELD_MAP`）
-- ciccwm 保留 `MarketIntelligenceProvider` 接口（资金流向/排行/板块/资讯）
-- akshare 保留行情/成分股降级能力
-
-#### Phase 3：四表合并全量字段提取（FINANCIAL_FIELD_MAP，18 字段）
-
-```python
-FINANCIAL_FIELD_MAP = {
-    # 利润表（Income）原始字段
-    "revenue": "revenue", "net_profit": "net_profit", "eps": "eps", "research_expenses": "research_expenses",
-    # 资产负债表（Balance）原始字段
-    "total_equity": "total_equity", "total_assets": "total_assets", "total_liabilities": "total_liabilities",
-    # 现金流量表（CashFlow）原始字段
-    "ocf": "ocf", "capex": "capex",
-    # 每股指标/主要指标表（Pershareindex）预计算字段
-    "bps": "bps", "ocf_per_share": "ocf_per_share", "debt_to_assets": "debt_to_assets",
-    "net_profit_margin": "net_profit_margin", "roe_weighted": "roe_weighted",
-    # 衍生指标（Pershareindex 预计算优先，手算兜底）
-    "net_profit_yoy": "net_profit_yoy", "revenue_yoy": "revenue_yoy", "roe": "roe", "gross_margin": "gross_margin",
-}
-```
-
-miniqmt 的 `_fetch_financials` 并行获取四张表，以 Income 表为基础按 `(symbol, report_date)` 对齐。`_compute_derived_financials` 改为**手算兜底模式**：优先使用 Pershareindex 表的预计算值（监管口径，比手算更准确），仅当预计算值缺失（NaN）时才用手算兜底。
-
-**缓存表结构（22 列，DROP + CREATE）**：`financial_quarterly` 含 `symbol`/`report_date`/`announce_date` NOT NULL + 18 个财务字段 + 主键 `(symbol, report_date)`。
-
-### 影响范围
-
-- Phase 1-2（提交 f2708c3 + 851c3dc）：`cache.py` / `miniqmt_provider.py` / `akshare_provider.py` / `ciccwm_provider.py` / `provider.py` / `test_provider_pit_contract.py`
-- Phase 3：`miniqmt_provider.py`（FINANCIAL_FIELD_MAP 7→18 字段）/ `cache.py`（表结构 10→22 列）/ `polars_adapter.py`（删除硬编码 4 字段）/ `strategy_develop_prompt.md`（字段白名单 7→23 字段）/ `test_provider_pit_contract.py`（C5 字段提取契约测试）
-
-### 验证
-
-- 全量单元测试通过（549 passed）
-- lint-imports 架构契约通过（3 kept, 0 broken）
-- ruff check 全部通过
-- 端到端回测验证无 PIT 泄漏（Phase 1 已验证）
+- 删除旧 `memory/`（5 文件 ~1500 行）与旧测试；新增 jieba 依赖；import-linter 新增 substance 独立合约。
+- MemoryService 8 -> 4 方法，5 个消费点机械迁移；ADR-004 Superseded。

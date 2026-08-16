@@ -1,7 +1,7 @@
 # ADR-005: 事件驱动回测框架替代向量化引擎
 
-## 状态
-Proposed
+日期: 2024-05
+状态: Accepted, Implemented（详见 [docs/architecture.md](../architecture.md) 与 `src/long_earn/backtest/engine/`）
 
 ## 上下文
 当前的向量化回测引擎（基于 Pandas MultiIndex 和 AST 表达式）在处理简单因子策略时速度极快，但在以下方面存在严重局限：
