@@ -146,7 +146,11 @@ def build_daily_financial_panel(
     if n >= _PANEL_LOG_MIN_SYMBOLS:
         logger.info(f"[财务面板] 开始: {n} 只, {start_date}~{end_date}")
 
-    quarterly = cache.get_financials(symbols, fields)
+    # P3-08: 仅上界过滤（report_date <= end_date）——下界不放：backward asof
+    # 需要 start 前最近一期财报预热，否则窗口起始几天的财务字段会是 NaN；
+    # report_date 晚于 end 的报告期 announce_date 必晚于窗口内任何交易日，
+    # asof 本就不会选中，上界过滤只是收窄查询量 + 纵深防御（防越界取数）。
+    quarterly = cache.get_financials(symbols, fields, end_date=end_date)
     if quarterly is None or quarterly.empty:
         if n >= _PANEL_LOG_MIN_SYMBOLS:
             logger.info(f"[财务面板] 完成(空): 总耗时 {time.perf_counter() - t0:.1f}s")

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
+from long_earn.backtest.domain.entities import OrderEvent
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 
@@ -690,3 +691,69 @@ def test_take_profit_triggers_sell(mock_data_provider):
         and e.get("payload", {}).get("risk_type") == "take_profit"
     ]
     assert len(tp_triggers) >= 1, "上涨趋势中止盈应触发"
+
+
+# ── P3-02：broker 异常输入 fail closed（NaN/Inf/负数/0 价格与数量）────────
+
+
+def _make_p3_order(quantity: float, price: float | None) -> OrderEvent:
+    """构造 P3-02 测试订单（quantity/price 直接可控，绕过 Portfolio 正常路径）。"""
+    return OrderEvent(
+        timestamp=datetime(2024, 1, 1),
+        trace_id="trace-p3",
+        event_id="evt-p3",
+        symbol="A.SZ",
+        order_type="BUY",
+        quantity=quantity,
+        price=price,
+        order_id="ord-p3",
+    )
+
+
+def test_pre_trade_rejects_invalid_quantity():
+    """P3-02：订单数量 NaN → _pre_trade_check 返回 INVALID_QUANTITY 结构化原因。
+
+    该返回值在 _execute_signals 中记入 ORDER_SKIPPED 审计（reason=枚举值），
+    保证拒单结构化可追溯、绝不静默吞掉。
+    """
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    order = _make_p3_order(quantity=float("nan"), price=None)
+    result = engine._pre_trade_check(order, 10.0, "trace-p3", None)
+    assert result is not None, "非法数量必须被拒绝"
+    reason, detail = result
+    assert reason == OrderSkipReason.INVALID_QUANTITY
+    assert "quantity" in detail
+
+
+def test_pre_trade_rejects_invalid_limit_price():
+    """P3-02：限价 NaN → _pre_trade_check 返回 INVALID_PRICE 结构化原因。"""
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    order = _make_p3_order(quantity=100.0, price=float("nan"))
+    result = engine._pre_trade_check(order, 10.0, "trace-p3", None)
+    assert result is not None, "非法限价必须被拒绝"
+    reason, detail = result
+    assert reason == OrderSkipReason.INVALID_PRICE
+    assert "price" in detail
+
+
+def test_pre_trade_rejects_invalid_market_price():
+    """P3-02：市场价 NaN → PRICE_INVALID（既有价格守卫保持）。"""
+    from long_earn.backtest.engine.audit import OrderSkipReason
+
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    order = _make_p3_order(quantity=100.0, price=None)
+    result = engine._pre_trade_check(order, float("nan"), "trace-p3", None)
+    assert result is not None
+    reason, _ = result
+    assert reason == OrderSkipReason.PRICE_INVALID
+
+
+def test_pre_trade_valid_order_passes():
+    """P3-02：正常订单 + 有效价格通过 pre-trade 检查。"""
+    engine = EventDrivenBacktestEngine(data_provider=None)
+    order = _make_p3_order(quantity=100.0, price=10.0)
+    assert engine._pre_trade_check(order, 10.0, "trace-p3", None) is None

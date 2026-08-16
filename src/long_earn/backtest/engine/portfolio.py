@@ -3,6 +3,7 @@
 负责将策略生成的信号转换为具体订单，并管理实时持仓与资金。
 """
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -248,7 +249,9 @@ class Portfolio:
             if price_field not in price_rows.columns:
                 continue
             price = price_rows.select(price_field).to_series()[0]
-            if price is None or price <= 0:
+            # P3-02: NaN/Inf 价格（NaN<=0 恒 False 会漏过旧守卫）无法生成合法
+            # 数量（int(NaN) 抛 ValueError 中断整轮回测），显式跳过该标的。
+            if price is None or not math.isfinite(price) or price <= 0:
                 continue
 
             # T+1 约束（P0-06）：检查当前持仓是否可卖出

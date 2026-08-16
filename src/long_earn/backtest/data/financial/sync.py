@@ -100,7 +100,10 @@ def ensure_financial_cache(
         q for q in quarters if pd.to_datetime(q, format="%Y%m%d") >= start_pd
     ]
 
-    cached_df = cache.get_financials(symbols)
+    # P3-08: 限定报告期窗口 [start, end]——只查本切分窗口内的缓存报告期，
+    # 收窄查询量并防越界取数（训练/测试/验证集纵深防御）。缺失判定只关心
+    # in_range_quarters，过滤前后结果等价，仅减少数据搬运。
+    cached_df = cache.get_financials(symbols, start_date=start_date, end_date=end_date)
     missing_quarters = in_range_quarters
     if cached_df is not None and not cached_df.empty:
         cached_quarters = set(cached_df["report_date"].dt.strftime("%Y%m%d").unique())

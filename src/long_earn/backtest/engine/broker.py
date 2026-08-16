@@ -4,6 +4,7 @@
 支持市价单、限价单、止损单、止损限价单及 OCO 订单。
 """
 
+import math
 import uuid
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ from long_earn.backtest.domain.entities import (
     OrderStatus,
 )
 from long_earn.backtest.domain.exceptions import OrderExecutionError
+from long_earn.backtest.engine.audit import OrderSkipReason
 
 
 @dataclass
@@ -70,6 +72,57 @@ class TradingCostConfig:
         return max(amount * self.commission_rate, self.min_commission)
 
 
+def validate_order_fields(order: OrderEvent) -> tuple[OrderSkipReason, str] | None:
+    """校验订单自身数值合法性（AUDIT-P3-02）。
+
+    撮合前 fail closed：订单数量必须为有限正数；限价（price）与止损价
+    （stop_price）若给定必须为有限正数。NaN / Inf / 0 / 负数一律拒绝。
+
+    返回 ``(OrderSkipReason, detail)`` 表示拒绝原因，``None`` 表示通过。
+    引擎预检（记 ORDER_SKIPPED 审计）与 Broker 入口（抛异常 fail closed）
+    共用本函数，保证两层判定一致、不留判定漂移空间。
+    """
+    if order.quantity is None or not math.isfinite(order.quantity) or order.quantity <= 0:
+        return (
+            OrderSkipReason.INVALID_QUANTITY,
+            f"{order.symbol} quantity={order.quantity}",
+        )
+    if order.price is not None and (
+        not math.isfinite(order.price) or order.price <= 0
+    ):
+        return (
+            OrderSkipReason.INVALID_PRICE,
+            f"{order.symbol} 限价 price={order.price}",
+        )
+    if order.stop_price is not None and (
+        not math.isfinite(order.stop_price) or order.stop_price <= 0
+    ):
+        return (
+            OrderSkipReason.INVALID_PRICE,
+            f"{order.symbol} 止损价 stop_price={order.stop_price}",
+        )
+    return None
+
+
+def validate_order_numeric(
+    order: OrderEvent, current_price: float
+) -> tuple[OrderSkipReason, str] | None:
+    """订单 + 成交价全量数值校验（AUDIT-P3-02）。
+
+    在 :func:`validate_order_fields` 基础上追加当前市场价校验，
+    保证 NaN / Inf / 非正数价格或数量绝无可能流入撮合计算。
+    """
+    fields_invalid = validate_order_fields(order)
+    if fields_invalid is not None:
+        return fields_invalid
+    if not math.isfinite(current_price) or current_price <= 0:
+        return (
+            OrderSkipReason.PRICE_INVALID,
+            f"{order.symbol} 当前价 price={current_price}",
+        )
+    return None
+
+
 class Broker:
     """
     模拟撮合经纪人
@@ -104,6 +157,15 @@ class Broker:
         Returns:
             本次产生的成交事件列表（可能为空）
         """
+        # P3-02: 非法数值输入（NaN/Inf/负数/0 价格或数量）fail closed——
+        # 显式抛异常拒绝，绝不静默吞掉或让 NaN 流入撮合计算。
+        invalid = validate_order_numeric(order, current_price)
+        if invalid is not None:
+            reason, detail = invalid
+            raise OrderExecutionError(
+                f"订单 {order.order_id} 数值非法被拒（{reason.value}）: {detail}"
+            )
+
         # 提前注册 OCO 组，确保即使立即成交也记录互斥关系
         self._register_oco(order)
 
@@ -161,6 +223,14 @@ class Broker:
             order = open_order.order
             sym_price = price_lookup.get(order.symbol)
             if sym_price is None:
+                continue
+            # P3-02: 行情价非法（NaN/Inf/非正数）时本 bar 跳过撮合，
+            # 防止 NaN 成交价流入 FillEvent 污染组合净值。
+            if not math.isfinite(sym_price) or sym_price <= 0:
+                logger.warning(
+                    f"待成交订单 {oid} 行情价非法，本 bar 跳过撮合: "
+                    f"{order.symbol} price={sym_price}"
+                )
                 continue
 
             otype = order.exec_type or ExecType.MARKET

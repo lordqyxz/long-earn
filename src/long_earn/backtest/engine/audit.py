@@ -69,7 +69,13 @@ class OrderSkipReason(StrEnum):
     """价格缺失：slab 中找不到该标的的价格"""
 
     PRICE_INVALID = "PRICE_INVALID"
-    """价格无效：NaN / Inf / 非正数"""
+    """价格无效：NaN / Inf / 非正数（成交价/市场价）"""
+
+    INVALID_PRICE = "INVALID_PRICE"
+    """订单价格无效：限价/止损价的 NaN / Inf / 非正数（P3-02）"""
+
+    INVALID_QUANTITY = "INVALID_QUANTITY"
+    """订单数量无效：NaN / Inf / 非正数（0 及负数，P3-02）"""
 
 
 class PostgresAuditProvider(AuditProvider):

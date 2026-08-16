@@ -658,6 +658,8 @@ class DataCache:
         self,
         symbols: list[str],
         fields: list[str] | None = None,
+        start_date: str = "",
+        end_date: str = "",
     ) -> pd.DataFrame | None:
         """[兼容包装] 从缓存获取财务数据 — union 5 张标量表。
 
@@ -667,9 +669,16 @@ class DataCache:
         （provider 的 get_financial_panel）过渡使用。
         新代码应直接用 ``get_financial_table``。
 
+        AUDIT-P3-08：新增 ``start_date`` / ``end_date`` 报告期窗口过滤
+        （纵深防御）——只返回 ``report_date`` 落在 ``[start, end]`` 区间
+        的报告期，防止训练/测试/验证集越界取数。缺省为空字符串 = 不过滤
+        （向后兼容：旧调用方不传日期仍取全量；新调用方按数据切分窗口显式收窄）。
+
         Args:
             symbols: 股票代码列表
             fields: 需要的财务字段列表；None 表示返回全量字段
+            start_date: 报告期下界（YYYY-MM-DD，含端点），空字符串不限
+            end_date: 报告期上界（YYYY-MM-DD，含端点），空字符串不限
         """
         if not symbols:
             return None
@@ -677,7 +686,7 @@ class DataCache:
         # "资本结构" 能拿到 total_shares / float_shares 字段。
         scalar_tables = FinancialSchemaRegistry.scalar_tables()[:5]
         query, params = self._build_union_financials_query(
-            scalar_tables, symbols, fields
+            scalar_tables, symbols, fields, start_date, end_date
         )
         n = len(symbols)
         start = time.perf_counter()
@@ -756,11 +765,18 @@ class DataCache:
         scalar_tables: tuple,
         symbols: list[str],
         fields: list[str] | None,
+        start_date: str = "",
+        end_date: str = "",
     ) -> tuple[str, list[str]]:
         """构造 4 张标量表的 UNION ALL 合并查询 + 参数。
 
         每张表 SELECT 其字段，缺失字段补 ``NULL AS fname``（保证 UNION ALL 列名一致），
         外层按 (symbol, report_date) GROUP BY 聚合，MAX(col) 合并多表同字段。
+
+        AUDIT-P3-08：``start_date`` / ``end_date`` 在聚合外层追加
+        ``report_date >= / <=`` 过滤（含端点）。``report_date`` 是 GROUP BY
+        键，过滤放在 GROUP BY 前后等价；放外层只需追加两个参数，避免逐表
+        WHERE 造成参数顺序漂移。缺省空字符串 = 不追加过滤（向后兼容）。
         """
         placeholders = ", ".join(["%s"] * len(symbols))
         select_fields = DataCache._union_select_fields(scalar_tables, fields)
@@ -795,12 +811,24 @@ class DataCache:
                 *agg_cols,
             ]
         )
+        # P3-08: 报告期窗口过滤（含端点）。放聚合外层——report_date 是
+        # GROUP BY 键，WHERE 前置过滤与 HAVING 等价且参数顺序简单可测。
+        params = list(symbols) * len(scalar_tables)
+        where_parts: list[str] = []
+        if start_date:
+            where_parts.append("report_date >= %s::date")
+            params.append(start_date)
+        if end_date:
+            where_parts.append("report_date <= %s::date")
+            params.append(end_date)
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
         query = f"""
             SELECT {final_select} FROM ({union_query})
+            {where_clause}
             GROUP BY symbol, report_date
             ORDER BY report_date, symbol
         """
-        params = list(symbols) * len(scalar_tables)
         return query, params
 
     def save_financials(self, df: pd.DataFrame) -> None:

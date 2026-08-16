@@ -144,6 +144,26 @@ def _make_limit_order(
     )
 
 
+def _make_stop_order(
+    order_type: str, stop_price: float, quantity: float = 100.0
+) -> OrderEvent:
+    """构造测试用止损/止盈单（触发后转市价）"""
+    from long_earn.backtest.domain.entities import ExecType
+
+    return OrderEvent(
+        timestamp=datetime(2024, 1, 1),
+        trace_id="trace-stop",
+        event_id="evt-stop",
+        symbol="000001",
+        order_type=order_type,
+        quantity=quantity,
+        price=None,
+        stop_price=stop_price,
+        order_id="ord-stop",
+        exec_type=ExecType.STOP,
+    )
+
+
 class TestLimitOrderConservativeFill:
     """限价单保守成交价测试
 
@@ -220,3 +240,141 @@ class TestFillEventIntegrity:
         assert fill.commission >= 0
         assert fill.slippage >= 0
         assert fill.stamp_duty >= 0
+
+
+class TestBrokerInvalidInputFailClosed:
+    """AUDIT-P3-02：撮合/下单路径对 NaN/Inf/负数/0 价格与数量 fail closed。
+
+    非法数值必须被显式拒绝（结构化原因 / 抛异常），绝不静默吞掉或流入撮合计算。
+    拒绝原因走 OrderSkipReason 枚举，保证审计日志 ORDER_SKIPPED 的 reason 结构化、
+    可查询、可聚合。
+    """
+
+    # ── validate_order_fields：订单自身数值字段 ─────────────────
+
+    @pytest.mark.parametrize(
+        "bad_qty", [float("nan"), float("inf"), float("-inf"), 0.0, -100.0]
+    )
+    def test_invalid_quantity_rejected(self, bad_qty: float):
+        """数量 NaN/Inf/0/负数 → INVALID_QUANTITY 结构化原因。"""
+        from long_earn.backtest.engine.audit import OrderSkipReason
+        from long_earn.backtest.engine.broker import validate_order_fields
+
+        result = validate_order_fields(_make_order("BUY", quantity=bad_qty))
+        assert result is not None
+        reason, detail = result
+        assert reason == OrderSkipReason.INVALID_QUANTITY
+        assert str(bad_qty) in detail, "detail 应含具体数值，可追溯"
+
+    @pytest.mark.parametrize(
+        "bad_price", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0]
+    )
+    def test_invalid_limit_price_rejected(self, bad_price: float):
+        """限价 NaN/Inf/0/负数 → INVALID_PRICE 结构化原因。"""
+        from long_earn.backtest.engine.audit import OrderSkipReason
+        from long_earn.backtest.engine.broker import validate_order_fields
+
+        result = validate_order_fields(_make_limit_order("BUY", bad_price))
+        assert result is not None
+        reason, detail = result
+        assert reason == OrderSkipReason.INVALID_PRICE
+        assert str(bad_price) in detail, "detail 应含具体数值，可追溯"
+
+    @pytest.mark.parametrize(
+        "bad_stop", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0]
+    )
+    def test_invalid_stop_price_rejected(self, bad_stop: float):
+        """止损价 NaN/Inf/0/负数 → INVALID_PRICE 结构化原因。"""
+        from long_earn.backtest.engine.audit import OrderSkipReason
+        from long_earn.backtest.engine.broker import validate_order_fields
+
+        result = validate_order_fields(_make_stop_order("SELL", bad_stop))
+        assert result is not None
+        reason, detail = result
+        assert reason == OrderSkipReason.INVALID_PRICE
+        assert str(bad_stop) in detail, "detail 应含具体数值，可追溯"
+
+    def test_valid_orders_pass_validation(self):
+        """正常订单（正数量 + 限价/止损价）通过校验。"""
+        from long_earn.backtest.engine.broker import validate_order_fields
+
+        assert validate_order_fields(_make_order("BUY")) is None
+        assert validate_order_fields(_make_limit_order("BUY", 10.0)) is None
+        assert validate_order_fields(_make_stop_order("SELL", 9.0)) is None
+
+    # ── validate_order_numeric：订单 + 市场价全量校验 ────────────
+
+    @pytest.mark.parametrize(
+        "bad_price", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0]
+    )
+    def test_invalid_current_price_rejected(self, bad_price: float):
+        """市场价 NaN/Inf/0/负数 → PRICE_INVALID 结构化原因。"""
+        from long_earn.backtest.engine.audit import OrderSkipReason
+        from long_earn.backtest.engine.broker import validate_order_numeric
+
+        result = validate_order_numeric(_make_order("BUY"), bad_price)
+        assert result is not None
+        reason, detail = result
+        assert reason == OrderSkipReason.PRICE_INVALID
+        assert str(bad_price) in detail, "detail 应含具体数值，可追溯"
+
+    def test_valid_order_with_current_price_passes(self):
+        """正常订单 + 有效市场价通过全量校验。"""
+        from long_earn.backtest.engine.broker import validate_order_numeric
+
+        assert validate_order_numeric(_make_order("BUY"), 10.0) is None
+
+    # ── Broker 入口 fail closed ────────────────────────────────
+
+    @pytest.mark.parametrize("bad_qty", [float("nan"), float("inf"), 0.0, -100.0])
+    def test_submit_order_raises_on_invalid_quantity(self, bad_qty: float):
+        """Broker 收到非法数量必须抛异常（fail closed），不得静默成交。"""
+        from long_earn.backtest.domain.exceptions import OrderExecutionError
+
+        broker = Broker()
+        with pytest.raises(OrderExecutionError):
+            broker.execute_order(_make_order("BUY", quantity=bad_qty), 10.0)
+
+    @pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), 0.0, -1.0])
+    def test_submit_order_raises_on_invalid_current_price(self, bad_price: float):
+        """Broker 收到非法市场价必须抛异常（fail closed），不得让 NaN 流入撮合。"""
+        from long_earn.backtest.domain.exceptions import OrderExecutionError
+
+        broker = Broker()
+        with pytest.raises(OrderExecutionError):
+            broker.execute_order(_make_order("BUY"), bad_price)
+
+    def test_submit_order_raises_on_invalid_limit_price(self):
+        """限价单非法限价必须抛异常。"""
+        from long_earn.backtest.domain.exceptions import OrderExecutionError
+
+        broker = Broker()
+        with pytest.raises(OrderExecutionError):
+            broker.submit_order(_make_limit_order("BUY", float("nan")), 10.0)
+
+    # ── 待成交订单：非法行情价仅跳过本 bar，订单保留 ─────────────
+
+    def test_pending_order_skips_bar_with_invalid_price(self):
+        """check_pending_orders：NaN 行情价本 bar 跳过撮合，订单仍待成交（非拒单）。"""
+        from long_earn.backtest.domain.entities import ExecType
+
+        broker = Broker()
+        order = OrderEvent(
+            timestamp=datetime(2024, 1, 1),
+            trace_id="trace-pend",
+            event_id="evt-pend",
+            symbol="000001",
+            order_type="BUY",
+            quantity=100.0,
+            price=10.0,
+            order_id="ord-pend",
+            exec_type=ExecType.LIMIT,
+        )
+        # BUY LIMIT @10、current=12：未触发，进入待成交
+        assert broker.submit_order(order, current_price=12.0) == []
+        assert broker.get_pending_count() == 1
+
+        # NaN 行情价：本 bar 跳过撮合，订单保留（延迟而非拒单，杜绝 NaN 成交价）
+        fills = broker.check_pending_orders(price_lookup={"000001": float("nan")})
+        assert fills == []
+        assert broker.get_pending_count() == 1

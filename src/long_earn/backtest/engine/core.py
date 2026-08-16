@@ -22,7 +22,11 @@ from long_earn.backtest.domain.entities import (
     SignalEvent,
 )
 from long_earn.backtest.engine.audit import RUN_TAG_PROD, RUN_TAG_TEST, OrderSkipReason
-from long_earn.backtest.engine.broker import Broker, TradingCostConfig
+from long_earn.backtest.engine.broker import (
+    Broker,
+    TradingCostConfig,
+    validate_order_fields,
+)
 from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
@@ -152,6 +156,12 @@ class EventDrivenBacktestEngine:
                 OrderSkipReason.PRICE_INVALID,
                 f"{order.symbol} price={price}",
             )
+
+        # P3-02: 订单自身数值合法性（数量/限价/止损价）——NaN / Inf / 负数 / 0
+        # 一律显式拒绝并记 ORDER_SKIPPED 审计，绝不静默吞掉或流入撮合。
+        order_invalid = validate_order_fields(order)
+        if order_invalid is not None:
+            return order_invalid
 
         limit_result = self._check_limit_up_down(order.symbol, order.order_type, price)
         if limit_result is not None:
@@ -758,7 +768,9 @@ class EventDrivenBacktestEngine:
                 slab, symbol, field="close", price_dict=price_dict
             )
             check_price = high_price if (high_price and high_price > 0) else close_price
-            if check_price is None or check_price <= 0:
+            # P3-02: NaN/Inf 价格会令 pnl_pct 判定失真（NaN 比较恒 False），
+            # 导致"触发止盈"却按 NaN 价成交污染组合——显式跳过。
+            if check_price is None or not math.isfinite(check_price) or check_price <= 0:
                 continue
 
             pnl_pct = (
@@ -862,7 +874,8 @@ class EventDrivenBacktestEngine:
                 slab, symbol, field="close", price_dict=price_dict
             )
             check_price = low_price if (low_price and low_price > 0) else close_price
-            if check_price is None or check_price <= 0:
+            # P3-02: NaN/Inf 价格会使止损判定失真（NaN 比较恒 False），显式跳过
+            if check_price is None or not math.isfinite(check_price) or check_price <= 0:
                 continue
 
             pnl_pct = (
@@ -1025,7 +1038,8 @@ class EventDrivenBacktestEngine:
             if pos.available_date is not None and ts < pos.available_date:
                 continue
             price = self._lookup_price_fast(slab, symbol, price_dict=price_dict)
-            if price is not None:
+            # P3-02: NaN/Inf/非正数价格不生成清仓订单（防止 NaN 成交价污染组合）
+            if price is not None and math.isfinite(price) and price > 0:
                 # A股整手取整
                 qty = int(pos.shares / _BOARD_LOT) * _BOARD_LOT
                 if qty < _BOARD_LOT:
