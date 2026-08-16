@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from long_earn.backtest.operators import OPERATOR_REGISTRY, list_operators
+from long_earn.backtest.operators import (
+    OPERATOR_REGISTRY,
+    PROOF_REGISTRY,
+    list_operators,
+)
 from long_earn.backtest.operators.causality import is_causal, math_note
 from long_earn.operator_dev import (
     FakeImplementer,
@@ -130,15 +134,24 @@ def _optimize(baseline_sharpe: float, optimized_sharpe: float) -> bool:
 def _cleanup():
     # 测试前清理：避免前一轮测试残留导致 spec_review 直接走 resolved 分支。
     # 保存并恢复，避免污染全局 OPERATOR_REGISTRY 影响其他测试模块。
+    # PROOF_REGISTRY 与 OPERATOR_REGISTRY 并行维护，一并保存/恢复保持一致性。
     _saved_e2ev = OPERATOR_REGISTRY.pop("e2e_volatility", None)
+    _saved_e2ev_proof = PROOF_REGISTRY.pop("e2e_volatility", None)
     _saved_leak = OPERATOR_REGISTRY.pop("leak_op", None)
+    _saved_leak_proof = PROOF_REGISTRY.pop("leak_op", None)
     yield
     OPERATOR_REGISTRY.pop("e2e_volatility", None)
     OPERATOR_REGISTRY.pop("leak_op", None)
+    PROOF_REGISTRY.pop("e2e_volatility", None)
+    PROOF_REGISTRY.pop("leak_op", None)
     if _saved_e2ev is not None:
         OPERATOR_REGISTRY["e2e_volatility"] = _saved_e2ev
+    if _saved_e2ev_proof is not None:
+        PROOF_REGISTRY["e2e_volatility"] = _saved_e2ev_proof
     if _saved_leak is not None:
         OPERATOR_REGISTRY["leak_op"] = _saved_leak
+    if _saved_leak_proof is not None:
+        PROOF_REGISTRY["leak_op"] = _saved_leak_proof
 
 
 class TestAutoEvolutionSystem:

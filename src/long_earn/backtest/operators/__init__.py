@@ -13,8 +13,10 @@ import 本包即触发一次自动扫描，把 ``operators/<category>/*.py`` 中
 
 from long_earn.backtest.operators._loader import (
     OPERATOR_REGISTRY,
+    PROOF_REGISTRY,
     OperatorNotFoundError,
     get_operator,
+    get_operator_proof,
     list_operators,
     register_operator,
 )
@@ -26,17 +28,20 @@ from long_earn.backtest.operators.base import (
     operator,
     validate_contract,
 )
-from long_earn.backtest.operators.causality import PerturbStrategy
+from long_earn.backtest.operators.causality import CausalityProof, PerturbStrategy
 
 __all__ = [
     "OPERATOR_REGISTRY",
+    "PROOF_REGISTRY",
     "VALID_CATEGORIES",
+    "CausalityProof",
     "Operator",
     "OperatorContractError",
     "OperatorNotFoundError",
     "OperatorParams",
     "PerturbStrategy",
     "get_operator",
+    "get_operator_proof",
     "list_operators",
     "operator",
     "register_operator",

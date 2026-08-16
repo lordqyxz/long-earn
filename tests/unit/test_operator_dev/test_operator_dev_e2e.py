@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from long_earn.backtest.operators import OPERATOR_REGISTRY, get_operator
+from long_earn.backtest.operators import OPERATOR_REGISTRY, PROOF_REGISTRY, get_operator
 from long_earn.operator_dev import (
     FakeImplementer,
     OperatorBacklog,
@@ -149,11 +149,14 @@ def _run(name: str, source: str, *, refined: str | None = None) -> dict:
 def _cleanup_registry():
     # 测试前清理：log_return 已写盘，bootstrap 启动时自动注册，
     # 需先移除以模拟"新算子不在目录"场景，否则 _spec_review_node 会直接走 resolved 分支。
+    # PROOF_REGISTRY 与 OPERATOR_REGISTRY 并行维护，热注册写入后一并清理，避免跨测试污染。
     for name in ("log_return", *_BLOCKED_OPS):
         OPERATOR_REGISTRY.pop(name, None)
+        PROOF_REGISTRY.pop(name, None)
     yield
     for name in ("log_return", *_BLOCKED_OPS):
         OPERATOR_REGISTRY.pop(name, None)
+        PROOF_REGISTRY.pop(name, None)
 
 
 def _status(result: dict, name: str) -> str:

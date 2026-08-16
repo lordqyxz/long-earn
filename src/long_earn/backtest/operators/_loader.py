@@ -12,6 +12,9 @@
 - 冲突处理：两个算子 ``name`` 撞了 → 启动即抛错（静默覆盖最危险）。
 - 加载时机：首次 import 本模块时扫描一次，缓存进 ``OPERATOR_REGISTRY``。
 - 契约校验：见 :func:`long_earn.backtest.operators.base.validate_contract`。
+- 因果性门：注册是 fail-closed 唯一入口，:func:`prove_registration_causality`
+  数值证明不过即注册失败（AUDIT-P3-10）；通过的证明对象留存进
+  :data:`PROOF_REGISTRY`，作为"注册附带 prove_causality 报告"的可审计事实。
 - 热注册：``register_operator(op)`` 写入当前进程注册表，供同进程后续使用；
   新进程靠启动扫描自然生效。
 
@@ -45,6 +48,10 @@ _REGISTRY_DIR = Path(__file__).resolve().parent
 _PACKAGE = "long_earn.backtest.operators"
 # 算子注册表：name -> Operator 实例。单进程内单一事实源。
 OPERATOR_REGISTRY: dict[str, Operator] = {}
+# 因果性证明注册表：name -> CausalityProof。与 OPERATOR_REGISTRY 并行维护，
+# 记录每个已注册算子在注册期通过/验证的因果性证明（AUDIT-P3-10：注册强制
+# 附带 prove_causality 报告，报告以结构化 CausalityProof 对象留存可查）。
+PROOF_REGISTRY: dict[str, CausalityProof] = {}
 
 
 class OperatorNotFoundError(KeyError):
@@ -106,7 +113,12 @@ def _scan_directory(directory: Path) -> None:
 
 
 def _register_class(cls: type[Operator]) -> None:
-    """契约校验 + 冲突检测 + 实例化注册。"""
+    """契约校验 + 冲突检测 + 实例化 + 因果性证明 + 注册。
+
+    注册是 fail-closed 的唯一入口：证明缺失/无效（数值证明不通过）即抛错，
+    绝不让缺证明的算子进入注册表。证明对象同时留存进 :data:`PROOF_REGISTRY`，
+    使"注册附带 prove_causality 报告"成为可审计事实。
+    """
 
     validate_contract(cls)
     if cls.name in OPERATOR_REGISTRY:
@@ -122,10 +134,11 @@ def _register_class(cls: type[Operator]) -> None:
             f"算子 {cls.name} 实例化失败: {type(exc).__name__}: {exc}"
         ) from exc
     try:
-        prove_registration_causality(instance)
+        proof = prove_registration_causality(instance)
     except ValueError as exc:
         raise OperatorContractError(str(exc)) from exc
     OPERATOR_REGISTRY[cls.name] = instance
+    PROOF_REGISTRY[cls.name] = proof
     logger.debug(f"已注册算子: {cls.name} ({cls.category})")
 
 
@@ -150,15 +163,17 @@ def register_operator(
             决定写盘子目录。``source_code`` 非空时必填。
         causality_proof: 可选的实现绑定证明。operator_dev 可复用验证节点产出的证明，
             避免重复数值验证；缺省时本函数同步执行完整注册证明。
+            无论走哪条路径，通过的证明都会留存进 :data:`PROOF_REGISTRY`。
     """
 
     cls = type(op)
     validate_contract(cls)
     try:
         if causality_proof is None:
-            prove_registration_causality(op)
+            proof = prove_registration_causality(op)
         else:
             validate_causality_proof(op, causality_proof)
+            proof = causality_proof
     except ValueError as exc:
         raise OperatorContractError(str(exc)) from exc
     if cls.name in OPERATOR_REGISTRY and type(OPERATOR_REGISTRY[cls.name]) is not cls:
@@ -181,6 +196,7 @@ def register_operator(
             logger.debug(f"算子 {cls.name} 源码文件已存在，跳过写盘: {target_file}")
 
     OPERATOR_REGISTRY[cls.name] = op
+    PROOF_REGISTRY[cls.name] = proof
 
 
 def get_operator(name: str) -> Operator:
@@ -191,6 +207,17 @@ def get_operator(name: str) -> Operator:
             f"未知算子 '{name}'，已注册: {sorted(OPERATOR_REGISTRY)}"
         )
     return OPERATOR_REGISTRY[name]
+
+
+def get_operator_proof(name: str) -> CausalityProof | None:
+    """按名取注册期因果性证明；未注册或无证明返回 None。
+
+    AUDIT-P3-10：注册强制附带 prove_causality 报告，证明以结构化
+    :class:`CausalityProof` 对象留存于 :data:`PROOF_REGISTRY`，供运行时
+    审计/复核（如校验实现指纹是否仍与注册时一致）。
+    """
+
+    return PROOF_REGISTRY.get(name)
 
 
 def list_operators() -> dict[str, dict[str, Any]]:
