@@ -8,6 +8,20 @@
 或为 null 的字段使用可选类型与默认值，保持宽松校验、不改变既有响应行为。
 """
 
+from long_earn.app.schemas.audit import (
+    AttributionChain,
+    AttributionChainEvents,
+    AuditChainEvent,
+    AuditEventItem,
+    AuditEventsResponse,
+    OrderInfo,
+    Rationale,
+    RationaleCriterion,
+    RationaleSegment,
+    RationaleWeights,
+    SignalAttribution,
+    TradeAttribution,
+)
 from long_earn.app.schemas.common import HealthResponse
 from long_earn.app.schemas.events import (
     EventDetail,
@@ -62,6 +76,12 @@ from long_earn.app.schemas.symbols import (
 )
 
 __all__ = [
+    # audit
+    "AttributionChain",
+    "AttributionChainEvents",
+    "AuditChainEvent",
+    "AuditEventItem",
+    "AuditEventsResponse",
     # runs
     "Benchmark",
     "CleanRunsResponse",
@@ -83,7 +103,12 @@ __all__ = [
     "FinancialsResponse",
     # common
     "HealthResponse",
+    "OrderInfo",
     "PricePoint",
+    "Rationale",
+    "RationaleCriterion",
+    "RationaleSegment",
+    "RationaleWeights",
     "RelationItem",
     "RelationsResponse",
     # research
@@ -96,6 +121,7 @@ __all__ = [
     "RunSummaryResponse",
     "RunsResponse",
     "SectorStatsResponse",
+    "SignalAttribution",
     "SignalHistoryItem",
     "SignalsResponse",
     "SymbolChartData",
@@ -106,6 +132,7 @@ __all__ = [
     "TimelinePoint",
     "TimelineResponse",
     "TopSymbol",
+    "TradeAttribution",
     "TradePoint",
     "TradeRecord",
     "TradesResponse",

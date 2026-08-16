@@ -6,6 +6,8 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 
+from long_earn.app.schemas.audit import TradeAttribution
+
 
 class RunInfo(BaseModel):
     """回测运行汇总条目。"""
@@ -80,7 +82,7 @@ class TradeRecord(BaseModel):
     quantity: float = 0.0
     portfolio_value: float = 0.0
     reason: str = ""
-    attribution: dict | None = None
+    attribution: TradeAttribution | None = None
 
 
 class TradesResponse(BaseModel):

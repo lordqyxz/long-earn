@@ -31,7 +31,7 @@ export const listRuns = <ThrowOnError extends boolean = false>(options?: Options
 /**
  * Clean Empty Runs
  *
- * 删除空跑或错误运行的回测数据。
+ * 删除无效回测运行（带 test 标签/空跑/错误/无 RUN_END 孤儿）的审计数据。
  */
 export const cleanEmptyRuns = <ThrowOnError extends boolean = false>(options?: Options<CleanEmptyRunsData, ThrowOnError>): RequestResult<CleanEmptyRunsResponses, unknown, ThrowOnError> => (options?.client ?? client).delete<CleanEmptyRunsResponses, unknown, ThrowOnError>({ url: '/api/runs/clean', ...options });
 
@@ -60,7 +60,7 @@ export const runTrades = <ThrowOnError extends boolean = false>(options: Options
 /**
  * Run Audit Event
  *
- * 拉取指定 trace 的全部审计事件原始记录（含完整 payload）。
+ * 按 trace_id 返回审计事件完整记录（含原始 payload，供归因链点击下钻）。
  */
 export const runAuditEvent = <ThrowOnError extends boolean = false>(options: Options<RunAuditEventData, ThrowOnError>): RequestResult<RunAuditEventResponses, RunAuditEventErrors, ThrowOnError> => (options.client ?? client).get<RunAuditEventResponses, RunAuditEventErrors, ThrowOnError>({ url: '/api/runs/{run_id}/audit/{trace_id}', ...options });
 

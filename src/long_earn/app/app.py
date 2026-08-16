@@ -212,6 +212,7 @@ def _register_run_routes(  # noqa: C901
 
     @app.get(
         "/api/runs/{run_id}/audit/{trace_id}",
+        response_model=schemas.AuditEventsResponse,
         operation_id="run_audit_event",
     )
     async def run_audit_event(run_id: str, trace_id: str):

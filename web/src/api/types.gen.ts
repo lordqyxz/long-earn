@@ -5,10 +5,44 @@ export type ClientOptions = {
 };
 
 /**
+ * AttributionChain
+ *
+ * 归因链 trace 路径（fill/order/upstream 三个 trace_id 供前端展示）。
+ */
+export type AttributionChain = {
+    /**
+     * Fill
+     */
+    fill?: string;
+    /**
+     * Order
+     */
+    order?: string;
+    /**
+     * Upstream
+     */
+    upstream?: string;
+    events?: AttributionChainEvents | null;
+};
+
+/**
+ * AttributionChainEvents
+ *
+ * 归因链各环节（upstream/order/fill）的紧凑事件摘要，缺失环节为 None。
+ */
+export type AttributionChainEvents = {
+    upstream?: AuditChainEvent | null;
+    order?: AuditChainEvent | null;
+    fill?: AuditChainEvent | null;
+};
+
+/**
  * AuditChainEvent
  *
- * 审计链节点事件的紧凑摘要（后端预计算的一句人话摘要 + 元信息），
- * 供审计链节点 hover Tooltip 展示。
+ * 审计链节点事件的紧凑摘要（后端预计算的一句人话摘要 + 元信息）。
+ *
+ * 供审计链节点 hover Tooltip 展示；字段与
+ * ``BacktestAnalyzer._build_chain_events`` 输出的节点摘要一致。
  */
 export type AuditChainEvent = {
     /**
@@ -37,6 +71,8 @@ export type AuditChainEvent = {
  * AuditEventItem
  *
  * 审计事件原始记录条目（GET /api/runs/{run_id}/audit/{trace_id}）。
+ *
+ * ``payload`` 为事件原始载荷（含下钻核验所需的完整数据），来源为 PG jsonb。
  */
 export type AuditEventItem = {
     /**
@@ -58,7 +94,29 @@ export type AuditEventItem = {
     /**
      * Payload
      */
-    payload?: Record<string, unknown>;
+    payload?: {
+        [key: string]: unknown;
+    };
+};
+
+/**
+ * AuditEventsResponse
+ *
+ * GET /api/runs/{run_id}/audit/{trace_id}
+ */
+export type AuditEventsResponse = {
+    /**
+     * Run Id
+     */
+    run_id: string;
+    /**
+     * Trace Id
+     */
+    trace_id: string;
+    /**
+     * Events
+     */
+    events?: Array<AuditEventItem>;
 };
 
 /**
@@ -500,6 +558,26 @@ export type HealthResponse = {
 };
 
 /**
+ * OrderInfo
+ *
+ * 订单摘要信息（取自 ORDER 事件 payload）。
+ */
+export type OrderInfo = {
+    /**
+     * Symbol
+     */
+    symbol?: string;
+    /**
+     * Type
+     */
+    type?: string;
+    /**
+     * Quantity
+     */
+    quantity?: number;
+};
+
+/**
  * PricePoint
  *
  * 日线行情采样点（开高低收量）。
@@ -529,6 +607,114 @@ export type PricePoint = {
      * Volume
      */
     volume?: number;
+};
+
+/**
+ * Rationale
+ *
+ * 信号决策依据（公式原文 + 流水线 + 选股依据）。
+ *
+ * ``selection`` 为选股明细行（symbol/rank + 各因子值，键随算子变化），
+ * 保持宽松建模。
+ */
+export type Rationale = {
+    /**
+     * Formula
+     */
+    formula?: string;
+    /**
+     * Criteria
+     */
+    criteria?: Array<RationaleCriterion>;
+    /**
+     * Selection
+     */
+    selection?: Array<{
+        [key: string]: unknown;
+    }>;
+    /**
+     * Universe Size
+     */
+    universe_size?: number | null;
+    /**
+     * Selected Count
+     */
+    selected_count?: number | null;
+    weights?: RationaleWeights | null;
+};
+
+/**
+ * RationaleCriterion
+ *
+ * 决策流水线单步（因子/过滤/排名等，含结构化渲染段）。
+ */
+export type RationaleCriterion = {
+    /**
+     * Step
+     */
+    step?: string;
+    /**
+     * Op
+     */
+    op?: string;
+    /**
+     * Alias
+     */
+    alias?: string;
+    /**
+     * Params
+     */
+    params?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Desc
+     */
+    desc?: string;
+    /**
+     * Format
+     */
+    format?: string;
+    /**
+     * Kind
+     */
+    kind?: string;
+    /**
+     * Segments
+     */
+    segments?: Array<RationaleSegment>;
+};
+
+/**
+ * RationaleSegment
+ *
+ * 决策步骤的结构化渲染段（前端数据驱动渲染的原子片段）。
+ */
+export type RationaleSegment = {
+    /**
+     * Type
+     */
+    type?: string;
+    /**
+     * Value
+     */
+    value?: string | number | boolean;
+    /**
+     * Unit
+     */
+    unit?: string;
+};
+
+/**
+ * RationaleWeights
+ *
+ * 选股权重方法。
+ */
+export type RationaleWeights = {
+    /**
+     * Method
+     */
+    method?: string;
 };
 
 /**
@@ -693,26 +879,6 @@ export type RiskResponse = {
 };
 
 /**
- * RunAuditEventResponse
- *
- * GET /api/runs/{run_id}/audit/{trace_id} - 指定 trace 的全部审计事件原始记录。
- */
-export type RunAuditEventResponse = {
-    /**
-     * Run Id
-     */
-    run_id: string;
-    /**
-     * Trace Id
-     */
-    trace_id: string;
-    /**
-     * Events
-     */
-    events: Array<AuditEventItem>;
-};
-
-/**
  * RunInfo
  *
  * 回测运行汇总条目。
@@ -749,7 +915,7 @@ export type RunInfo = {
     /**
      * Tags
      */
-    tags?: string[];
+    tags?: Array<string>;
 };
 
 /**
@@ -818,6 +984,31 @@ export type SectorStatsResponse = {
      * With Region
      */
     with_region?: number;
+};
+
+/**
+ * SignalAttribution
+ *
+ * 上游信号归因（取自 SIGNAL 事件 payload）。
+ *
+ * ``signals`` 为符号→权重的映射；兼容历史数据中可能遗留的字符串序列化形式。
+ */
+export type SignalAttribution = {
+    /**
+     * Strategy Id
+     */
+    strategy_id?: string;
+    /**
+     * Signals
+     */
+    signals?: {
+        [key: string]: number;
+    } | string;
+    /**
+     * Risk Triggered
+     */
+    risk_triggered?: boolean;
+    rationale?: Rationale | null;
 };
 
 /**
@@ -988,6 +1179,29 @@ export type TopSymbol = {
 };
 
 /**
+ * TradeAttribution
+ *
+ * 单笔 FILL 的审计归因链（SIGNAL→ORDER→FILL / RISK_TRIGGER→ORDER→FILL）。
+ *
+ * ``risk_trigger`` 为风控载荷（字段随 risk_type 变化），保持宽松建模。
+ */
+export type TradeAttribution = {
+    /**
+     * Kind
+     */
+    kind?: string;
+    order?: OrderInfo | null;
+    signal?: SignalAttribution | null;
+    /**
+     * Risk Trigger
+     */
+    risk_trigger?: {
+        [key: string]: unknown;
+    } | null;
+    chain?: AttributionChain | null;
+};
+
+/**
  * TradePoint
  *
  * 成交标注点。
@@ -1057,79 +1271,7 @@ export type TradeRecord = {
      * Reason
      */
     reason?: string;
-    /**
-     * Attribution
-     */
     attribution?: TradeAttribution | null;
-};
-
-export type TradeAttribution = {
-    /**
-     * Kind
-     */
-    kind?: string;
-    /**
-     * Order
-     */
-    order?: {
-        symbol?: string;
-        type?: string;
-        quantity?: number;
-    } | null;
-    /**
-     * Signal
-     */
-    signal?: {
-        strategy_id?: string;
-        signals?: Record<string, number>;
-        risk_triggered?: boolean;
-        rationale?: {
-            formula?: string;
-            criteria?: Array<{
-                step?: string;
-                op?: string;
-                alias?: string;
-                params?: Record<string, unknown>;
-                desc?: string;
-                format?: string;
-                kind?: string;
-                segments?: Array<{
-                    type?: string;
-                    value?: string | number | boolean;
-                    unit?: string;
-                }>;
-            }>;
-            selection?: Array<Record<string, unknown>>;
-            universe_size?: number;
-            selected_count?: number;
-            weights?: {
-                method?: string;
-            } | null;
-        } | null;
-    } | null;
-    /**
-     * Risk Trigger
-     */
-    risk_trigger?: Record<string, unknown> | null;
-    /**
-     * Chain
-     */
-    chain?: {
-        fill?: string;
-        order?: string;
-        upstream?: string;
-        /**
-         * Events
-         *
-         * 各环节审计事件的紧凑摘要（summary 为后端预计算的人话摘要），
-         * 供审计链节点 hover 展示；旧数据可能缺失该字段。
-         */
-        events?: {
-            upstream?: AuditChainEvent | null;
-            order?: AuditChainEvent | null;
-            fill?: AuditChainEvent | null;
-        };
-    };
 };
 
 /**
@@ -1401,10 +1543,10 @@ export type RunAuditEventResponses = {
     /**
      * Successful Response
      */
-    200: RunAuditEventResponse;
+    200: AuditEventsResponse;
 };
 
-export type RunAuditEventResponse2 = RunAuditEventResponses[keyof RunAuditEventResponses];
+export type RunAuditEventResponse = RunAuditEventResponses[keyof RunAuditEventResponses];
 
 export type RunSignalsData = {
     body?: never;
