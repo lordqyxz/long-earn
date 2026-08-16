@@ -206,7 +206,8 @@ class BacktestAnalyzer:
         - 空跑：无 FILL 事件
         - 错误：有 RUN_ERROR 事件
         - test 标签：RUN_START payload.tags 含 ``RUN_TAG_TEST``（"test"，
-          测试/冒烟回测专用标签，替代旧 run_id 前缀启发式 run-/t-/conc-/rw-）
+          测试/冒烟回测专用标签）**且不含 ``RUN_TAG_PROD``（"prod"，
+          生产策略 DSL ``kind: production`` 自动携带，清理豁免）
         - 孤儿：无 RUN_END 事件（引擎 DATA_EMPTY 等路径直接 return 未写
           RUN_END，此类 run 含 FILL 但看板不显示、无汇总指标）
         - 成交过少：FILL 笔数 < ``_MIN_VALID_FILLS``（冒烟/调试 run）
@@ -228,11 +229,13 @@ class BacktestAnalyzer:
                         SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
                         WHERE event_type = 'RUN_ERROR'
                     )
-                    -- test 标签：RUN_START payload.tags 含 'test'
+                    -- test 标签（且不含 prod 豁免）：RUN_START payload.tags
+                    -- 含 'test' 且不含 'prod'（kind: production 自动带 prod）
                     OR r.run_id IN (
                         SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
                         WHERE event_type = 'RUN_START'
                           AND payload->'tags' ? 'test'
+                          AND NOT (payload->'tags' ? 'prod')
                     )
                     -- 孤儿：无 RUN_END
                     OR r.run_id NOT IN (

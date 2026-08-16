@@ -12,6 +12,7 @@ import pytest
 
 from long_earn.app.analyzer import BacktestAnalyzer
 from long_earn.backtest.engine.audit import (
+    RUN_TAG_PROD,
     RUN_TAG_TEST,
     AuditLogger,
     PostgresAuditProvider,
@@ -149,18 +150,41 @@ def test_clean_identifies_test_tagged_runs():
     )
     provider2.close()
 
+    # 3. 生产豁免 run（tags 含 test 且 prod）→ 不应被识别（prod 覆盖 test 清理语义）
+    prod_run = f"run-{uuid4().hex[:10]}"
+    provider3 = PostgresAuditProvider()
+    logger3 = AuditLogger(provider=provider3, run_id=prod_run)
+    logger3.log_run_start({"tags": [RUN_TAG_TEST, RUN_TAG_PROD]})
+    for i in range(5):
+        logger3.log_transition(
+            event_type="FILL",
+            trace_id=f"{prod_run}-f{i}",
+            component="Broker",
+            status="SUCCESS",
+            payload={"symbol": "AAPL", "quantity": 100},
+        )
+    logger3.log_transition(
+        event_type="RUN_END",
+        trace_id=f"{prod_run}-end",
+        component="Engine",
+        status="SUCCESS",
+        payload={"total_return": 0.05},
+    )
+    provider3.close()
+
     try:
         analyzer = BacktestAnalyzer()
         bad = set(analyzer.get_empty_or_error_runs())
         assert tagged_run in bad
         assert valid_run not in bad
+        assert prod_run not in bad, "带 prod 标签的生产 run 不应被 test 清理口径识别"
     finally:
         # 清理本测试写入的审计数据（保持共享 PG 干净）
         conn = pg_connect()
         try:
             conn.execute(
-                'DELETE FROM "backtest_audit".logs WHERE run_id IN (%s, %s)',
-                (tagged_run, valid_run),
+                'DELETE FROM "backtest_audit".logs WHERE run_id IN (%s, %s, %s)',
+                (tagged_run, valid_run, prod_run),
             )
             conn.commit()
         finally:

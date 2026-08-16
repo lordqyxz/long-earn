@@ -21,7 +21,7 @@ from long_earn.backtest.domain.entities import (
     PerformanceMetrics,
     SignalEvent,
 )
-from long_earn.backtest.engine.audit import OrderSkipReason
+from long_earn.backtest.engine.audit import RUN_TAG_PROD, RUN_TAG_TEST, OrderSkipReason
 from long_earn.backtest.engine.broker import Broker, TradingCostConfig
 from long_earn.backtest.engine.portfolio import Portfolio
 from long_earn.backtest.engine.strategy import BaseStrategy
@@ -255,9 +255,10 @@ class EventDrivenBacktestEngine:
                 值；交易时间戳仍按 [start_date, end_date] 过滤，不会在 warmup 期产生
                 交易。
             strategy_yaml: 策略 YAML 全文（P1-13），存入审计日志以支持完整重放。
-            tags: run 级标签列表，写入 RUN_START payload.tags。测试/冒烟回测
-                必须携带 ``RUN_TAG_TEST``（"test"），供审计库按「带 test 标签」
-                口径批量清理；生产回测不传即无标签、不会被误清理。
+            tags: run 级标签列表，写入 RUN_START payload.tags。未显式指定时
+                按策略 DSL ``kind`` 自动打标：``production`` → ``[RUN_TAG_PROD]``
+                （清理豁免），其余（默认 research）→ ``[RUN_TAG_TEST]``
+                （可被审计清理）；显式传入则优先。
         """
         # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
         run_id = str(uuid.uuid4())
@@ -285,6 +286,13 @@ class EventDrivenBacktestEngine:
             strategy_hash = hashlib.sha256(strategy_yaml.strip().encode()).hexdigest()[
                 :16
             ]
+        # 自动打标：未显式传 tags 时按策略 DSL kind 推导。
+        # production → prod（清理豁免）；research（默认）→ test（可清理）。
+        # 显式传入的 tags 优先，覆盖 DSL kind 推导。
+        if not tags:
+            dsl = getattr(strategy, "dsl", None)
+            kind = getattr(dsl, "kind", "research") if dsl is not None else "research"
+            tags = [RUN_TAG_PROD] if kind == "production" else [RUN_TAG_TEST]
         self._log_audit(
             "RUN_START",
             run_id,

@@ -41,6 +41,9 @@ _AUDIT_INDEXES = (
 # 专用测试标签：测试/冒烟回测写入共享 PG 时必须在 RUN_START payload.tags
 # 携带本标签，供审计库「清理带 test 标签记录」口径识别与批量清理。
 RUN_TAG_TEST = "test"
+# 生产保护标签：策略 DSL 声明 ``kind: production`` 时引擎自动携带，
+# 供审计库「清理带 test 标签记录」口径豁免（test 且不含 prod 才清）。
+RUN_TAG_PROD = "prod"
 
 
 class OrderSkipReason(StrEnum):

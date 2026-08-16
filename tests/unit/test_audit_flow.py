@@ -16,7 +16,11 @@ import polars as pl
 import pytest
 
 from long_earn.backtest.domain.entities import SignalEvent
-from long_earn.backtest.engine.audit import RUN_TAG_TEST, PostgresAuditProvider
+from long_earn.backtest.engine.audit import (
+    RUN_TAG_PROD,
+    RUN_TAG_TEST,
+    PostgresAuditProvider,
+)
 from long_earn.backtest.engine.broker import TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.parallel import ParallelRunner
@@ -295,6 +299,59 @@ def test_audit_run_start_contains_symbols_and_strategy_hash():
     assert payload["strategy_yaml"] == test_yaml
     assert "strategy_hash" in payload, "RUN_START 缺少 strategy_hash 字段"
     assert len(payload["strategy_hash"]) == 16
+
+
+def test_audit_auto_tags_by_dsl_kind():
+    """未显式传 tags 时引擎按策略 DSL kind 自动打标（research→test，production→prod）"""
+    provider = PostgresAuditProvider()
+    engine = EventDrivenBacktestEngine(
+        audit_provider=provider, cost_config=TradingCostConfig()
+    )
+
+    full_data = pl.DataFrame(
+        {
+            "timestamp": [datetime(2023, 1, 1)],
+            "symbol": ["AAPL"],
+            "close": [150.0],
+        }
+    )
+    engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
+
+    # 默认 research → 自动 test 标签
+    strategy = MockStrategy(strategy_id="test_strat")
+    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    run_start = _query_audit_rows(
+        "WHERE event_type = %s", ["RUN_START"], run_id=engine._current_run_id
+    )
+    assert run_start, "无 RUN_START 审计事件"
+    payload = _payload_of(run_start[-1])
+    assert payload["tags"] == [RUN_TAG_TEST], f"research 策略应自动带 test 标签，实际 {payload['tags']}"
+
+    # production → 自动 prod 标签（清理豁免）
+    from long_earn.backtest.engine.dsl import StrategyDSL
+    from long_earn.backtest.engine.dsl_strategy import DSLStrategy
+
+    dsl = StrategyDSL(name="prod_strat", kind="production")
+    prod_strategy = DSLStrategy(strategy_id="prod_strat", dsl_strategy=dsl)
+    engine.run(prod_strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    run_start = _query_audit_rows(
+        "WHERE event_type = %s", ["RUN_START"], run_id=engine._current_run_id
+    )
+    assert run_start, "无 RUN_START 审计事件"
+    payload = _payload_of(run_start[-1])
+    assert payload["tags"] == [RUN_TAG_PROD], f"production 策略应自动带 prod 标签，实际 {payload['tags']}"
+
+    # 显式传 tags 优先于 DSL kind 推导
+    engine.run(
+        prod_strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST]
+    )
+    run_start = _query_audit_rows(
+        "WHERE event_type = %s", ["RUN_START"], run_id=engine._current_run_id
+    )
+    assert run_start, "无 RUN_START 审计事件"
+    payload = _payload_of(run_start[-1])
+    assert payload["tags"] == [RUN_TAG_TEST], "显式传入的 tags 应优先于 DSL kind 推导"
+    provider.close()
 
 
 def test_audit_market_data_contains_slab_summary():

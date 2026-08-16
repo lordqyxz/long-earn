@@ -7,7 +7,7 @@ ADR-009 收尾：旧式 ``factors`` + ``filter``/``rank``/``expression`` 信号�
 """
 
 import datetime
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from loguru import logger
@@ -107,6 +107,12 @@ class StrategyDSL(BaseModel):
 
     name: str = Field(default="Strategy", description="策略名称")
     description: str = Field(default="", description="策略描述")
+    kind: Literal["research", "production"] = Field(
+        default="research",
+        description="策略用途标记：research=研发/测试（默认，引擎自动打 test 标签"
+        "可被审计清理）；production=生产（引擎自动打 prod 标签，审计清理豁免）。"
+        "测试/冒烟策略即使不显式传 tags 也会被引擎按 kind 自动标记。",
+    )
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     start_date: str | None = Field(default=None, description="回测开始日期")
     end_date: str | None = Field(default=None, description="回测结束日期")

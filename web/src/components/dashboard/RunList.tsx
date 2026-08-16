@@ -79,8 +79,19 @@ export function RunList({ runs, loading, selectedRunId, onSelect, onRefresh, onD
                   <span className={`text-xs font-semibold truncate ${isSelected ? 'text-primary' : 'text-foreground'}`}>
                     {run.strategy_id || '未知策略'}
                   </span>
-                  {Array.isArray(run.tags) && run.tags.includes('test') && (
-                    <Badge variant="secondary" className="text-[10px] px-1 py-0 shrink-0">test</Badge>
+                  {Array.isArray(run.tags) && run.tags.length > 0 && (
+                    <div className="flex items-center gap-1 min-w-0">
+                      {run.tags.map((tag) => (
+                        <Badge
+                          key={tag}
+                          variant={tag === 'prod' ? 'warning' : tag === 'test' ? 'secondary' : 'outline'}
+                          className="text-[10px] px-1 py-0 shrink-0"
+                          title={tag === 'prod' ? '生产策略，清理豁免' : tag === 'test' ? '测试/冒烟，可清理' : tag}
+                        >
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
                   )}
                 </div>
                 <div className="flex items-center gap-1 shrink-0 ml-2">
