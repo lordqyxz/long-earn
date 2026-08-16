@@ -9,6 +9,8 @@ from typing import Any, Protocol
 
 from langchain_core.messages import BaseMessage
 
+from long_earn.backtest import ParamGrid
+
 # ── Memory Service ───────────────────────────────────────────────
 
 
@@ -267,6 +269,36 @@ class BacktestService(Protocol):
 
         Returns:
             与 strategy_yamls 等长的结果列表，每项与 run() 返回结构一致。
+        """
+        ...
+
+    def run_grid(  # noqa: PLR0913
+        self,
+        strategy_template: str,
+        param_grid: ParamGrid,
+        start_date: str = "",
+        end_date: str = "",
+        universe_type: str = "main_board+gem",
+        benchmark_symbol: str = "",
+        allow_large_grid: bool = False,
+    ) -> dict[str, Any]:
+        """参数网格寻优：在训练集上并行暴力搜索最优参数组合。
+
+        对策略模板的 ``{{ var }}`` 占位符做笛卡尔积展开，进程池并行回测，
+        返回 Top-K 最优结果（引擎内参数组合上限 ``_MAX_GRID_DEFAULT``）。
+
+        Args:
+            strategy_template: 策略 YAML 模板，使用 {{ var }} 作为参数占位符
+            param_grid: 参数网格（标量 scalars + 结构化 structs，笛卡尔积展开）
+            start_date: 回测起始日期（默认 config.backtest_start_date，训练集）
+            end_date: 回测结束日期（默认 config.backtest_end_date，训练集）
+            universe_type: 股票池类型（默认 main_board+gem）
+            benchmark_symbol: 基准标的代码（默认空串表示无基准）
+            allow_large_grid: 允许超过引擎参数组合上限（默认 False）
+
+        Returns:
+            网格寻优结果字典，含 total / success_count / failure_count /
+            best_sharpe / best_return / best_param_desc / outcomes（Top-K）。
         """
         ...
 

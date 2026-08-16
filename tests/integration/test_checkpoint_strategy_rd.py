@@ -29,7 +29,7 @@ from langgraph.checkpoint.memory import MemorySaver
 # 在 load_dotenv 前设置，跳过启动时缓存同步（加速测试启动）
 os.environ.setdefault("LONG_EARN_SKIP_CACHE_SYNC", "1")
 
-from long_earn.services.strategy_research_service import (
+from long_earn.strategy_rd.research_service import (
     StrategyResearchService,
 )
 
@@ -525,7 +525,7 @@ class TestStrategyResearchServiceCheckpoint:
         """run_round 启用 checkpoint 后状态应持久化"""
         from langgraph.checkpoint.memory import MemorySaver
 
-        from long_earn.services.strategy_research_service import (
+        from long_earn.strategy_rd.research_service import (
             StrategyResearchService,
         )
 
@@ -564,7 +564,7 @@ class TestStrategyResearchServiceCheckpoint:
         """已完成线程的 run_round 应直接复用结果"""
         from langgraph.checkpoint.memory import MemorySaver
 
-        from long_earn.services.strategy_research_service import (
+        from long_earn.strategy_rd.research_service import (
             StrategyResearchService,
         )
 
@@ -603,7 +603,7 @@ class TestStrategyResearchServiceCheckpoint:
         """run_loop 启用 checkpoint 后多轮应正常执行"""
         from langgraph.checkpoint.memory import MemorySaver
 
-        from long_earn.services.strategy_research_service import (
+        from long_earn.strategy_rd.research_service import (
             StrategyResearchService,
         )
 

@@ -120,7 +120,7 @@ class TestKimiCollector:
             {"title": "噪音", "url": "", "content": ""},
         ]
         with patch(
-            "long_earn.tools.kimi_web_search.kimi_web_search",
+            "long_earn.services.kimi_web_search.kimi_web_search",
             return_value=fake_results,
         ):
             items = c.collect("茅台", max_items=5)
@@ -132,7 +132,7 @@ class TestKimiCollector:
         monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
         c = KimiCollector()
         with patch(
-            "long_earn.tools.kimi_web_search.kimi_web_search",
+            "long_earn.services.kimi_web_search.kimi_web_search",
             side_effect=RuntimeError("network"),
         ):
             assert c.collect("q") == []

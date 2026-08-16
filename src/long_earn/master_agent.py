@@ -20,9 +20,9 @@ from langgraph.prebuilt import create_react_agent
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.event_inference import create_event_inference_subgraph
+from long_earn.services.kimi_web_search import kimi_web_search
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
 from long_earn.strategy_rd.research_agent import ResearchAgent
-from long_earn.tools.kimi_web_search import kimi_web_search
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext

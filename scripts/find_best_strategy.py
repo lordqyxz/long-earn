@@ -274,7 +274,7 @@ def main() -> None:  # noqa: PLR0912
         checkpoint_db_path,
         strategy_results_path,
     )
-    from long_earn.services.strategy_research_service import StrategyResearchService
+    from long_earn.strategy_rd.research_service import StrategyResearchService
 
     config = AppConfig.from_env()
 

@@ -20,6 +20,8 @@ import re
 import sys
 from pathlib import Path
 
+from long_earn.core.stdio import ensure_utf8_stdio
+
 # 项目根目录
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -140,6 +142,9 @@ def check_prompt_files() -> list[str]:
 
 def main() -> int:
     """主入口 — 运行所有检查，返回退出码。"""
+    # 中文 Windows 控制台默认 GBK，先切到 UTF-8 防止打印 ✅/❌ 时崩溃
+    ensure_utf8_stdio()
+
     violations: list[str] = []
 
     violations.extend(check_python_files())

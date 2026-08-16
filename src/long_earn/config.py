@@ -202,7 +202,7 @@ class AppConfig:
     | DEEPSEEK_API_KEY | utils/llm_factory.py | DeepSeek API Key（LLM_TYPE=deepseek 时必填） |
     | DASHSCOPE_API_KEY | utils/llm_factory.py | 阿里百炼 API Key（LLM_TYPE=dashscope 时必填） |
     | OPENAI_API_KEY | langchain_openai（隐式读取） | OpenAI API Key（LLM_TYPE=openai 时必填） |
-    | MOONSHOT_API_KEY / KIMI_API_KEY | event_inference/collectors/kimi_collector.py / tools/kimi_web_search.py | Kimi / Moonshot API Key（事件推理采集 + 网页搜索，二选一） |
+    | MOONSHOT_API_KEY / KIMI_API_KEY | event_inference/collectors/kimi_collector.py / services/kimi_web_search.py | Kimi / Moonshot API Key（事件推理采集 + 网页搜索，二选一） |
 
     Attributes:
         llm_type: LLM 类型，可选值：deepseek, ollama, dashscope, openai

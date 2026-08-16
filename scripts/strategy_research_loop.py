@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """自主策略研究循环（薄入口，等价于 ``long-earn research``）。
 
-核心逻辑位于 long_earn.services.strategy_research_service，
+核心逻辑位于 long_earn.strategy_rd.research_service，
 本脚本仅注入 research 子命令后委托给统一 typer CLI。
 
 用法:

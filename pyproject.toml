@@ -63,7 +63,8 @@ line-length = 88
 target-version = "py313"
 src = ["src", "tests"]
 # scripts/ 为一次性研究脚本，不纳入质量门槛（AGENTS.md 卡口为 src/）
-exclude = [".venv", "build", "dist", "scripts"]
+# archive/ 为归档死代码（如 archive/strategy_rd_subgraph/），保留供回滚参考，不纳入质量门槛
+exclude = [".venv", "build", "dist", "scripts", "archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF", "C", "PL", "ARG"]
@@ -159,6 +160,38 @@ type = "forbidden"
 source_modules = ["long_earn.core"]
 forbidden_modules = ["long_earn.backtest", "long_earn.services", "long_earn.tools", "long_earn.strategy_rd"]
 message = "core 层不应依赖 backtest/services/tools/strategy_rd 等上层模块"
+
+[[tool.importlinter.contracts]]
+id = "tools_forbidden_app"
+name = "工具层不依赖应用层"
+type = "forbidden"
+source_modules = ["long_earn.tools"]
+forbidden_modules = ["long_earn.app"]
+message = "tools 层不应依赖 app 组合根（防止反向依赖）"
+
+[[tool.importlinter.contracts]]
+id = "backtest_engine_forbidden_dependencies"
+name = "引擎层不依赖上层模块"
+type = "forbidden"
+source_modules = ["long_earn.backtest.engine"]
+forbidden_modules = ["long_earn.services", "long_earn.tools", "long_earn.app"]
+message = "backtest.engine 层不应依赖 services/tools/app"
+
+[[tool.importlinter.contracts]]
+id = "services_forbidden_strategy_rd"
+name = "服务层不依赖策略研发上下文"
+type = "forbidden"
+source_modules = ["long_earn.services"]
+forbidden_modules = ["long_earn.strategy_rd"]
+message = "services 层不应依赖 strategy_rd 上下文（防止上下文循环依赖）"
+
+[[tool.importlinter.contracts]]
+id = "strategy_optimization_forbidden_strategy_rd"
+name = "策略优化上下文不依赖策略研发上下文"
+type = "forbidden"
+source_modules = ["long_earn.strategy_optimization"]
+forbidden_modules = ["long_earn.strategy_rd"]
+message = "strategy_optimization 不应依赖 strategy_rd（防止上下文循环依赖）"
 
 [dependency-groups]
 dev = [

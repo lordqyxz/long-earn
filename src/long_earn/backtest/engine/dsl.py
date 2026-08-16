@@ -228,3 +228,39 @@ def _validate_operator_steps(strategy: StrategyDSL) -> None:
             resolve_signal_step(step)
         except ValueError as exc:
             raise ValueError(f"第 {i} 个 operator 信号步骤非法: {exc}") from exc
+
+
+def compute_warmup_days(dsl: StrategyDSL) -> int:
+    """从 DSL 算子参数推断所需预热期（日历日）。
+
+    扫描 ``operator_factors`` 与 ``signals``（type=operator）全部算子步骤，
+    取最大回溯窗口（``period`` / ``periods`` / ``window`` / ``span`` /
+    ``fast`` / ``slow`` / ``signal``），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
+    0 表示无时序算子，不需要 warmup。
+
+    关键 bug 修复背景（ADR-013 T6，2026-08）：原实现只扫 ``operator_factors``
+    的 ``period``/``window``/``span`` 三键，遗漏 ``shift.periods``（复数）、
+    ``macd.fast``/``slow``/``signal``，且不扫 ``signals`` 里的算子步骤。结果
+    预取区间短于真实回溯需求，因子前若干 bar 全 NaN，``rank_top`` 选不出股票，
+    整轮回测 ``trade_count=0``。修复后覆盖全部算子参数键 + signal 步骤。
+
+    来源：自 ``services/backtest_service.py`` 迁入（``_compute_warmup_days``
+    改名公开函数），以恢复依赖方向。
+    """
+    # 回溯窗口参数键全集合：任何含回溯语义的算子参数都应在此
+    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
+    max_period = 0
+    # 扫描 operator_factors + signals(type=operator) 全部算子步骤
+    operator_steps: list[dict[str, Any]] = list(dsl.operator_factors)
+    for step in dsl.signals:
+        if step.get("type") == "operator":
+            operator_steps.append(step)
+    for step in operator_steps:
+        params = step.get("params") or {}
+        for key in lookback_keys:
+            val = params.get(key, 0) or 0
+            max_period = max(max_period, val)
+    if max_period <= 0:
+        return 0
+    # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日
+    return int(max_period * 1.5 + 30)

@@ -12,8 +12,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 import polars as pl
 
+from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 from long_earn.config import AppConfig
-from long_earn.services.backtest_service import BacktestServiceImpl, DSLStrategy
+from long_earn.services.backtest_service import BacktestServiceImpl
 
 
 def _make_service() -> BacktestServiceImpl:

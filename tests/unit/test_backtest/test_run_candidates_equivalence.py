@@ -17,12 +17,12 @@ import polars as pl
 import pytest
 
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
-from long_earn.backtest.engine.dsl import parse_strategy_yaml
-from long_earn.backtest.engine.parallel import ParallelRunner
-from long_earn.services.backtest_service import (
-    BacktestServiceImpl,
-    _compute_warmup_days,
+from long_earn.backtest.engine.dsl import (
+    compute_warmup_days,
+    parse_strategy_yaml,
 )
+from long_earn.backtest.engine.parallel import ParallelRunner
+from long_earn.services.backtest_service import BacktestServiceImpl
 
 # ── 合成面板 ────────────────────────────────────────────────
 
@@ -143,16 +143,16 @@ class TestRunCandidatesEquivalence:
     """ADR-008 B6：串行 run vs 批量 run_candidates 数值等价。"""
 
     def test_compute_warmup_days_covers_returns_period(self) -> None:
-        """_compute_warmup_days 对 returns(period=20) 算出非零 warmup。"""
+        """compute_warmup_days 对 returns(period=20) 算出非零 warmup。"""
         dsl = parse_strategy_yaml(STRATEGY_YAML)
-        warmup = _compute_warmup_days(dsl)
+        warmup = compute_warmup_days(dsl)
         assert warmup > 0, "returns(period=20) 应产生非零 warmup"
 
     def test_run_candidates_matches_serial_run(self) -> None:
         """核心等价性：串行 engine.run vs ParallelRunner.run_candidates 数值一致。
 
         构造同一策略 + 同一面板，分别走：
-        1. 串行：EventDrivenBacktestEngine.run(warmup_days=_compute_warmup_days)
+        1. 串行：EventDrivenBacktestEngine.run(warmup_days=compute_warmup_days)
         2. 批量：ParallelRunner.run_candidates（max_workers=1）
         断言 sharpe/return/drawdown/degenerate/metrics_unreliable 一致。
 
@@ -166,8 +166,8 @@ class TestRunCandidatesEquivalence:
 
         # ── 串行路径：直接调 engine.run ──
         dsl = parse_strategy_yaml(STRATEGY_YAML)
-        warmup_days = _compute_warmup_days(dsl)
-        from long_earn.services.backtest_service import DSLStrategy
+        warmup_days = compute_warmup_days(dsl)
+        from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 
         engine = EventDrivenBacktestEngine(
             cost_config=dsl.trading_cost.to_broker_config(),

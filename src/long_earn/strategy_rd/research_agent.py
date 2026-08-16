@@ -486,7 +486,7 @@ class ResearchAgent:
                 strategy_yaml: 完整策略 YAML 文本
             """
             with monitoring.track("research.compile_strategy_yaml"):
-                from long_earn.backtest.engine.dsl import (  # noqa: PLC0415
+                from long_earn.backtest import (  # noqa: PLC0415
                     parse_strategy_yaml,
                 )
 
@@ -723,10 +723,8 @@ class ResearchAgent:
                         ensure_ascii=False,
                     )
 
-                from long_earn.backtest.engine.parallel import (  # noqa: PLC0415
+                from long_earn.backtest import (  # noqa: PLC0415
                     _MAX_GRID_DEFAULT,
-                )
-                from long_earn.backtest.engine.param_grid import (  # noqa: PLC0415
                     ParamGrid,
                 )
 

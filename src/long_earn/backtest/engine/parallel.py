@@ -23,7 +23,8 @@ from long_earn.backtest.engine.core import (
     EventDrivenBacktestEngine,
     InMemoryAuditTrail,
 )
-from long_earn.backtest.engine.dsl import parse_strategy_yaml
+from long_earn.backtest.engine.dsl import compute_warmup_days, parse_strategy_yaml
+from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 from long_earn.backtest.engine.param_grid import (
     ParamGrid,
     apply_struct_params,
@@ -168,8 +169,6 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
             audit_provider=audit_provider,
         )
         engine.data_provider = None
-
-        from long_earn.services.backtest_service import DSLStrategy  # noqa: PLC0415
 
         strategy = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
 
@@ -353,10 +352,6 @@ class ParallelRunner:
 
         # 生成所有策略 YAML + 每 combo 独立算 warmup/风控（ADR-008 B5）
         # struct_params 可改算子参数或风控参数，各 combo 必须独立解析
-        from long_earn.services.backtest_service import (  # noqa: PLC0415
-            _compute_warmup_days,
-        )
-
         tasks_data: list[dict[str, Any]] = []
         for _idx, (scalar_params, struct_params) in enumerate(combos):
             yaml_str = render_template(strategy_template, scalar_params)
@@ -375,7 +370,7 @@ class ParallelRunner:
                 {
                     "yaml": final_yaml,
                     "param_desc": param_desc,
-                    "warmup_days": _compute_warmup_days(dsl),
+                    "warmup_days": compute_warmup_days(dsl),
                     "stop_loss": dsl.risk_control.stop_loss,
                     "max_drawdown_limit": dsl.risk_control.max_drawdown_limit,
                     "max_position_pct": dsl.risk_control.max_position_per_stock,
@@ -436,7 +431,7 @@ class ParallelRunner:
         )
         return result
 
-    def run_walk_forward_parallel(  # noqa: PLR0913, PLR0915
+    def run_walk_forward_parallel(  # noqa: PLR0913
         self,
         strategy_yaml: str,
         start_date: str,
@@ -456,11 +451,7 @@ class ParallelRunner:
         max_drawdown_limit = dsl.risk_control.max_drawdown_limit
         max_position_pct = dsl.risk_control.max_position_per_stock
         # ADR-008 B5：walk-forward 各 fold 训练期初也需要 warmup 填时序因子
-        from long_earn.services.backtest_service import (  # noqa: PLC0415
-            _compute_warmup_days,
-        )
-
-        warmup_days = _compute_warmup_days(dsl)
+        warmup_days = compute_warmup_days(dsl)
         prefetch_start = _shift_start_date(start_date, warmup_days)
         full_data = self._prepare_data(symbols, prefetch_start, end_date)
 
@@ -626,10 +617,6 @@ class ParallelRunner:
         if not strategy_yamls:
             return []
 
-        from long_earn.services.backtest_service import (  # noqa: PLC0415
-            _compute_warmup_days,
-        )
-
         # 逐候选解析：风控参数 + warmup 各自独立
         candidates: list[dict[str, Any]] = []
         for idx, yaml_str in enumerate(strategy_yamls):
@@ -637,7 +624,7 @@ class ParallelRunner:
             candidates.append(
                 {
                     "yaml": yaml_str,
-                    "warmup_days": _compute_warmup_days(dsl),
+                    "warmup_days": compute_warmup_days(dsl),
                     "stop_loss": dsl.risk_control.stop_loss,
                     "max_drawdown_limit": dsl.risk_control.max_drawdown_limit,
                     "max_position_pct": dsl.risk_control.max_position_per_stock,

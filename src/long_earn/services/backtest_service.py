@@ -6,8 +6,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import polars as pl
-
+from long_earn.backtest import ParamGrid
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.miniqmt_provider import (
     COMPOSITE_BOARD_MAP,
@@ -18,10 +17,10 @@ from long_earn.backtest.data.polars_adapter import PandasToPolarsProvider
 from long_earn.backtest.engine.audit import PostgresAuditProvider
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
-    StrategyDSL,
+    compute_warmup_days,
     parse_strategy_yaml,
 )
-from long_earn.backtest.engine.strategy import BaseStrategy
+from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 from long_earn.services import BacktestService, LoggerService
 
 # PIT 快照日期偏差容忍天数（超过此值触发幸存者偏差警告）
@@ -30,154 +29,6 @@ _UNIVERSE_PIT_MAX_DAYS = 30
 if TYPE_CHECKING:
     from long_earn.backtest.data.connector import DataConnector
     from long_earn.config import AppConfig
-
-
-class DSLStrategy(BaseStrategy):
-    """从 YAML DSL 自动生成的状态化策略（ADR-009 收尾：仅算子目录路径）
-
-    旧式 factors + filter/rank/expression 信号路径已退役，所有策略必须含
-    operator_factors 或 type=operator 信号步骤（DSL 解析期强制校验）。
-    因果性由算子目录（每个算子过 prove_causality）+ VisibilityGuard
-    （history 仅含 timestamp <= 当前时刻）共同保证。
-    """
-
-    def __init__(self, strategy_id: str, dsl_strategy: Any, config: dict | None = None):
-        super().__init__(strategy_id, config)
-        self.dsl = dsl_strategy
-        # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
-        # 还是只是退化成"什么都不做"而被错误标记 success=True。
-        # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
-        self.factor_failures: list[dict[str, str]] = []
-        self.step_failures: list[dict[str, str]] = []
-
-    def _build_operator_executor(self):
-        """惰性构造算子目录执行器。
-
-        把算子目录接入策略执行路径：算子因子/信号步骤经此执行器跑在算子目录上。
-        解析期已校验过 op/params，这里直接 resolve。
-        """
-        from long_earn.backtest.engine.operator_executor import (  # noqa: PLC0415
-            OperatorStrategyExecutor,
-            resolve_factor_step,
-            resolve_signal_step,
-        )
-
-        factor_specs = [resolve_factor_step(s) for s in self.dsl.operator_factors]
-        signal_specs = [
-            resolve_signal_step(s)
-            for s in self.dsl.signals
-            if s.get("type") == "operator"
-        ]
-        return OperatorStrategyExecutor(factor_specs, signal_specs)
-
-    def on_bar(self, bars: pl.DataFrame, context) -> Any:  # noqa: ARG002
-        """算子目录执行路径：在 polars 历史面板上跑算子链 → 选中标的 → 等权信号。
-
-        ADR-009 收尾：旧式 factors + expression 路径已退役，所有策略必须含
-        operator_factors 或 operator 信号步骤（DSL 解析期强制校验）。
-        ``bars`` 参数为 BaseStrategy.on_bar 契约要求，算子路径改用 history 面板。
-        """
-        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
-
-        if not hasattr(self, "_op_executor"):
-            self._op_executor = self._build_operator_executor()
-
-        try:
-            history_pl = context.get_history_df()
-        except Exception as exc:
-            self.step_failures.append(
-                {
-                    "type": "history_fetch",
-                    "step": "on_bar history",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            return None
-
-        try:
-            selected, rationale = self._op_executor.execute_with_rationale(
-                history_pl, context.current_timestamp
-            )
-        except Exception as exc:
-            self.step_failures.append(
-                {
-                    "type": "operator_execute",
-                    "step": "operator_executor",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            return None
-
-        final_weights = self._equal_weights(selected)
-        if not final_weights:
-            return None
-
-        return SignalEvent(
-            timestamp=context.current_timestamp,
-            trace_id=f"op_{context.current_timestamp.isoformat()}",
-            event_id=f"op_{context.current_timestamp.isoformat()}",
-            signals=final_weights,
-            strategy_id=self.strategy_id,
-            metadata={"rationale": self._rationale_with_weights(rationale)},
-        )
-
-    def _rationale_with_weights(self, rationale: dict[str, Any]) -> dict[str, Any]:
-        """给执行器的决策依据补上权重口径与人类可读公式（供审计归因展示）。"""
-        weights = getattr(self.dsl, "weights", None)
-        method = getattr(weights, "method", "") if weights is not None else ""
-        criteria = rationale.get("criteria", [])
-        formula = "；".join(c.get("desc", "") for c in criteria)
-        if method == "equal":
-            formula = f"{formula}；等权"
-        rationale["formula"] = formula
-        rationale["weights"] = {"method": method} if method else {}
-        return rationale
-
-    def _equal_weights(self, selected: list) -> dict[str, float]:
-        if not selected:
-            self.step_failures.append(
-                {
-                    "type": "weights",
-                    "step": "method=equal",
-                    "error": "selected 为空：信号步骤未选出任何标的",
-                }
-            )
-            return {}
-        weight = 1.0 / len(selected)
-        return dict.fromkeys(selected, weight)
-
-
-def _compute_warmup_days(dsl: "StrategyDSL") -> int:
-    """从 DSL 算子参数推断所需预热期（日历日）。
-
-    扫描 ``operator_factors`` 与 ``signals``（type=operator）全部算子步骤，
-    取最大回溯窗口（``period`` / ``periods`` / ``window`` / ``span`` /
-    ``fast`` / ``slow`` / ``signal``），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
-    0 表示无时序算子，不需要 warmup。
-
-    关键 bug 修复背景（ADR-013 T6，2026-08）：原实现只扫 ``operator_factors``
-    的 ``period``/``window``/``span`` 三键，遗漏 ``shift.periods``（复数）、
-    ``macd.fast``/``slow``/``signal``，且不扫 ``signals`` 里的算子步骤。结果
-    预取区间短于真实回溯需求，因子前若干 bar 全 NaN，``rank_top`` 选不出股票，
-    整轮回测 ``trade_count=0``。修复后覆盖全部算子参数键 + signal 步骤。
-    """
-    # 回溯窗口参数键全集合：任何含回溯语义的算子参数都应在此
-    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
-    max_period = 0
-    # 扫描 operator_factors + signals(type=operator) 全部算子步骤
-    operator_steps: list[dict[str, Any]] = list(dsl.operator_factors)
-    for step in dsl.signals:
-        if step.get("type") == "operator":
-            operator_steps.append(step)
-    for step in operator_steps:
-        params = step.get("params") or {}
-        for key in lookback_keys:
-            val = params.get(key, 0) or 0
-            max_period = max(max_period, val)
-    if max_period <= 0:
-        return 0
-    # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日
-    return int(max_period * 1.5 + 30)
 
 
 class BacktestServiceImpl(BacktestService):
@@ -434,7 +285,7 @@ class BacktestServiceImpl(BacktestService):
                     start_date,
                     end_date,
                     formatted_symbols,
-                    warmup_days=_compute_warmup_days(dsl),
+                    warmup_days=compute_warmup_days(dsl),
                     universe_pit_warning=universe_pit_warning,
                     strategy_yaml=strategy_yaml,
                 )
@@ -495,7 +346,7 @@ class BacktestServiceImpl(BacktestService):
     def run_grid(  # noqa: PLR0913
         self,
         strategy_template: str,
-        param_grid: Any,
+        param_grid: ParamGrid,
         start_date: str = "",
         end_date: str = "",
         universe_type: str = "main_board+gem",

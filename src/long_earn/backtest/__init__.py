@@ -33,11 +33,14 @@ from long_earn.backtest.engine.dsl import (
     StrategyDSL,
     parse_strategy_yaml,
 )
+from long_earn.backtest.engine.parallel import _MAX_GRID_DEFAULT
+from long_earn.backtest.engine.param_grid import ParamGrid
 from long_earn.backtest.engine.strategy import BaseStrategy
 from long_earn.backtest.engine.timeseries_split import TimeSeriesSplit
 from long_earn.backtest.models import BacktestResult
 
 __all__ = [
+    "_MAX_GRID_DEFAULT",
     "BacktestDomainError",
     "BacktestExecutionError",
     "BacktestResult",
@@ -47,6 +50,7 @@ __all__ = [
     "EventDrivenBacktestEngine",
     "ExpressionEvalError",
     "InMemoryAuditTrail",
+    "ParamGrid",
     "PerformanceMetrics",
     "Position",
     "StrategyDSL",

@@ -63,6 +63,38 @@ class _FakeBacktestService:
         self.windows.append((start_date, end_date))
         return [self._result for _ in strategy_yamls]
 
+    def run_grid(
+        self,
+        strategy_template: str,
+        param_grid: Any,
+        start_date: str = "",
+        end_date: str = "",
+        universe_type: str = "main_board+gem",
+        benchmark_symbol: str = "",
+        allow_large_grid: bool = False,
+    ) -> dict[str, Any]:
+        """参数网格寻优桩：回传固定结果（与 run_candidates 同构，保持原测试语义）。"""
+        self.windows.append((start_date, end_date))
+        return {
+            "total": 1,
+            "success_count": 1,
+            "failure_count": 0,
+            "best_sharpe": self._result.get("sharpe_ratio"),
+            "best_return": self._result.get("total_return"),
+            "best_param_desc": "",
+            "outcomes": [
+                {
+                    "task_id": "stub",
+                    "success": True,
+                    "total_return": self._result.get("total_return"),
+                    "sharpe_ratio": self._result.get("sharpe_ratio"),
+                    "max_drawdown": self._result.get("max_drawdown"),
+                    "error": None,
+                    "param_desc": "stub",
+                }
+            ],
+        }
+
 
 class _FakeLogger:
     """简易 logger，记录 warning/error/info 调用。"""

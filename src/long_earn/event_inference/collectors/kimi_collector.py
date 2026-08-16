@@ -1,6 +1,6 @@
 """Kimi 联网搜索采集器。
 
-包装现有 ``tools/kimi_web_search.py``（Moonshot API + ``$web_search`` 内置函数）。
+包装现有 ``services/kimi_web_search.py``（Moonshot API + ``$web_search`` 内置函数）。
 凭证：环境变量 ``MOONSHOT_API_KEY`` 或 ``KIMI_API_KEY``。
 """
 
@@ -17,7 +17,7 @@ from long_earn.event_inference.collectors.base import CollectedItem
 class KimiCollector:
     """Kimi 联网搜索采集器。
 
-    依赖 ``tools/kimi_web_search.kimi_web_search``。凭证缺失时 ``is_available``
+    依赖 ``services/kimi_web_search.kimi_web_search``。凭证缺失时 ``is_available``
     返回 False，collect 节点自动跳过。
     """
 
@@ -51,7 +51,7 @@ class KimiCollector:
             return []
 
         # 延迟导入：kimi_web_search 依赖 openai SDK，避免无凭证环境加载失败
-        from long_earn.tools.kimi_web_search import kimi_web_search  # noqa: PLC0415
+        from long_earn.services.kimi_web_search import kimi_web_search  # noqa: PLC0415
 
         try:
             raw_results: list[dict[str, Any]] = kimi_web_search(query)

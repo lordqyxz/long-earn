@@ -17,7 +17,7 @@ import polars as pl
 
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import parse_strategy_yaml
-from long_earn.services.backtest_service import DSLStrategy
+from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 from long_earn.strategy_optimization import (
     AcceptanceGate,
     FakeStrategyOptimizer,

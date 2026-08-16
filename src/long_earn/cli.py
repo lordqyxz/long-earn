@@ -81,7 +81,7 @@ def research(
     from long_earn.config import AppConfig
     from long_earn.context_init import initialize_context
     from long_earn.core.storage import best_strategy_path, strategy_results_path
-    from long_earn.services.strategy_research_service import StrategyResearchService
+    from long_earn.strategy_rd.research_service import StrategyResearchService
 
     idea_str = idea or _DEFAULT_IDEA
     config = AppConfig.from_env()
@@ -202,6 +202,9 @@ def optimize(
     from long_earn.strategy_rd.agents.strategy_develop_agent import (
         StrategyDevelopAgent,
     )
+    from long_earn.strategy_rd.agents.strategy_research_agent import (
+        StrategyResearchAgent,
+    )
 
     yaml_path = Path(strategy_yaml)
     if not yaml_path.exists():
@@ -232,7 +235,7 @@ def optimize(
     config.backtest_end_date = config.train_end_date
     ctx = initialize_context(config)
 
-    optimizer = LLMStrategyOptimizer(ctx)
+    optimizer = LLMStrategyOptimizer(StrategyResearchAgent(context=ctx))
     pipeline = OptimizationPipeline(
         optimizer=optimizer,
         backtest_service=ctx.backtest_service,
