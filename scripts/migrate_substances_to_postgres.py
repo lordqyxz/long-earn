@@ -11,8 +11,8 @@ PostgreSQL 的 ``substances`` 表。
 
     uv run python scripts/migrate_substances_to_postgres.py [--source PATH]
 
-``--source`` 可选：显式指定源库路径。默认按 `<数据目录>/backup/substances.duckdb`
-（归档优先）→ `<数据目录>/substances.duckdb` 顺序查找。
+``--source`` 可选：显式指定源库路径。默认查找 `<数据目录>/substances.duckdb`
+（迁移已完成，源库已删除；仅当需要从历史 DuckDB 重新迁移时可用）。
 """
 
 from __future__ import annotations
@@ -122,13 +122,9 @@ def _substance_from_row(row: tuple) -> Substance:
 
 
 def _default_source() -> Path:
-    """定位源库：优先 backup/ 归档（迁移完成后默认路径已无文件），
-    其次默认存储路径（迁移前 / 未归档场景）。"""
-    default = substances_db_path()
-    backup = default.parent / "backup" / default.name
-    if backup.exists():
-        return backup
-    return default
+    """定位源库：默认存储路径（迁移完成后源库已删除；
+    --source 显式指定时不受影响）。"""
+    return substances_db_path()
 
 
 def migrate_substances(
@@ -175,7 +171,7 @@ def main() -> None:
         "--source",
         type=Path,
         default=None,
-        help="源 substances.duckdb 路径（默认：数据目录 backup/ 归档优先，其次默认存储路径）",
+        help="源 substances.duckdb 路径（默认：数据目录 substances.duckdb）",
     )
     args = parser.parse_args()
 

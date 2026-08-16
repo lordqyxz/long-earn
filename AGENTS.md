@@ -215,7 +215,7 @@ uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
 
-> **缓存保护约定**：PostgreSQL `long_earn` 库的 `price_daily` / 财务表是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。旧 DuckDB 源库已归档至 `<LONG_EARN_DATA_DIR>/backup/`（含独立 `.gitignore`），仅供审计保留。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
+> **缓存保护约定**：PostgreSQL `long_earn` 库的 `price_daily` / 财务表是全量下载的权威数据源，**不得主动修改**（如手动 DELETE/DROP 或在回测中随意覆盖），除非有明确必要理由（如数据损坏、需要增量更新）。全量刷新通过上述 `download_data.py` 脚本显式执行。旧 DuckDB 源库已完成迁移并删除（PostgreSQL 为唯一权威存储，历史迁移见 ADR-019）。数据目录由 `LONG_EARN_DATA_DIR` 环境变量控制（默认 `D:/dev/long-earn-data`）。
 
 ---
 

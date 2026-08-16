@@ -48,7 +48,7 @@ long-earn 早期以 **DuckDB 嵌入式文件库**承载三类存储，分布在 
 
 - `scripts/migrate_duckdb_to_postgres.py`：价格/财务/审计全量迁移（分页 `ORDER BY` 全列确定性，COPY 批量灌入，行数与源精确匹配）。
 - `scripts/migrate_substances_to_postgres.py`：物质库独立迁移（`save_many` 幂等 UPSERT）。
-- 旧 DuckDB 文件归档至 `<LONG_EARN_DATA_DIR>/backup/`（含独立 `.gitignore`），不再参与运行时读写。
+- 旧 DuckDB 文件迁移完成后已删除（PostgreSQL 为唯一权威存储；迁移脚本 `migrate_duckdb_to_postgres.py` / `migrate_substances_to_postgres.py` 保留，可供历史数据重新迁移）。
 
 ## 后果
 
