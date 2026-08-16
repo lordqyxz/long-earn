@@ -215,6 +215,7 @@ class BacktestService(Protocol):
         strategy_yaml: str,
         start_date: str = "",
         end_date: str = "",
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """运行回测
 
@@ -222,6 +223,8 @@ class BacktestService(Protocol):
             strategy_yaml: YAML DSL 策略描述
             start_date: 回测起始日期（覆盖策略中的默认值）
             end_date: 回测结束日期（覆盖策略中的默认值）
+            tags: run 级标签，写入 RUN_START payload.tags；测试/冒烟回测
+                须传 ``[RUN_TAG_TEST]``（"test"）供审计库按 test 标签清理。
 
         Returns:
             回测结果字典。成功时包含 performance 指标；
@@ -255,6 +258,7 @@ class BacktestService(Protocol):
         start_date: str = "",
         end_date: str = "",
         universe_type: str = "",
+        tags: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """批量并行回测多个候选策略（ADR-010 阶段 5 收尾）
 
@@ -266,6 +270,7 @@ class BacktestService(Protocol):
             start_date: 回测起始日期（默认 config.backtest_start_date，训练集）
             end_date: 回测结束日期（默认 config.backtest_end_date，训练集）
             universe_type: 股票池类型；缺省从首候选 DSL 解析
+            tags: run 级标签，透传各候选 RUN_START payload.tags
 
         Returns:
             与 strategy_yamls 等长的结果列表，每项与 run() 返回结构一致。

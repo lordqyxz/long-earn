@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import polars as pl
 
+from long_earn.backtest.engine.audit import RUN_TAG_TEST
 from long_earn.backtest.engine.dsl_strategy import DSLStrategy
 from long_earn.config import AppConfig
 from long_earn.services.backtest_service import BacktestServiceImpl
@@ -34,6 +35,7 @@ class TestRunBacktest:
             strategy_yaml="name: Test\nstart_date: 2023-01-01\nend_date: 2023-03-01",
             start_date="2023-01-01",
             end_date="2023-03-31",
+            tags=[RUN_TAG_TEST],
         )
 
         assert result is not None
@@ -50,6 +52,7 @@ class TestRunBacktest:
             strategy_yaml="name: MomentumTest\nsignals: []",
             start_date="2023-01-01",
             end_date="2023-03-31",
+            tags=[RUN_TAG_TEST],
         )
 
         assert result is not None

@@ -59,6 +59,9 @@ class BacktestTask:
     # ADR-008 B5：warmup 注入契约。每 task 独立算（run_grid 每 combo、
     # run_candidates 每候选），worker 透传给 engine.run(warmup_days=...)。
     warmup_days: int = 0
+    # run 级标签：测试/冒烟并行回测携带 RUN_TAG_TEST（"test"），worker 透传
+    # 给 engine.run(tags=...)，写入 RUN_START payload.tags 供审计清理识别。
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -183,6 +186,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
                 full_data=full_data,
                 warmup_days=task.warmup_days,
                 strategy_yaml=task.strategy_yaml,
+                tags=task.tags,
             )
 
         if result.success:
@@ -338,6 +342,7 @@ class ParallelRunner:
         max_positions: int = 0,
         allow_large_grid: bool = False,
         audit_db_path: Path | str | None = None,
+        tags: list[str] | None = None,
     ) -> GridResult:
         """参数网格并行回测。"""
         combos = param_grid.expand_all()
@@ -418,6 +423,7 @@ class ParallelRunner:
                     param_desc=td["param_desc"],
                     audit_db_path="pg" if audit_base else "",
                     warmup_days=td["warmup_days"],
+                    tags=tags or [],
                 )
                 for idx, td in enumerate(tasks_data)
             ]
@@ -440,6 +446,7 @@ class ParallelRunner:
         n_splits: int = 3,
         benchmark_symbol: str = "",
         audit_db_path: Path | str | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
         from long_earn.backtest.engine.timeseries_split import (  # noqa: PLC0415
@@ -498,6 +505,7 @@ class ParallelRunner:
                         param_desc=f"fold {fold_idx} train",
                         audit_db_path="pg" if audit_base else "",
                         warmup_days=warmup_days,
+                        tags=tags or [],
                     )
                 )
                 tasks.append(
@@ -517,6 +525,7 @@ class ParallelRunner:
                         param_desc=f"fold {fold_idx} test",
                         audit_db_path="pg" if audit_base else "",
                         warmup_days=warmup_days,
+                        tags=tags or [],
                     )
                 )
 
@@ -606,6 +615,7 @@ class ParallelRunner:
         symbols: list[str],
         benchmark_symbol: str = "",
         audit_db_path: Path | str | None = None,
+        tags: list[str] | None = None,
     ) -> list[BacktestOutcome]:
         """批量候选并行回测（ADR-010 阶段 5 收尾）。
 
@@ -676,6 +686,7 @@ class ParallelRunner:
                     task_id=c["task_id"],
                     audit_db_path="pg" if audit_base else "",
                     warmup_days=c["warmup_days"],
+                    tags=tags or [],
                 )
                 for c in candidates
             ]

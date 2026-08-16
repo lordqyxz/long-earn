@@ -155,9 +155,7 @@ class BacktestServiceImpl(BacktestService):
                     )
         return MiniQmtUniverseProvider().get_symbols(universe_type, date)
 
-    def _check_universe_pit(
-        self, universe_type: str, start_date: str
-    ) -> bool:
+    def _check_universe_pit(self, universe_type: str, start_date: str) -> bool:
         """检查股票池快照是否 PIT 对齐。
 
         返回 True 表示存在幸存者偏差风险（快照日期与回测起始日期偏差 > 30 天）。
@@ -172,9 +170,7 @@ class BacktestServiceImpl(BacktestService):
             else:
                 index_code = universe_type
 
-            snapshot_date = cache.get_universe_snapshot_date(
-                index_code, start_date
-            )
+            snapshot_date = cache.get_universe_snapshot_date(index_code, start_date)
             if snapshot_date is None:
                 return True  # 无历史快照 → 警告
 
@@ -190,6 +186,7 @@ class BacktestServiceImpl(BacktestService):
         strategy_yaml: str,
         start_date: str = "",
         end_date: str = "",
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         start_date = start_date or getattr(
             self.config, "backtest_start_date", "2020-01-01"
@@ -288,6 +285,7 @@ class BacktestServiceImpl(BacktestService):
                     warmup_days=compute_warmup_days(dsl),
                     universe_pit_warning=universe_pit_warning,
                     strategy_yaml=strategy_yaml,
+                    tags=tags,
                 )
             finally:
                 # 显式关闭审计连接，确保 WAL 落盘（防止进程退出后数据丢失）
@@ -651,6 +649,7 @@ class BacktestServiceImpl(BacktestService):
         start_date: str = "",
         end_date: str = "",
         universe_type: str = "",
+        tags: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """批量并行回测多个候选策略（ADR-010 阶段 5 收尾）。
 
@@ -717,6 +716,7 @@ class BacktestServiceImpl(BacktestService):
             end_date=end_date,
             symbols=formatted_symbols,
             audit_db_path="pg",
+            tags=tags,
         )
 
         # BacktestOutcome -> run() 同结构 dict（diagnostics 保真，ADR-008 B6）

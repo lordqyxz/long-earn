@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
+from long_earn.backtest.engine.audit import RUN_TAG_TEST
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.dsl import (
     compute_warmup_days,
@@ -196,6 +197,7 @@ class TestRunCandidatesEquivalence:
             start_date="2024-01-01",
             end_date="2024-03-31",
             symbols=symbols,
+            tags=[RUN_TAG_TEST],
         )
         assert len(outcomes) == 1
         batch_outcome = outcomes[0]
@@ -232,6 +234,7 @@ class TestRunCandidatesEquivalence:
             start_date="2024-01-01",
             end_date="2024-03-31",
             symbols=symbols,
+            tags=[RUN_TAG_TEST],
         )
         outcome = outcomes[0]
         assert outcome.success
@@ -258,6 +261,7 @@ class TestRunCandidatesEquivalence:
             start_date="2024-01-01",
             end_date="2024-03-31",
             universe_type="csi300",
+            tags=[RUN_TAG_TEST],
         )
         assert len(results) == 1
         result = results[0]
