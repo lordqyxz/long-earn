@@ -1,6 +1,6 @@
 # TODO — 待办清单
 
-> 最后更新：2026-08-16
+> 最后更新：2026-08-17
 >
 > 按 **紧急 × 重要** 四象限组织（艾森豪威尔矩阵），合并功能开发与合规审计。
 > 判定准则：
@@ -22,10 +22,6 @@
 > 三页面骨架、OpenAPI 自动生成客户端、包重命名 `dashboard/`→`app/`、归因面板完整化、criteria 结构化渲染等已完成，按需继续开发（具体子任务见代码与后续冲刺规划）。
 
 - [~] **Web 前端开发**（`web/`）— 进行中，按需继续开发
-
-- [~] **⚠️ 前端审计链类型漂移根治**（开放修复项）
-  - 现状：`web/src/api/types.gen.ts` 的 `AuditChainEvent`/`AuditEventItem` 为陈旧残留——`GET /api/runs/{run_id}/audit/{trace_id}` 无 `response_model`（直接返回原始 dict），openapi 不生成这两个命名 schema；重跑 `api:gen` 会删掉类型导致 `BacktestDetail.tsx` 类型引用断裂（tsc/build 失败）。本次已回退 `web/src/api` 到 HEAD 规避。
-  - 待办：在 `schemas/` 定义 `AuditEventItem`/`AuditChainEvent` 并给 audit 接口补 `response_model` 后重跑 `api:gen` 固化。
 
 ---
 
@@ -58,4 +54,3 @@
 - [ ] **AUDIT-P3-06** telemetry 与审计集成
 - [ ] **AUDIT-P3-07** miniqmt 内联常量清理
 - [ ] **AUDIT-P3-09** 因果性切点扩展
-- [ ] **AUDIT-P3-10** 算子注册强制附带 `prove_causality` 报告
