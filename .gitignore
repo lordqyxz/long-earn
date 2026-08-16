@@ -55,3 +55,6 @@ check_audit.py
 # 生成数据不入版本控制；该目录有独立 .gitignore（含旧 DuckDB backup/ 归档）
 long-earn-data/
 *.duckdb
+
+# git worktree 并行开发目录（subagent 隔离工作区）
+.worktrees/
