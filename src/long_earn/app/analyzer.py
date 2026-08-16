@@ -21,6 +21,9 @@ from long_earn.core.pg import pg_connect
 # 风险指标计算所需的最小日收益率数据点数
 _MIN_DAILY_RETURNS_FOR_RISK = 2
 
+# 有效回测的最小成交笔数（FILL < 此值视为无效记录，避免冒烟/调试 run 混入看板）
+_MIN_VALID_FILLS = 5
+
 # 审计日志表名（PG schema 与 DuckDB 时代一致）
 _AUDIT_TABLE = '"backtest_audit".logs'
 
@@ -48,7 +51,10 @@ class BacktestAnalyzer:
 
     def _get_writable_conn(self) -> Any:
         # 可写连接：仅在删除操作时短暂使用，用完立即关闭。
-        return pg_connect()
+        # 与只读连接一致返回元组行（row_factory=None）：delete_run 以
+        # row[0] 下标访问，默认 dict_row 行会抛 KeyError 被吞掉、返回 0，
+        # 导致删除接口误报 "Run not found"（历史 bug）。
+        return pg_connect(row_factory=None)
 
     @staticmethod
     def _rows_to_pl(conn: Any, query: str, params: list[Any]) -> pl.DataFrame:
@@ -97,7 +103,8 @@ class BacktestAnalyzer:
                     r.payload,
                     COALESCE(f.fill_count, 0) AS fill_count,
                     COALESCE(e.event_count, 0) AS event_count,
-                    s.strategy_id
+                    s.strategy_id,
+                    s.tags
                 FROM (
                     SELECT run_id, MIN(timestamp) AS started,
                         (array_agg(payload ORDER BY timestamp))[1] AS payload
@@ -119,7 +126,9 @@ class BacktestAnalyzer:
                 LEFT JOIN (
                     SELECT run_id,
                         (array_agg(payload->>'strategy_id' ORDER BY timestamp))[1]
-                            AS strategy_id
+                            AS strategy_id,
+                        (array_agg(payload->'tags' ORDER BY timestamp))[1]
+                            AS tags
                     FROM {_AUDIT_TABLE}
                     WHERE event_type = 'RUN_START'
                     GROUP BY run_id
@@ -134,7 +143,7 @@ class BacktestAnalyzer:
         conn.close()
         runs: list[dict[str, Any]] = []
         for row in rows:
-            run_id, started, payload, fill_count, event_count, strategy_id = row
+            run_id, started, payload, fill_count, event_count, strategy_id, tags = row
             total_return = 0.0
             sharpe = 0.0
             trade_count = fill_count
@@ -155,6 +164,7 @@ class BacktestAnalyzer:
                     "trade_count": trade_count,
                     "event_count": event_count,
                     "strategy_id": str(strategy_id) if strategy_id else "",
+                    "tags": list(tags or []),
                 }
             )
         return runs
@@ -190,10 +200,16 @@ class BacktestAnalyzer:
             return 0
 
     def get_empty_or_error_runs(self) -> list[str]:
-        """获取空跑或错误运行的 run_id 列表。
+        """获取无效回测运行的 run_id 列表。
 
-        空跑：无 FILL 事件
-        错误：有 RUN_ERROR 事件
+        无效口径（与项目维护约定一致）：
+        - 空跑：无 FILL 事件
+        - 错误：有 RUN_ERROR 事件
+        - test 标签：RUN_START payload.tags 含 ``RUN_TAG_TEST``（"test"，
+          测试/冒烟回测专用标签，替代旧 run_id 前缀启发式 run-/t-/conc-/rw-）
+        - 孤儿：无 RUN_END 事件（引擎 DATA_EMPTY 等路径直接 return 未写
+          RUN_END，此类 run 含 FILL 但看板不显示、无汇总指标）
+        - 成交过少：FILL 笔数 < ``_MIN_VALID_FILLS``（冒烟/调试 run）
         """
         conn = self._get_conn()
         try:
@@ -201,13 +217,35 @@ class BacktestAnalyzer:
                 f"""
                 SELECT DISTINCT r.run_id
                 FROM {_AUDIT_TABLE} r
-                WHERE r.run_id NOT IN (
-                    SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
-                    WHERE event_type = 'FILL'
-                )
-                UNION
-                SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
-                WHERE event_type = 'RUN_ERROR'
+                WHERE
+                    -- 空跑：无 FILL
+                    r.run_id NOT IN (
+                        SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
+                        WHERE event_type = 'FILL'
+                    )
+                    -- 错误：有 RUN_ERROR
+                    OR r.run_id IN (
+                        SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
+                        WHERE event_type = 'RUN_ERROR'
+                    )
+                    -- test 标签：RUN_START payload.tags 含 'test'
+                    OR r.run_id IN (
+                        SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
+                        WHERE event_type = 'RUN_START'
+                          AND payload->'tags' ? 'test'
+                    )
+                    -- 孤儿：无 RUN_END
+                    OR r.run_id NOT IN (
+                        SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
+                        WHERE event_type = 'RUN_END'
+                    )
+                    -- 成交过少：FILL 笔数 < {_MIN_VALID_FILLS}
+                    OR r.run_id IN (
+                        SELECT run_id FROM {_AUDIT_TABLE}
+                        WHERE event_type = 'FILL'
+                        GROUP BY run_id
+                        HAVING COUNT(*) < {_MIN_VALID_FILLS}
+                    )
                 """
             ).fetchall()
             conn.close()
@@ -265,8 +303,7 @@ class BacktestAnalyzer:
             current_id = trace_id
             while True:
                 res = conn.execute(
-                    f"SELECT parent_id FROM {_AUDIT_TABLE} "
-                    "WHERE trace_id = %s LIMIT 1",
+                    f"SELECT parent_id FROM {_AUDIT_TABLE} WHERE trace_id = %s LIMIT 1",
                     [current_id],
                 ).fetchone()
                 if not res or not res[0]:
@@ -479,9 +516,7 @@ class BacktestAnalyzer:
         # 原实现额外减 0.02 且年化口径用几何，导致与列表页（引擎 RUN_END 值）
         # 显示不一致。
         sharpe_ratio = (
-            float(annual_return / annual_volatility)
-            if annual_volatility > 0
-            else 0.0
+            float(annual_return / annual_volatility) if annual_volatility > 0 else 0.0
         )
 
         # 最大回撤 & 持续天数
@@ -613,7 +648,10 @@ class BacktestAnalyzer:
             if dt is None and isinstance(db_ts, datetime):
                 dt = db_ts
             points.append(
-                {"time": str(dt.date()) if dt is not None else str(db_ts or ""), "value": value}
+                {
+                    "time": str(dt.date()) if dt is not None else str(db_ts or ""),
+                    "value": value,
+                }
             )
         return points
 
@@ -731,9 +769,7 @@ class BacktestAnalyzer:
                     "fill": fill_trace,
                     "order": "",
                     "upstream": "",
-                    "events": cls._build_chain_events(
-                        fill_trace, "", "", by_trace
-                    ),
+                    "events": cls._build_chain_events(fill_trace, "", "", by_trace),
                 },
             }
 

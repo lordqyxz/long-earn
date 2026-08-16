@@ -746,6 +746,10 @@ export type RunInfo = {
      * Strategy Id
      */
     strategy_id?: string;
+    /**
+     * Tags
+     */
+    tags?: string[];
 };
 
 /**
@@ -1088,6 +1092,12 @@ export type TradeAttribution = {
                 params?: Record<string, unknown>;
                 desc?: string;
                 format?: string;
+                kind?: string;
+                segments?: Array<{
+                    type?: string;
+                    value?: string | number | boolean;
+                    unit?: string;
+                }>;
             }>;
             selection?: Array<Record<string, unknown>>;
             universe_size?: number;

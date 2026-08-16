@@ -16,7 +16,11 @@ import pytest
 
 from long_earn.app.analyzer import BacktestAnalyzer
 from long_earn.backtest.domain.entities import SignalEvent
-from long_earn.backtest.engine.audit import AuditLogger, PostgresAuditProvider
+from long_earn.backtest.engine.audit import (
+    RUN_TAG_TEST,
+    AuditLogger,
+    PostgresAuditProvider,
+)
 from long_earn.backtest.engine.broker import TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.strategy import BaseStrategy
@@ -52,6 +56,8 @@ def _make_provider_and_logger(
 ) -> tuple[AuditLogger, PostgresAuditProvider]:
     provider = PostgresAuditProvider()
     logger = AuditLogger(provider=provider, run_id=run_id)
+    # 测试回测记录必须携带专用 test 标签（供审计库「清理带 test 标签记录」识别）
+    logger.log_run_start({"tags": [RUN_TAG_TEST]})
     return logger, provider
 
 
@@ -373,10 +379,20 @@ def _write_attribution_chain(logger: AuditLogger, run_id: str) -> None:
             "rationale": {
                 "formula": "mom = close 的 20 期收益率；筛选 mom > 0；按 mom 降序取前 2；等权",
                 "criteria": [
-                    {"step": "factor", "op": "returns", "alias": "mom", "format": "pct",
-                     "desc": "mom = close 的 20 期收益率", "params": {"field": "close", "period": 20}},
-                    {"step": "signal", "op": "rank_top", "desc": "按 mom 降序取前 2",
-                     "params": {"field": "mom", "top": 2, "ascending": False}},
+                    {
+                        "step": "factor",
+                        "op": "returns",
+                        "alias": "mom",
+                        "format": "pct",
+                        "desc": "mom = close 的 20 期收益率",
+                        "params": {"field": "close", "period": 20},
+                    },
+                    {
+                        "step": "signal",
+                        "op": "rank_top",
+                        "desc": "按 mom 降序取前 2",
+                        "params": {"field": "mom", "top": 2, "ascending": False},
+                    },
                 ],
                 "selection": [
                     {"symbol": "A", "rank": 1, "mom": 0.5},
@@ -496,12 +512,17 @@ def test_trade_journal_attribution_reconstructs_chain():
     assert events["fill"]["event_type"] == "FILL"
     assert "BUY" in events["fill"]["summary"] and "A" in events["fill"]["summary"]
     assert events["order"]["event_type"] == "ORDER"
-    assert "策略" in events["upstream"]["summary"] and "选股" in events["upstream"]["summary"]
+    assert (
+        "策略" in events["upstream"]["summary"]
+        and "选股" in events["upstream"]["summary"]
+    )
     risk_events = risk_trade["attribution"]["chain"]["events"]
     assert "止损触发" in risk_events["upstream"]["summary"]
 
     # 按 trace_id 下钻原始事件记录（完整 payload，供点击核验）
-    drill = analyzer.export_audit_event(run_id, signal_trade["attribution"]["chain"]["fill"])
+    drill = analyzer.export_audit_event(
+        run_id, signal_trade["attribution"]["chain"]["fill"]
+    )
     assert len(drill) == 1
     assert drill[0]["event_type"] == "FILL"
     assert drill[0]["payload"]["symbol"] == "A"
@@ -563,8 +584,14 @@ def test_engine_risk_fill_enriched_reason_and_chain():
                     "rationale": {
                         "formula": "mom = close 的 2 期收益率；按 mom 降序取前 1；等权",
                         "criteria": [
-                            {"step": "factor", "op": "returns", "alias": "mom", "format": "pct",
-                             "desc": "mom = close 的 2 期收益率", "params": {"field": "close", "period": 2}}
+                            {
+                                "step": "factor",
+                                "op": "returns",
+                                "alias": "mom",
+                                "format": "pct",
+                                "desc": "mom = close 的 2 期收益率",
+                                "params": {"field": "close", "period": 2},
+                            }
                         ],
                         "selection": [{"symbol": "A.SZ", "rank": 1, "mom": 0.1}],
                         "universe_size": 1,
@@ -581,7 +608,7 @@ def test_engine_risk_fill_enriched_reason_and_chain():
         stop_loss=0.1,
         max_drawdown_limit=0.3,
     )
-    engine.run(_BuyOnce(), "2024-02-01", "2024-02-05", ["A.SZ"])
+    engine.run(_BuyOnce(), "2024-02-01", "2024-02-05", ["A.SZ"], tags=[RUN_TAG_TEST])
     engine_run_id = engine._current_run_id
     _CREATED_RUN_IDS.append(engine_run_id)
     provider.close()

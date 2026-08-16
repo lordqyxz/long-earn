@@ -16,7 +16,7 @@ from uuid import uuid4
 import pytest
 
 from long_earn.backtest.domain.interfaces import AuditRecord
-from long_earn.backtest.engine.audit import PostgresAuditProvider
+from long_earn.backtest.engine.audit import RUN_TAG_TEST, PostgresAuditProvider
 from long_earn.core.pg import pg_version
 
 
@@ -55,6 +55,23 @@ def _make_record(
     )
 
 
+def _log_run_start(prov: PostgresAuditProvider, run_id: str) -> None:
+    """记录 RUN_START 事件并携带专用 test 标签（供审计库「清理带 test 标签记录」识别）。"""
+    prov.log_event(
+        AuditRecord(
+            run_id=run_id,
+            timestamp=datetime.now(),
+            event_type="RUN_START",
+            trace_id=run_id,
+            parent_id=None,
+            component="Engine",
+            status="SUCCESS",
+            payload={"tags": [RUN_TAG_TEST]},
+            latency_ms=0.0,
+        )
+    )
+
+
 @pytest.fixture
 def provider() -> Any:
     """为每个测试提供独立的 PostgresAuditProvider + 隔离 run_id。
@@ -64,6 +81,7 @@ def provider() -> Any:
     run_id = f"t-{uuid4().hex[:12]}"
     prov = PostgresAuditProvider()
     prov.log_event(_make_record(run_id=run_id))
+    _log_run_start(prov, run_id)
     yield (prov, run_id)
     prov.close()
 
@@ -91,15 +109,13 @@ class TestQueryEventsWhitelist:
         """典型 SQL 注入 payload 应被白名单拒绝"""
         prov, _ = provider
         with pytest.raises(ValueError):
-            prov.query_events(
-                "x", {"event_type; DROP TABLE logs--": "x"}
-            )
+            prov.query_events("x", {"event_type; DROP TABLE logs--": "x"})
 
     def test_empty_filters_returns_all(self, provider) -> None:
         """空 filters 应返回该 run_id 全部记录"""
         prov, run_id = provider
         records = prov.query_events(run_id, {})
-        assert len(records) == 1
+        assert len(records) == 2  # MARKET_DATA + RUN_START(带 test 标签)
 
 
 class TestThreadSafety:
@@ -109,6 +125,7 @@ class TestThreadSafety:
         """多线程并发 log_event 不应崩溃（锁串行化）"""
         run_id = f"conc-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
         errors: list[Exception] = []
 
         def worker(thread_id: int) -> None:
@@ -142,6 +159,7 @@ class TestThreadSafety:
         """多线程并发读 + 写不应崩溃"""
         run_id = f"rw-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
         for i in range(10):
             provider.log_event(_make_record(run_id=run_id, trace_id=f"trace-{i}"))
 
@@ -180,14 +198,16 @@ class TestSeqMonotonicity:
 
     def test_causal_chain_ordered_by_seq_not_timestamp(self) -> None:
         """get_causal_chain 应按 seq 排序，而非 timestamp（墙钟回退场景）"""
+        run_id = f"seq-{uuid4().hex[:12]}"
         trace_id = f"chain-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
 
         base = datetime(2026, 1, 1, 10, 0, 0)
         records = [
-            _make_record(trace_id=trace_id, event_type="MARKET_DATA"),
-            _make_record(trace_id=trace_id, event_type="SIGNAL"),
-            _make_record(trace_id=trace_id, event_type="ORDER"),
+            _make_record(run_id=run_id, trace_id=trace_id, event_type="MARKET_DATA"),
+            _make_record(run_id=run_id, trace_id=trace_id, event_type="SIGNAL"),
+            _make_record(run_id=run_id, trace_id=trace_id, event_type="ORDER"),
         ]
         records[0].timestamp = base
         records[1].timestamp = base
@@ -206,13 +226,15 @@ class TestSeqMonotonicity:
 
     def test_duplicate_timestamp_does_not_clobber(self) -> None:
         """相同 timestamp 的两条记录不应因主键冲突而互相覆盖（seq 区分）"""
+        run_id = f"dup2-{uuid4().hex[:12]}"
         trace_id = f"dup-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
 
         ts = datetime(2026, 1, 1, 10, 0, 0)
-        r1 = _make_record(trace_id=trace_id, event_type="MARKET_DATA")
+        r1 = _make_record(run_id=run_id, trace_id=trace_id, event_type="MARKET_DATA")
         r1.timestamp = ts
-        r2 = _make_record(trace_id=trace_id, event_type="SIGNAL")
+        r2 = _make_record(run_id=run_id, trace_id=trace_id, event_type="SIGNAL")
         r2.timestamp = ts
 
         provider.log_event(r1)

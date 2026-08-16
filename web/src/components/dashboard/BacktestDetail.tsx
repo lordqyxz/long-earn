@@ -112,6 +112,16 @@ function FactorTag({ alias, cls }: { alias: string; cls: string }) {
   )
 }
 
+/** criteria 渲染段（后端下发的结构化渲染数据）。
+ * type 保持宽松（string | undefined）：后端未来新增段类型时前端应优雅降级
+ * 为 text 渲染，而不是因类型不匹配而崩溃。
+ */
+interface RenderSegment {
+  type?: string
+  value?: string | number | boolean
+  unit?: string
+}
+
 /** criteria 单步的结构（types.gen 中为内联结构，此处显式声明供小组件 props 使用） */
 interface Criterion {
   step?: string
@@ -120,15 +130,32 @@ interface Criterion {
   params?: Record<string, unknown>
   desc?: string
   format?: string
+  /** 粗粒度步骤类型 → 图标；未知回退 factor 样式 */
+  kind?: string
+  /** 有序渲染段：新数据走数据驱动渲染，旧数据（无此字段）回退 desc 文本 */
+  segments?: RenderSegment[]
+}
+
+/** kind -> 胶囊图标：factor/filter/rank 为后端契约的小型分类，未知回退 Sigma */
+const KIND_ICON: Record<string, LucideIcon> = {
+  factor: Sigma,
+  filter: Filter,
+  rank: ListOrdered,
+}
+
+function kindIcon(kind?: string): LucideIcon {
+  return KIND_ICON[kind ?? ''] ?? Sigma
 }
 
 /**
- * 单个算子步骤胶囊（决策流水线的一环）：
- * - factor 步骤：彩色因子标签 + 公式描述（去掉 desc 中重复的 "alias = " 前缀）
- * - filter_threshold：紧凑表达式「字段 比较符 阈值」，字段名复用因子色
- * - rank_top：「排序方向 · 前N」，字段名复用因子色
- * - 其他算子：回退 desc / op 文本
- * hover title 展示原始 op + params，供审计核验
+ * 单个算子步骤胶囊（决策流水线的一环）——**数据驱动渲染**：
+ * 后端下发 ``kind``（选图标）+ ``segments``（有序渲染段），前端零算子知识：
+ * - ``field`` 段 → 因子彩色标签（字段名变更无需改前端）
+ * - ``value`` / ``symbol`` 段 → 等宽文本
+ * - ``text`` 段 → 普通文本
+ * 新增算子只需后端下发模板，前端无需同步分支。
+ * 旧数据（无 segments）回退：factor 步骤用 alias + desc，其余显示 desc 文本。
+ * hover title 展示原始 op + params，供审计核验。
  */
 function CriterionChip({ c, factorCls }: { c: Criterion; factorCls: Map<string, string> }) {
   const op = c.op ?? ''
@@ -142,8 +169,42 @@ function CriterionChip({ c, factorCls }: { c: Criterion; factorCls: Map<string, 
     ) : (
       <span className="font-mono text-[11px]">{field}</span>
     )
+  const renderSegment = (seg: RenderSegment, i: number): ReactNode => {
+    switch (seg.type ?? 'text') {
+      case 'field':
+        return <Fragment key={i}>{fieldTag(String(seg.value ?? ''))}</Fragment>
+      case 'value':
+        return (
+          <span key={i} className="font-mono text-[11px]">
+            {String(seg.value ?? '')}
+            {seg.unit ?? ''}
+          </span>
+        )
+      case 'symbol':
+        return (
+          <span key={i} className="font-mono text-[11px]">
+            {String(seg.value ?? '')}
+          </span>
+        )
+      default:
+        return <span key={i}>{String(seg.value ?? '')}</span>
+    }
+  }
   let content: ReactNode
-  if (c.step === 'factor') {
+  if (c.segments && c.segments.length > 0) {
+    // 新数据：后端下发的结构化段，动态渲染（零算子知识）
+    const Icon = kindIcon(c.kind)
+    content = (
+      <>
+        <Icon className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+        {c.step === 'factor' && c.alias && (
+          <FactorTag alias={c.alias} cls={factorCls.get(c.alias) ?? NEUTRAL_TAG_CLS} />
+        )}
+        {c.segments.map(renderSegment)}
+      </>
+    )
+  } else if (c.step === 'factor') {
+    // 旧数据回退：factor 步骤保留 alias 标签 + desc（去掉重复的 "alias = " 前缀）
     const alias = c.alias ?? ''
     let body = c.desc ?? op
     if (alias && body.startsWith(`${alias} = `)) body = body.slice(alias.length + 3)
@@ -154,39 +215,8 @@ function CriterionChip({ c, factorCls }: { c: Criterion; factorCls: Map<string, 
         <span>{body}</span>
       </>
     )
-  } else if (op === 'filter_threshold') {
-    const field = String(params.field ?? '')
-    const cmp = String(params.op ?? '>')
-    const val = params.value
-    content = (
-      <>
-        <Filter className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-        {field ? (
-          <>
-            {fieldTag(field)}
-            <span className="font-mono text-[11px]">
-              {cmp} {val != null ? String(val) : ''}
-            </span>
-          </>
-        ) : (
-          <span>{c.desc ?? op}</span>
-        )}
-      </>
-    )
-  } else if (op === 'rank_top') {
-    const field = String(params.field ?? '')
-    const top = params.top
-    const asc = params.ascending === true
-    content = (
-      <>
-        <ListOrdered className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-        {fieldTag(field)}
-        <span>
-          {asc ? '升序' : '降序'} · 前{top != null ? String(top) : '-'}
-        </span>
-      </>
-    )
   } else {
+    // 旧数据回退：信号步骤显示 desc 文本（不按 op 名解读 params）
     content = <span>{c.desc || `${op}(…)`}</span>
   }
   return (

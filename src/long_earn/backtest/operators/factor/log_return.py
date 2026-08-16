@@ -18,6 +18,8 @@ class LogReturn(Operator):
     name: ClassVar[str] = "log_return"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = LogReturnParams
     min_history: ClassVar[int] = 1
 

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { BarChart3, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
-import { deleteRun } from '@/api'
+import { cleanEmptyRuns, deleteRun } from '@/api'
 import { RunList } from '@/components/dashboard/RunList'
 import { BacktestDetail } from '@/components/dashboard/BacktestDetail'
 import { useRuns } from '@/hooks/useRuns'
@@ -56,6 +56,26 @@ export function DashboardPage() {
     }
   }
 
+  const handleCleanRuns = async () => {
+    try {
+      const { error, data } = await cleanEmptyRuns()
+      if (error) {
+        const detail = (error as { detail?: string })?.detail
+        alert(detail || '清理失败')
+        return
+      }
+      // 清理后刷新列表，并给出结果反馈
+      reload()
+      if (data && data.deleted_runs > 0) {
+        alert(`已清理 ${data.deleted_runs} 个无效回测记录（${data.deleted_records} 条日志）`)
+      } else {
+        alert('没有需要清理的无效回测记录')
+      }
+    } catch {
+      alert('网络错误，清理失败')
+    }
+  }
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Left: Run list sidebar — collapsible */}
@@ -71,6 +91,7 @@ export function DashboardPage() {
           onSelect={openRun}
           onRefresh={reload}
           onDelete={handleDeleteRun}
+          onClean={handleCleanRuns}
         />
       </div>
 

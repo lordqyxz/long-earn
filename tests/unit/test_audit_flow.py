@@ -16,7 +16,7 @@ import polars as pl
 import pytest
 
 from long_earn.backtest.domain.entities import SignalEvent
-from long_earn.backtest.engine.audit import PostgresAuditProvider
+from long_earn.backtest.engine.audit import RUN_TAG_TEST, PostgresAuditProvider
 from long_earn.backtest.engine.broker import TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.parallel import ParallelRunner
@@ -187,7 +187,7 @@ def test_audit_records_events():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategy(strategy_id="test_strat")
-    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     all_events = _query_audit_rows(run_id=engine._current_run_id)
@@ -214,8 +214,7 @@ def test_audit_equity_curve_alignment():
     full_data = pl.DataFrame(
         {
             "timestamp": [
-                datetime(2023, 1, 1) + timedelta(days=i)
-                for i in range(days)
+                datetime(2023, 1, 1) + timedelta(days=i) for i in range(days)
             ],
             "symbol": ["AAPL"] * days,
             "open": [100.0 + i * 2 for i in range(days)],
@@ -228,7 +227,9 @@ def test_audit_equity_curve_alignment():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategy(strategy_id="test_strat")
-    result = engine.run(strategy, "2023-01-01", "2023-01-05", ["AAPL"])
+    result = engine.run(
+        strategy, "2023-01-01", "2023-01-05", ["AAPL"], tags=[RUN_TAG_TEST]
+    )
     provider.close()
 
     mkt_rows = _query_audit_rows(
@@ -277,6 +278,7 @@ def test_audit_run_start_contains_symbols_and_strategy_hash():
         "2023-01-02",
         ["AAPL"],
         strategy_yaml=test_yaml,
+        tags=[RUN_TAG_TEST],
     )
     provider.close()
 
@@ -313,7 +315,7 @@ def test_audit_market_data_contains_slab_summary():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategy(strategy_id="test_strat")
-    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     mkt_events = _query_audit_rows(
@@ -351,7 +353,7 @@ def test_audit_run_id_consistency():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategy(strategy_id="test_strat")
-    engine.run(strategy, "2023-01-01", "2023-01-03", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-03", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     run_id = _latest_run_id()
@@ -386,7 +388,7 @@ def test_audit_signal_to_dict_json_serializable():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategy(strategy_id="test_strat")
-    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     signal_rows = _query_audit_rows(
@@ -434,9 +436,7 @@ def test_audit_order_contains_exec_type():
         def init(self):
             self._state = {"fired": False}
 
-        def on_bar(
-            self, slab: pl.DataFrame, context: Any
-        ) -> SignalEvent | None:
+        def on_bar(self, slab: pl.DataFrame, context: Any) -> SignalEvent | None:
             if not self._state["fired"]:
                 self._state["fired"] = True
                 return SignalEvent(
@@ -449,7 +449,7 @@ def test_audit_order_contains_exec_type():
             return None
 
     strategy = OneShotStrategy(strategy_id="one_shot")
-    engine.run(strategy, "2023-01-01", "2023-01-04", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-04", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     order_rows = _query_audit_rows(
@@ -511,7 +511,7 @@ def test_direct_limit_order_audit():
     engine._prepare_data = lambda s, start, end, warmup_days=0: full_data
 
     strategy = MockStrategyWithDirectOrder(strategy_id="test_limit")
-    engine.run(strategy, "2023-01-01", "2023-01-03", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-03", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     order_rows = _query_audit_rows(
@@ -549,9 +549,7 @@ def test_max_position_pct_limit():
         def init(self):
             self._state = {}
 
-        def on_bar(
-            self, slab: pl.DataFrame, context: Any
-        ) -> SignalEvent | None:
+        def on_bar(self, slab: pl.DataFrame, context: Any) -> SignalEvent | None:
             return SignalEvent(
                 timestamp=datetime.now(),
                 trace_id=str(uuid.uuid4()),
@@ -561,7 +559,9 @@ def test_max_position_pct_limit():
             )
 
     strategy = BigWeightStrategy(strategy_id="big_weight")
-    result = engine.run(strategy, "2023-01-01", "2023-01-02", ["AAPL"])
+    result = engine.run(
+        strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST]
+    )
     provider.close()
 
     # max_position_pct 限制后，单只股票仓位不应超过 5%
@@ -602,9 +602,7 @@ def test_stop_loss_risk_trigger_event():
         def init(self):
             self._state = {"bought": False}
 
-        def on_bar(
-            self, slab: pl.DataFrame, context: Any
-        ) -> SignalEvent | None:
+        def on_bar(self, slab: pl.DataFrame, context: Any) -> SignalEvent | None:
             if not self._state["bought"]:
                 self._state["bought"] = True
                 return SignalEvent(
@@ -617,7 +615,7 @@ def test_stop_loss_risk_trigger_event():
             return None
 
     strategy = BuyAndHoldStrategy(strategy_id="buy_hold")
-    engine.run(strategy, "2023-01-01", "2023-01-05", ["AAPL"])
+    engine.run(strategy, "2023-01-01", "2023-01-05", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
     risk_events = _query_audit_rows(

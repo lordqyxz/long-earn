@@ -16,6 +16,8 @@ class e2e_volatility(Operator):  # noqa: N801 算子名须与目录注册名一�
     name: ClassVar[str] = "e2e_volatility"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = P
     min_history: ClassVar[int] = 0
 

@@ -115,7 +115,8 @@ class OperatorStrategyExecutor:
 
         rationale（供审计归因展示）含：
         - criteria: 算子步骤描述（因子公式 + 信号步骤），含 ``format`` 提示
-          （如 returns 类标记为百分比）
+          （如 returns 类标记为百分比）与结构化渲染数据 ``kind`` / ``segments``
+          （见 :func:`_describe_step`，前端按此动态渲染，零算子知识）
         - selection: 每只选中标的的因子值 + 排名（rank）
         - universe_size / selected_count: 信号过滤前截面候选数 / 最终选中数
 
@@ -231,9 +232,15 @@ def _merge_factor_result(
 
 
 def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:
-    """生成单步算子的人类可读描述（公式片段）+ 数值格式提示。
+    """生成单步算子的人类可读描述 + 结构化渲染数据。
 
-    常见算子走模板给出干净中文描述；未知算子回退到 docstring 首行。
+    设计：**渲染知识全部收口在后端**，前端只做数据驱动的通用渲染。
+    每个步骤除 ``desc``（纯文本，tooltip/兼容旧数据用）外，还下发：
+    - ``kind``：粗粒度步骤类型（factor/filter/rank/generic）→ 前端选图标；
+    - ``segments``：有序渲染段（field/value/symbol/text），field 段渲染为
+      因子彩色标签、value/symbol 渲染为等宽文本。
+    常见算子走模板；**未知算子走通用模板**（按 ``field_params`` 标注把列名
+    参数变成 field 段），因此新增算子/改字段名都无需同步前端。
     ``format`` 字段供前端决定数值渲染（pct=百分比，其余按原值）。
     """
     op_name = type(spec.op).name
@@ -241,23 +248,30 @@ def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:
     alias = spec.alias if is_factor else ""
     params = p.model_dump()
     fmt = ""
-    if op_name == "returns":
+    kind = _kind_for(type(spec.op).category)
+    if op_name in ("returns", "log_return"):
         period = getattr(p, "period", 1)
         field = getattr(p, "field", "close")
         head = f"{alias} = " if alias else ""
         desc = f"{head}{field} 的 {period} 期收益率"
-        fmt = "pct"
+        fmt = "pct" if op_name == "returns" else ""
+        segments = [_seg_field(field), _seg_text(" 的 "), _seg_value(period), _seg_text(" 期收益率")]
     elif op_name == "filter_threshold":
-        desc = (
-            f"筛选 {getattr(p, 'field', '')} {getattr(p, 'op', '>')} "
-            f"{getattr(p, 'value', 0)}"
-        )
+        field = getattr(p, "field", "")
+        cmp_op = getattr(p, "op", ">")
+        value = getattr(p, "value", 0)
+        desc = f"筛选 {field} {cmp_op} {value}"
+        segments = [_seg_text("筛选 "), _seg_field(field), _seg_symbol(cmp_op), _seg_value(value)]
     elif op_name == "rank_top":
+        field = getattr(p, "field", "")
         order = "降序" if not getattr(p, "ascending", False) else "升序"
-        desc = f"按 {getattr(p, 'field', '')} {order} 取前 {getattr(p, 'top', 10)}"
+        top = getattr(p, "top", 10)
+        desc = f"按 {field} {order} 取前 {top}"
+        segments = [_seg_text("按 "), _seg_field(field), _seg_text(f" {order}取前 "), _seg_value(top)]
     else:
         doc = (type(spec.op).__doc__ or "").strip().split("\n")[0]
         desc = doc.strip("` ") or op_name
+        segments = _generic_segments(op_name, params, type(spec.op).field_params)
     return {
         "step": "factor" if is_factor else "signal",
         "op": op_name,
@@ -265,7 +279,63 @@ def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:
         "params": params,
         "desc": desc,
         "format": fmt,
+        "kind": kind,
+        "segments": segments,
     }
+
+
+def _kind_for(category: str) -> str:
+    """算子类别 → 前端图标归属的粗粒度步骤类型。
+
+    filter→filter、rank→rank；factor/technical/compose 均归 factor（公式样式）。
+    这是稳定的小型分类法，新增算子复用既有 kind，无需前端改动。
+    """
+    if category == "filter":
+        return "filter"
+    if category == "rank":
+        return "rank"
+    return "factor"
+
+
+def _seg_text(value: object) -> dict[str, object]:
+    """纯文本渲染段。"""
+    return {"type": "text", "value": value}
+
+
+def _seg_field(value: object) -> dict[str, object]:
+    """字段（列名）渲染段：前端渲染为因子彩色标签。"""
+    return {"type": "field", "value": value}
+
+
+def _seg_value(value: object) -> dict[str, object]:
+    """标量值渲染段：前端渲染为等宽文本。"""
+    return {"type": "value", "value": value}
+
+
+def _seg_symbol(value: object) -> dict[str, object]:
+    """比较/运算符符号渲染段：前端渲染为等宽文本。"""
+    return {"type": "symbol", "value": value}
+
+
+def _generic_segments(
+    op_name: str, params: dict[str, Any], field_params: list[str]
+) -> list[dict[str, object]]:
+    """未知算子的通用渲染段：``op(param, param, ...)``。
+
+    ``field_params`` 标注的列名参数渲染为 field 段（因子彩色标签），其余参数
+    渲染为 value 段。因此新增算子即使没有专属模板，字段名也能正确高亮，
+    且改字段名只需后端一处改动。
+    """
+    segments: list[dict[str, object]] = [_seg_text(f"{op_name}(")]
+    for index, (key, value) in enumerate(params.items()):
+        if index:
+            segments.append(_seg_text(", "))
+        if key in field_params and isinstance(value, str):
+            segments.append(_seg_field(value))
+        else:
+            segments.append(_seg_value(value))
+    segments.append(_seg_text(")"))
+    return segments
 
 
 def _apply_signal_result(

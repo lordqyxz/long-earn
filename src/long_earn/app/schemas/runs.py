@@ -17,6 +17,7 @@ class RunInfo(BaseModel):
     trade_count: int = 0
     event_count: int = 0
     strategy_id: str = ""
+    tags: list[str] = Field(default_factory=list)
 
 
 class RunsResponse(BaseModel):

@@ -1,4 +1,4 @@
-import { RefreshCw, TrendingUp, TrendingDown, Trash2 } from 'lucide-react'
+import { Eraser, RefreshCw, TrendingUp, TrendingDown, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,14 +12,22 @@ interface Props {
   onSelect: (runId: string) => void
   onRefresh: () => void
   onDelete?: (runId: string) => void
+  onClean?: () => void
 }
 
-export function RunList({ runs, loading, selectedRunId, onSelect, onRefresh, onDelete }: Props) {
+export function RunList({ runs, loading, selectedRunId, onSelect, onRefresh, onDelete, onClean }: Props) {
   const handleDelete = (runId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!onDelete) return
     if (window.confirm('确定删除此回测记录？此操作不可撤销。')) {
       onDelete(runId)
+    }
+  }
+
+  const handleClean = () => {
+    if (!onClean) return
+    if (window.confirm('确定清理无效回测记录？\n（空跑 / 错误 / test 标签 / 无汇总 / 成交过少）此操作不可撤销。')) {
+      onClean()
     }
   }
 
@@ -30,9 +38,22 @@ export function RunList({ runs, loading, selectedRunId, onSelect, onRefresh, onD
           回测运行
           <Badge variant="secondary" className="ml-1 text-xs">{runs.length}</Badge>
         </CardTitle>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onRefresh} disabled={loading}>
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          {onClean && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleClean}
+              title="清理无效回测记录（空跑/错误/test 标签/无汇总/成交过少）"
+            >
+              <Eraser className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onRefresh} disabled={loading}>
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="flex-1 overflow-auto p-0">
         {runs.length === 0 && (
@@ -54,9 +75,14 @@ export function RunList({ runs, loading, selectedRunId, onSelect, onRefresh, onD
               }`}
             >
               <div className="flex items-center justify-between mb-0.5">
-                <span className={`text-xs font-semibold truncate ${isSelected ? 'text-primary' : 'text-foreground'}`}>
-                  {run.strategy_id || '未知策略'}
-                </span>
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className={`text-xs font-semibold truncate ${isSelected ? 'text-primary' : 'text-foreground'}`}>
+                    {run.strategy_id || '未知策略'}
+                  </span>
+                  {Array.isArray(run.tags) && run.tags.includes('test') && (
+                    <Badge variant="secondary" className="text-[10px] px-1 py-0 shrink-0">test</Badge>
+                  )}
+                </div>
                 <div className="flex items-center gap-1 shrink-0 ml-2">
                   {onDelete && (
                     <button

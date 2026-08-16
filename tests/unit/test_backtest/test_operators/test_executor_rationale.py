@@ -87,6 +87,69 @@ def test_execute_with_rationale_criteria_describes_formula():
     assert "前 2" in rank_step["desc"]
 
 
+def test_criteria_step_has_kind_and_segments():
+    """criteria 每步应下发 kind + segments 结构化渲染数据（接口传数据，前端动态渲染）。"""
+    _, rationale = _executor().execute_with_rationale(_make_panel(), datetime(2024, 1, 6))
+    criteria = rationale["criteria"]
+
+    factor_step = criteria[0]
+    assert factor_step["kind"] == "factor"
+    # returns 模板段：字段高亮 + 期数标量 + 文本
+    assert factor_step["segments"] == [
+        {"type": "field", "value": "close"},
+        {"type": "text", "value": " 的 "},
+        {"type": "value", "value": 2},
+        {"type": "text", "value": " 期收益率"},
+    ]
+
+    rank_step = criteria[1]
+    assert rank_step["kind"] == "rank"
+    assert rank_step["segments"][0] == {"type": "text", "value": "按 "}
+    assert rank_step["segments"][1] == {"type": "field", "value": "mom"}
+    assert rank_step["segments"][-1] == {"type": "value", "value": 2}
+
+
+def test_criteria_filter_step_segments():
+    """filter_threshold 应下发 filter kind 与「字段 符号 阈值」渲染段。"""
+    executor = OperatorStrategyExecutor(
+        [],
+        [
+            resolve_signal_step(
+                {"op": "filter_threshold", "params": {"field": "close", "op": ">", "value": 9.5}}
+            )
+        ],
+    )
+    _, rationale = executor.execute_with_rationale(_make_panel(), datetime(2024, 1, 6))
+    step = rationale["criteria"][0]
+    assert step["kind"] == "filter"
+    assert step["segments"] == [
+        {"type": "text", "value": "筛选 "},
+        {"type": "field", "value": "close"},
+        {"type": "symbol", "value": ">"},
+        {"type": "value", "value": 9.5},
+    ]
+
+
+def test_criteria_generic_segments_for_unknown_operator():
+    """无专属模板的算子（technical 如 macd）也应下发通用段：列名参数高亮为 field 段。"""
+    executor = OperatorStrategyExecutor(
+        [
+            resolve_factor_step(
+                {"op": "macd", "alias": "m", "params": {"field": "close", "fast": 12, "slow": 26, "signal": 9}}
+            )
+        ],
+        [],
+    )
+    _, rationale = executor.execute_with_rationale(_make_panel(), datetime(2024, 1, 6))
+    step = rationale["criteria"][0]
+    assert step["kind"] == "factor"  # technical 归 factor 样式
+    types = [s["type"] for s in step["segments"]]
+    assert types == ["text", "field", "text", "value", "text", "value", "text", "value", "text"]
+    assert step["segments"][1] == {"type": "field", "value": "close"}  # field_params 列名高亮
+    assert step["segments"][0]["value"] == "macd("
+    assert step["segments"][-1]["value"] == ")"
+
+
 def test_execute_returns_symbols_only_keeps_compat():
     """旧接口 execute 仍只返回 symbol 列表（不破坏既有调用方）。"""
     selected = _executor().execute(_make_panel(), datetime(2024, 1, 6))

@@ -135,7 +135,9 @@ def _register_run_routes(  # noqa: C901
 ) -> None:
     """注册回测运行查询端点。"""
 
-    @app.get("/api/health", response_model=schemas.HealthResponse, operation_id="health")
+    @app.get(
+        "/api/health", response_model=schemas.HealthResponse, operation_id="health"
+    )
     async def health():
         return {"status": "ok"}
 
@@ -150,12 +152,12 @@ def _register_run_routes(  # noqa: C901
         operation_id="clean_empty_runs",
     )
     async def clean_empty_runs():
-        """删除空跑或错误运行的回测数据。"""
+        """删除无效回测运行（带 test 标签/空跑/错误/无 RUN_END 孤儿）的审计数据。"""
         bad_ids = analyzer.get_empty_or_error_runs()
         deleted = 0
         for rid in bad_ids:
             deleted += analyzer.delete_run(rid)
-        logger.info(f"清理完成: 删除 {len(bad_ids)} 个问题 run, {deleted} 条记录")
+        logger.info(f"清理完成: 删除 {len(bad_ids)} 个无效 run, {deleted} 条记录")
         return {"deleted_runs": len(bad_ids), "deleted_records": deleted}
 
     @app.delete(
@@ -261,9 +263,7 @@ def _register_run_routes(  # noqa: C901
         return {"run_id": run_id, "daily_returns": returns_list}
 
 
-def _register_chart_export_routes(
-    app: FastAPI, analyzer: BacktestAnalyzer
-) -> None:
+def _register_chart_export_routes(app: FastAPI, analyzer: BacktestAnalyzer) -> None:
     """注册图表和导出端点。"""
 
     @app.get(
@@ -311,9 +311,7 @@ def _register_chart_export_routes(
                 if format == "csv"
                 else "application/json; charset=utf-8"
             )
-            return FileResponse(
-                out_path, media_type=media_type, filename=out_path.name
-            )
+            return FileResponse(out_path, media_type=media_type, filename=out_path.name)
         except Exception as e:
             logger.exception("导出交易日志失败")
             raise HTTPException(500, str(e)) from e
@@ -533,9 +531,7 @@ def _register_symbol_routes(app: FastAPI) -> None:
         return {"symbol": symbol, "financials": financials}
 
 
-def _register_event_routes(
-    app: FastAPI, event_analyzer: EventAnalyzer
-) -> None:
+def _register_event_routes(app: FastAPI, event_analyzer: EventAnalyzer) -> None:
     """注册事件流 REST 端点。"""
 
     @app.get(
@@ -611,16 +607,12 @@ def _register_event_routes(
             raise HTTPException(400, "query is required")
         # 在后台任务中运行管线，通过 WebSocket 广播进度
         asyncio.create_task(  # noqa: RUF006
-            _run_pipeline_and_broadcast(
-                query, event_analyzer, app.state.active_ws
-            )
+            _run_pipeline_and_broadcast(query, event_analyzer, app.state.active_ws)
         )
         return {"task_id": query[:20], "status": "started"}
 
 
-def _register_ws_routes(
-    app: FastAPI, event_analyzer: EventAnalyzer
-) -> None:
+def _register_ws_routes(app: FastAPI, event_analyzer: EventAnalyzer) -> None:
     """注册 WebSocket 事件流端点。"""
 
     @app.websocket("/ws/events")
@@ -677,9 +669,7 @@ def _register_ws_routes(
             active_ws.discard(websocket)
 
 
-async def _broadcast_event(
-    active_ws: set[WebSocket], data: dict[str, Any]
-) -> None:
+async def _broadcast_event(active_ws: set[WebSocket], data: dict[str, Any]) -> None:
     """向所有活跃 WebSocket 客户端广播事件。"""
     disconnected: set[WebSocket] = set()
     for ws in active_ws:
@@ -768,7 +758,9 @@ def _register_research_routes(  # noqa: C901, PLR0915
 ) -> None:
     """注册策略研究 WebSocket 和 REST 端点。"""
 
-    _research_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="research")
+    _research_executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="research"
+    )
 
     @app.websocket("/ws/research")
     async def ws_research(websocket: WebSocket):
@@ -790,66 +782,72 @@ def _register_research_routes(  # noqa: C901, PLR0915
                 elif action == "start":
                     idea = msg.get("idea", "")
                     if not idea:
-                        await websocket.send_json({
-                            "type": "error",
-                            "detail": "idea 不能为空",
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "detail": "idea 不能为空",
+                            }
+                        )
                         continue
 
                     max_rounds = int(msg.get("max_rounds", 3))
                     max_iterations = int(msg.get("max_iterations", 2))
                     min_improvement = float(msg.get("min_improvement", 0.005))
 
-                    await websocket.send_json({
-                        "type": "research_started",
-                        "idea": idea,
-                        "max_rounds": max_rounds,
-                        "max_iterations": max_iterations,
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "research_started",
+                            "idea": idea,
+                            "max_rounds": max_rounds,
+                            "max_iterations": max_iterations,
+                        }
+                    )
 
                     def _run_in_thread(
-                            _idea: str = idea,
-                            _max_rounds: int = max_rounds,
-                            _max_iterations: int = max_iterations,
-                            _min_improvement: float = min_improvement,
-                        ) -> None:
-                            from long_earn.config import AppConfig  # noqa: PLC0415
-                            from long_earn.context_init import (  # noqa: PLC0415
-                                initialize_context,
-                            )
-                            from long_earn.services.strategy_research_service import (  # noqa: PLC0415
-                                StrategyResearchService,
-                            )
+                        _idea: str = idea,
+                        _max_rounds: int = max_rounds,
+                        _max_iterations: int = max_iterations,
+                        _min_improvement: float = min_improvement,
+                    ) -> None:
+                        from long_earn.config import AppConfig  # noqa: PLC0415
+                        from long_earn.context_init import (  # noqa: PLC0415
+                            initialize_context,
+                        )
+                        from long_earn.strategy_rd.research_service import (  # noqa: PLC0415
+                            StrategyResearchService,
+                        )
 
-                            config = AppConfig.from_env()
-                            config.backtest_start_date = config.train_start_date
-                            config.backtest_end_date = config.train_end_date
-                            ctx = initialize_context(config)
+                        config = AppConfig.from_env()
+                        config.backtest_start_date = config.train_start_date
+                        config.backtest_end_date = config.train_end_date
+                        ctx = initialize_context(config)
 
-                            def _send_progress(data: dict[str, Any]) -> None:
-                                try:
-                                    loop = asyncio.get_event_loop()
-                                    asyncio.run_coroutine_threadsafe(
-                                        _broadcast_event(active_ws, data), loop
-                                    )
-                                except Exception:
-                                    pass
-
-                            service = StrategyResearchService(ctx)
+                        def _send_progress(data: dict[str, Any]) -> None:
                             try:
-                                service.run_loop(
-                                    idea=_idea,
-                                    max_rounds=_max_rounds,
-                                    max_iterations=_max_iterations,
-                                    min_improvement=_min_improvement,
-                                    progress_callback=_send_progress,
+                                loop = asyncio.get_event_loop()
+                                asyncio.run_coroutine_threadsafe(
+                                    _broadcast_event(active_ws, data), loop
                                 )
-                            except Exception as e:
-                                logger.exception("策略研究失败")
-                                _send_progress({
+                            except Exception:
+                                pass
+
+                        service = StrategyResearchService(ctx)
+                        try:
+                            service.run_loop(
+                                idea=_idea,
+                                max_rounds=_max_rounds,
+                                max_iterations=_max_iterations,
+                                min_improvement=_min_improvement,
+                                progress_callback=_send_progress,
+                            )
+                        except Exception as e:
+                            logger.exception("策略研究失败")
+                            _send_progress(
+                                {
                                     "type": "research_error",
                                     "detail": str(e),
-                                })
+                                }
+                            )
 
                     _research_executor.submit(_run_in_thread)
 
@@ -878,46 +876,48 @@ def _register_research_routes(  # noqa: C901, PLR0915
         active_ws: set[WebSocket] = app.state.active_ws
 
         def _run_in_thread(
-                _idea: str = idea,
-                _max_rounds: int = max_rounds,
-                _max_iterations: int = max_iterations,
-                _min_improvement: float = min_improvement,
-            ) -> None:
-                from long_earn.config import AppConfig  # noqa: PLC0415
-                from long_earn.context_init import initialize_context  # noqa: PLC0415
-                from long_earn.services.strategy_research_service import (  # noqa: PLC0415
-                    StrategyResearchService,
-                )
+            _idea: str = idea,
+            _max_rounds: int = max_rounds,
+            _max_iterations: int = max_iterations,
+            _min_improvement: float = min_improvement,
+        ) -> None:
+            from long_earn.config import AppConfig  # noqa: PLC0415
+            from long_earn.context_init import initialize_context  # noqa: PLC0415
+            from long_earn.strategy_rd.research_service import (  # noqa: PLC0415
+                StrategyResearchService,
+            )
 
-                config = AppConfig.from_env()
-                config.backtest_start_date = config.train_start_date
-                config.backtest_end_date = config.train_end_date
-                ctx = initialize_context(config)
+            config = AppConfig.from_env()
+            config.backtest_start_date = config.train_start_date
+            config.backtest_end_date = config.train_end_date
+            ctx = initialize_context(config)
 
-                def _send_progress(data: dict[str, Any]) -> None:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        asyncio.run_coroutine_threadsafe(
-                            _broadcast_event(active_ws, data), loop
-                        )
-                    except Exception:
-                        pass
-
-                service = StrategyResearchService(ctx)
+            def _send_progress(data: dict[str, Any]) -> None:
                 try:
-                    service.run_loop(
-                        idea=_idea,
-                        max_rounds=_max_rounds,
-                        max_iterations=_max_iterations,
-                        min_improvement=_min_improvement,
-                        progress_callback=_send_progress,
+                    loop = asyncio.get_event_loop()
+                    asyncio.run_coroutine_threadsafe(
+                        _broadcast_event(active_ws, data), loop
                     )
-                except Exception as e:
-                    logger.exception("策略研究失败")
-                    _send_progress({
+                except Exception:
+                    pass
+
+            service = StrategyResearchService(ctx)
+            try:
+                service.run_loop(
+                    idea=_idea,
+                    max_rounds=_max_rounds,
+                    max_iterations=_max_iterations,
+                    min_improvement=_min_improvement,
+                    progress_callback=_send_progress,
+                )
+            except Exception as e:
+                logger.exception("策略研究失败")
+                _send_progress(
+                    {
                         "type": "research_error",
                         "detail": str(e),
-                    })
+                    }
+                )
 
         _research_executor.submit(_run_in_thread)
 
@@ -927,6 +927,7 @@ def _register_research_routes(  # noqa: C901, PLR0915
             "max_rounds": max_rounds,
             "max_iterations": max_iterations,
         }
+
 
 def _register_api_routes(
     app: FastAPI,
@@ -978,7 +979,9 @@ def _create_app(
     # 参数），resolved_db 仅保留用于向后兼容显式传库路径的场景（本地 duckdb
     # 已废弃，传了也忽略——BacktestAnalyzer 构造签名兼容）。
     analyzer = BacktestAnalyzer()
-    logger.info(f"审计分析器已连接: PostgreSQL ({cfg.pg_host}:{cfg.pg_port}/{cfg.pg_db})")
+    logger.info(
+        f"审计分析器已连接: PostgreSQL ({cfg.pg_host}:{cfg.pg_port}/{cfg.pg_db})"
+    )
 
     event_analyzer = EventAnalyzer()
     # PG 全量迁移后：物质存储位于 PostgreSQL，直接加载（resolved_substances
@@ -1008,7 +1011,9 @@ def _create_app(
 
         logger.info("前端模式: React SPA (web/dist/)")
     else:
-        logger.warning("前端构建产物不存在 (web/dist/)，请先运行 `cd web && npm run build`")
+        logger.warning(
+            "前端构建产物不存在 (web/dist/)，请先运行 `cd web && npm run build`"
+        )
 
     return app
 

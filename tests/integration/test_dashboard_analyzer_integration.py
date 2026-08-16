@@ -10,7 +10,12 @@ from uuid import uuid4
 
 import pytest
 
-from long_earn.backtest.engine.audit import AuditLogger, PostgresAuditProvider
+from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.backtest.engine.audit import (
+    RUN_TAG_TEST,
+    AuditLogger,
+    PostgresAuditProvider,
+)
 from long_earn.core.pg import pg_connect, pg_version
 
 
@@ -34,6 +39,9 @@ def test_analyzer_reads_events_from_db():
     run_id = f"run-{uuid4().hex[:10]}"
     provider = PostgresAuditProvider()
     logger = AuditLogger(provider=provider, run_id=run_id)
+
+    # 测试回测记录必须携带专用 test 标签（供审计库「清理带 test 标签记录」识别）
+    logger.log_run_start({"tags": [RUN_TAG_TEST]})
 
     # 模拟记录一些事件
     logger.log_transition(
@@ -75,6 +83,9 @@ def test_analyzer_returns_summary():
     provider = PostgresAuditProvider()
     logger = AuditLogger(provider=provider, run_id=run_id)
 
+    # 测试回测记录必须携带专用 test 标签（供审计库「清理带 test 标签记录」识别）
+    logger.log_run_start({"tags": [RUN_TAG_TEST]})
+
     for i in range(5):
         logger.log_transition(
             event_type="SIGNAL",
@@ -97,4 +108,60 @@ def test_analyzer_returns_summary():
 
     assert len(summary) >= 1
     total = sum(r[1] for r in summary)
-    assert total == 5
+    assert total == 6  # RUN_START(带 test 标签) + 5 条 SIGNAL
+
+
+def test_clean_identifies_test_tagged_runs():
+    """清理口径：带 test 标签的 run 应被 get_empty_or_error_runs 识别，有效非测试 run 不应被识别。"""
+    # 1. 带 test 标签的空跑 run → 应被识别为无效（test 标签 + 无 FILL）
+    tagged_run = f"run-{uuid4().hex[:10]}"
+    provider = PostgresAuditProvider()
+    logger = AuditLogger(provider=provider, run_id=tagged_run)
+    logger.log_run_start({"tags": [RUN_TAG_TEST]})
+    logger.log_transition(
+        event_type="RUN_END",
+        trace_id=f"{tagged_run}-end",
+        component="Engine",
+        status="SUCCESS",
+        payload={"total_return": 0.0},
+    )
+    provider.close()
+
+    # 2. 有效非测试 run（RUN_END + 5 笔 FILL，tags 为空）→ 不应被识别
+    valid_run = f"run-{uuid4().hex[:10]}"
+    provider2 = PostgresAuditProvider()
+    logger2 = AuditLogger(provider=provider2, run_id=valid_run)
+    logger2.log_run_start({"tags": []})
+    for i in range(5):
+        logger2.log_transition(
+            event_type="FILL",
+            trace_id=f"{valid_run}-f{i}",
+            component="Broker",
+            status="SUCCESS",
+            payload={"symbol": "AAPL", "quantity": 100},
+        )
+    logger2.log_transition(
+        event_type="RUN_END",
+        trace_id=f"{valid_run}-end",
+        component="Engine",
+        status="SUCCESS",
+        payload={"total_return": 0.05},
+    )
+    provider2.close()
+
+    try:
+        analyzer = BacktestAnalyzer()
+        bad = set(analyzer.get_empty_or_error_runs())
+        assert tagged_run in bad
+        assert valid_run not in bad
+    finally:
+        # 清理本测试写入的审计数据（保持共享 PG 干净）
+        conn = pg_connect()
+        try:
+            conn.execute(
+                'DELETE FROM "backtest_audit".logs WHERE run_id IN (%s, %s)',
+                (tagged_run, valid_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()

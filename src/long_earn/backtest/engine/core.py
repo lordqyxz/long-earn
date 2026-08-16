@@ -239,6 +239,7 @@ class EventDrivenBacktestEngine:
         warmup_days: int = 0,
         universe_pit_warning: bool = False,
         strategy_yaml: str = "",
+        tags: list[str] | None = None,
     ) -> BacktestResult:
         """执行回测
 
@@ -254,6 +255,9 @@ class EventDrivenBacktestEngine:
                 值；交易时间戳仍按 [start_date, end_date] 过滤，不会在 warmup 期产生
                 交易。
             strategy_yaml: 策略 YAML 全文（P1-13），存入审计日志以支持完整重放。
+            tags: run 级标签列表，写入 RUN_START payload.tags。测试/冒烟回测
+                必须携带 ``RUN_TAG_TEST``（"test"），供审计库按「带 test 标签」
+                口径批量清理；生产回测不传即无标签、不会被误清理。
         """
         # run_id 提前生成：数据为空 / 异常等失败路径也要能审计
         run_id = str(uuid.uuid4())
@@ -302,6 +306,7 @@ class EventDrivenBacktestEngine:
                 "strategy_hash": strategy_hash,
                 "universe_pit_warning": universe_pit_warning,
                 "warmup_days": warmup_days,
+                "tags": list(tags or []),
             },
             db_audit,
         )

@@ -16,6 +16,8 @@ class QualityMomentum(Operator):
     name: ClassVar[str] = "quality_momentum"
     category: ClassVar[str] = "compose"
     inputs: ClassVar[list[str]] = []
+    # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
+    field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = QualityMomentumParams
     min_history: ClassVar[int] = 0
 

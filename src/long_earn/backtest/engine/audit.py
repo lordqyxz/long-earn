@@ -34,11 +34,13 @@ CREATE TABLE IF NOT EXISTS backtest_audit.logs (
 )
 """
 _AUDIT_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS idx_logs_run "
-    "ON backtest_audit.logs(run_id)",
-    "CREATE INDEX IF NOT EXISTS idx_logs_trace "
-    "ON backtest_audit.logs(trace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_logs_run ON backtest_audit.logs(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_logs_trace ON backtest_audit.logs(trace_id)",
 )
+
+# 专用测试标签：测试/冒烟回测写入共享 PG 时必须在 RUN_START payload.tags
+# 携带本标签，供审计库「清理带 test 标签记录」口径识别与批量清理。
+RUN_TAG_TEST = "test"
 
 
 class OrderSkipReason(StrEnum):
@@ -239,6 +241,21 @@ class AuditLogger:
     def __init__(self, provider: AuditProvider, run_id: str):
         self.provider = provider
         self.run_id = run_id
+
+    def log_run_start(self, payload: dict[str, Any]) -> None:
+        """记录 RUN_START 事件（run 锚点）。
+
+        RUN_START 是 run 级元数据的载体（strategy_id / tags / 回测配置等），
+        测试/冒烟回测必须在此携带 ``RUN_TAG_TEST`` 标签，供审计库按
+        「带 test 标签」口径清理。
+        """
+        self.log_transition(
+            event_type="RUN_START",
+            trace_id=self.run_id,
+            component="Engine",
+            status="SUCCESS",
+            payload=payload,
+        )
 
     def log_transition(  # noqa: PLR0913
         self,
