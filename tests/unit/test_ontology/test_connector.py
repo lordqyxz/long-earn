@@ -258,6 +258,24 @@ class TestConnectorConceptQuery:
         assert call_args.args[1] == "2024-01-01"
         assert call_args.args[2] == "2024-12-31"
 
+    def test_time_parse_quarter_range(
+        self,
+        seeded_registry: OntologyRegistry,
+        mock_data_provider: MagicMock,
+    ) -> None:
+        """time="2024Q1~2024Q4" 各端独立季度解析为日期（回归：曾原样返回季度串导致 SQL 报错）。"""
+        connector = Connector(seeded_registry, data_provider=mock_data_provider)
+        connector.get_concept(
+            ConceptQuery(
+                subject="600519.SH",
+                aspect="盈利能力",
+                time="2024Q1~2024Q4",
+            )
+        )
+        call_args = mock_data_provider.get_financial_panel.call_args
+        assert call_args.args[1] == "2024-01-01"
+        assert call_args.args[2] == "2024-12-31"
+
 
 class TestConceptResolverSubject:
     """主体解析测试。"""

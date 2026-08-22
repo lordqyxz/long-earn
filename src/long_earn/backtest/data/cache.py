@@ -511,6 +511,14 @@ class DataCache:
         # 过滤 NOT NULL 列为空的行
         not_null_cols = [c.name for c in schema.columns if not c.nullable]
         df = df.dropna(subset=not_null_cols)
+        # 批内主键去重（xtquant 可能返回同 (symbol, report_date) 多行）：
+        # 否则 INSERT ... ON CONFLICT 报 "cannot affect row a second time"。
+        # 保留 announce_date 最新（财报更正后重发）的行。
+        pk_cols = schema.primary_key
+        if df.duplicated(subset=pk_cols).any():
+            df = df.sort_values("announce_date", kind="stable").drop_duplicates(
+                subset=pk_cols, keep="last"
+            )
         if df.empty:
             return
         col_list = ", ".join(schema_cols)
@@ -992,8 +1000,9 @@ class DataCache:
         if not date_fmt:
             date_fmt = datetime.now().strftime("%Y-%m-%d")
 
-        with self._write_transaction() as conn:
-            conn.executemany(
+        with self._write_transaction() as conn, conn.cursor() as cur:
+            # psycopg3 的 Connection 无 executemany，须走 Cursor
+            cur.executemany(
                 """
                 INSERT INTO universe_constituents (index_code, symbol, date)
                 VALUES (%s, %s, %s::date)
@@ -1132,8 +1141,9 @@ class DataCache:
             )
         if not rows:
             return 0
-        with self._write_transaction() as conn:
-            conn.executemany(
+        with self._write_transaction() as conn, conn.cursor() as cur:
+            # psycopg3 的 Connection 无 executemany，须走 Cursor
+            cur.executemany(
                 """
                 INSERT INTO instrument_details
                     (symbol, name, industry, region, listing_date,

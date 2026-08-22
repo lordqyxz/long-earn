@@ -374,7 +374,21 @@ class TestBatchLatestInterfaces:
 class TestSelectPricesToRefresh:
     """行情增量预检：按交易日精确判定，缺一天就补一天"""
 
-    END = "2026-07-12"  # 目标截止日
+    END = "2026-07-12"  # 目标截止日（周日；周末回看行为由下方专门测试覆盖）
+
+    @pytest.fixture(autouse=True)
+    def _freeze_end_date(self, monkeypatch):
+        """冻结 end_date 解析为恒等函数。
+
+        END 是周日，_resolve_last_trading_date 会从缓存交易日历回看；
+        本类聚焦分组逻辑，end_ts 必须确定（周末回看行为由
+        TestResolveLastTradingDate 专门覆盖）。
+        """
+        monkeypatch.setattr(
+            DataIngestionService,
+            "_resolve_last_trading_date",
+            lambda self, end_date: pd.Timestamp(end_date),
+        )
 
     def test_empty_cache_marks_all_for_full_download(self, tmp_path):
         """缓存为空 → 全部进 full_missing 组，stale 为空"""
@@ -463,3 +477,40 @@ class TestSelectPricesToRefresh:
         assert set(stale) == {_sym("000001.SZ"), _sym("000002.SZ")}
         # 最早待补起始日 = 2026-07-09
         assert stale_start == "2026-07-09"
+
+
+class TestResolveLastTradingDate:
+    """周末 end_date 回看行为（防周末运行时全量重下）。
+
+    周六/周日不是交易日，缓存数据止于上一交易日；直接以日历日比较会把
+    全部股票误判为待补。回看窗口内的交易日历从缓存提取。
+    """
+
+    @staticmethod
+    def _svc_with_trading_dates(dates: list[str]) -> DataIngestionService:
+        svc = _make_service(MagicMock())
+        svc.cache.get_trading_dates.return_value = dates
+        return svc
+
+    def test_weekend_resolves_to_last_cached_trading_day(self):
+        """周日 end_date → 解析为缓存日历的最后一个交易日。"""
+        svc = self._svc_with_trading_dates(["2026-07-08", "2026-07-10"])
+        # 2026-07-12 是周日
+        assert svc._resolve_last_trading_date("2026-07-12") == pd.Timestamp(
+            "2026-07-10"
+        )
+
+    def test_weekday_returns_end_date_as_is(self):
+        """工作日 end_date → 原样返回（收盘后当日待补）。"""
+        svc = self._svc_with_trading_dates(["2026-07-10"])
+        # 2026-07-10 是周五
+        assert svc._resolve_last_trading_date("2026-07-10") == pd.Timestamp(
+            "2026-07-10"
+        )
+
+    def test_weekend_empty_calendar_falls_back_to_end_date(self):
+        """周末但缓存日历为空 → 回退 end_date（不抛异常）。"""
+        svc = self._svc_with_trading_dates([])
+        assert svc._resolve_last_trading_date("2026-07-12") == pd.Timestamp(
+            "2026-07-12"
+        )

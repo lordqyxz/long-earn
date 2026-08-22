@@ -46,6 +46,9 @@ DEFAULT_MAX_WORKERS = 4
 # 基于 announce_date（公告日，PIT 真实可见日），而非 report_date（报告期末）
 _FINANCIAL_STALE_DAYS = 120
 
+# datetime.weekday() 的周六值（>= 此值即周末）
+_WEEKDAY_SATURDAY = 5
+
 
 class DataIngestionService:
     """miniQMT 采集与 DuckDB 写入执行器。
@@ -155,7 +158,7 @@ class DataIngestionService:
             - stale_start: stale 组的下载起始日（取最早待补起始日）；
               stale 为空时返回 end_date（无意义，调用方应检查 stale 是否为空）
         """
-        end_ts = pd.Timestamp(end_date)
+        end_ts = self._resolve_last_trading_date(end_date)
         latest_map = self.cache.get_price_latest_dates(symbols)
         full_missing: list[str] = []
         stale: list[str] = []
@@ -186,6 +189,26 @@ class DataIngestionService:
             f"（无缓存 {len(full_missing)} / 待补 {len(stale)}），跳过 {fresh_count} 只"
         )
         return full_missing, stale, stale_start
+
+    def _resolve_last_trading_date(self, end_date: str) -> pd.Timestamp:
+        """把增量比对的截止时间解析为「预期的最新交易日」。
+
+        周末运行时 end_date 不是交易日，缓存最新数据止于上一交易日；直接用
+        日历日比较（latest < end_date）会把全部股票误判为待补、触发全量重下。
+        工作日仍以 end_date 为目标（收盘后当日待补；法定节假日会多一次空跑，
+        miniqmt 无 bar 可补、upsert 幂等，代价可接受）。缓存无交易日数据时
+        回退 end_date。
+        """
+        end_ts = pd.Timestamp(end_date)
+        if end_ts.weekday() >= _WEEKDAY_SATURDAY:
+            lookback = (end_ts - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+            try:
+                dates = self.cache.get_trading_dates(lookback, end_date)
+            except Exception:
+                dates = []
+            if dates:
+                return pd.Timestamp(dates[-1])
+        return end_ts
 
     def download_prices_incremental(
         self,
@@ -584,7 +607,7 @@ class DataIngestionService:
         self._download_instrument_details(price_symbols)
 
         self._info("=" * 60)
-        self._info(f"数据下载完成！缓存路径: {self.cache.db_path}")
+        self._info("数据下载完成！缓存: PostgreSQL (long_earn)")
         self._info("=" * 60)
 
         with contextlib.suppress(Exception):
@@ -596,7 +619,6 @@ class DataIngestionService:
             "mode": "full" if full else "smart",
             "price_symbols": len(price_symbols),
             "financial_symbols": len(financial_symbols),
-            "cache_path": str(self.cache.db_path),
         }
 
     # ── P1-01 成分股快照采集 ──────────────────────────────────────

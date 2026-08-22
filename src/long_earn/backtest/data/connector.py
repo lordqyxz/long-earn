@@ -256,11 +256,20 @@ class CompositeDataConnector:
 
     @staticmethod
     def _normalize_date(date_str: str) -> str:
-        """标准化日期格式为 YYYY-MM-DD（DuckDB 缓存要求）。"""
+        """标准化日期格式为 YYYY-MM-DD（DuckDB 缓存要求）。
+
+        兜底季度格式（如 ontology 层漏转的 "2024Q4"）：转为该季首日。
+        """
         if not date_str:
             return date_str
         if len(date_str) == 8 and date_str.isdigit():
             return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        if len(date_str) == 6 and date_str[4] == "Q" and date_str[5].isdigit():
+            year = int(date_str[:4])
+            quarter = int(date_str[5])
+            quarter_first = {1: "01-01", 2: "04-01", 3: "07-01", 4: "10-01"}
+            if quarter in quarter_first:
+                return f"{year}-{quarter_first[quarter]}"
         return date_str
 
     @property

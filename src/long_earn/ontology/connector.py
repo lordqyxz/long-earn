@@ -567,29 +567,45 @@ class Connector:
     # ── 私有：时间解析 ──────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_time(time: str) -> tuple[str, str]:
+    def _parse_quarter(q: str) -> tuple[str, str]:
+        """解析单季度字符串为 (start_date, end_date)。
+
+        - "2024Q3" → ("2024-07-01", "2024-09-30")
+        - 非法格式 → ("", "")
+        """
+        if "Q" not in q or len(q) != _QUARTER_TIME_LEN:
+            return "", ""
+        year = int(q[:4])
+        quarter = int(q[5])
+        quarter_ranges = {
+            1: (f"{year}-01-01", f"{year}-03-31"),
+            2: (f"{year}-04-01", f"{year}-06-30"),
+            3: (f"{year}-07-01", f"{year}-09-30"),
+            4: (f"{year}-10-01", f"{year}-12-31"),
+        }
+        return quarter_ranges.get(quarter, ("", ""))
+
+    @classmethod
+    def _parse_time(cls, time: str) -> tuple[str, str]:
         """解析 time 字段为 (start_date, end_date)。
 
         - "2024Q3" → ("2024-07-01", "2024-09-30")
+        - "2024Q1~2024Q4" → ("2024-01-01", "2024-12-31")（各端独立季度解析）
         - "2024-01-01~2024-12-31" → 原样
         - "latest" / "" → 空字符串（让 provider 用默认）
         """
         if not time or time == "latest":
             return "", ""
         if "~" in time:
-            parts = time.split("~")
-            return parts[0].strip(), parts[1].strip()
-        if "Q" in time and len(time) == _QUARTER_TIME_LEN:  # "2024Q3"
-            year = int(time[:4])
-            quarter = int(time[5])
-            quarter_ranges = {
-                1: (f"{year}-01-01", f"{year}-03-31"),
-                2: (f"{year}-04-01", f"{year}-06-30"),
-                3: (f"{year}-07-01", f"{year}-09-30"),
-                4: (f"{year}-10-01", f"{year}-12-31"),
-            }
-            return quarter_ranges.get(quarter, ("", ""))
-        return "", ""
+            parts = [p.strip() for p in time.split("~")]
+            start_q = cls._parse_quarter(parts[0])
+            end_q = cls._parse_quarter(parts[1])
+            # 端点为季度时取该季首日/末日；否则按普通日期原样返回
+            return (
+                start_q[0] if start_q[0] else parts[0],
+                end_q[1] if end_q[1] else parts[1],
+            )
+        return cls._parse_quarter(time)
 
     @staticmethod
     def _parse_as_of(as_of: str) -> datetime | None:
