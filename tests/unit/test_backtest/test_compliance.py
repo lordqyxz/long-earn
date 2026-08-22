@@ -416,6 +416,38 @@ def test_compute_price_limits_formula():
     assert up0 == float("inf") and down0 == 0.0
 
 
+def test_compute_price_limits_board_adaptive():
+    """板块适配涨跌幅：创业板/科创板 ±20%，主板 ±10%。
+
+    回归背景：此前对全市场硬编码 ±10%，创业板 +18% 的正常交易
+    被误判涨停拒买（买入偏差）/-15% 被误判跌停拒卖。
+    """
+    # 创业板 30xxxx：±20%
+    up_gem, down_gem = EventDrivenBacktestEngine._compute_price_limits(
+        10.0, "300001.SZ"
+    )
+    assert up_gem == 12.0, "创业板涨停价应为 +20%"
+    assert down_gem == 8.0, "创业板跌停价应为 -20%"
+    # 创业板 +18% 的价格在 20% 板内，不应触碰涨停价
+    assert up_gem > 11.8, "创业板 +18% 不应被判定涨停"
+
+    # 科创板 68xxxx：±20%
+    up_star, down_star = EventDrivenBacktestEngine._compute_price_limits(
+        10.0, "688001.SH"
+    )
+    assert up_star == 12.0 and down_star == 8.0
+
+    # 主板 60xxxx / 00xxxx：±10%
+    assert EventDrivenBacktestEngine._compute_price_limits(10.0, "600000.SH") == (
+        11.0,
+        9.0,
+    )
+    assert EventDrivenBacktestEngine._compute_price_limits(10.0, "000001.SZ") == (
+        11.0,
+        9.0,
+    )
+
+
 def test_limit_up_blocks_buy_integration(mock_data_provider):
     """涨停板集成测试：引擎级 _process_timestamp 基于 _prev_close_map 动态计算涨跌停，
     涨停日买入订单应被 ORDER_SKIPPED（reason=OrderSkipReason.LIMIT_UP_REJECT）。
@@ -469,6 +501,69 @@ def test_limit_up_blocks_buy_integration(mock_data_provider):
 
 
 # ── 停牌（P1-09）─────────────────────────────────────────────────
+
+
+def test_gem_board_18pct_buy_fills(mock_data_provider):
+    """创业板板块适配集成：+18% 在 20% 板内属正常交易，买入应成交。
+
+    回归背景：_compute_price_limits 曾对全市场硬编码 ±10%，
+    创业板 300xxx 涨 18% 的买入单被误拒（LIMIT_UP_REJECT）。
+    修复后创业板 ±20%，11.8 < 12.0 不触板，订单应正常 FILL。
+    """
+    rows = []
+    base = datetime(2024, 1, 1)
+    for i in range(5):
+        ts = base + timedelta(days=i)
+        close = 10.0 if i <= 1 else 11.8  # 第 3 日起 +18%（20% 板内）
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "300001.SZ",
+                "open": close * 0.99,
+                "high": close * 1.01,
+                "low": close * 0.98,
+                "close": close,
+                "volume": 100000.0,
+            }
+        )
+    panel = pl.DataFrame(rows)
+    provider = mock_data_provider(panel)
+    engine = EventDrivenBacktestEngine(data_provider=provider)
+
+    class _BuyGem:
+        def __init__(self):
+            self._state: dict = {}
+            self.strategy_id = "gem_buy_test"
+
+        def init(self):
+            self._state = {}
+
+        def on_bar(self, bars, context=None):
+            from long_earn.backtest.domain.entities import SignalEvent
+
+            return SignalEvent(
+                timestamp=bars["timestamp"][0],
+                trace_id="trace-gem-buy",
+                event_id="sig-gem-buy",
+                signals={"300001.SZ": 1.0},
+                strategy_id="gem_buy_test",
+            )
+
+    result = engine.run(_BuyGem(), "2024-01-01", "2024-01-05", ["300001.SZ"])
+    assert result.success
+
+    trail = engine.audit_logger.get_full_trail()
+    limit_skips = [
+        e
+        for e in trail
+        if e.get("event_type") == "ORDER_SKIPPED"
+        and e.get("payload", {}).get("reason") == "limit_up_reject"
+    ]
+    fills = [e for e in trail if e.get("event_type") == "FILL"]
+    assert not limit_skips, (
+        f"创业板 +18% 不应被误判涨停拒买: {limit_skips[:2]}"
+    )
+    assert fills, "创业板 +18% 的买入单应正常成交"
 
 
 def test_suspend_zero_volume_blocks_trade(mock_data_provider):

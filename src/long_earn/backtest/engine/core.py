@@ -118,17 +118,30 @@ class EventDrivenBacktestEngine:
     @staticmethod
     def _compute_price_limits(
         prev_close: float,
+        symbol: str = "",
     ) -> tuple[float, float]:
-        """计算 A 股涨跌停价格（10% 涨跌幅限制）。
+        """计算 A 股涨跌停价格（按板块适配涨跌幅限制）。
+
+        板块规则（按代码前缀判定）：
+          - 创业板（30xxxx）/科创板（68xxxx）：±20%
+            （创业板自 2020-08-24 注册制改革起 ±20%；本项目回测区间
+            2022+ 全部在改革后，按前缀判定安全）
+          - 主板（其余）：±10%
+
+        已知限制：ST/*ST 股 ±5% 未适配（价格面板无股票名称/ST 标志列，
+        无法判定）；北交所不在默认股票池。二者当前影响有限。
 
         Args:
             prev_close: 前收盘价
+            symbol: 股票代码（用于板块判定）
 
         Returns:
             (limit_up, limit_down) 涨停价和跌停价
         """
         if prev_close <= 0:
             return float("inf"), 0.0
+        if symbol.startswith(("30", "68")):
+            return round(prev_close * 1.2, 2), round(prev_close * 0.8, 2)
         return round(prev_close * 1.1, 2), round(prev_close * 0.9, 2)
 
     def _pre_trade_check(  # noqa: PLR0913
@@ -568,7 +581,7 @@ class EventDrivenBacktestEngine:
             close = row.get("close", None)
             if sym and close is not None:
                 prev_close = self._prev_close_map.get(sym, close)
-                up, down = self._compute_price_limits(prev_close)
+                up, down = self._compute_price_limits(prev_close, sym)
                 self._current_limit_up_map[sym] = up
                 self._current_limit_down_map[sym] = down
 
@@ -1485,8 +1498,11 @@ class EventDrivenBacktestEngine:
                     timestamp=ts,
                     latency_ms=latency_ms,
                 )
-            except Exception:
-                logger.warning("DuckDB 审计写入失败，已降级（审计不阻断主流程）")
+            except Exception as exc:
+                logger.warning(
+                    f"审计库写入失败，已降级（审计不阻断主流程）: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
     # ── P1-13 审计辅助方法 ────────────────────────────────────
 
