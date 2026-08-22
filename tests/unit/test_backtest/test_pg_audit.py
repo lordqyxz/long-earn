@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from long_earn.backtest.domain.interfaces import AuditRecord
@@ -244,3 +245,65 @@ class TestSeqMonotonicity:
         provider.close()
 
         assert len(chain) == 2, "相同 timestamp 记录不应被覆盖"
+
+
+class TestSelfHealing:
+    """连接毒化自愈契约
+
+    psycopg3 的隐式事务在语句失败后进入 aborted 状态，之后所有语句都抛
+    InFailedSqlTransaction 且永不自愈；连接级故障则需丢弃连接待重连。
+    Provider 必须在失败后自愈，否则一次瞬时错误会毒化整条审计链路。
+    """
+
+    def test_nan_payload_write_ok(self) -> None:
+        """NaN/Inf payload 应被 sanitize 为 null 后正常写入。
+
+        json.dumps 默认输出 NaN/Infinity 字面量（非合法 JSON），PG jsonb
+        列会拒绝——这是审计连接被毒化的已知第一因。
+        """
+        run_id = f"nan-{uuid4().hex[:12]}"
+        provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
+        rec = _make_record(run_id=run_id)
+        rec.payload = {
+            "sharpe": float("nan"),
+            "inf": float("inf"),
+            "ok": 1.5,
+            "nested": {"x": float("-inf")},
+        }
+        provider.log_event(rec)
+        records = provider.query_events(run_id, {"event_type": "MARKET_DATA"})
+        provider.close()
+        assert len(records) == 1
+
+    def test_statement_failure_self_heals(self) -> None:
+        """语句级失败（PK 冲突）后连接应 rollback 自愈，后续写入恢复。"""
+        run_id = f"heal-{uuid4().hex[:12]}"
+        trace_id = f"trace-{uuid4().hex[:12]}"
+        a = PostgresAuditProvider()
+        b = PostgresAuditProvider()
+        try:
+            a.log_event(_make_record(run_id=run_id, trace_id=trace_id))
+            # b 的 seq 同样从 1 开始 → 同主键 (run_id, trace_id, seq) 冲突
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                b.log_event(_make_record(run_id=run_id, trace_id=trace_id))
+            # 自愈后换 trace_id 再写：应恢复成功
+            b.log_event(_make_record(run_id=run_id, trace_id=f"{trace_id}-x"))
+        finally:
+            a.close()
+            b.close()
+
+    def test_connection_drop_self_heals(self) -> None:
+        """连接级故障后应丢弃连接，下次写入重连恢复。"""
+        run_id = f"drop-{uuid4().hex[:12]}"
+        provider = PostgresAuditProvider()
+        _log_run_start(provider, run_id)
+        provider.log_event(_make_record(run_id=run_id))
+        # 故障注入：直接关闭底层连接，模拟服务端断开（不走 close() 的干净路径）
+        assert provider._conn is not None
+        provider._conn.close()
+        with pytest.raises(psycopg.OperationalError):
+            provider.log_event(_make_record(run_id=run_id, trace_id="t-drop"))
+        # 自愈后下次写入应重连成功
+        provider.log_event(_make_record(run_id=run_id, trace_id="t-drop2"))
+        provider.close()

@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 from collections.abc import Sequence
 from datetime import datetime
@@ -78,6 +79,22 @@ class OrderSkipReason(StrEnum):
     """订单数量无效：NaN / Inf / 非正数（0 及负数，P3-02）"""
 
 
+def _sanitize_json_value(obj: Any) -> Any:
+    """递归把 NaN/±Inf 转为 None。
+
+    ``json.dumps`` 默认把 NaN/Infinity 序列化为 ``NaN``/``Infinity`` 字面量
+    （非合法 JSON），PG jsonb 列会拒绝并抛 ``invalid input syntax for type
+    json`` —— 这是审计连接被毒化的已知第一因之一。
+    """
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json_value(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json_value(v) for v in obj]
+    return obj
+
+
 class PostgresAuditProvider(AuditProvider):
     """PostgreSQL 实现的审计存储提供者
 
@@ -133,6 +150,28 @@ class PostgresAuditProvider(AuditProvider):
                 finally:
                     self._conn = None
 
+    def _heal_after_error(self, exc: Exception) -> None:
+        """语句/连接失败后的自愈，防止连接被毒化。
+
+        psycopg3 的隐式事务在语句失败后进入 aborted 状态，之后所有语句
+        都抛 ``InFailedSqlTransaction`` 且永不自愈（调用方持有的异常只是
+        第一因，后续全部是连锁失败）；必须 ``rollback()`` 清除。连接级
+        故障（服务端断开等）则丢弃连接，下次操作重连。
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            if getattr(conn, "closed", False) or isinstance(
+                exc, psycopg.OperationalError
+            ):
+                conn.close()
+                self._conn = None
+            else:
+                conn.rollback()
+        except Exception:
+            self._conn = None
+
     def log_event(self, record: AuditRecord) -> None:
         def json_serializable(obj):
             if isinstance(obj, datetime):
@@ -141,32 +180,38 @@ class PostgresAuditProvider(AuditProvider):
                 return obj.__dict__
             return str(obj)
 
-        payload_json = json.dumps(record.payload, default=json_serializable)
+        payload_json = json.dumps(
+            _sanitize_json_value(record.payload), default=json_serializable
+        )
 
         with self._lock:
             self._seq += 1
             seq = self._seq
             conn = self._get_conn()
-            conn.execute(
-                """
-                INSERT INTO "backtest_audit".logs
-                    (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                [
-                    record.run_id,
-                    seq,
-                    record.timestamp,
-                    record.event_type,
-                    record.trace_id,
-                    record.parent_id,
-                    record.component,
-                    record.status,
-                    payload_json,
-                    record.latency_ms,
-                ],
-            )
-            conn.commit()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO "backtest_audit".logs
+                        (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        record.run_id,
+                        seq,
+                        record.timestamp,
+                        record.event_type,
+                        record.trace_id,
+                        record.parent_id,
+                        record.component,
+                        record.status,
+                        payload_json,
+                        record.latency_ms,
+                    ],
+                )
+                conn.commit()
+            except Exception as exc:
+                self._heal_after_error(exc)
+                raise
 
     def query_events(
         self, run_id: str, filters: dict[str, Any]
@@ -192,7 +237,11 @@ class PostgresAuditProvider(AuditProvider):
 
         with self._lock:
             conn = self._get_conn()
-            res = conn.execute(query, params).fetchall()
+            try:
+                res = conn.execute(query, params).fetchall()
+            except Exception as exc:
+                self._heal_after_error(exc)
+                raise
 
         records = []
         for row in res:
@@ -215,12 +264,16 @@ class PostgresAuditProvider(AuditProvider):
         # 按 seq 排序保证因果链单调性（P1-10：timestamp 可能因墙钟回退无序）
         with self._lock:
             conn = self._get_conn()
-            res = conn.execute(
-                "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
-                "component, status, payload, latency_ms "
-                'FROM "backtest_audit".logs WHERE trace_id = %s ORDER BY seq ASC',
-                [trace_id],
-            ).fetchall()
+            try:
+                res = conn.execute(
+                    "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
+                    "component, status, payload, latency_ms "
+                    'FROM "backtest_audit".logs WHERE trace_id = %s ORDER BY seq ASC',
+                    [trace_id],
+                ).fetchall()
+            except Exception as exc:
+                self._heal_after_error(exc)
+                raise
 
         records = []
         for row in res:
