@@ -146,9 +146,6 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
         full_data = SharedDataContext.attach(
             task.shm_token, task.shm_size, task.pickle_data
         )
-        full_data = SharedDataContext.attach(
-            task.shm_token, task.shm_size, task.pickle_data
-        )
 
         dsl = parse_strategy_yaml(task.strategy_yaml)
 
