@@ -281,6 +281,30 @@ class GridResult:
 _MAX_GRID_DEFAULT = 256
 
 
+def _extra_fetch_symbols(
+    strategy_yamls: list[str], benchmark_symbol: str
+) -> set[str]:
+    """收集预取面板需要的股票池外标的。
+
+    - benchmark_symbol：基准指标计算需面板含其行情（此前未并入，
+      基准 Alpha/Beta 一直拿不到数据，一并修复）
+    - regime 配置：牛熊门控的 benchmark + 防守腿标的（DSLStrategy
+      从历史面板读 benchmark 行判牛熊，熊市买防守腿）
+    解析失败的 YAML 忽略（调用方解析期已报错，此处不重复失败）。
+    """
+    extra: set[str] = set()
+    if benchmark_symbol:
+        extra.add(benchmark_symbol)
+    for yaml_str in strategy_yamls:
+        try:
+            dsl = parse_strategy_yaml(yaml_str)
+        except ValueError:
+            continue
+        if dsl.regime is not None:
+            extra.update(dsl.regime.non_pool_symbols())
+    return extra
+
+
 class ParallelRunner:
     """并行回测编排器。
 
@@ -382,7 +406,11 @@ class ParallelRunner:
         # 预取数据：区间前移 max_warmup 覆盖最大回溯需求（ADR-008 B5）
         max_warmup = max(td["warmup_days"] for td in tasks_data)
         prefetch_start = _shift_start_date(start_date, max_warmup)
-        full_data = self._prepare_data(symbols, prefetch_start, end_date)
+        grid_yamls = [td["yaml"] for td in tasks_data]
+        extra = _extra_fetch_symbols(grid_yamls, benchmark_symbol)
+        full_data = self._prepare_data(
+            sorted(set(symbols) | extra), prefetch_start, end_date
+        )
 
         if full_data.is_empty():
             logger.error("[grid] 数据预取为空，无法执行并行回测")
@@ -643,7 +671,10 @@ class ParallelRunner:
         # 预取区间前移 max_warmup（ADR-008 B5）
         max_warmup = max(c["warmup_days"] for c in candidates)
         prefetch_start = _shift_start_date(start_date, max_warmup)
-        full_data = self._prepare_data(symbols, prefetch_start, end_date)
+        extra = _extra_fetch_symbols(strategy_yamls, benchmark_symbol)
+        full_data = self._prepare_data(
+            sorted(set(symbols) | extra), prefetch_start, end_date
+        )
 
         if full_data.is_empty():
             logger.error("[candidates] 数据预取为空，无法执行并行回测")

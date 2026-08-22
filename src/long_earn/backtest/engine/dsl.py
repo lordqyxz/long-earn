@@ -96,6 +96,33 @@ class UniverseConfig(BaseModel):
     )
 
 
+class RegimeConfig(BaseModel):
+    """牛熊状态门控配置（哑铃策略）
+
+    以基准指数收盘价 vs 长期均线判定市场状态：均线上方为牛市（正常选股），
+    下方为熊市（切换防守腿）。防守腿可为低波红利 ETF / 国债 ETF，
+    空列表表示熊市空仓持币。
+
+    门控在 ``DSLStrategy.on_bar`` 内实现（数据源为 VisibilityGuard 历史
+    面板中的 benchmark 行），要求预取面板包含 benchmark 与防守腿标的
+    （并行路径由 ``parallel.py`` 自动并入，单进程路径由引擎拉数时并入）。
+    """
+
+    benchmark: str = Field(description="牛熊判定基准指数代码，如 000300.SH")
+    window: int = Field(
+        default=250,
+        description="均线窗口（交易日）。窗口不足时视为牛市（不门控）",
+    )
+    defensive_assets: list[str] = Field(
+        default_factory=list,
+        description="熊市防守腿标的（如低波红利 ETF 512890.SH）；空列表=熊市空仓",
+    )
+
+    def non_pool_symbols(self) -> list[str]:
+        """股票池之外需进入预取面板的标的（benchmark + 防守腿）。"""
+        return [self.benchmark, *self.defensive_assets]
+
+
 class StrategyDSL(BaseModel):
     """策略 DSL 模型（ADR-009 收尾：仅支持算子目录路径）
 
@@ -114,6 +141,10 @@ class StrategyDSL(BaseModel):
         "测试/冒烟策略即使不显式传 tags 也会被引擎按 kind 自动标记。",
     )
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
+    regime: RegimeConfig | None = Field(
+        default=None,
+        description="牛熊状态门控（可选）。配置后熊市切换防守腿，牛市正常选股",
+    )
     start_date: str | None = Field(default=None, description="回测开始日期")
     end_date: str | None = Field(default=None, description="回测结束日期")
     operator_factors: list[dict[str, Any]] = Field(
@@ -266,6 +297,10 @@ def compute_warmup_days(dsl: StrategyDSL) -> int:
         for key in lookback_keys:
             val = params.get(key, 0) or 0
             max_period = max(max_period, val)
+    # 牛熊门控均线窗口同样需要 warmup（benchmark 收盘价不足 window 时
+    # 门控退化为牛市，熊市不会触发切换）
+    if dsl.regime is not None:
+        max_period = max(max_period, dsl.regime.window)
     if max_period <= 0:
         return 0
     # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日

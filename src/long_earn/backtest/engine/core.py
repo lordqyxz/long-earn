@@ -344,8 +344,16 @@ class EventDrivenBacktestEngine:
 
         try:
             if full_data is None:
+                # 牛熊门控：策略声明 regime 时，benchmark/防守腿标的需进入
+                # 面板（门控在 DSLStrategy 内从历史面板读 benchmark 行）。
+                fetch_symbols = list(symbols)
+                regime_spec = getattr(strategy, "regime_spec", None)
+                if regime_spec is not None:
+                    for extra in regime_spec.non_pool_symbols():
+                        if extra and extra not in fetch_symbols:
+                            fetch_symbols.append(extra)
                 full_data = self._prepare_data(
-                    symbols, start_date, end_date, warmup_days=warmup_days
+                    fetch_symbols, start_date, end_date, warmup_days=warmup_days
                 )
             else:
                 # 防御性日期过滤：外部传入的 full_data 可能含 warmup 期数据，

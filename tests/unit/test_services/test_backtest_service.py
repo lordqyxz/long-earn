@@ -113,6 +113,7 @@ class _StubDSL:
         self.signals = signals or []
         self.weights = weights or _StubWeights(method="equal")
         self.universe = _StubUniverse()
+        self.regime = None
 
 
 class _StubUniverse:
