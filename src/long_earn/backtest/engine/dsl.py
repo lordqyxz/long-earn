@@ -99,24 +99,46 @@ class UniverseConfig(BaseModel):
 class RegimeConfig(BaseModel):
     """牛熊状态门控配置（哑铃策略）
 
-    以基准指数收盘价 vs 长期均线判定市场状态：均线上方为牛市（正常选股），
-    下方为熊市（切换防守腿）。防守腿可为低波红利 ETF / 国债 ETF，
-    空列表表示熊市空仓持币。
+    以基准指数判定市场状态，熊市切换防守腿（低波红利 ETF / 国债 ETF，
+    空列表表示熊市空仓持币）。三种门控模式：
 
-    门控在 ``DSLStrategy.on_bar`` 内实现（数据源为 VisibilityGuard 历史
-    面板中的 benchmark 行），要求预取面板包含 benchmark 与防守腿标的
-    （并行路径由 ``parallel.py`` 自动并入，单进程路径由引擎拉数时并入）。
+    - ``absolute``：指数收盘价 vs 长期均线（经典 Faber 择时）。防市场级
+      崩盘（2022-2023 型），防不了指数横盘期的风格崩盘
+    - ``relative``：股票池动量 vs 指数动量（池相对强度）。池落后指数超
+      margin 即判熊——防风格崩盘（2025Q1 型：指数横盘但池内策略股崩盘）
+    - ``combined``：两者任一触发即熊市（OR 逻辑，最保守）
+
+    门控在 ``DSLStrategy.on_bar`` 内实现（增量收盘价追踪，O(截面)/bar），
+    要求预取面板包含 benchmark 与防守腿标的（并行路径由 ``parallel.py``
+    自动并入，单进程路径由引擎拉数时并入）。
     """
 
     benchmark: str = Field(description="牛熊判定基准指数代码，如 000300.SH")
     window: int = Field(
         default=250,
-        description="均线窗口（交易日）。窗口不足时视为牛市（不门控）",
+        description="绝对模式均线窗口（交易日）。窗口不足时视为牛市（不门控）",
     )
     defensive_assets: list[str] = Field(
         default_factory=list,
         description="熊市防守腿标的（如低波红利 ETF 512890.SH）；空列表=熊市空仓",
     )
+    mode: Literal["absolute", "relative", "combined"] = Field(
+        default="absolute",
+        description="门控模式：absolute/relative/combined（见类 docstring）",
+    )
+    rel_window: int = Field(
+        default=20,
+        description="相对强度动量窗口（交易日），仅 relative/combined 模式生效",
+    )
+    rel_margin: float = Field(
+        default=0.0,
+        description="池动量落后指数动量超过此幅度才触发熊市（0.05=落后5个百分点）",
+    )
+
+    @property
+    def uses_relative(self) -> bool:
+        """是否启用池相对强度分支。"""
+        return self.mode in ("relative", "combined")
 
     def non_pool_symbols(self) -> list[str]:
         """股票池之外需进入预取面板的标的（benchmark + 防守腿）。"""
@@ -297,10 +319,11 @@ def compute_warmup_days(dsl: StrategyDSL) -> int:
         for key in lookback_keys:
             val = params.get(key, 0) or 0
             max_period = max(max_period, val)
-    # 牛熊门控均线窗口同样需要 warmup（benchmark 收盘价不足 window 时
-    # 门控退化为牛市，熊市不会触发切换）
+    # 牛熊门控窗口同样需要 warmup（数据不足时门控退化为牛市，熊市不触发）
     if dsl.regime is not None:
         max_period = max(max_period, dsl.regime.window)
+        if dsl.regime.uses_relative:
+            max_period = max(max_period, dsl.regime.rel_window)
     if max_period <= 0:
         return 0
     # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日

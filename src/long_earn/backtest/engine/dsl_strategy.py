@@ -9,11 +9,13 @@ filter / rank / expression 路径已退役）。
 """
 
 import re
+from collections import deque
 from typing import Any
 
 import polars as pl
 
-from long_earn.backtest.engine.dsl import StrategyDSL
+from long_earn.backtest.domain.entities import SignalEvent
+from long_earn.backtest.engine.dsl import RegimeConfig, StrategyDSL
 from long_earn.backtest.engine.strategy import BaseStrategy
 
 # rebalance_freq 合法格式："<N>D"（N 个交易日，如 "20D"）
@@ -56,6 +58,19 @@ class DSLStrategy(BaseStrategy):
         self._regime_state: str | None = None
         # benchmark 行缺失只告警一次（避免每 bar 累积诊断）
         self._regime_benchmark_warned = False
+        # 牛熊门控增量数据通道（O(截面)/bar，替代每 bar 全面板扫描）：
+        # benchmark 收盘价 deque + 股票池每 symbol 定长 deque（仅相对强度模式）
+        cfg = dsl_strategy.regime
+        bench_len = (
+            max(cfg.window, cfg.rel_window + 1) if cfg is not None else None
+        )
+        self._bench_closes: deque[float] = deque(maxlen=bench_len)
+        self._pool_deque_maxlen = (
+            cfg.rel_window + 1
+            if cfg is not None and cfg.uses_relative
+            else None
+        )
+        self._pool_closes: dict[str, deque[float]] = {}
         # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
         # 还是只是退化成"什么都不做"而被错误标记 success=True。
         # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
@@ -72,10 +87,12 @@ class DSLStrategy(BaseStrategy):
         return self.dsl.regime
 
     def init(self) -> None:
-        """每 run 重置调仓相位（walk-forward 复用实例时避免跨 fold 相位漂移）。"""
+        """每 run 重置调仓相位与门控追踪（walk-forward 复用实例时防跨 fold 泄漏）。"""
         self._bar_count = 0
         self._regime_state = None
         self._regime_benchmark_warned = False
+        self._bench_closes.clear()
+        self._pool_closes.clear()
 
     def _should_rebalance(self) -> bool:
         """调仓频率门控：首个交易日建仓，之后每 N 个交易日调仓一次。"""
@@ -108,24 +125,21 @@ class DSLStrategy(BaseStrategy):
 
         ADR-009 收尾：旧式 factors + expression 路径已退役，所有策略必须含
         operator_factors 或 operator 信号步骤（DSL 解析期强制校验）。
-        ``bars`` 参数为 BaseStrategy.on_bar 契约要求，算子路径改用 history 面板。
+        ``bars`` 参数为 BaseStrategy.on_bar 契约要求：当日全截面行情，
+        兼作牛熊门控的增量数据通道；算子链改用 history 面板（仅调仓日获取）。
 
         调仓频率门控：非调仓日返回 None（持仓保持），首个交易日建仓，
         之后每 ``rebalance_freq`` 个交易日调仓一次。风控（止损/清仓）在
         引擎层独立运行，不受此门控影响。
 
-        牛熊门控（配置 ``regime`` 时）：benchmark 收盘价 vs 长均线判牛熊；
-        熊市切换防守腿等权信号（空列表=空仓），牛市走算子链；
-        状态切换日强制调仓（不等调仓周期，防熊市延迟入场）。
+        牛熊门控（配置 ``regime`` 时）：absolute=指数 vs 均线，
+        relative=池动量 vs 指数动量，combined=任一触发；熊市切换防守腿
+        等权信号（空列表=空仓），牛市走算子链；状态切换日强制调仓
+        （不等调仓周期，防熊市延迟入场）。
         """
-        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
+        self._track_closes(bars)
 
-        history_pl = self._fetch_history(context)
-        if history_pl is None:
-            self._bar_count += 1
-            return None
-
-        regime_state = self._update_regime_state(history_pl)
+        regime_state = self._update_regime_state()
         regime_flipped = self._consume_regime_flip(regime_state)
 
         do_rebalance = self._should_rebalance() or regime_flipped
@@ -138,6 +152,10 @@ class DSLStrategy(BaseStrategy):
 
         if not hasattr(self, "_op_executor"):
             self._op_executor = self._build_operator_executor()
+
+        history_pl = self._fetch_history(context)
+        if history_pl is None:
+            return None
 
         try:
             pool_history = self._strip_non_pool(history_pl)
@@ -181,41 +199,94 @@ class DSLStrategy(BaseStrategy):
             )
             return None
 
-    def _update_regime_state(self, history_pl: pl.DataFrame) -> str | None:
-        """更新牛熊状态：benchmark 收盘价 vs 长均线。
+    def _track_closes(self, bars: pl.DataFrame) -> None:
+        """增量记录 benchmark 与股票池收盘价（牛熊门控数据通道）。
+
+        每 bar O(截面规模)：benchmark 收盘价进定长 deque（覆盖最大窗口），
+        池内 symbol 各一条定长 deque（rel_window+1，历史不足的 symbol 自动
+        跳过）。替代每 bar 全面板 filter/group_by（O(面板行数)，大股票池
+        下不可承受）。benchmark/防守腿不参与池动量，全部排除。
+        """
+        cfg = self.dsl.regime
+        if cfg is None or bars.height == 0:
+            return
+        track_pool = cfg.uses_relative
+        defensive = set(cfg.defensive_assets)
+        pool_maxlen = self._pool_deque_maxlen
+        for sym, close in zip(bars["symbol"], bars["close"], strict=True):
+            if close is None:
+                continue
+            if sym == cfg.benchmark:
+                self._bench_closes.append(float(close))
+            elif track_pool and sym not in defensive:
+                dq = self._pool_closes.get(sym)
+                if dq is None:
+                    dq = deque(maxlen=pool_maxlen)
+                    self._pool_closes[sym] = dq
+                dq.append(float(close))
+
+    def _update_regime_state(self) -> str | None:
+        """按 mode 计算当日牛熊状态（数据源：增量收盘价追踪）。
 
         Returns:
             None=未配置门控；"bull"/"bear"=当日状态。
-            benchmark 行缺失或窗口不足时视为牛市（不门控）。
+            benchmark 数据不足或池样本不足时视为牛市（不门控）。
         """
         cfg = self.dsl.regime
         if cfg is None:
             return None
 
-        bm_closes = (
-            history_pl.filter(pl.col("symbol") == cfg.benchmark)
-            .sort("timestamp")
-            .get_column("close")
-            .drop_nulls()
-        )
-        if bm_closes.is_empty():
-            if not self._regime_benchmark_warned:
-                self._regime_benchmark_warned = True
-                self.step_failures.append(
-                    {
-                        "type": "regime_benchmark_missing",
-                        "step": "regime gate",
-                        "error": (
-                            f"历史面板无 benchmark {cfg.benchmark} 行，"
-                            f"门控退化为始终牛市；预取面板需并入该标的"
-                        ),
-                    }
-                )
+        if not self._bench_closes and not self._regime_benchmark_warned:
+            self._regime_benchmark_warned = True
+            self.step_failures.append(
+                {
+                    "type": "regime_benchmark_missing",
+                    "step": "regime gate",
+                    "error": (
+                        f"行情截面无 benchmark {cfg.benchmark} 行，"
+                        f"门控退化为始终牛市；拉数时需并入该标的"
+                    ),
+                }
+            )
+
+        abs_state = self._absolute_state(cfg)
+        if cfg.mode == "absolute":
+            return abs_state
+        rel_state = self._relative_state(cfg)
+        if cfg.mode == "relative":
+            return rel_state
+        return "bear" if "bear" in (abs_state, rel_state) else "bull"
+
+    def _absolute_state(self, cfg: RegimeConfig) -> str:
+        """绝对模式：benchmark 收盘价 vs ``window`` 日均线。"""
+        closes = list(self._bench_closes)
+        if len(closes) < cfg.window:
             return "bull"
-        if len(bm_closes) < cfg.window:
+        ma = sum(closes[-cfg.window:]) / cfg.window
+        return "bull" if closes[-1] > ma else "bear"
+
+    def _relative_state(self, cfg: RegimeConfig) -> str:
+        """相对强度模式：股票池动量 vs benchmark 动量。
+
+        池动量 = 池内样本股 ``rel_window`` 期收益的截面均值；
+        池落后基准超过 ``rel_margin`` 判熊（风格崩盘信号：
+        指数可能横盘，但策略所在风格的股票池在崩）。
+        """
+        need = cfg.rel_window + 1
+        bench = list(self._bench_closes)
+        if len(bench) < need or bench[-need] == 0:
             return "bull"
-        ma = bm_closes.tail(cfg.window).mean()
-        return "bull" if bm_closes[-1] > ma else "bear"
+        bench_ret = bench[-1] / bench[-need] - 1.0
+
+        rets = [
+            dq[-1] / dq[0] - 1.0
+            for dq in self._pool_closes.values()
+            if len(dq) == dq.maxlen and dq[0] > 0
+        ]
+        if not rets:
+            return "bull"
+        pool_ret = sum(rets) / len(rets)
+        return "bear" if pool_ret < bench_ret - cfg.rel_margin else "bull"
 
     def _consume_regime_flip(self, state: str | None) -> bool:
         """消费状态翻转：返回是否发生 bull↔bear 切换并更新内部状态。"""
@@ -238,8 +309,6 @@ class DSLStrategy(BaseStrategy):
 
         防守腿全缺失或列表为空时返回 None（空仓持币，本身即防守）。
         """
-        from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
-
         cfg = self.dsl.regime
         assert cfg is not None  # 调用方保证
         tradable = [a for a in cfg.defensive_assets if a in set(bars["symbol"])]
