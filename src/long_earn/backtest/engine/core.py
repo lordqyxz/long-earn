@@ -356,22 +356,8 @@ class EventDrivenBacktestEngine:
                     fetch_symbols, start_date, end_date, warmup_days=warmup_days
                 )
             else:
-                # 防御性日期过滤：外部传入的 full_data 可能含 warmup 期数据，
-                # 这里按 [start - warmup, end] 保留，避免扔掉预热期历史。
-                # ``start_date`` 可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
-                # （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符做日期解析。
-                date_col = "timestamp" if "timestamp" in full_data.columns else "date"
-                end_dt = pl.lit(end_date[:10]).str.to_datetime()
-                if warmup_days > 0:
-                    data_start = (
-                        datetime.strptime(start_date[:10], "%Y-%m-%d")
-                        - timedelta(days=warmup_days)
-                    ).strftime("%Y-%m-%d")
-                else:
-                    data_start = start_date[:10]
-                start_dt = pl.lit(data_start).str.to_datetime()
-                full_data = full_data.filter(
-                    (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
+                full_data = self._apply_defensive_date_filter(
+                    full_data, start_date, end_date, warmup_days
                 )
             if full_data.is_empty():
                 # G6: 数据为空必须审计，否则失败路径链路断裂
@@ -1908,6 +1894,47 @@ class EventDrivenBacktestEngine:
         }
 
     # ── 数据与指标 ────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_defensive_date_filter(
+        full_data: pl.DataFrame,
+        start_date: str,
+        end_date: str,
+        warmup_days: int,
+    ) -> pl.DataFrame:
+        """防御性日期过滤：外部传入面板按 [start - warmup, end] 保留。
+
+        no-op 快路径：面板本就在边界内时直接返回原引用——polars filter
+        会物化整块拷贝，并行 worker 持 mmap 视图时等于逐 worker 复制整
+        面板（旧实现内存放大的来源之一）。日期按 ISO 字符串前 10 位比较
+        （日频面板无盘中时间戳，精度足够）。
+
+        ``start_date`` 可能是 "2023-01-07" 或 "2023-01-07 00:00:00"
+        （walk_forward_run 中 str(datetime) 产生），统一取前 10 字符。
+        """
+        date_col = "timestamp" if "timestamp" in full_data.columns else "date"
+        if warmup_days > 0:
+            data_start = (
+                datetime.strptime(start_date[:10], "%Y-%m-%d")
+                - timedelta(days=warmup_days)
+            ).strftime("%Y-%m-%d")
+        else:
+            data_start = start_date[:10]
+        panel_min = full_data[date_col].min()
+        panel_max = full_data[date_col].max()
+        in_bounds = (
+            panel_min is not None
+            and panel_max is not None
+            and str(panel_min)[:10] >= data_start
+            and str(panel_max)[:10] <= end_date[:10]
+        )
+        if in_bounds:
+            return full_data
+        start_dt = pl.lit(data_start).str.to_datetime()
+        end_dt = pl.lit(end_date[:10]).str.to_datetime()
+        return full_data.filter(
+            (pl.col(date_col) >= start_dt) & (pl.col(date_col) <= end_dt)
+        )
 
     def _prepare_data(
         self,

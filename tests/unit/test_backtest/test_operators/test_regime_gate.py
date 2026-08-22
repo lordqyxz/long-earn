@@ -197,6 +197,37 @@ def _barbell_panel(with_benchmark: bool = True) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def _warmup_decline_panel() -> pl.DataFrame:
+    """warmup 判别面板：池上行、指数持续下行贯穿全程。
+
+    start_date 设在 day20；warmup 期（day0-19）指数已远跌破均线。
+    门控 deque 若未用 warmup 历史预填，前 window 个交易日盲判牛市
+    → 首 bar 调仓买入 A/B；预填后 start_date 当天即判熊 → 只买 DEF。
+    """
+    rows = []
+    base = datetime(2024, 1, 1)
+    for i in range(40):
+        ts = base + timedelta(days=i)
+        for sym, close in [
+            ("A.SZ", round(10.0 * 1.01**i, 4)),
+            ("B.SH", round(10.0 * 1.01**i, 4)),
+            ("DEF.SH", 50.0),
+            ("IDX.SH", round(100.0 * 0.98**i, 4)),
+        ]:
+            rows.append(
+                {
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": 10000.0,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
 def _fill_symbols(engine: EventDrivenBacktestEngine) -> set[str]:
     """从引擎内存审计 trail 提取 FILL 事件的成交标的集合。"""
     symbols = set()
@@ -279,6 +310,34 @@ class TestRegimeGateE2E:
             f for f in strategy.step_failures if f["type"] == "regime_benchmark_missing"
         ]
         assert len(missing) == 1, "benchmark 缺失诊断应恰好记一次"
+
+
+class TestRegimeWarmupSeed:
+    def test_absolute_mode_seeded_from_warmup(self, mock_data_provider):
+        """warmup 期指数已跌破均线 → start_date 当天即判熊（deque 预填回归测试）。
+
+        增量追踪重构后 deque 只看交易期 bar，warmup 期数据不进 on_bar，
+        导致 absolute 模式前 window 个交易日盲判牛市（对照组收益漂移）。
+        预填修复后盲区消除：首 bar 直接切换防守腿，股票腿零成交。
+        """
+        dsl = parse_strategy_yaml(REGIME_YAML)
+        engine = EventDrivenBacktestEngine(
+            data_provider=mock_data_provider(_warmup_decline_panel())
+        )
+        strategy = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
+        result = engine.run(
+            strategy,
+            "2024-01-21",
+            "2024-02-09",
+            ["A.SZ", "B.SH", "DEF.SH", "IDX.SH"],
+            warmup_days=30,
+        )
+        assert result.success, result.message
+        filled = _fill_symbols(engine)
+        assert "DEF.SH" in filled, f"warmup 已破位应首日切防守腿, 实际成交: {filled}"
+        assert not (filled & {"A.SZ", "B.SH"}), (
+            f"门控盲区期不应买入股票腿, 实际成交: {filled}"
+        )
 
 
 class TestRelativeRegime:

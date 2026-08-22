@@ -80,8 +80,13 @@ class VisibilityGuard:
             full_data: 包含全部回测期间数据的 Polars DataFrame
                        期望结构: [timestamp, symbol, close, ...]
         """
-        # 预排序 by timestamp（一次 O(N log N)），后续所有切片基于此顺序
-        self._full_data = full_data.sort("timestamp")
+        # 预排序 by timestamp（一次 O(N log N)），后续所有切片基于此顺序。
+        # 已排序面板（并行路径主进程预排序 / provider 有序输出）直接引用，
+        # 避免逐 worker 各物化一整块排序拷贝。
+        if full_data["timestamp"].is_sorted():
+            self._full_data = full_data
+        else:
+            self._full_data = full_data.sort("timestamp")
         # 预提取 timestamps 列表供 bisect（O(N) 一次）
         self._timestamps: list[datetime] = (
             self._full_data.select("timestamp").to_series().to_list()

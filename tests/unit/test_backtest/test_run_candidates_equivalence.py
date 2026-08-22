@@ -55,6 +55,31 @@ def _make_panel(days: int = 80, symbols: list[str] | None = None) -> pl.DataFram
     return pl.DataFrame(rows)
 
 
+def _make_leaded_panel(days: int = 170) -> pl.DataFrame:
+    """带前置历史的面板：2023-10-01 起，start_date 前有 ~92 天可用 warmup。
+
+    供多 warmup 候选等价性测试用——串行路径按各自 warmup 取数，
+    批量路径统一 max_warmup，两者面板历史长度不同，若时序因子
+    取值依赖历史长度则不等价（金融正确性硬约束）。
+    """
+    rows = []
+    for i in range(days):
+        for j, sym in enumerate(["000001", "000002", "000003", "000004", "000005"]):
+            price = 10.0 * (1.0 + 0.001 * i + 0.0001 * j)
+            rows.append(
+                {
+                    "timestamp": datetime(2023, 10, 1) + timedelta(days=i),
+                    "symbol": sym,
+                    "open": price * 0.99,
+                    "high": price * 1.02,
+                    "low": price * 0.98,
+                    "close": price,
+                    "volume": 10000,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
 # ── 策略 YAML ────────────────────────────────────────────────
 
 STRATEGY_YAML = """strategy:
@@ -157,7 +182,7 @@ class TestRunCandidatesEquivalence:
         2. 批量：ParallelRunner.run_candidates（max_workers=1）
         断言 sharpe/return/drawdown/degenerate/metrics_unreliable 一致。
 
-        容差说明：两条路径的数据面板逻辑相等，但批量路径经 SharedMemory
+        容差说明：两条路径的数据面板逻辑相等，但批量路径经 mmap IPC
         Arrow IPC 往返，浮点底层内存表示可能微差（polars equals 为 True 但
         累积计算后末位不同）。容差 rel=1e-3 足以区分逻辑 bug vs 往返噪声
         （sharpe 19.x 级别，1e-3 = 0.02 差异容忍度）。
@@ -204,7 +229,7 @@ class TestRunCandidatesEquivalence:
         assert batch_outcome.success, f"批量回测失败: {batch_outcome.error}"
 
         # ── 数值等价断言（ADR-008 B6 硬约束）──
-        # rel=1e-3 容差：SharedMemory Arrow IPC 往返的浮点微差容忍
+        # rel=1e-3 容差：Arrow IPC 往返的浮点微差容忍
         assert batch_outcome.sharpe_ratio == pytest.approx(
             serial_result.sharpe_ratio, rel=1e-3
         ), "sharpe_ratio 不一致"
@@ -217,6 +242,77 @@ class TestRunCandidatesEquivalence:
         # diagnostics 保真（ADR-008 B6）
         assert batch_outcome.degenerate == (serial_result.trade_count == 0)
         assert batch_outcome.trade_count == serial_result.trade_count
+
+    def test_uniform_max_warmup_preserves_per_candidate_values(self) -> None:
+        """多 warmup 候选等价性：统一 max_warmup 不改变各候选数值。
+
+        run_grid/run_candidates 现统一用 max_warmup（让防御性日期过滤
+        退化为 no-op，消除逐 worker 整面板复制）。金融正确性硬约束：
+        时序因子按 trailing window 取值，多给的历史不改变因子值，
+        故短 warmup 候选在串行（自身 warmup）与批量（max_warmup）
+        两条路径下数值必须一致。
+        """
+        short_yaml = STRATEGY_YAML.replace("period: 20", "period: 5")
+        long_yaml = STRATEGY_YAML
+        dsl_short = parse_strategy_yaml(short_yaml)
+        dsl_long = parse_strategy_yaml(long_yaml)
+        warmup_short = compute_warmup_days(dsl_short)
+        warmup_long = compute_warmup_days(dsl_long)
+        assert warmup_long > warmup_short, "两个候选 warmup 应不同（前提）"
+
+        panel = _make_leaded_panel()
+        symbols = ["000001", "000002", "000003", "000004", "000005"]
+        from long_earn.backtest.engine.dsl_strategy import DSLStrategy
+
+        # 串行路径：各候选按自身 warmup 取数
+        serial_metrics: dict[str, dict[str, float]] = {}
+        for label, dsl in [("short", dsl_short), ("long", dsl_long)]:
+            engine = EventDrivenBacktestEngine(
+                cost_config=dsl.trading_cost.to_broker_config(),
+                stop_loss=dsl.risk_control.stop_loss,
+                max_drawdown_limit=dsl.risk_control.max_drawdown_limit,
+                max_position_pct=dsl.risk_control.max_position_per_stock,
+            )
+            engine.data_provider = _MockDataProvider(panel)
+            strategy_obj = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
+            result = engine.run(
+                strategy_obj,
+                "2024-01-01",
+                "2024-03-31",
+                symbols,
+                warmup_days=compute_warmup_days(dsl),
+            )
+            assert result.success, f"串行 {label} 失败: {result.message}"
+            serial_metrics[label] = {
+                "sharpe": result.sharpe_ratio,
+                "ret": result.total_return,
+                "dd": result.max_drawdown,
+            }
+
+        # 批量路径：统一 max_warmup
+        runner = ParallelRunner(
+            max_workers=1, data_provider=_MockDataProvider(panel)
+        )
+        outcomes = runner.run_candidates(
+            strategy_yamls=[short_yaml, long_yaml],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            symbols=symbols,
+            tags=[RUN_TAG_TEST],
+        )
+        assert len(outcomes) == 2
+        for outcome, label in zip(outcomes, ["short", "long"], strict=True):
+            assert outcome.success, f"批量 {label} 失败: {outcome.error}"
+            expected = serial_metrics[label]
+            assert outcome.sharpe_ratio == pytest.approx(
+                expected["sharpe"], rel=1e-3
+            ), f"{label} sharpe 不一致"
+            assert outcome.total_return == pytest.approx(
+                expected["ret"], rel=1e-3
+            ), f"{label} total_return 不一致"
+            assert outcome.max_drawdown == pytest.approx(
+                expected["dd"], rel=1e-3
+            ), f"{label} max_drawdown 不一致"
 
     def test_run_candidates_preserves_diagnostics(self) -> None:
         """非退化策略的 diagnostics 保真：degenerate=False, trade_count>0。

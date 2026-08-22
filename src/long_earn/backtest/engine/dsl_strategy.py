@@ -71,6 +71,10 @@ class DSLStrategy(BaseStrategy):
             else None
         )
         self._pool_closes: dict[str, deque[float]] = {}
+        # 门控 deque 是否已用 warmup 历史预填（每 run 一次，见
+        # _seed_regime_from_history；增量追踪只看交易期 bar，warmup 期
+        # 数据必须显式回填，否则门控前 window 个交易日盲判牛市）
+        self._regime_seeded = False
         # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
         # 还是只是退化成"什么都不做"而被错误标记 success=True。
         # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
@@ -91,6 +95,7 @@ class DSLStrategy(BaseStrategy):
         self._bar_count = 0
         self._regime_state = None
         self._regime_benchmark_warned = False
+        self._regime_seeded = False
         self._bench_closes.clear()
         self._pool_closes.clear()
 
@@ -137,6 +142,9 @@ class DSLStrategy(BaseStrategy):
         等权信号（空列表=空仓），牛市走算子链；状态切换日强制调仓
         （不等调仓周期，防熊市延迟入场）。
         """
+        if self.dsl.regime is not None and not self._regime_seeded:
+            self._seed_regime_from_history(context, bars)
+
         self._track_closes(bars)
 
         regime_state = self._update_regime_state()
@@ -224,6 +232,58 @@ class DSLStrategy(BaseStrategy):
                     dq = deque(maxlen=pool_maxlen)
                     self._pool_closes[sym] = dq
                 dq.append(float(close))
+
+    def _seed_regime_from_history(self, context, bars: pl.DataFrame) -> None:
+        """首 bar 用 warmup 历史预填门控收盘价 deque（每 run 一次）。
+
+        交易循环从 start_date 起，warmup 期数据只进 VisibilityGuard 历史、
+        不产生 on_bar 调用；不预填的话门控前 window 个交易日是盲区
+        （deque 未满一律判牛）——这是增量追踪重构引入的回归，
+        absolute 模式对照组收益漂移（+30% → -10.95%）即此因。
+        此处从首 bar 历史面板（含 warmup 行，timestamp < 当前 bar）回填
+        benchmark 与池内 symbol 收盘价序列，恢复 start_date 当天门控即可用。
+
+        池 symbol 仅取当前截面仍存续者（warmup 期后退市样本不进池，
+        与增量追踪语义一致，防陈旧 deque 污染池动量截面均值）。
+        """
+        self._regime_seeded = True
+        cfg = self.dsl.regime
+        if cfg is None or bars.height == 0:
+            return
+        try:
+            history = context.get_history_df()
+        except Exception as exc:
+            self.step_failures.append(
+                {
+                    "type": "regime_seed_history",
+                    "step": "regime gate warmup seed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            return
+        if history.height == 0:
+            return
+        past = history.filter(pl.col("timestamp") < context.current_timestamp)
+        if past.height == 0:
+            return
+        bench = past.filter(pl.col("symbol") == cfg.benchmark)
+        self._bench_closes.extend(
+            float(c) for c in bench["close"] if c is not None
+        )
+        if not cfg.uses_relative:
+            return
+        current_syms = bars["symbol"].to_list()
+        pool = past.filter(
+            (pl.col("symbol") != cfg.benchmark)
+            & ~pl.col("symbol").is_in(cfg.defensive_assets)
+            & pl.col("symbol").is_in(current_syms)
+        )
+        maxlen = self._pool_deque_maxlen
+        grouped = pool.group_by("symbol").agg(pl.col("close"))
+        for sym, closes in zip(grouped["symbol"], grouped["close"], strict=True):
+            vals = [float(c) for c in closes if c is not None]
+            if vals:
+                self._pool_closes[sym] = deque(vals, maxlen=maxlen)
 
     def _update_regime_state(self) -> str | None:
         """按 mode 计算当日牛熊状态（数据源：增量收盘价追踪）。

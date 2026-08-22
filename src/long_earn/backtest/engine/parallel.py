@@ -1,7 +1,8 @@
 """进程级并行编排层
 
 提供参数网格并行回测和 Walk-Forward 并行回测。
-每个 worker 独立构造引擎实例，通过 SharedMemory 共享数据底座。
+每个 worker 独立构造引擎实例，通过 mmap Arrow IPC 文件共享数据底座
+（所有 worker 共享 OS 页缓存同一份物理页，私有内存趋近于零）。
 并行 worker 直接并发写 PostgreSQL 审计表（PG MVCC 原生支持多写者），
 不再使用「worker 临时 DuckDB 文件 + 主进程合并」的旧架构。
 """
@@ -43,9 +44,8 @@ class BacktestTask:
     end_date: str
     symbols: list[str]
     benchmark_symbol: str
-    shm_token: str
-    shm_size: int
-    pickle_data: bytes
+    # 共享面板路径（mmap Arrow IPC 文件，见 SharedDataContext）
+    panel_path: str
     stop_loss: float | None = None
     max_drawdown_limit: float | None = None
     max_position_pct: float = 1.0
@@ -143,9 +143,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
     try:
         ensure_utf8_stdio()
 
-        full_data = SharedDataContext.attach(
-            task.shm_token, task.shm_size, task.pickle_data
-        )
+        full_data = SharedDataContext.attach(task.panel_path)
 
         dsl = parse_strategy_yaml(task.strategy_yaml)
 
@@ -324,9 +322,11 @@ class ParallelRunner:
         self.data_provider = data_provider
 
     def _prepare_data(self, symbols: list[str], start_date: str, end_date: str) -> Any:
-        """预取合并面板为 polars DataFrame（主进程执行，worker 通过 SharedMemory 共享）。
+        """预取合并面板为 polars DataFrame（主进程执行，worker 通过 mmap IPC 文件共享）。
 
         优先用注入的 ``data_provider``（走降级链），未注入时退回 ``MiniQmtDataProvider``。
+        返回前按 timestamp 排序一次：主进程单次复制换取全部 worker 的
+        VisibilityGuard 跳过排序（否则每个 worker 各复制一整块面板）。
         """
         from long_earn.backtest.data.polars_adapter import (  # noqa: PLC0415
             PandasToPolarsProvider,
@@ -337,20 +337,23 @@ class ParallelRunner:
             # 已实现 get_merged_panel_as_polars 的 provider（如 CompositeDataProvider）
             # 直接调用；否则用 PandasToPolarsProvider 适配
             if hasattr(provider, "get_merged_panel_as_polars"):
-                return provider.get_merged_panel_as_polars(
+                panel = provider.get_merged_panel_as_polars(
                     symbols, start_date, end_date
                 )
-            return PandasToPolarsProvider(provider).get_merged_panel_as_polars(
-                symbols, start_date, end_date
+            else:
+                panel = PandasToPolarsProvider(provider).get_merged_panel_as_polars(
+                    symbols, start_date, end_date
+                )
+        else:
+            # 向后兼容：未注入时退回本地 MiniQmtDataProvider
+            from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
+                MiniQmtDataProvider,
             )
-        # 向后兼容：未注入时退回本地 MiniQmtDataProvider
-        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
-            MiniQmtDataProvider,
-        )
 
-        return PandasToPolarsProvider(MiniQmtDataProvider()).get_merged_panel_as_polars(
-            symbols, start_date, end_date
-        )
+            panel = PandasToPolarsProvider(
+                MiniQmtDataProvider()
+            ).get_merged_panel_as_polars(symbols, start_date, end_date)
+        return panel.sort("timestamp")
 
     def run_grid(  # noqa: PLR0913
         self,
@@ -428,7 +431,7 @@ class ParallelRunner:
         # 构造 BacktestTask 列表
         audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
-            shm_token, shm_size, pickle_data = ctx.get_worker_args()
+            panel_path = ctx.get_worker_args()
 
             tasks = [
                 BacktestTask(
@@ -437,9 +440,7 @@ class ParallelRunner:
                     end_date=end_date,
                     symbols=symbols,
                     benchmark_symbol=benchmark_symbol,
-                    shm_token=shm_token,
-                    shm_size=shm_size,
-                    pickle_data=pickle_data,
+                    panel_path=panel_path,
                     stop_loss=td["stop_loss"],
                     max_drawdown_limit=td["max_drawdown_limit"],
                     max_position_pct=td["max_position_pct"],
@@ -447,7 +448,10 @@ class ParallelRunner:
                     task_id=str(idx),
                     param_desc=td["param_desc"],
                     audit_db_path="pg" if audit_base else "",
-                    warmup_days=td["warmup_days"],
+                    # 统一用 max_warmup：预取区间即 [start - max_warmup, end]，
+                    # 全部 task 的防御性日期过滤退化为 no-op（引擎跳过整面板复制）；
+                    # 多给的 warmup 历史只会让时序因子更早可用，不改变取值
+                    warmup_days=max_warmup,
                     tags=tags or [],
                 )
                 for idx, td in enumerate(tasks_data)
@@ -501,14 +505,14 @@ class ParallelRunner:
 
         audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
-            shm_token, shm_size, pickle_data = ctx.get_worker_args()
+            panel_path = ctx.get_worker_args()
 
             tasks: list[BacktestTask] = []
 
             for fold_idx, (train_ts, test_ts) in enumerate(splits):
                 train_start = str(train_ts[0])
                 train_end = str(train_ts[-1])
-                test_start = str(test_ts[0]) if test_ts else train_end
+                test_start = str(train_ts[0]) if test_ts else train_end
                 test_end = str(test_ts[-1]) if test_ts else train_end
 
                 train_task_id = f"{fold_idx}_train"
@@ -520,9 +524,7 @@ class ParallelRunner:
                         end_date=train_end,
                         symbols=symbols,
                         benchmark_symbol=benchmark_symbol,
-                        shm_token=shm_token,
-                        shm_size=shm_size,
-                        pickle_data=pickle_data,
+                        panel_path=panel_path,
                         stop_loss=stop_loss,
                         max_drawdown_limit=max_drawdown_limit,
                         max_position_pct=max_position_pct,
@@ -540,9 +542,7 @@ class ParallelRunner:
                         end_date=test_end,
                         symbols=symbols,
                         benchmark_symbol=benchmark_symbol,
-                        shm_token=shm_token,
-                        shm_size=shm_size,
-                        pickle_data=pickle_data,
+                        panel_path=panel_path,
                         stop_loss=stop_loss,
                         max_drawdown_limit=max_drawdown_limit,
                         max_position_pct=max_position_pct,
@@ -646,7 +646,7 @@ class ParallelRunner:
 
         各候选 DSL 独立解析风控参数与 warmup（ADR-008 B5）；
         预取区间前移 max_warmup 覆盖最大回溯需求；
-        SharedMemory 共享面板 + 进程池分发。
+        mmap IPC 文件共享面板 + 进程池分发。
         返回 list[BacktestOutcome]，顺序与输入 strategy_yamls 对齐。
         """
         if not strategy_yamls:
@@ -695,7 +695,7 @@ class ParallelRunner:
 
         audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
-            shm_token, shm_size, pickle_data = ctx.get_worker_args()
+            panel_path = ctx.get_worker_args()
 
             tasks = [
                 BacktestTask(
@@ -704,16 +704,15 @@ class ParallelRunner:
                     end_date=end_date,
                     symbols=symbols,
                     benchmark_symbol=benchmark_symbol,
-                    shm_token=shm_token,
-                    shm_size=shm_size,
-                    pickle_data=pickle_data,
+                    panel_path=panel_path,
                     stop_loss=c["stop_loss"],
                     max_drawdown_limit=c["max_drawdown_limit"],
                     max_position_pct=c["max_position_pct"],
                     max_positions=c["max_positions"],
                     task_id=c["task_id"],
                     audit_db_path="pg" if audit_base else "",
-                    warmup_days=c["warmup_days"],
+                    # 同 run_grid：统一 max_warmup 让防御性过滤退化为 no-op
+                    warmup_days=max_warmup,
                     tags=tags or [],
                 )
                 for c in candidates

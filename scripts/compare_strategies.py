@@ -7,7 +7,7 @@
 - 验证集（2026-03-25 ~ 2026-06-25）：开发阶段禁止使用
 
 加速方案：
-1. ParallelRunner 预取数据一次，SharedMemory 共享给两个策略
+1. ParallelRunner 预取数据一次，mmap IPC 文件共享给两个策略
 2. ProcessPoolExecutor 并行回测基准 + 候选（2 核同时跑）
 3. worker 进程日志降噪（ERROR 级别），减少 I/O 开销
 
@@ -269,7 +269,7 @@ def run_parallel_backtest(
 
     runner = ParallelRunner(max_workers=max_workers, data_provider=data_provider)
 
-    # 预取数据（主进程执行一次，SharedMemory 共享给所有 worker）
+    # 预取数据（主进程执行一次，mmap IPC 文件共享给所有 worker）
     print(f"  预取数据: {len(symbols)} 只股票, {start_date} ~ {end_date}")
     full_data = runner._prepare_data(symbols, start_date, end_date)
     if full_data.is_empty():
@@ -285,7 +285,7 @@ def run_parallel_backtest(
 
     outcomes: list = []
     with SharedDataContext(full_data) as sctx:
-        shm_token, shm_size, pickle_data = sctx.get_worker_args()
+        panel_path = sctx.get_worker_args()
         tasks = [
             BacktestTask(
                 strategy_yaml=yaml_str,
@@ -293,9 +293,7 @@ def run_parallel_backtest(
                 end_date=end_date,
                 symbols=symbols,
                 benchmark_symbol="000300.SH",
-                shm_token=shm_token,
-                shm_size=shm_size,
-                pickle_data=pickle_data,
+                panel_path=panel_path,
                 stop_loss=stop_loss,
                 max_drawdown_limit=max_dd_limit,
                 max_position_pct=max_pos_pct,

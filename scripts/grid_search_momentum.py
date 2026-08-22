@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """并行网格扫描纯动量策略参数（质量动量策略的基线对照）。
 
-利用 ParallelRunner（ProcessPoolExecutor + SharedMemory 共享数据底座）：
+利用 ParallelRunner（ProcessPoolExecutor + mmap IPC 文件共享数据底座）：
 - 主进程预取数据一次（PG 缓存优先）
 - worker 进程并发回测，禁用 xtquant（纯缓存，不触发外部下载）
 - 18 组合并发执行，总耗时 ≈ 单次回测时间

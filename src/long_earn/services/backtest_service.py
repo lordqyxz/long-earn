@@ -502,7 +502,7 @@ class BacktestServiceImpl(BacktestService):
 
             # 性能优化（P0）：Walk-Forward fold 级并行
             # 默认走 ParallelRunner（max_workers=0 自动用 os.cpu_count()），
-            # 每个 fold 独立进程跑 train+test，SharedMemory 零拷贝共享 full_data。
+            # 每个 fold 独立进程跑 train+test，mmap IPC 文件零拷贝共享 full_data。
             # max_workers=1 时退化为串行（等价于旧 engine.walk_forward_run）。
             from long_earn.backtest.engine.parallel import (  # noqa: PLC0415
                 ParallelRunner,

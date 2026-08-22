@@ -276,7 +276,7 @@ def run_parallel_backtest(
 
     outcomes: list = []
     with SharedDataContext(full_data) as sctx:
-        shm_token, shm_size, pickle_data = sctx.get_worker_args()
+        panel_path = sctx.get_worker_args()
         tasks = [
             BacktestTask(
                 strategy_yaml=yaml_str,
@@ -284,9 +284,7 @@ def run_parallel_backtest(
                 end_date=end_date,
                 symbols=symbols,
                 benchmark_symbol="000300.SH",
-                shm_token=shm_token,
-                shm_size=shm_size,
-                pickle_data=pickle_data,
+                panel_path=panel_path,
                 stop_loss=stop_loss,
                 max_drawdown_limit=max_dd_limit,
                 max_position_pct=max_pos_pct,
