@@ -8,12 +8,29 @@ filter / rank / expression 路径已退役）。
 （backtest.engine 属领域层，不得反向依赖 services）。
 """
 
+import re
 from typing import Any
 
 import polars as pl
 
 from long_earn.backtest.engine.dsl import StrategyDSL
 from long_earn.backtest.engine.strategy import BaseStrategy
+
+# rebalance_freq 合法格式："<N>D"（N 个交易日，如 "20D"）
+_REBALANCE_FREQ_RE = re.compile(r"^(\d+)D$")
+
+
+def parse_rebalance_days(freq: str) -> int:
+    """解析 ``rebalance_freq`` 为交易日数。
+
+    非法值（空串/格式错/非正数）退化为 1（每日调仓），并保持向后兼容：
+    历史策略未声明或声明非法时行为与修复前一致。
+    """
+    m = _REBALANCE_FREQ_RE.match(freq.strip())
+    if not m:
+        return 1
+    n = int(m.group(1))
+    return n if n >= 1 else 1
 
 
 class DSLStrategy(BaseStrategy):
@@ -30,11 +47,26 @@ class DSLStrategy(BaseStrategy):
     ):
         super().__init__(strategy_id, config)
         self.dsl = dsl_strategy
+        self._rebalance_days = parse_rebalance_days(
+            dsl_strategy.universe.rebalance_freq
+        )
+        # 交易日计数（on_bar 调用次数）：0 表示尚未开仓
+        self._bar_count = 0
         # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
         # 还是只是退化成"什么都不做"而被错误标记 success=True。
         # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
         self.factor_failures: list[dict[str, str]] = []
         self.step_failures: list[dict[str, str]] = []
+
+    def init(self) -> None:
+        """每 run 重置调仓相位（walk-forward 复用实例时避免跨 fold 相位漂移）。"""
+        self._bar_count = 0
+
+    def _should_rebalance(self) -> bool:
+        """调仓频率门控：首个交易日建仓，之后每 N 个交易日调仓一次。"""
+        if self._rebalance_days <= 1:
+            return True
+        return self._bar_count % self._rebalance_days == 0
 
     def _build_operator_executor(self):
         """惰性构造算子目录执行器。
@@ -62,8 +94,17 @@ class DSLStrategy(BaseStrategy):
         ADR-009 收尾：旧式 factors + expression 路径已退役，所有策略必须含
         operator_factors 或 operator 信号步骤（DSL 解析期强制校验）。
         ``bars`` 参数为 BaseStrategy.on_bar 契约要求，算子路径改用 history 面板。
+
+        调仓频率门控：非调仓日返回 None（持仓保持），首个交易日建仓，
+        之后每 ``rebalance_freq`` 个交易日调仓一次。风控（止损/清仓）在
+        引擎层独立运行，不受此门控影响。
         """
         from long_earn.backtest.domain.entities import SignalEvent  # noqa: PLC0415
+
+        do_rebalance = self._should_rebalance()
+        self._bar_count += 1
+        if not do_rebalance:
+            return None
 
         if not hasattr(self, "_op_executor"):
             self._op_executor = self._build_operator_executor()

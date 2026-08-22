@@ -112,6 +112,14 @@ class _StubDSL:
         self.operator_factors = operator_factors or []
         self.signals = signals or []
         self.weights = weights or _StubWeights(method="equal")
+        self.universe = _StubUniverse()
+
+
+class _StubUniverse:
+    """股票池配置桩（rebalance_freq 默认每日调仓）。"""
+
+    def __init__(self, rebalance_freq: str = "1D"):
+        self.rebalance_freq = rebalance_freq
 
 
 class _StubWeights:
