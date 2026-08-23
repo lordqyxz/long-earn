@@ -16,6 +16,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
 from langgraph.graph import END, START, StateGraph
 
 from long_earn.strategy_rd.agents.strategy_develop_agent import StrategyDevelopAgent
@@ -78,14 +79,17 @@ def _training_window(
     backtest_service: BacktestService,
 ) -> tuple[str, str]:
     """取得 HTR 开发回测的强制训练集窗口。"""
-    config = context.config if context is not None else getattr(
-        backtest_service, "config", SimpleNamespace()
+    config = (
+        context.config
+        if context is not None
+        else getattr(backtest_service, "config", SimpleNamespace())
     )
     start_date = getattr(config, "train_start_date", "")
     end_date = getattr(config, "train_end_date", "")
     if not start_date or not end_date:
         raise ValueError("HTR executor 缺少训练集日期配置")
     return start_date, end_date
+
 
 # ADR-014 任务4：默认 universe 与股票数量上限
 # 默认 main_board+gem（沪深除科创板所有标的），与 DSL 默认值保持一致
@@ -213,7 +217,7 @@ def _fetch_universe_financial_brief(
             )
         )
         data = result.data
-        if not hasattr(data, "shape") or data.shape[0] == 0:
+        if not isinstance(data, pl.DataFrame) or data.shape[0] == 0:
             return f"无（{universe} 共 {len(symbols)} 只，但 {aspect} 面板为空）"
 
         # 3. 压缩为统计摘要
@@ -228,8 +232,13 @@ def _fetch_universe_financial_brief(
             try:
                 vals = data[col].drop_nulls()
                 if len(vals) > 0:
-                    mean_v = float(vals.mean())
-                    median_v = float(vals.median())
+                    # polars 聚合结果可能为 None（空序列），防御性收窄后再转 float
+                    _mean = vals.mean()
+                    _median = vals.median()
+                    mean_v = float(_mean) if isinstance(_mean, (int, float)) else 0.0
+                    median_v = (
+                        float(_median) if isinstance(_median, (int, float)) else 0.0
+                    )
                     lines.append(f"  {col}: mean={mean_v:.2f}, median={median_v:.2f}")
             except Exception:
                 continue
@@ -513,7 +522,7 @@ def _ideate_node(
     observations: dict[str, Any] = (
         {"next_focus": observations_raw}
         if isinstance(observations_raw, str)
-        else observations_raw
+        else observations_raw or {}
     )
 
     # Hot-start: 检索历史假设树洞察
@@ -1005,7 +1014,7 @@ def _executor_node(  # noqa: PLR0913
 
     # 所有候选共享的 state 级输入（无候选间状态耦合）
     strategy = state.get("strategy", {}) or {}
-    previous_backtest = state.get("backtest_result", {})
+    previous_backtest = state.get("backtest_result", {}) or {}
     train_start, train_end = _training_window(context, backtest_service)
 
     # ── 阶段 1：逐候选 optimize -> develop（LLM，IO 密集）──
@@ -1373,11 +1382,12 @@ def _decide_evaluate_and_merge(  # noqa: PLR0913
         stability_gate=stability_gate,
         dsr_gate=dsr_gate,
     )
-    oos_score = (
-        tree.get_node(best_result.get("node_id", "")).oos_score
-        if best_result.get("node_id")
-        else None
-    )
+    oos_score: float | None = None
+    node_id = best_result.get("node_id", "")
+    if node_id:
+        node = tree.get_node(node_id)
+        if node is not None:
+            oos_score = node.oos_score
 
     # ADR-015 S3: PBO 概率门（仅在 S1+S2 通过且 action == "merge" 时触发）
     if action == "merge" and best_result.get("backtest_result"):
@@ -1811,7 +1821,7 @@ def _collect_reflection_texts(state: State) -> list[str]:
     tree_data = state.get("hypothesis_tree", {}) or {}
     try:
         tree = HypothesisTree.deserialize(tree_data)
-        texts.extend(n.insight for n in tree.nodes if n.insight)
+        texts.extend(n.insight for n in tree.all_nodes() if n.insight)
     except Exception:
         pass
     return texts
@@ -1849,9 +1859,9 @@ def _gap_detector_node(
     if not strategy_yaml:
         return {"operator_gaps": []}
 
-    # 已注册算子名集合
+    # 已注册算子名集合（list_operators 返回 name -> info 的 dict，key 即算子名）
     try:
-        existing_ops = {op["name"] for op in list_operators()}
+        existing_ops = set(list_operators())
     except Exception:
         existing_ops = set()
 

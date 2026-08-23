@@ -277,24 +277,33 @@ class TestSelfHealing:
         assert len(records) == 1
 
     def test_statement_failure_self_heals(self) -> None:
-        """语句级失败（PK 冲突）后连接应 rollback 自愈，后续写入恢复。"""
+        """语句级失败（PK 冲突）后连接应 rollback 自愈，后续写入恢复。
+
+        批量写入时代：冲突在 flush（query_events 触发）时上抛。
+        """
         run_id = f"heal-{uuid4().hex[:12]}"
         trace_id = f"trace-{uuid4().hex[:12]}"
         a = PostgresAuditProvider()
         b = PostgresAuditProvider()
         try:
             a.log_event(_make_record(run_id=run_id, trace_id=trace_id))
+            a.close()  # 落库 (run_id, trace_id, seq=1)
             # b 的 seq 同样从 1 开始 → 同主键 (run_id, trace_id, seq) 冲突
+            b.log_event(_make_record(run_id=run_id, trace_id=trace_id))
             with pytest.raises(psycopg.errors.UniqueViolation):
-                b.log_event(_make_record(run_id=run_id, trace_id=trace_id))
+                b.query_events(run_id, {})  # 触发 flush → 冲突上抛
             # 自愈后换 trace_id 再写：应恢复成功
             b.log_event(_make_record(run_id=run_id, trace_id=f"{trace_id}-x"))
+            b.close()
         finally:
             a.close()
             b.close()
 
     def test_connection_drop_self_heals(self) -> None:
-        """连接级故障后应丢弃连接，下次写入重连恢复。"""
+        """连接级故障后应丢弃连接，下次写入重连恢复。
+
+        批量写入时代：连接故障在 flush（query_events 触发）时暴露。
+        """
         run_id = f"drop-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
         _log_run_start(provider, run_id)
@@ -302,8 +311,9 @@ class TestSelfHealing:
         # 故障注入：直接关闭底层连接，模拟服务端断开（不走 close() 的干净路径）
         assert provider._conn is not None
         provider._conn.close()
+        provider.log_event(_make_record(run_id=run_id, trace_id="t-drop"))
         with pytest.raises(psycopg.OperationalError):
-            provider.log_event(_make_record(run_id=run_id, trace_id="t-drop"))
+            provider.query_events(run_id, {})  # 触发 flush → 死连接上抛
         # 自愈后下次写入应重连成功
         provider.log_event(_make_record(run_id=run_id, trace_id="t-drop2"))
         provider.close()

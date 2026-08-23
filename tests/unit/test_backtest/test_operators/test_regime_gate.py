@@ -180,9 +180,7 @@ def _barbell_panel(with_benchmark: bool = True) -> pl.DataFrame:
                 }
             )
         if with_benchmark:
-            idx_close = (
-                100.0 * 1.01**i if i < 20 else 122.0 * 0.97 ** (i - 20)
-            )
+            idx_close = 100.0 * 1.01**i if i < 20 else 122.0 * 0.97 ** (i - 20)
             rows.append(
                 {
                     "timestamp": ts,
@@ -244,7 +242,10 @@ def _fill_symbols(engine: EventDrivenBacktestEngine) -> set[str]:
 class TestRegimeDslParse:
     def test_regime_optional(self):
         """无 regime 字段的 DSL 解析正常且 regime 为 None。"""
-        yaml_no_regime = REGIME_YAML.split("  regime:", maxsplit=1)[0] + "  weights: { method: equal }\n"
+        yaml_no_regime = (
+            REGIME_YAML.split("  regime:", maxsplit=1)[0]
+            + "  weights: { method: equal }\n"
+        )
         dsl = parse_strategy_yaml(yaml_no_regime)
         assert dsl.regime is None
 

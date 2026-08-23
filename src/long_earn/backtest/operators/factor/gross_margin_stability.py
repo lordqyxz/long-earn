@@ -8,7 +8,7 @@ from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 class GrossMarginStabilityParams(OperatorParams):
     field: str = "close"
     window: int = 60
-    min_periods: int = 30
+    min_samples: int = 30
     eps: float = 1e-10
 
 
@@ -23,9 +23,10 @@ class GrossMarginStability(Operator):
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, GrossMarginStabilityParams)
         field = params.field
         window = params.window
-        min_periods = params.min_periods
+        min_samples = params.min_samples
         eps = params.eps
 
         # 保留原始行序，确保因果性验证通过（面板可能 shuffle）。
@@ -37,20 +38,20 @@ class GrossMarginStability(Operator):
         if "symbol" in panel.columns:
             mean_expr = (
                 pl.col(field)
-                .rolling_mean(window_size=window, min_periods=min_periods)
+                .rolling_mean(window_size=window, min_samples=min_samples)
                 .over("symbol")
             )
             std_expr = (
                 pl.col(field)
-                .rolling_std(window_size=window, min_periods=min_periods)
+                .rolling_std(window_size=window, min_samples=min_samples)
                 .over("symbol")
             )
         else:
             mean_expr = pl.col(field).rolling_mean(
-                window_size=window, min_periods=min_periods
+                window_size=window, min_samples=min_samples
             )
             std_expr = pl.col(field).rolling_std(
-                window_size=window, min_periods=min_periods
+                window_size=window, min_samples=min_samples
             )
 
         # Compute rolling mean and std, then combine level and stability.

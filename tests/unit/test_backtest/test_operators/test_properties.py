@@ -46,15 +46,9 @@ def price_panels(draw, min_symbols: int = 1, max_symbols: int = 3):
             high = draw(
                 st.floats(low, low + 50.0, allow_nan=False, allow_infinity=False)
             )
-            close = draw(
-                st.floats(low, high, allow_nan=False, allow_infinity=False)
-            )
-            open_p = draw(
-                st.floats(low, high, allow_nan=False, allow_infinity=False)
-            )
-            volume = draw(
-                st.floats(100.0, 1e7, allow_nan=False, allow_infinity=False)
-            )
+            close = draw(st.floats(low, high, allow_nan=False, allow_infinity=False))
+            open_p = draw(st.floats(low, high, allow_nan=False, allow_infinity=False))
+            volume = draw(st.floats(100.0, 1e7, allow_nan=False, allow_infinity=False))
             rows.append(
                 {
                     "timestamp": ts,
@@ -87,9 +81,7 @@ class TestOperatorMonotonicity:
 
     @given(price_panels(min_symbols=2, max_symbols=5))
     @settings(max_examples=200)
-    def test_rank_top_ordering_invariant_under_shift(
-        self, panel: pl.DataFrame
-    ) -> None:
+    def test_rank_top_ordering_invariant_under_shift(self, panel: pl.DataFrame) -> None:
         """rank_top：所有 close 加常数后 top-N 排序不变。"""
         # 价格以 1e-6 为最小报价单位，确保 +100 后不同价格不会因 IEEE-754
         # 舍入折叠为同一值。该约束保留真实的加法平移排序不变性质，且不掩盖
@@ -102,9 +94,7 @@ class TestOperatorMonotonicity:
             ranking_panel, RankTopParams(field="close", top=top_n, ascending=False)
         )
         # 全部 close + 100
-        shifted = ranking_panel.with_columns(
-            (pl.col("close") + 100.0).alias("close")
-        )
+        shifted = ranking_panel.with_columns((pl.col("close") + 100.0).alias("close"))
         shifted_out = op.apply(
             shifted, RankTopParams(field="close", top=top_n, ascending=False)
         )
@@ -123,9 +113,7 @@ class TestOperatorMonotonicity:
                 .filter(pl.col("_rank").is_not_null())["symbol"]
                 .to_list()
             )
-            assert base_syms == shift_syms, (
-                f"T={ts}: 排序在平移后改变"
-            )
+            assert base_syms == shift_syms, f"T={ts}: 排序在平移后改变"
 
     @given(price_panels(min_symbols=1, max_symbols=3))
     @settings(max_examples=30)
@@ -145,13 +133,9 @@ class TestOperatorMonotonicity:
                 ret = sub["ret"][i]
                 if ret is not None:
                     if curr_close > prev_close:
-                        assert ret > 0, (
-                            f"{sym} T={i}: close↑但 ret={ret} ≤ 0"
-                        )
+                        assert ret > 0, f"{sym} T={i}: close↑但 ret={ret} ≤ 0"
                     elif curr_close < prev_close:
-                        assert ret < 0, (
-                            f"{sym} T={i}: close↓但 ret={ret} ≥ 0"
-                        )
+                        assert ret < 0, f"{sym} T={i}: close↓但 ret={ret} ≥ 0"
 
     @given(price_panels(min_symbols=1, max_symbols=3))
     @settings(max_examples=30)
@@ -180,9 +164,7 @@ class TestOperatorMonotonicity:
 
     @given(price_panels(min_symbols=1, max_symbols=3))
     @settings(max_examples=30)
-    def test_shift_returns_original_value_at_lag(
-        self, panel: pl.DataFrame
-    ) -> None:
+    def test_shift_returns_original_value_at_lag(self, panel: pl.DataFrame) -> None:
         """shift(periods=N)：输出第 N 行后应等于原始 close 第 0 行。"""
         op = get_operator("shift")
         periods = 3
@@ -197,14 +179,12 @@ class TestOperatorMonotonicity:
                 if prevs[i] is not None:
                     assert prevs[i] == pytest.approx(closes[i - periods], rel=1e-9), (
                         f"{sym} T={i}: shift({periods})={prevs[i]} "
-                        f"≠ close[{i-periods}]={closes[i-periods]}"
+                        f"≠ close[{i - periods}]={closes[i - periods]}"
                     )
 
     @given(price_panels(min_symbols=1, max_symbols=3))
     @settings(max_examples=30)
-    def test_sma_output_bounded_by_input_range(
-        self, panel: pl.DataFrame
-    ) -> None:
+    def test_sma_output_bounded_by_input_range(self, panel: pl.DataFrame) -> None:
         """sma：输出值应在输入窗口 min/max 范围内。"""
         op = get_operator("sma")
         window = 5
@@ -261,9 +241,7 @@ class TestSlippageSymmetry:
         assert buy_fill.fill_price >= price, (
             f"BUY fill_price={buy_fill.fill_price} < current_price={price}"
         )
-        assert buy_fill.slippage >= 0, (
-            f"BUY slippage={buy_fill.slippage} < 0"
-        )
+        assert buy_fill.slippage >= 0, f"BUY slippage={buy_fill.slippage} < 0"
 
         # 卖出：成交价 ≤ 当前价（滑点向下）
         sell_order = OrderEvent(
@@ -280,9 +258,7 @@ class TestSlippageSymmetry:
         assert sell_fill.fill_price <= price, (
             f"SELL fill_price={sell_fill.fill_price} > current_price={price}"
         )
-        assert sell_fill.slippage >= 0, (
-            f"SELL slippage={sell_fill.slippage} < 0"
-        )
+        assert sell_fill.slippage >= 0, f"SELL slippage={sell_fill.slippage} < 0"
 
     @given(price_panels(min_symbols=1, max_symbols=1))
     @settings(max_examples=50)
@@ -324,14 +300,10 @@ class TestSlippageSymmetry:
         # 往返净收益 = 卖出收入 - 买入支出
         buy_cost = buy_fill.fill_price * qty + buy_fill.commission
         sell_revenue = (
-            sell_fill.fill_price * qty
-            - sell_fill.commission
-            - sell_fill.stamp_duty
+            sell_fill.fill_price * qty - sell_fill.commission - sell_fill.stamp_duty
         )
         net = sell_revenue - buy_cost
-        assert net < 0, (
-            f"往返净收益={net:.4f} ≥ 0（滑点+佣金应产生正成本）"
-        )
+        assert net < 0, f"往返净收益={net:.4f} ≥ 0（滑点+佣金应产生正成本）"
 
     @given(price_panels(min_symbols=1, max_symbols=1))
     @settings(max_examples=50)
@@ -391,7 +363,7 @@ class TestSlippageSymmetry:
         impact2 = config.compute_impact_bps(order_amount * 2, daily_volume)
 
         assert impact2 >= impact1, (
-            f"冲击成本非单调: impact({order_amount*2})={impact2} "
+            f"冲击成本非单调: impact({order_amount * 2})={impact2} "
             f"< impact({order_amount})={impact1}"
         )
 
@@ -434,18 +406,14 @@ class TestPITDelay:
         before_announce = result.loc[
             result.index.get_level_values("date") <= pd.Timestamp("2024-02-19")
         ]
-        assert before_announce["roe"].isna().all(), (
-            "Q1 公告前不应有 roe 数据"
-        )
+        assert before_announce["roe"].isna().all(), "Q1 公告前不应有 roe 数据"
 
         # 2024-02-20 及之后：应有 Q1 数据
         after_announce = result.loc[
             (result.index.get_level_values("date") >= pd.Timestamp("2024-02-20"))
             & (result.index.get_level_values("date") < pd.Timestamp("2024-05-25"))
         ]
-        assert (after_announce["roe"] == 10.0).all(), (
-            "Q1 公告后应有 roe=10.0"
-        )
+        assert (after_announce["roe"] == 10.0).all(), "Q1 公告后应有 roe=10.0"
 
     def test_asof_never_uses_future_announcement(self) -> None:
         """PIT 对齐：任何日期不引用未来公告日的数据。"""
@@ -471,20 +439,14 @@ class TestPITDelay:
             (result.index.get_level_values("date") >= pd.Timestamp("2024-03-01"))
             & (result.index.get_level_values("date") <= pd.Timestamp("2024-08-31"))
         ]
-        assert (mid_period["roe"] == 8.0).all(), (
-            "Q2 公告前不应有 roe=20.0"
-        )
-        assert (mid_period["eps"] == 0.8).all(), (
-            "Q2 公告前不应有 eps=2.0"
-        )
+        assert (mid_period["roe"] == 8.0).all(), "Q2 公告前不应有 roe=20.0"
+        assert (mid_period["eps"] == 0.8).all(), "Q2 公告前不应有 eps=2.0"
 
         # 2024-09-01 及之后：应有 Q2 数据（roe=20.0）
         after_q2 = result.loc[
             result.index.get_level_values("date") >= pd.Timestamp("2024-09-01")
         ]
-        assert (after_q2["roe"] == 20.0).all(), (
-            "Q2 公告后应有 roe=20.0"
-        )
+        assert (after_q2["roe"] == 20.0).all(), "Q2 公告后应有 roe=20.0"
 
     def test_asof_forward_fill_within_announcement_window(self) -> None:
         """PIT 对齐：公告后数据持续有效（forward fill），直到下一公告。"""
@@ -506,14 +468,12 @@ class TestPITDelay:
         )
 
         # 整个区间不应有 NaN（公告后前向填充）
-        assert not result["roe"].isna().any(), (
-            "PIT 对齐后不应有缺失值"
-        )
+        assert not result["roe"].isna().any(), "PIT 对齐后不应有缺失值"
 
         # 值序列：Q1 公告后 → Q2 公告后，不应有跳跃回退
         roe_vals = result["roe"].values
         for i in range(1, len(roe_vals)):
             assert roe_vals[i] >= roe_vals[i - 1], (
                 f"PIT 对齐值应单调不降（roe[{i}]={roe_vals[i]} "
-                f"< roe[{i-1}]={roe_vals[i-1]}）"
+                f"< roe[{i - 1}]={roe_vals[i - 1]}）"
             )

@@ -97,26 +97,31 @@ class ConnectorDataProvider(Protocol):
 
 
 class ConnectorMemoryProvider(Protocol):
-    """连接器需要的记忆访问接口 — 由 MemoryServiceImpl 实现。"""
+    """连接器需要的记忆访问接口 — 由 MemoryServiceImpl 实现。
+
+    返回类型用 ``Any``：StrategyExperience 定义在 services 层，ontology 按
+    import-linter 契约不得依赖 services，故此处不引用具体类型；消费侧
+    ``_experience_to_dict`` 已兼容 dataclass / dict 混合形态。
+    """
 
     def search_experience(
         self,
         query: str,
         k: int = 3,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]: ...
+        min_sharpe: float | None = None,
+    ) -> list[Any]: ...
 
     def activate_events(
         self,
         query: str,
         k: int = 5,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]: ...
+        include_relations: bool = True,
+    ) -> list[Any]: ...
 
 
 def _experience_to_dict(exp: Any) -> dict[str, Any] | Any:
     """把 StrategyExperience dataclass 转为 dict（HTR 调用方用 .get()）。"""
-    if is_dataclass(exp):
+    if is_dataclass(exp) and not isinstance(exp, type):
         return asdict(exp)
     return exp
 
@@ -283,7 +288,10 @@ class Connector:
         if not symbols or self._data is None:
             return pl.DataFrame(), []
         fields = resolution.payload.get("fields", [])
-        field_list = [str(f) for f in fields] if fields else None
+        if isinstance(fields, (list, tuple)):
+            field_list = [str(f) for f in fields] if fields else None
+        else:
+            field_list = None
         start, end = self._parse_time(query.time)
         df = self._data.get_financial_panel(
             symbols,

@@ -347,7 +347,7 @@ def _enrich_sectors_batch(cache: Any) -> None:
         )
 
         client = MiniQmtClient.get()
-        if not client.is_available():
+        if not client.is_available:
             logger.debug("xtquant 不可用，跳过板块批量回填")
             return
 

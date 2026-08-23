@@ -290,9 +290,7 @@ class TestRunCandidatesEquivalence:
             }
 
         # 批量路径：统一 max_warmup
-        runner = ParallelRunner(
-            max_workers=1, data_provider=_MockDataProvider(panel)
-        )
+        runner = ParallelRunner(max_workers=1, data_provider=_MockDataProvider(panel))
         outcomes = runner.run_candidates(
             strategy_yamls=[short_yaml, long_yaml],
             start_date="2024-01-01",
@@ -307,12 +305,12 @@ class TestRunCandidatesEquivalence:
             assert outcome.sharpe_ratio == pytest.approx(
                 expected["sharpe"], rel=1e-3
             ), f"{label} sharpe 不一致"
-            assert outcome.total_return == pytest.approx(
-                expected["ret"], rel=1e-3
-            ), f"{label} total_return 不一致"
-            assert outcome.max_drawdown == pytest.approx(
-                expected["dd"], rel=1e-3
-            ), f"{label} max_drawdown 不一致"
+            assert outcome.total_return == pytest.approx(expected["ret"], rel=1e-3), (
+                f"{label} total_return 不一致"
+            )
+            assert outcome.max_drawdown == pytest.approx(expected["dd"], rel=1e-3), (
+                f"{label} max_drawdown 不一致"
+            )
 
     def test_run_candidates_preserves_diagnostics(self) -> None:
         """非退化策略的 diagnostics 保真：degenerate=False, trade_count>0。

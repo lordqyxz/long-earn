@@ -1,4 +1,4 @@
-"""算子数值正确性测试（关键算子）。
+﻿"""算子数值正确性测试（关键算子）。
 
 校验算子输出与按 symbol 分组的手算期望一致，且输出行序与 panel 对齐（即使
 panel 打乱输入）。重点验证时序对齐与窗口边界，不重复 causality 已覆盖的内容。
@@ -255,9 +255,7 @@ class TestOperatorStability:
     def test_shift_handles_nan(self) -> None:
         """shift 算子：NaN 输入不应崩溃"""
         panel = _panel_with_nan()
-        out = get_operator("shift").apply(
-            panel, ShiftParams(field="close", periods=1)
-        )
+        out = get_operator("shift").apply(panel, ShiftParams(field="close", periods=1))
         assert out is not None, "shift 算子 NaN 输入时不应返回 None"
         assert out.len() == panel.height
 
@@ -406,21 +404,21 @@ class TestGrossMarginStabilityStability:
     def test_handles_nan(self) -> None:
         out = get_operator("gross_margin_stability").apply(
             _panel_with_nan(),
-            GrossMarginStabilityParams(field="close", window=60, min_periods=30),
+            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
     def test_handles_inf(self) -> None:
         out = get_operator("gross_margin_stability").apply(
             _panel_with_inf(),
-            GrossMarginStabilityParams(field="close", window=60, min_periods=30),
+            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
     def test_handles_extreme(self) -> None:
         out = get_operator("gross_margin_stability").apply(
             _panel_with_extreme(),
-            GrossMarginStabilityParams(field="close", window=60, min_periods=30),
+            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
@@ -428,7 +426,7 @@ class TestGrossMarginStabilityStability:
         panel = _panel_short_for_window()
         out = get_operator("gross_margin_stability").apply(
             panel,
-            GrossMarginStabilityParams(field="close", window=100, min_periods=50),
+            GrossMarginStabilityParams(field="close", window=100, min_samples=50),
         )
         assert out is not None
 
@@ -439,7 +437,7 @@ class TestGrossMarginStabilityStability:
         )
         out = get_operator("gross_margin_stability").apply(
             empty,
-            GrossMarginStabilityParams(field="close", window=60, min_periods=30),
+            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
@@ -450,28 +448,28 @@ class TestRoeQualityStability:
     def test_handles_nan(self) -> None:
         out = get_operator("roe_quality").apply(
             _panel_with_nan(),
-            RoeQualityParams(field="close", window=20, min_periods=5),
+            RoeQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_handles_inf(self) -> None:
         out = get_operator("roe_quality").apply(
             _panel_with_inf(),
-            RoeQualityParams(field="close", window=20, min_periods=5),
+            RoeQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_handles_extreme(self) -> None:
         out = get_operator("roe_quality").apply(
             _panel_with_extreme(),
-            RoeQualityParams(field="close", window=20, min_periods=5),
+            RoeQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_window_longer_than_data(self) -> None:
         panel = _panel_short_for_window()
         out = get_operator("roe_quality").apply(
-            panel, RoeQualityParams(field="close", window=100, min_periods=50)
+            panel, RoeQualityParams(field="close", window=100, min_samples=50)
         )
         assert out is not None
 
@@ -481,7 +479,7 @@ class TestRoeQualityStability:
             schema={"symbol": pl.Utf8, "timestamp": pl.Int64, "close": pl.Float64},
         )
         out = get_operator("roe_quality").apply(
-            empty, RoeQualityParams(field="close", window=20, min_periods=5)
+            empty, RoeQualityParams(field="close", window=20, min_samples=5)
         )
         assert out is not None
 
@@ -548,8 +546,10 @@ class TestRankTopStability:
         empty = pl.DataFrame(
             {"symbol": [], "timestamp": [], "close": [], "volume": []},
             schema={
-                "symbol": pl.Utf8, "timestamp": pl.Int64,
-                "close": pl.Float64, "volume": pl.Float64,
+                "symbol": pl.Utf8,
+                "timestamp": pl.Int64,
+                "close": pl.Float64,
+                "volume": pl.Float64,
             },
         )
         out = get_operator("rank_top").apply(
@@ -611,9 +611,7 @@ class TestRSIStability:
 
     def test_window_longer_than_data(self) -> None:
         panel = _panel_short_for_window()
-        out = get_operator("rsi").apply(
-            panel, RSIParams(field="close", window=100)
-        )
+        out = get_operator("rsi").apply(panel, RSIParams(field="close", window=100))
         assert out is not None
 
     def test_empty_panel(self) -> None:
@@ -711,8 +709,11 @@ class TestLowvolMomentumComboStability:
         out = get_operator("lowvol_momentum_combo").apply(
             _panel_with_nan(),
             LowvolMomentumComboParams(
-                field="close", low_vol_lookback=10, momentum_lookback=10,
-                low_vol_weight=0.7, momentum_weight=0.3,
+                field="close",
+                low_vol_lookback=10,
+                momentum_lookback=10,
+                low_vol_weight=0.7,
+                momentum_weight=0.3,
             ),
         )
         assert out is not None
@@ -721,8 +722,11 @@ class TestLowvolMomentumComboStability:
         out = get_operator("lowvol_momentum_combo").apply(
             _panel_with_inf(),
             LowvolMomentumComboParams(
-                field="close", low_vol_lookback=5, momentum_lookback=5,
-                low_vol_weight=0.7, momentum_weight=0.3,
+                field="close",
+                low_vol_lookback=5,
+                momentum_lookback=5,
+                low_vol_weight=0.7,
+                momentum_weight=0.3,
             ),
         )
         assert out is not None
@@ -733,8 +737,12 @@ class TestLowvolMomentumComboStability:
         out = get_operator("lowvol_momentum_combo").apply(
             panel,
             LowvolMomentumComboParams(
-                field="close", low_vol_lookback=20, momentum_lookback=20,
-                low_vol_weight=0.7, momentum_weight=0.3, min_obs=20,
+                field="close",
+                low_vol_lookback=20,
+                momentum_lookback=20,
+                low_vol_weight=0.7,
+                momentum_weight=0.3,
+                min_obs=20,
             ),
         )
         assert out is not None
@@ -747,8 +755,11 @@ class TestLowvolMomentumComboStability:
         out = get_operator("lowvol_momentum_combo").apply(
             empty,
             LowvolMomentumComboParams(
-                field="close", low_vol_lookback=10, momentum_lookback=10,
-                low_vol_weight=0.7, momentum_weight=0.3,
+                field="close",
+                low_vol_lookback=10,
+                momentum_lookback=10,
+                low_vol_weight=0.7,
+                momentum_weight=0.3,
             ),
         )
         assert out is not None
@@ -761,7 +772,9 @@ class TestQualityMomentumStability:
         out = get_operator("quality_momentum").apply(
             _panel_with_nan(),
             QualityMomentumParams(
-                field="close", momentum_window=10, quality_window=30,
+                field="close",
+                momentum_window=10,
+                quality_window=30,
             ),
         )
         assert out is not None
@@ -770,7 +783,9 @@ class TestQualityMomentumStability:
         out = get_operator("quality_momentum").apply(
             _panel_with_inf(),
             QualityMomentumParams(
-                field="close", momentum_window=5, quality_window=10,
+                field="close",
+                momentum_window=5,
+                quality_window=10,
             ),
         )
         assert out is not None
@@ -779,7 +794,9 @@ class TestQualityMomentumStability:
         out = get_operator("quality_momentum").apply(
             _panel_with_extreme(),
             QualityMomentumParams(
-                field="close", momentum_window=5, quality_window=10,
+                field="close",
+                momentum_window=5,
+                quality_window=10,
             ),
         )
         assert out is not None
@@ -792,7 +809,9 @@ class TestQualityMomentumStability:
         out = get_operator("quality_momentum").apply(
             empty,
             QualityMomentumParams(
-                field="close", momentum_window=10, quality_window=30,
+                field="close",
+                momentum_window=10,
+                quality_window=30,
             ),
         )
         assert out is not None
@@ -1003,3 +1022,4 @@ class TestBollingerFormula:
         _assert_series_approx(out["middle"], expected_mid)
         _assert_series_approx(out["upper"], expected_upper)
         _assert_series_approx(out["lower"], expected_lower)
+

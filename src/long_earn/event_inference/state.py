@@ -28,8 +28,8 @@ class EventInferenceState(TypedDict, total=False):
     # 每项是 Substance 的 dict 表示（form=RELATION）
     propagated_relations: list[dict[str, Any]]
 
-    # conflict 节点产出：冲突检测结果（冲突组分配）
-    conflict_groups: dict[str, str]
+    # conflict 节点产出：冲突检测结果（冲突组分配，键为事件下标 → 组 ID）
+    conflict_groups: dict[int, str]
 
     # save 节点产出：落库的 sid 列表 + 统计
     saved_sids: list[str]

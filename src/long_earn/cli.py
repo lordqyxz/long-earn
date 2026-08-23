@@ -118,8 +118,10 @@ def _print_research_banner(
     recent_window: str,
 ) -> None:
     """打印 research 子命令启动横幅。"""
+    from long_earn.config import AppConfig
     from long_earn.core.storage import best_strategy_path, strategy_results_path
 
+    assert isinstance(config, AppConfig)
     results_file = strategy_results_path()
     best_file = best_strategy_path()
 
@@ -307,8 +309,10 @@ def _run_sync(
 ) -> None:
     """从 miniQMT 同步行情与财务到 DuckDB 主数据层。"""
     from long_earn.services.incremental_sync import IncrementalSyncService
+    from long_earn.services.logger_service import LoggerServiceImpl
 
-    service = IncrementalSyncService(logger=logger)
+    # 服务层接受 LoggerService 协议实例，而非 loguru 全局 logger
+    service = IncrementalSyncService(logger=LoggerServiceImpl())
     report = service.sync(
         universe=universe,
         start_date=start,
@@ -370,38 +374,22 @@ def web(
     substances: str = typer.Option(
         "", "--substances", help="SubstanceStore JSONL 路径（事件流端点）"
     ),
-    fastapi: bool = typer.Option(
-        True, "--fastapi/--no-fastapi", help="使用 FastAPI + WebSocket（默认启用）"
-    ),
     allow_remote: bool = typer.Option(
         False,
         "--allow-remote",
         help="明确允许绑定非本机地址；远程部署仍需认证和网络访问控制",
     ),
 ) -> None:
-    """启动回测可视化 Web 服务。
+    """启动回测可视化 Web 服务（FastAPI + Uvicorn，支持 WebSocket 实时事件流推送）。"""
+    from long_earn.app.app import serve_visualization_fastapi
 
-    默认使用 FastAPI + Uvicorn，支持 WebSocket 实时事件流推送。
-    使用 --no-fastapi 回退到 stdlib http.server 旧版。
-    """
-    if fastapi:
-        from long_earn.app.app import serve_visualization_fastapi
-
-        serve_visualization_fastapi(
-            host=host,
-            port=port,
-            db_path=db,
-            substances_path=substances,
-            allow_remote=allow_remote,
-        )
-    else:
-        serve_visualization_fastapi(
-            host=host,
-            port=port,
-            db_path=db,
-            substances_path=substances,
-            allow_remote=allow_remote,
-        )
+    serve_visualization_fastapi(
+        host=host,
+        port=port,
+        db_path=db,
+        substances_path=substances,
+        allow_remote=allow_remote,
+    )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
@@ -293,7 +294,7 @@ class ResearchAgent:
                             min_weight=0.0,
                         )
                         for p in paths[:20]:
-                            node_name = p.node.name if p.node is not None else p.sid
+                            node_name = p.node.label if p.node is not None else p.sid
                             lines.append(
                                 f"- {p.sid} → {node_name} "
                                 f"(w={getattr(p, 'weight', 0):.2f})"
@@ -658,8 +659,7 @@ class ResearchAgent:
                         n_obs = 252
                         if fold_results:
                             avg_days = sum(
-                                int(f.get("trading_days", 0) or 0)
-                                for f in fold_results
+                                int(f.get("trading_days", 0) or 0) for f in fold_results
                             ) / max(len(fold_results), 1)
                             n_obs = max(int(avg_days), 63)
                         dsr = DeflatedSharpeGate().evaluate(
@@ -973,7 +973,7 @@ class ResearchAgent:
         if self._last_context:
             user_content = f"{query}\n\n## 已激活上下文\n\n{self._last_context[:3000]}"
 
-        run_config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
+        run_config: RunnableConfig = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
         if self._checkpointer is not None:
             tid = thread_id.strip() or "tog-research"
             run_config["configurable"] = {"thread_id": tid}

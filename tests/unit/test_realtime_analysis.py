@@ -77,7 +77,9 @@ class TestRealtimeProviderContract:
         self, unavailable_provider: RealtimeDataProvider
     ) -> None:
         """不可用时 subscribe_quote 返回空 ID。"""
-        assert unavailable_provider.subscribe_quote(["600519.SH"], lambda _d: None) == ""
+        assert (
+            unavailable_provider.subscribe_quote(["600519.SH"], lambda _d: None) == ""
+        )
 
 
 class TestCompositeRealtimeProvider:
@@ -223,7 +225,9 @@ class TestFundFlowAnalyst:
             event_context="茅台发布业绩预告",
         )
 
-        prompt = ctx.require_llm.return_value.get_llm.return_value.invoke.call_args[0][0]
+        prompt = ctx.require_llm.return_value.get_llm.return_value.invoke.call_args[0][
+            0
+        ]
         assert "茅台发布业绩预告" in prompt
 
     def test_fetch_fund_flow_with_mi(self) -> None:

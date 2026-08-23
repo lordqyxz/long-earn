@@ -8,7 +8,7 @@ from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 class RoeQualityParams(OperatorParams):
     field: str = "close"
     window: int = 20
-    min_periods: int = 5
+    min_samples: int = 5
 
 
 @operator
@@ -22,7 +22,8 @@ class RoeQuality(Operator):
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
-        p = params  # type: RoeQualityParams
+        assert isinstance(params, RoeQualityParams)
+        p = params
         # Preserve original row order
         panel = panel.with_columns(pl.Series(range(panel.height)).alias("__row"))
         # Sort for time series calculations
@@ -36,13 +37,13 @@ class RoeQuality(Operator):
         # Rolling mean and std of returns (trailing window)
         mean_expr = (
             pl.col("ret")
-            .rolling_mean(window_size=p.window, min_periods=p.min_periods)
+            .rolling_mean(window_size=p.window, min_samples=p.min_samples)
             .over("symbol")
             .alias("ret_mean")
         )
         std_expr = (
             pl.col("ret")
-            .rolling_std(window_size=p.window, min_periods=p.min_periods)
+            .rolling_std(window_size=p.window, min_samples=p.min_samples)
             .over("symbol")
             .alias("ret_std")
         )

@@ -289,6 +289,41 @@ def _validate_operator_steps(strategy: StrategyDSL) -> None:
             raise ValueError(f"第 {i} 个 operator 信号步骤非法: {exc}") from exc
 
 
+def lookback_profile(dsl: StrategyDSL) -> tuple[int, int]:
+    """扫描 DSL 算子参数，返回 (最大有限回溯窗口 bars, 最大 ewm span)。
+
+    供两处消费：compute_warmup_days（转日历日）与 DSLStrategy 历史
+    截断窗口（有限窗口 + 4×span ewm 收敛余量）。扫描口径与
+    compute_warmup_days 历史修复（ADR-013 T6）保持一致：覆盖
+    ``operator_factors`` + ``signals``(type=operator) 全部算子步骤的
+    回溯参数键（``period``/``periods``/``window``/``span``/``fast``/
+    ``slow``/``signal``）+ 牛熊门控窗口。
+    """
+    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
+    span_keys = ("span", "fast", "slow", "signal")
+    max_window = 0
+    max_span = 0
+    operator_steps: list[dict[str, Any]] = list(dsl.operator_factors)
+    for step in dsl.signals:
+        if step.get("type") == "operator":
+            operator_steps.append(step)
+    for step in operator_steps:
+        params = step.get("params") or {}
+        for key in lookback_keys:
+            val = params.get(key, 0) or 0
+            max_window = max(max_window, val)
+        for key in span_keys:
+            val = params.get(key, 0) or 0
+            max_span = max(max_span, val)
+    max_window = max(max_window, max_span)
+    # 牛熊门控窗口同样需要回溯（数据不足时门控退化为牛市，熊市不触发）
+    if dsl.regime is not None:
+        max_window = max(max_window, dsl.regime.window)
+        if dsl.regime.uses_relative:
+            max_window = max(max_window, dsl.regime.rel_window)
+    return max_window, max_span
+
+
 def compute_warmup_days(dsl: StrategyDSL) -> int:
     """从 DSL 算子参数推断所需预热期（日历日）。
 
@@ -306,24 +341,7 @@ def compute_warmup_days(dsl: StrategyDSL) -> int:
     来源：自 ``services/backtest_service.py`` 迁入（``_compute_warmup_days``
     改名公开函数），以恢复依赖方向。
     """
-    # 回溯窗口参数键全集合：任何含回溯语义的算子参数都应在此
-    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
-    max_period = 0
-    # 扫描 operator_factors + signals(type=operator) 全部算子步骤
-    operator_steps: list[dict[str, Any]] = list(dsl.operator_factors)
-    for step in dsl.signals:
-        if step.get("type") == "operator":
-            operator_steps.append(step)
-    for step in operator_steps:
-        params = step.get("params") or {}
-        for key in lookback_keys:
-            val = params.get(key, 0) or 0
-            max_period = max(max_period, val)
-    # 牛熊门控窗口同样需要 warmup（数据不足时门控退化为牛市，熊市不触发）
-    if dsl.regime is not None:
-        max_period = max(max_period, dsl.regime.window)
-        if dsl.regime.uses_relative:
-            max_period = max(max_period, dsl.regime.rel_window)
+    max_period, _ = lookback_profile(dsl)
     if max_period <= 0:
         return 0
     # 交易日 -> 日历日：约 7/5 倍；加 30 天 buffer 防节假日

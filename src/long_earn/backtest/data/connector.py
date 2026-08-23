@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pandas as pd
 import polars as pl
@@ -31,7 +31,10 @@ from loguru import logger
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.backtest.data.financial.panel import build_daily_financial_panel
-from long_earn.backtest.data.financial.sync import ensure_financial_cache
+from long_earn.backtest.data.financial.sync import (
+    FinancialCacheIngestor,
+    ensure_financial_cache,
+)
 from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 from long_earn.backtest.data.polars_adapter import to_polars_panel
 
@@ -307,6 +310,11 @@ class CompositeDataConnector:
             self._miniqmt_available = False
         return self._miniqmt_available
 
+    @property
+    def is_available(self) -> bool:
+        """数据源是否可用（DataConnector 契约，委托 miniqmt 可用性检测）。"""
+        return self.miniqmt_available
+
     def _log_source(self, source: str) -> None:
         """记录数据来源。"""
         logger.info(f"[数据来源: {source}]")
@@ -348,7 +356,15 @@ class CompositeDataConnector:
         end_date = self._normalize_date(end_date)
         field_list = fields or list(FINANCIAL_FIELD_MAP.values())
         mq = self.miniqmt
-        ensure_financial_cache(self.cache, symbols, start_date, end_date, mq)
+        # MiniQmtDataProvider 同时实现 FinancialCacheIngestor（fetch_financials），
+        # 此处仅需 ingestor 能力，显式 cast 收窄（协议不互通）
+        ensure_financial_cache(
+            self.cache,
+            symbols,
+            start_date,
+            end_date,
+            cast(FinancialCacheIngestor | None, mq),
+        )
         df = build_daily_financial_panel(
             self.cache, symbols, start_date, end_date, field_list
         )

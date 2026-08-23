@@ -21,7 +21,8 @@ class e2e_volatility(Operator):  # noqa: N801 算子名须与目录注册名一�
     params_cls: ClassVar[type[OperatorParams]] = P
     min_history: ClassVar[int] = 0
 
-    def apply(self, panel, params):
+    def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, P)
         # 保留原始行序，确保因果性验证通过（面板可能 shuffle）。
         panel = panel.with_row_index("__e2ev_row_id")
         if "symbol" in panel.columns and "timestamp" in panel.columns:

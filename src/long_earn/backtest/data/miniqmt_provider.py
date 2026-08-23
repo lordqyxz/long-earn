@@ -275,7 +275,13 @@ class MiniQmtClient:
         self._download_kline(stock_list, start_time, end_time, period)
 
         result_fields = fields or [
-            "time", "open", "high", "low", "close", "volume", "suspendFlag"
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "suspendFlag",
         ]
         if "time" not in result_fields:
             result_fields = ["time", *fields] if fields else result_fields
@@ -320,7 +326,8 @@ class MiniQmtClient:
                         "close": float(data.iloc[i].get("close", 0.0) or 0.0),
                         "volume": float(data.iloc[i].get("volume", 0.0) or 0.0),
                         # P1-09: suspendFlag=1 表示停牌，is_tradable = NOT suspendFlag
-                        "is_tradable": int(data.iloc[i].get("suspendFlag", 0) or 0) == 0,
+                        "is_tradable": int(data.iloc[i].get("suspendFlag", 0) or 0)
+                        == 0,
                     }
                 )
 
@@ -398,7 +405,10 @@ class MiniQmtClient:
                         )
                     else:
                         tmp["announce_date"] = pd.NaT
-                    rows.extend(tmp.to_dict("records"))
+                    # to_dict("records") 的键类型为 Hashable，统一转 str 以匹配
+                    # rows 的 dict[str, Any] 契约
+                    for rec in tmp.to_dict("records"):
+                        rows.append({str(k): v for k, v in rec.items()})
 
         result = pd.DataFrame(rows)
         if not result.empty and "report_date" in result.columns:

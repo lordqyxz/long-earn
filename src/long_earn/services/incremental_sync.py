@@ -8,7 +8,7 @@ DuckDB 是系统的优先访问层，承载业务操作所需的本地同步数�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from long_earn.services.data_ingestion_service import DataIngestionService
 
@@ -29,7 +29,7 @@ class IncrementalSyncReport:
     reason: str = ""
 
     @classmethod
-    def from_result(cls, result: dict[str, object]) -> IncrementalSyncReport:
+    def from_result(cls, result: dict[str, Any]) -> IncrementalSyncReport:
         """将底层采集结果转换为同步模块的公开结果。"""
         return cls(
             status=str(result.get("status", "error")),

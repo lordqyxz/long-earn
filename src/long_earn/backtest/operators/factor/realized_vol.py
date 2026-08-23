@@ -23,7 +23,8 @@ class RealizedVol(Operator):
     params_cls: ClassVar[type[OperatorParams]] = RealizedVolParams
     min_history: ClassVar[int] = 0
 
-    def apply(self, panel, params):
+    def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, RealizedVolParams)
         expr = (
             (pl.col(params.field) / pl.col(params.field).shift(1) - 1)
             .pow(2)

@@ -36,9 +36,7 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 # 唯一前缀：同一 pytest 进程内隔离测试数据（不同 run 互不污染）
 _UNIQ = uuid4().hex[:10]
@@ -56,9 +54,7 @@ def _cleanup_test_data():
     cache = DataCache()
     try:
         conn = cache._get_conn()
-        conn.execute(
-            "DELETE FROM price_daily WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"]
-        )
+        conn.execute("DELETE FROM price_daily WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"])
         for table in (
             "income_stmt",
             "balance_sheet",
@@ -66,9 +62,7 @@ def _cleanup_test_data():
             "pershareindex",
             "capital",
         ):
-            conn.execute(
-                f"DELETE FROM {table} WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"]
-            )
+            conn.execute(f"DELETE FROM {table} WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"])
         conn.commit()
     finally:
         cache.close()
@@ -312,8 +306,12 @@ class TestSelectFinancialsToRefresh:
         """仅过期股票（无全量缺失）→ 起始日取最早过期起始日"""
         cache = _make_cache(tmp_path)
         # 两只都过期，公告日不同
-        _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])  # 起始 2025-01-02
-        _save_financial_rows(cache, _sym("000002.SZ"), ["2025-03-01"])  # 起始 2025-03-02
+        _save_financial_rows(
+            cache, _sym("000001.SZ"), ["2025-01-01"]
+        )  # 起始 2025-01-02
+        _save_financial_rows(
+            cache, _sym("000002.SZ"), ["2025-03-01"]
+        )  # 起始 2025-03-02
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
@@ -356,7 +354,9 @@ class TestBatchLatestInterfaces:
         _save_price_rows(cache, _sym("000001.SZ"), ["2026-07-01", "2026-07-08"])
         _save_price_rows(cache, _sym("000002.SZ"), ["2026-07-05"])
 
-        result = cache.get_price_latest_dates([_sym("000001.SZ"), _sym("000002.SZ"), _sym("999999.SZ")])
+        result = cache.get_price_latest_dates(
+            [_sym("000001.SZ"), _sym("000002.SZ"), _sym("999999.SZ")]
+        )
         assert _sym("000001.SZ") in result
         assert "2026-07-08" in str(result[_sym("000001.SZ")])
         assert _sym("000002.SZ") in result

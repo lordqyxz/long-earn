@@ -75,7 +75,8 @@ class PriceAlertMonitor:
     def _handle_tick(self, tick: dict[str, object]) -> None:
         """tick 回调：检查所有告警规则。"""
         symbol = str(tick.get("symbol", ""))
-        price = float(tick.get("price", 0.0) or 0.0)
+        _price = tick.get("price", 0.0)
+        price = float(_price) if isinstance(_price, (int, float)) else 0.0
         if price <= 0 or not symbol:
             return
         for alert in self._alerts:

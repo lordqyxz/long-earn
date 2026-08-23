@@ -103,13 +103,31 @@ class PostgresAuditProvider(AuditProvider):
     PostgreSQL MVCC 原生支持多写者并发，消除「worker 临时文件 + 主进程
     合并」的旧架构（P0-11 缺口根治）。
 
+    批量写入：``log_event`` 缓冲事件，满 ``_FLUSH_EVERY`` 条或 ``close()``
+    时以 ``executemany`` 批量落库（长回测数千事件，逐条 INSERT+commit
+    在共享 PG 上是网格并发的热点）。``query_events`` / ``get_causal_chain``
+    查询前先 flush 缓冲，保留「写后立即可读」语义。
+
     线程安全：进程内所有 DuckDB 时代的锁语义不再需要——psycopg 连接
     每次操作独立提交，PG 服务端处理并发；本实现保留单连接 + 锁以兼容
     单进程多线程写入（引擎审计为旁路，性能非瓶颈）。
 
     单调序列号：``seq`` 列确保即使墙钟回退（``datetime.now()`` 非单调）也能
-    保证主键唯一性与因果排序（P1-10）。
+    保证主键唯一性与因果排序（P1-10）；seq 在入缓冲时分配，批量落库
+    保持缓冲顺序。
     """
+
+    _FLUSH_EVERY = 500
+
+    _MAX_BUFFER = 10_000
+    """缓冲上限：永久性 flush 失败（如 PK 冲突）下丢弃最旧事件并记
+    error 日志，保证内存有界；瞬态失败经回填重试不触此限。"""
+
+    _INSERT_SQL = """
+                    INSERT INTO "backtest_audit".logs
+                        (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """
 
     def __init__(self, db_path: Path | None = None) -> None:
         # db_path 参数保留仅为兼容旧签名；PG 时代连接参数由 core.pg 统一裁决
@@ -117,6 +135,7 @@ class PostgresAuditProvider(AuditProvider):
         self._conn: psycopg.Connection | None = None
         self._lock = threading.Lock()
         self._seq = 0
+        self._buffer: list[tuple[Any, ...]] = []
         self._init_db()
 
     def _get_conn(self) -> psycopg.Connection:
@@ -140,15 +159,35 @@ class PostgresAuditProvider(AuditProvider):
         logger.info("Audit provider initialized (PostgreSQL)")
 
     def close(self) -> None:
-        """显式关闭连接。"""
+        """显式关闭连接（关闭前冲刷缓冲，保证审计完整性）。
+
+        冲刷失败（如 PK 冲突 / PG 不可达）时自愈后重试一次；重试仍失败
+        则丢弃缓冲并记 error 日志（含条数）——close 不抛异常，但连接必关
+        （避免 flush 异常跳过 ``conn.close()`` 导致句柄泄漏 + RUN_END
+        静默丢失）。
+        """
         with self._lock:
-            if self._conn is not None:
+            try:
+                self._flush_locked()
+            except Exception as exc:
+                logger.error(f"[audit] close 冲刷失败，自愈后重试一次: {exc}")
                 try:
-                    self._conn.close()
-                except Exception as exc:
-                    logger.warning(f"关闭审计 PostgreSQL 连接时异常: {exc}")
-                finally:
-                    self._conn = None
+                    self._flush_locked()
+                except Exception as exc2:
+                    n = len(self._buffer)
+                    logger.error(
+                        f"[audit] close 重试仍失败，丢弃缓冲 {n} 条审计事件"
+                        f"（审计链可能缺失尾部事件）: {exc2}"
+                    )
+                    self._buffer = []
+            finally:
+                if self._conn is not None:
+                    try:
+                        self._conn.close()
+                    except Exception as exc:
+                        logger.warning(f"关闭审计 PostgreSQL 连接时异常: {exc}")
+                    finally:
+                        self._conn = None
 
     def _heal_after_error(self, exc: Exception) -> None:
         """语句/连接失败后的自愈，防止连接被毒化。
@@ -173,6 +212,8 @@ class PostgresAuditProvider(AuditProvider):
             self._conn = None
 
     def log_event(self, record: AuditRecord) -> None:
+        """缓冲写入；满 ``_FLUSH_EVERY`` 条批量落库（executemany 一次提交）。"""
+
         def json_serializable(obj):
             if isinstance(obj, datetime):
                 return obj.isoformat()
@@ -187,31 +228,59 @@ class PostgresAuditProvider(AuditProvider):
         with self._lock:
             self._seq += 1
             seq = self._seq
-            conn = self._get_conn()
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO "backtest_audit".logs
-                        (run_id, seq, timestamp, event_type, trace_id, parent_id, component, status, payload, latency_ms)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    [
-                        record.run_id,
-                        seq,
-                        record.timestamp,
-                        record.event_type,
-                        record.trace_id,
-                        record.parent_id,
-                        record.component,
-                        record.status,
-                        payload_json,
-                        record.latency_ms,
-                    ],
+            self._buffer.append(
+                (
+                    record.run_id,
+                    seq,
+                    record.timestamp,
+                    record.event_type,
+                    record.trace_id,
+                    record.parent_id,
+                    record.component,
+                    record.status,
+                    payload_json,
+                    record.latency_ms,
                 )
-                conn.commit()
-            except Exception as exc:
-                self._heal_after_error(exc)
-                raise
+            )
+            if len(self._buffer) >= self._FLUSH_EVERY:
+                self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """批量落库缓冲事件（调用方须已持 ``self._lock``）。
+
+        失败语义：语句失败自愈连接后**整批回填缓冲**并上抛——瞬态故障
+        （PG 重启等）在下一次 flush（后续 log_event / 查询 / close）自动
+        重试，事件不丢；批量写入相对逐条写入把单次失败的最大丢失量从 1 条
+        放大到一批，回填即为此设计。永久性失败（如 PK 冲突）经回填反复
+        重试仍失败时，由 ``_MAX_BUFFER`` 上限截断（丢弃最旧事件并记
+        error 日志），保证内存有界。
+        psycopg3 的批量写入走 cursor.executemany（Connection 无此便捷方法）。
+        """
+        if not self._buffer:
+            return
+        rows, self._buffer = self._buffer, []
+        try:
+            # _get_conn 也须在 try 内：连接失败（PG 不可达）时整批回填缓冲，
+            # 否则 rows 已取出而异常跳过回填——最多一批事件静默丢失且无日志
+            conn = self._get_conn()
+            with conn.cursor() as cur:
+                cur.executemany(self._INSERT_SQL, rows)
+            conn.commit()
+        except Exception as exc:
+            self._heal_after_error(exc)
+            self._buffer = rows + self._buffer
+            self._truncate_buffer_locked()
+            raise
+
+    def _truncate_buffer_locked(self) -> None:
+        """缓冲超 ``_MAX_BUFFER`` 时丢弃最旧事件（调用方须已持锁）。"""
+        overflow = len(self._buffer) - self._MAX_BUFFER
+        if overflow > 0:
+            del self._buffer[:overflow]
+            logger.error(
+                f"[audit] 缓冲超上限 {self._MAX_BUFFER}，丢弃最旧 {overflow} 条"
+                "审计事件（flush 持续失败，审计链存在空洞）"
+            )
 
     def query_events(
         self, run_id: str, filters: dict[str, Any]
@@ -236,9 +305,13 @@ class PostgresAuditProvider(AuditProvider):
             params.append(value)
 
         with self._lock:
+            # read-your-writes：查询前冲刷缓冲，保证本进程已写事件可见
+            self._flush_locked()
             conn = self._get_conn()
             try:
-                res = conn.execute(query, params).fetchall()
+                # key 已过白名单（_QUERY_FILTER_WHITELIST），无注入风险；
+                # psycopg 严格参数类型把 str 标为 QueryNoTemplate，运行时兼容
+                res = conn.execute(query, params).fetchall()  # type: ignore[arg-type]
             except Exception as exc:
                 self._heal_after_error(exc)
                 raise
@@ -263,6 +336,8 @@ class PostgresAuditProvider(AuditProvider):
     def get_causal_chain(self, trace_id: str) -> Sequence[AuditRecord]:
         # 按 seq 排序保证因果链单调性（P1-10：timestamp 可能因墙钟回退无序）
         with self._lock:
+            # read-your-writes：查询前冲刷缓冲
+            self._flush_locked()
             conn = self._get_conn()
             try:
                 res = conn.execute(

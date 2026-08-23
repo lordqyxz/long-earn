@@ -481,4 +481,3 @@ class TestStockAnalysisEventContextNode:
         )
         assert result == {"event_context": ""}
         context.logger.warning.assert_called_once()
-

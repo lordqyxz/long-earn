@@ -40,16 +40,12 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 # ── 测试数据构造 ─────────────────────────────────────────────
 
 
-def _make_pit_fixture_data(
-    symbol_a: str, symbol_b: str
-) -> pd.DataFrame:
+def _make_pit_fixture_data(symbol_a: str, symbol_b: str) -> pd.DataFrame:
     """构造 PIT 回归测试的季频财务数据（多报告期 + 多 symbol）。
 
     关键场景（对应 scripts/test_pit_fix_e2e.py 验证的 PIT 修复点）：
@@ -62,12 +58,8 @@ def _make_pit_fixture_data(
     return pd.DataFrame(
         {
             "symbol": [symbol_a, symbol_a, symbol_b],
-            "report_date": pd.to_datetime(
-                ["2020-03-31", "2020-06-30", "2020-03-31"]
-            ),
-            "announce_date": pd.to_datetime(
-                ["2020-04-28", "2020-08-20", "2020-04-29"]
-            ),
+            "report_date": pd.to_datetime(["2020-03-31", "2020-06-30", "2020-03-31"]),
+            "announce_date": pd.to_datetime(["2020-04-28", "2020-08-20", "2020-04-29"]),
             "revenue": [100.0, 200.0, 50.0],
             "net_profit": [10.0, 20.0, 5.0],
             "eps": [0.8, 1.6, 0.4],
@@ -108,12 +100,8 @@ def pit_provider(tmp_path: Any) -> MiniQmtDataProvider:
             "pershareindex",
             "capital",
         ):
-            conn.execute(
-                f"DELETE FROM {table} WHERE symbol = %s", [symbol_a]
-            )
-            conn.execute(
-                f"DELETE FROM {table} WHERE symbol = %s", [symbol_b]
-            )
+            conn.execute(f"DELETE FROM {table} WHERE symbol = %s", [symbol_a])
+            conn.execute(f"DELETE FROM {table} WHERE symbol = %s", [symbol_b])
         conn.commit()
     finally:
         cache.close()

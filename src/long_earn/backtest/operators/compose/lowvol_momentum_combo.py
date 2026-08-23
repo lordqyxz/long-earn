@@ -25,6 +25,7 @@ class LowvolMomentumCombo(Operator):
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, LowvolMomentumComboParams)
         p = params
         df = panel.with_row_index("__lvmc_row_id")
         work = df.select(["__lvmc_row_id", "timestamp", "symbol", p.field]).sort(
@@ -36,7 +37,7 @@ class LowvolMomentumCombo(Operator):
         )
         work = work.with_columns(
             pl.col("__ret")
-            .rolling_std(window_size=p.low_vol_lookback, min_periods=p.min_obs)
+            .rolling_std(window_size=p.low_vol_lookback, min_samples=p.min_obs)
             .over("symbol")
             .alias("__vol")
         )

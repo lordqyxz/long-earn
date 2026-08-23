@@ -223,7 +223,9 @@ def _compile_event_inference_subgraph(
 
     workflow = StateGraph(EventInferenceState)
 
-    workflow.add_node("collect", partial(_collect_node, registry=registry, logger=logger))
+    workflow.add_node(
+        "collect", partial(_collect_node, registry=registry, logger=logger)
+    )
     workflow.add_node(
         "extract", partial(_extract_node, extractor=extractor, logger=logger)
     )

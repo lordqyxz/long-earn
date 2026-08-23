@@ -101,7 +101,9 @@ class DataCache:
                 conn.execute("COMMIT")
 
     @staticmethod
-    def _fetchdf(conn: Any, query: str, params: list[Any] | None = None) -> pd.DataFrame:
+    def _fetchdf(
+        conn: Any, query: str, params: list[Any] | None = None
+    ) -> pd.DataFrame:
         """执行查询并转为 pandas DataFrame（psycopg 无 fetchdf）。"""
         if params is None:
             params = []
@@ -383,9 +385,10 @@ class DataCache:
             )
             # NaN → None：psycopg COPY 无法序列化 pandas NaN
             copy_df = df[insert_cols].where(pd.notnull(df[insert_cols]), None)
-            with conn.cursor() as cur, cur.copy(
-                f"COPY temp_price ({cols_str}) FROM STDIN"
-            ) as copy:
+            with (
+                conn.cursor() as cur,
+                cur.copy(f"COPY temp_price ({cols_str}) FROM STDIN") as copy,
+            ):
                 for row in copy_df.itertuples(index=False):
                     copy.write_row(list(row))
             conn.execute(
@@ -535,9 +538,10 @@ class DataCache:
             )
             # NaN → None：psycopg COPY 无法序列化 pandas NaN
             copy_df = df[schema_cols].where(pd.notnull(df[schema_cols]), None)
-            with conn.cursor() as cur, cur.copy(
-                f"COPY temp_fin ({col_list}) FROM STDIN"
-            ) as copy:
+            with (
+                conn.cursor() as cur,
+                cur.copy(f"COPY temp_fin ({col_list}) FROM STDIN") as copy,
+            ):
                 for row in copy_df.itertuples(index=False):
                     copy.write_row(list(row))
             conn.execute(
@@ -796,11 +800,14 @@ class DataCache:
         for schema in scalar_tables:
             for col in schema.columns:
                 if col.name not in field_pg_type:
-                    field_pg_type[col.name] = _PG_TYPE_MAP.get(col.dtype, col.dtype)
+                    dtype = col.dtype
+                    field_pg_type[col.name] = _PG_TYPE_MAP.get(dtype, dtype) or "TEXT"
 
         # 每张表的 SELECT 子句（缺失列补 NULL AS fname，带类型断言）
         sub_selects = [
-            DataCache._union_table_select(schema, select_fields, field_pg_type, placeholders)
+            DataCache._union_table_select(
+                schema, select_fields, field_pg_type, placeholders
+            )
             for schema in scalar_tables
         ]
         union_query = " UNION ALL ".join(sub_selects)

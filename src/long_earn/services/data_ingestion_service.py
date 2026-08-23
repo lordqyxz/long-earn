@@ -648,7 +648,7 @@ class DataIngestionService:
         collected = 0
         for key, name in targets.items():
             try:
-                symbols = self.data_provider.get_sector_stocks(name)
+                symbols = self.client.get_sector_stocks(name)
                 if symbols:
                     self.cache.save_universe(key, "", sorted(symbols))
                     collected += 1

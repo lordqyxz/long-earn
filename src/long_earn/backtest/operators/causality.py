@@ -90,7 +90,7 @@ _TEMPORAL_PARAMETER_NAMES = frozenset(
         "momentum_window",
         "quality_window",
         "min_obs",
-        "min_periods",
+        "min_samples",
     }
 )
 
@@ -194,10 +194,10 @@ def _adjust_parameter_dependencies(
         candidate["fast"] = min(int(candidate["fast"]), boundary - 1)
         if candidate["fast"] < 1:
             return False
-    elif name == "min_periods" and "window" in candidate:
+    elif name == "min_samples" and "window" in candidate:
         candidate["window"] = max(int(candidate["window"]), boundary)
-    elif name == "window" and "min_periods" in candidate:
-        candidate["min_periods"] = min(int(candidate["min_periods"]), boundary)
+    elif name == "window" and "min_samples" in candidate:
+        candidate["min_samples"] = min(int(candidate["min_samples"]), boundary)
     elif name == "min_obs":
         for lookback in ("low_vol_lookback", "momentum_lookback"):
             if lookback in candidate:

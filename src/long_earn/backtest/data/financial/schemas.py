@@ -183,7 +183,11 @@ CASHFLOW_SCHEMA = FinancialTableSchema(
         FinancialColumn("investing_cf", "DOUBLE", ("net_cash_flows_inv_act",)),
         FinancialColumn("financing_cf", "DOUBLE", ("net_cash_flows_fnc_act",)),
         FinancialColumn("net_cash_change", "DOUBLE", ("net_incr_cash_cash_equ",)),
-        FinancialColumn("cash_from_sales", "DOUBLE", ("goods_sale_and_service_render_cash", "m_cashSellingProvidingServices")),
+        FinancialColumn(
+            "cash_from_sales",
+            "DOUBLE",
+            ("goods_sale_and_service_render_cash", "m_cashSellingProvidingServices"),
+        ),
     ),
 )
 

@@ -150,7 +150,7 @@ def _make_history_panel() -> pl.DataFrame:
 
 
 class _StubContext:
-    """模拟 VisibilityContext：暴露 get_history_df 和 current_timestamp。"""
+    """模拟 VisibilityContext：暴露 get_history_df / get_history_tail 和 current_timestamp。"""
 
     def __init__(self, history_df: pl.DataFrame, current_ts):
         self._df = history_df
@@ -159,14 +159,21 @@ class _StubContext:
     def get_history_df(self) -> pl.DataFrame:
         return self._df
 
+    def get_history_tail(self, n_bars: int) -> pl.DataFrame:
+        # stub 面板仅 5 个 bar，直接返回全量（窗口语义由 guard 侧测试覆盖）
+        return self._df
+
 
 class _BrokenContext:
-    """模拟 get_history_df 抛异常的 context。"""
+    """模拟历史读取抛异常的 context。"""
 
     def __init__(self, current_ts):
         self.current_timestamp = current_ts
 
     def get_history_df(self) -> pl.DataFrame:
+        raise RuntimeError("data layer down")
+
+    def get_history_tail(self, n_bars: int) -> pl.DataFrame:
         raise RuntimeError("data layer down")
 
 

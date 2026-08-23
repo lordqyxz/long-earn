@@ -81,7 +81,7 @@ agent = ResearchAgent()
 
 - 代码格式和检查：ruff（format + lint + McCabe 圈复杂度 ≤15 + Pylint 规则 + 未使用参数检测，88 字符行宽）
 - 架构依赖校验：import-linter（数据层不依赖上层、服务层不依赖 tools）
-- 类型检查：Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`），不使用 mypy/pyright CLI（详见第四节「质量门槛」）
+- 类型检查：pyright 全项目静态类型检查（`uv run pyright src/`）为最终关口；Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`）作为编辑期快速反馈回路（详见第四节「质量门槛」）
 
 ### 3.3 日志
 
@@ -116,12 +116,12 @@ prompt = prompt_template.format(query=query)
 
 ### 4.1 质量门槛（按强弱排序）
 
-1. **Serena LSP 单文件零错**（**首要、唯一类型检查工具**）：编辑任何代码符号后，必须用 `mcp__serena__get_diagnostics_for_file` 验证目标文件 `Error` 级别诊断为空。这是最快、最聚焦的反馈回路，也是本项目**唯一**的类型检查手段。
+1. **`uv run pyright src/` 全局零错**（**首要类型检查工具**）：静态类型检查最终关口，`Error` 级别必须为零。编辑代码符号后先用 Serena LSP 单文件诊断（`mcp__serena__get_diagnostics_for_file`）快速反馈，收尾以 pyright 全项目扫描验证。
 2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
 3. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
 4. **`uv run pytest tests/unit/`**：单元测试全绿。
 
-> 不使用 mypy / pyright CLI：以 Serena LSP 单文件诊断为准，避免双工具冲突与配置分裂。
+> pyright 为全项目权威类型检查工具，不使用 mypy CLI。第三方库（pandas / OpenAI SDK 等）类型推断噪音以 `cast()` 或显式注解收窄，禁止用 `# type: ignore` 掩盖。
 
 ### 4.2 测试组织
 

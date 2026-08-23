@@ -20,9 +20,7 @@ def _ollama_available() -> bool:
     if os.environ.get("LONG_EARN_SKIP_E2E_LLM"):
         return False
     try:
-        req = urllib.request.Request(
-            "http://localhost:11434/api/tags", method="GET"
-        )
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             return resp.status == 200
     except Exception:
@@ -109,6 +107,4 @@ class TestResearchAgentE2E:
         )
 
         # beam_paths / evidence_cache 应在 invoke 入口重置
-        assert agent._strategy_trial_count >= 0, (
-            "trial_count 应被重置（至少不为负数）"
-        )
+        assert agent._strategy_trial_count >= 0, "trial_count 应被重置（至少不为负数）"

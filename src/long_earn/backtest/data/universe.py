@@ -8,9 +8,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from long_earn.backtest.data.cache import DataCache
-from long_earn.backtest.data.miniqmt_provider import (
-    get_universe_provider as _miniqmt_universe,
-)
+from long_earn.backtest.data.miniqmt_provider import MiniQmtUniverseProvider
 
 
 class UniverseProvider(Protocol):
@@ -21,4 +19,4 @@ class UniverseProvider(Protocol):
 
 def get_universe_provider(cache: DataCache | None = None) -> UniverseProvider:
     """获取默认的股票池提供者（miniqmt 版）。"""
-    return _miniqmt_universe(cache)
+    return MiniQmtUniverseProvider(cache)

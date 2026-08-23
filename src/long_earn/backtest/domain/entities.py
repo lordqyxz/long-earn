@@ -71,12 +71,36 @@ class PerformanceMetrics:
 # ── 事件系统 (Event System) ────────────────────────────────────────────
 
 
+def bar_trace_id(ts: datetime) -> str:
+    """确定性日级 trace 前缀：``trace_{YYYYMMDD}``。
+
+    设计依据：审计表主键为 ``(run_id, trace_id, seq)``。trace_id 需满足
+    两个约束：(1) **每事件唯一**——``BacktestAnalyzer.export_trade_attribution``
+    按 trace_id 索引事件并沿 parent_id 两跳解析归因链（FILL→ORDER→
+    SIGNAL/RISK_TRIGGER），共享 trace 会使 parent 自引用、链解析退化；
+    (2) **确定性**——替代逐事件 uuid4，保证同数据同策略两次回测审计
+    轨迹一致，可作性能优化的回归基准。
+
+    落地约定：``trace_id = bar_trace_id(ts) + "_{role}[_{symbol}]"``，
+    role ∈ mkt/op/rg/ord/tp/sl/dd/fill/risk_{type}。日线级回测每交易日
+    一条 bar，日前缀天然携带决策日信息，支持 ``trace_id LIKE
+    'trace_20240105%'`` 的日级聚合查询。
+
+    注意：T+1 执行语义下，T 日信号在 T+1 日成交——订单/成交 trace 取
+    自身事件时间戳的日期（订单=执行日），因果链归因仍由 parent_id
+    （订单.parent=信号.trace）保证。
+    """
+    return f"trace_{ts:%Y%m%d}"
+
+
 @dataclass(frozen=True)
 class Event:
     """回测引擎基础事件"""
 
     timestamp: datetime
-    trace_id: str  # 贯穿 信号 -> 订单 -> 成交 的唯一 ID，用于因果审计
+    trace_id: (
+        str  # 事件唯一 trace（确定性派生，见 bar_trace_id）；因果链由 parent_id 串接
+    )
     event_id: str
 
 

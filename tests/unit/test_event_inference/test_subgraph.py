@@ -56,15 +56,20 @@ class _FakeMemory:
 class _FakeLogger:
     """测试日志服务，确保测试工厂的依赖完整。"""
 
-    def debug(self, message: str) -> None: pass
+    def debug(self, message: str) -> None:
+        pass
 
-    def info(self, message: str) -> None: pass
+    def info(self, message: str) -> None:
+        pass
 
-    def warning(self, message: str) -> None: pass
+    def warning(self, message: str) -> None:
+        pass
 
-    def error(self, message: str) -> None: pass
+    def error(self, message: str) -> None:
+        pass
 
-    def exception(self, message: str) -> None: pass
+    def exception(self, message: str) -> None:
+        pass
 
 
 class _FakeCollector:

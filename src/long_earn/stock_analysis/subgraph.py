@@ -1,6 +1,6 @@
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langgraph.graph import END, START, StateGraph
 
@@ -274,7 +274,10 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     """
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
-    workflow.add_node("get_stock_data", lambda state: get_stock_data(state, context))
+    workflow.add_node(
+        "get_stock_data",
+        lambda state: get_stock_data(cast(StockAnalysisState, state), context),
+    )
     workflow.add_node("event_context", lambda state: event_context_node(state, context))
     workflow.add_node(
         "petter_analysis", lambda state: petter_analysis_node(state, context)

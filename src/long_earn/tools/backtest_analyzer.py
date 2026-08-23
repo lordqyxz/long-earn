@@ -68,8 +68,7 @@ class BacktestAnalyzer:
             current_id = trace_id
             while True:
                 res = conn.execute(
-                    f"SELECT parent_id FROM {_AUDIT_TABLE} "
-                    "WHERE trace_id = %s LIMIT 1",
+                    f"SELECT parent_id FROM {_AUDIT_TABLE} WHERE trace_id = %s LIMIT 1",
                     [current_id],
                 ).fetchone()
                 if not res or not res[0]:
@@ -181,11 +180,7 @@ class BacktestAnalyzer:
 
         journal = []
         for row in fills:
-            payload = (
-                json.loads(row[3])
-                if isinstance(row[3], str)
-                else (row[3] or {})
-            )
+            payload = json.loads(row[3]) if isinstance(row[3], str) else (row[3] or {})
             journal.append(
                 {
                     "time": str(row[0]) if row[0] else "",

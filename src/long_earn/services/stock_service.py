@@ -118,12 +118,15 @@ class StockServiceImpl(StockService):
         start_year: str,
     ) -> dict[str, Any]:
         """通过 Connector 获取财务指标（ADR-014 阶段 C 新路径）。"""
+        connector = self._connector
+        if connector is None:
+            return self._get_financial_metrics_legacy(stock_code, start_year)
         try:
             # 规范化 xt_symbol（确保带后缀）
             symbol = (
                 stock_code if "." in stock_code else self._normalize_symbol(stock_code)
             )
-            result = self._connector.get_concept(
+            result = connector.get_concept(
                 ConceptQuery(
                     subject=symbol,
                     aspect="盈利能力",
@@ -184,7 +187,7 @@ class StockServiceImpl(StockService):
             df = self._client.get_financial(
                 stock_list=[stock_code],
                 start_time=start_year + "0101",
-                end_date=end_date,
+                end_time=end_date,
                 table="Balance",
             )
 

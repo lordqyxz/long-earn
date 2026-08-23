@@ -201,15 +201,15 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
             return BacktestOutcome(
                 task_id=task.task_id,
                 success=True,
-                total_return=result.total_return,
-                annual_return=result.annual_return,
-                sharpe_ratio=result.sharpe_ratio,
-                max_drawdown=result.max_drawdown,
-                win_rate=result.win_rate,
-                volatility=result.volatility,
-                trading_days=result.trading_days,
-                calmar_ratio=result.calmar_ratio,
-                sortino_ratio=result.sortino_ratio,
+                total_return=result.total_return or 0.0,
+                annual_return=result.annual_return or 0.0,
+                sharpe_ratio=result.sharpe_ratio or 0.0,
+                max_drawdown=result.max_drawdown or 0.0,
+                win_rate=result.win_rate or 0.0,
+                volatility=result.volatility or 0.0,
+                trading_days=result.trading_days or 0,
+                calmar_ratio=result.calmar_ratio or 0.0,
+                sortino_ratio=result.sortino_ratio or 0.0,
                 param_desc=task.param_desc,
                 metrics_unreliable=metrics_unreliable,
                 trade_count=trade_count,
@@ -279,9 +279,7 @@ class GridResult:
 _MAX_GRID_DEFAULT = 256
 
 
-def _extra_fetch_symbols(
-    strategy_yamls: list[str], benchmark_symbol: str
-) -> set[str]:
+def _extra_fetch_symbols(strategy_yamls: list[str], benchmark_symbol: str) -> set[str]:
     """收集预取面板需要的股票池外标的。
 
     - benchmark_symbol：基准指标计算需面板含其行情（此前未并入，

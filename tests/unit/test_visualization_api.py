@@ -20,9 +20,7 @@ def _pg_available() -> bool:
 
 # _create_app 构造会初始化 BacktestAnalyzer / EventAnalyzer（连 PG），
 # PG 不可达时这些测试无法运行。
-_PG_REQUIRED = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+_PG_REQUIRED = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 
 def test_fastapi_visualization_entrypoint_is_callable() -> None:
@@ -55,7 +53,9 @@ def test_remote_bind_requires_explicit_opt_in() -> None:
 
 
 @_PG_REQUIRED
-def test_remote_bind_runs_only_with_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_bind_runs_only_with_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The opt-in reaches Uvicorn and marks the app as remote."""
     captured: dict[str, object] = {}
 

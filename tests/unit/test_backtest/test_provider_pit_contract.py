@@ -42,9 +42,7 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 # ── 统一构造的季频测试数据 ─────────────────────────────────────
 
@@ -348,9 +346,7 @@ class TestAnnounceDateExtraction:
                 "WHERE table_name = %s AND table_schema = 'public'",
                 [schema.table_name],
             )
-            columns = pd.DataFrame(
-                cur.fetchall(), columns=["column_name"]
-            )
+            columns = pd.DataFrame(cur.fetchall(), columns=["column_name"])
             all_cols.update(columns["column_name"].tolist())
 
         expected_financial_cols = {
@@ -454,8 +450,6 @@ class TestAnnounceDateExtraction:
                 "pershareindex",
                 "capital",
             ):
-                conn.execute(
-                    f"DELETE FROM {table} WHERE symbol = %s", [symbol]
-                )
+                conn.execute(f"DELETE FROM {table} WHERE symbol = %s", [symbol])
             conn.commit()
             cache.close()

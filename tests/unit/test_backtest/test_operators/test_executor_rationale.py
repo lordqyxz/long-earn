@@ -42,12 +42,19 @@ def _executor() -> OperatorStrategyExecutor:
     return OperatorStrategyExecutor(
         [
             resolve_factor_step(
-                {"op": "returns", "alias": "mom", "params": {"field": "close", "period": 2}}
+                {
+                    "op": "returns",
+                    "alias": "mom",
+                    "params": {"field": "close", "period": 2},
+                }
             )
         ],
         [
             resolve_signal_step(
-                {"op": "rank_top", "params": {"field": "mom", "top": 2, "ascending": False}}
+                {
+                    "op": "rank_top",
+                    "params": {"field": "mom", "top": 2, "ascending": False},
+                }
             )
         ],
     )
@@ -73,7 +80,9 @@ def test_execute_with_rationale_returns_factor_values_and_rank():
 
 def test_execute_with_rationale_criteria_describes_formula():
     """criteria 应包含因子与信号步骤的人类可读描述，returns 标记为百分比。"""
-    _, rationale = _executor().execute_with_rationale(_make_panel(), datetime(2024, 1, 6))
+    _, rationale = _executor().execute_with_rationale(
+        _make_panel(), datetime(2024, 1, 6)
+    )
 
     criteria = rationale["criteria"]
     assert [c["op"] for c in criteria] == ["returns", "rank_top"]
@@ -89,7 +98,9 @@ def test_execute_with_rationale_criteria_describes_formula():
 
 def test_criteria_step_has_kind_and_segments():
     """criteria 每步应下发 kind + segments 结构化渲染数据（接口传数据，前端动态渲染）。"""
-    _, rationale = _executor().execute_with_rationale(_make_panel(), datetime(2024, 1, 6))
+    _, rationale = _executor().execute_with_rationale(
+        _make_panel(), datetime(2024, 1, 6)
+    )
     criteria = rationale["criteria"]
 
     factor_step = criteria[0]
@@ -115,7 +126,10 @@ def test_criteria_filter_step_segments():
         [],
         [
             resolve_signal_step(
-                {"op": "filter_threshold", "params": {"field": "close", "op": ">", "value": 9.5}}
+                {
+                    "op": "filter_threshold",
+                    "params": {"field": "close", "op": ">", "value": 9.5},
+                }
             )
         ],
     )
@@ -135,7 +149,11 @@ def test_criteria_generic_segments_for_unknown_operator():
     executor = OperatorStrategyExecutor(
         [
             resolve_factor_step(
-                {"op": "macd", "alias": "m", "params": {"field": "close", "fast": 12, "slow": 26, "signal": 9}}
+                {
+                    "op": "macd",
+                    "alias": "m",
+                    "params": {"field": "close", "fast": 12, "slow": 26, "signal": 9},
+                }
             )
         ],
         [],
@@ -144,8 +162,21 @@ def test_criteria_generic_segments_for_unknown_operator():
     step = rationale["criteria"][0]
     assert step["kind"] == "factor"  # technical 归 factor 样式
     types = [s["type"] for s in step["segments"]]
-    assert types == ["text", "field", "text", "value", "text", "value", "text", "value", "text"]
-    assert step["segments"][1] == {"type": "field", "value": "close"}  # field_params 列名高亮
+    assert types == [
+        "text",
+        "field",
+        "text",
+        "value",
+        "text",
+        "value",
+        "text",
+        "value",
+        "text",
+    ]
+    assert step["segments"][1] == {
+        "type": "field",
+        "value": "close",
+    }  # field_params 列名高亮
     assert step["segments"][0]["value"] == "macd("
     assert step["segments"][-1]["value"] == ")"
 
@@ -163,7 +194,10 @@ def test_execute_with_rationale_empty_selection_is_graceful():
         [],
         [
             resolve_signal_step(
-                {"op": "filter_threshold", "params": {"field": "close", "op": ">", "value": 1e9}}
+                {
+                    "op": "filter_threshold",
+                    "params": {"field": "close", "op": ">", "value": 1e9},
+                }
             )
         ],
     )

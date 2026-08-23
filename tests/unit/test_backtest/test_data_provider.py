@@ -33,9 +33,7 @@ def _pg_available() -> bool:
         return False
 
 
-_PG_SKIP = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+_PG_SKIP = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 # ── 测试桩 ───────────────────────────────────────────────────────────────
 
@@ -342,9 +340,7 @@ def test_adjustment_consistency_detects_jump():
         cache.save_prices(df)
 
         suspicious = cache.check_adjustment_consistency([symbol])
-        assert len(suspicious) == 1, (
-            f"应检测到 1 条可疑跳跃，实际 {len(suspicious)} 条"
-        )
+        assert len(suspicious) == 1, f"应检测到 1 条可疑跳跃，实际 {len(suspicious)} 条"
         assert suspicious[0]["symbol"] == symbol
         assert suspicious[0]["return_pct"] < -50, (
             f"收益率应为 -60% 左右，实际 {suspicious[0]['return_pct']}%"

@@ -26,6 +26,12 @@ from long_earn.backtest.operators import get_operator
 from long_earn.backtest.operators.base import Operator, OperatorParams
 
 
+def _selection_rank_key(s: dict[str, Any]) -> float:
+    """selection 排序键：rank 为 int 时按其值，None（未入选）排最后。"""
+    rank = s.get("rank")
+    return float(rank) if isinstance(rank, int) else float("inf")
+
+
 @dataclass
 class OperatorFactorSpec:
     """已校验的算子因子步骤。"""
@@ -57,8 +63,19 @@ def resolve_factor_step(step: dict[str, Any]) -> OperatorFactorSpec:
 
 
 def resolve_signal_step(step: dict[str, Any]) -> OperatorSignalSpec:
-    """把 DSL 里的 ``{type: operator, op, params}`` 解析为已校验的算子信号步骤。"""
+    """把 DSL 里的 ``{type: operator, op, params}`` 解析为已校验的算子信号步骤。
+
+    额外校验截面性（cross_sectional）：预计算执行路径的 signal 算子跑在
+    单日截面上，非截面算子（依赖历史的 shift/sma 等）会静默产出 null/
+    错值——解析期直接拒绝。prove_causality 只证明不窥未来，不证明不跨
+    时刻，两者正交（见 base.Operator.cross_sectional）。
+    """
     op, params = _resolve_op(step)
+    if not type(op).cross_sectional:
+        raise ValueError(
+            f"信号算子 {type(op).name!r} 非截面运算（cross_sectional=False），"
+            "预计算路径仅支持截面信号算子（如 rank_top / filter_threshold）"
+        )
     return OperatorSignalSpec(op=op, params=params)
 
 
@@ -78,6 +95,27 @@ def _resolve_op(step: dict[str, Any]) -> tuple[Operator, OperatorParams]:
             f"算子 '{type(op).name}' 参数校验失败 {step.get('params', {})!r}: {exc}"
         ) from exc
     return op, params
+
+
+def precompute_factors(
+    factor_specs: list[OperatorFactorSpec], panel: pl.DataFrame
+) -> tuple[pl.DataFrame, list[str]]:
+    """全期一次性预计算 factor 链，返回 (enriched, 因子列名列表)。
+
+    正确性依据：算子目录因果性证明（ADR-009 prove_causality）保证
+    行 t 的因子值只依赖同 symbol 的 ≤t 行，故全期计算与逐 bar 截断
+    计算逐值相等（含 ewm：两侧均从面板首行起算）。等价性由
+    ``tests/unit/test_backtest/test_operators/test_precompute_equivalence.py``
+    运行时验证——结果发散 = 证明被违反 = bug。
+    VisibilityGuard 仍按 timestamp 截断行可见性，双重防线不变。
+    """
+    enriched = panel
+    factor_columns: list[str] = []
+    for spec in factor_specs:
+        result = spec.op.apply(enriched, spec.params)
+        enriched, added = _merge_factor_result(enriched, result, spec.alias)
+        factor_columns.extend(added)
+    return enriched, factor_columns
 
 
 class OperatorStrategyExecutor:
@@ -168,14 +206,69 @@ class OperatorStrategyExecutor:
                     f"（timestamp={current_timestamp}），累计 {self._empty_cross_count} 次"
                 )
             return [], self._rationale([], universe_size, 0)
+        return self._finalize_selection(cross, factor_columns, universe_size)
+
+    def execute_precomputed(
+        self,
+        cross: pl.DataFrame,
+        factor_columns: list[str],
+        current_timestamp: datetime,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """在已含因子列的当前截面上一键跑 signal 算子（预计算模式）。
+
+        signal 算子均为截面内运算（rank_top 以 over("timestamp") 保证，
+        filter_threshold 为行级比较），故只需当前截面行。与旧路径
+        （全历史面板跑 factor+signal 全链）的等价性由因果性证明背书
+        （见 precompute_factors docstring）。
+        """
+        if cross.height == 0:
+            self._empty_signal_count += 1
+            if self._empty_signal_count == 1 or (
+                self._empty_signal_count % self._EMPTY_SIGNAL_LOG_INTERVAL == 0
+            ):
+                logger.warning(
+                    "OperatorStrategyExecutor: 预计算截面为空"
+                    f"（timestamp={current_timestamp}），"
+                    f"累计 {self._empty_signal_count} 次"
+                )
+            return [], self._rationale([], 0, 0)
+
+        universe_size = cross["symbol"].unique().len()
+        selected_df = cross
+        for spec in self.signal_specs:
+            result = spec.op.apply(selected_df, spec.params)
+            selected_df = _apply_signal_result(selected_df, result)
+
+        if selected_df.height == 0:
+            self._empty_signal_count += 1
+            if self._empty_signal_count == 1 or (
+                self._empty_signal_count % self._EMPTY_SIGNAL_LOG_INTERVAL == 0
+            ):
+                logger.warning(
+                    "OperatorStrategyExecutor: signal 算子过滤后为空"
+                    f"（timestamp={current_timestamp}），"
+                    f"累计 {self._empty_signal_count} 次"
+                )
+            return [], self._rationale([], universe_size, 0)
+
+        return self._finalize_selection(selected_df, factor_columns, universe_size)
+
+    def _finalize_selection(
+        self,
+        cross: pl.DataFrame,
+        factor_columns: list[str],
+        universe_size: int,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """从 signal 过滤后的当前截面组装 (选中标的, rationale)。
+
+        旧路径（execute_with_rationale）与预计算路径（execute_precomputed）
+        的公共尾部：构建 selection、按排名排序、组装 rationale。
+        """
         symbols = cross["symbol"].unique().to_list()
         selection = self._build_selection(cross, factor_columns)
         # 按排名升序（#1 在前），让归因展示与排名一致；symbols 跟随同一顺序
-        selection.sort(
-            key=lambda s: s.get("rank")
-            if isinstance(s.get("rank"), int)
-            else float("inf")
-        )
+        # rank 为 None（未入选）时排最后；key 恒返回 float，满足排序契约
+        selection.sort(key=_selection_rank_key)
         symbols = [s["symbol"] for s in selection]
         return symbols, self._rationale(selection, universe_size, len(symbols))
 
@@ -255,19 +348,34 @@ def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:
         head = f"{alias} = " if alias else ""
         desc = f"{head}{field} 的 {period} 期收益率"
         fmt = "pct" if op_name == "returns" else ""
-        segments = [_seg_field(field), _seg_text(" 的 "), _seg_value(period), _seg_text(" 期收益率")]
+        segments = [
+            _seg_field(field),
+            _seg_text(" 的 "),
+            _seg_value(period),
+            _seg_text(" 期收益率"),
+        ]
     elif op_name == "filter_threshold":
         field = getattr(p, "field", "")
         cmp_op = getattr(p, "op", ">")
         value = getattr(p, "value", 0)
         desc = f"筛选 {field} {cmp_op} {value}"
-        segments = [_seg_text("筛选 "), _seg_field(field), _seg_symbol(cmp_op), _seg_value(value)]
+        segments = [
+            _seg_text("筛选 "),
+            _seg_field(field),
+            _seg_symbol(cmp_op),
+            _seg_value(value),
+        ]
     elif op_name == "rank_top":
         field = getattr(p, "field", "")
         order = "降序" if not getattr(p, "ascending", False) else "升序"
         top = getattr(p, "top", 10)
         desc = f"按 {field} {order} 取前 {top}"
-        segments = [_seg_text("按 "), _seg_field(field), _seg_text(f" {order}取前 "), _seg_value(top)]
+        segments = [
+            _seg_text("按 "),
+            _seg_field(field),
+            _seg_text(f" {order}取前 "),
+            _seg_value(top),
+        ]
     else:
         doc = (type(spec.op).__doc__ or "").strip().split("\n")[0]
         desc = doc.strip("` ") or op_name

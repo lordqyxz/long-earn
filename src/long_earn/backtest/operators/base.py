@@ -77,6 +77,16 @@ class Operator(ABC):
     causal: ClassVar[bool] = True
     """恒为 True：算子目录禁止非因果算子。"""
 
+    cross_sectional: ClassVar[bool] = False
+    """是否为截面运算：输出仅依赖同一 timestamp 截面内的行（如 rank_top
+    以 over("timestamp") 保证、filter_threshold 为行级比较）。
+
+    与 :attr:`causal` 正交：causal 证明不窥未来，cross_sectional 证明
+    不跨时刻。预计算执行路径（``execute_precomputed``）的 signal 算子
+    跑在单日截面上，非截面算子会静默产出 null/错值——``resolve_signal_step``
+    据此在解析期拒绝非截面信号算子。默认 False（保守：新增信号算子忘
+    声明会被拦下而非静默算错）。"""
+
     # 算子所需的最小历史窗口长度（用于策略层判断数据是否充足），0 表示无要求。
     min_history: ClassVar[int] = 0
 

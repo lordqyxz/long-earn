@@ -14,8 +14,13 @@ from typing import Any
 
 import polars as pl
 
-from long_earn.backtest.domain.entities import SignalEvent
-from long_earn.backtest.engine.dsl import RegimeConfig, StrategyDSL
+from long_earn.backtest.domain.entities import SignalEvent, bar_trace_id
+from long_earn.backtest.engine.dsl import (
+    RegimeConfig,
+    StrategyDSL,
+    lookback_profile,
+)
+from long_earn.backtest.engine.operator_executor import precompute_factors
 from long_earn.backtest.engine.strategy import BaseStrategy
 
 # rebalance_freq 合法格式："<N>D"（N 个交易日，如 "20D"）
@@ -61,20 +66,25 @@ class DSLStrategy(BaseStrategy):
         # 牛熊门控增量数据通道（O(截面)/bar，替代每 bar 全面板扫描）：
         # benchmark 收盘价 deque + 股票池每 symbol 定长 deque（仅相对强度模式）
         cfg = dsl_strategy.regime
-        bench_len = (
-            max(cfg.window, cfg.rel_window + 1) if cfg is not None else None
-        )
+        bench_len = max(cfg.window, cfg.rel_window + 1) if cfg is not None else None
         self._bench_closes: deque[float] = deque(maxlen=bench_len)
         self._pool_deque_maxlen = (
-            cfg.rel_window + 1
-            if cfg is not None and cfg.uses_relative
-            else None
+            cfg.rel_window + 1 if cfg is not None and cfg.uses_relative else None
         )
         self._pool_closes: dict[str, deque[float]] = {}
         # 门控 deque 是否已用 warmup 历史预填（每 run 一次，见
         # _seed_regime_from_history；增量追踪只看交易期 bar，warmup 期
         # 数据必须显式回填，否则门控前 window 个交易日盲判牛市）
         self._regime_seeded = False
+        # 调仓日历史面板截断窗口（交易日 bar 数）：有限窗口算子精确需要
+        # max_window；ewm 类加 4×span 收敛余量（span=26 时 (1-α)^104 ≈ 3e-4，
+        # 截断误差可忽略）。替代每调仓日取全历史面板的 O(T²) 行为。
+        max_window, max_span = lookback_profile(dsl_strategy)
+        self._history_window_bars = max_window + 4 * max_span + 1
+        # 因子全期预计算状态（引擎 precompute_panel 钩子置位）：
+        # 预计算模式下 guard 面板已含因子列，调仓日只在当前截面跑 signal
+        self._precomputed = False
+        self._factor_columns: list[str] = []
         # 静默吞异常的诊断窗口：上层可读取这两个列表判断策略是否真在工作，
         # 还是只是退化成"什么都不做"而被错误标记 success=True。
         # factor_failures 保留为空列表（旧字段，向后兼容诊断逻辑），算子路径不写入。
@@ -98,6 +108,10 @@ class DSLStrategy(BaseStrategy):
         self._regime_seeded = False
         self._bench_closes.clear()
         self._pool_closes.clear()
+        # 预计算状态随每 run 重置：引擎 precompute_panel 钩子置位，
+        # 防止上一 fold 的 _precomputed=True 残留到未走钩子的 run
+        self._precomputed = False
+        self._factor_columns = []
 
     def _should_rebalance(self) -> bool:
         """调仓频率门控：首个交易日建仓，之后每 N 个交易日调仓一次。"""
@@ -124,6 +138,21 @@ class DSLStrategy(BaseStrategy):
             if s.get("type") == "operator"
         ]
         return OperatorStrategyExecutor(factor_specs, signal_specs)
+
+    def precompute_panel(self, full_data: pl.DataFrame) -> pl.DataFrame:
+        """引擎钩子：全期预计算 factor 列（O(T·U) 一次），返回 enriched 面板。
+
+        替代逐调仓日在历史面板重算因子（O(T²·U/f)）。benchmark/防守腿
+        标的保留在面板内（regime 门控需要），其因子列多算几列开销可忽略
+        （over("symbol") 按 symbol 分区，互不影响）。等价性由算子因果性
+        证明背书（见 operator_executor.precompute_factors）。
+        """
+        if not hasattr(self, "_op_executor"):
+            self._op_executor = self._build_operator_executor()
+        enriched, cols = precompute_factors(self._op_executor.factor_specs, full_data)
+        self._precomputed = True
+        self._factor_columns = cols
+        return enriched
 
     def on_bar(self, bars: pl.DataFrame, context) -> Any:
         """算子目录执行路径：在 polars 历史面板上跑算子链 → 选中标的 → 等权信号。
@@ -161,15 +190,25 @@ class DSLStrategy(BaseStrategy):
         if not hasattr(self, "_op_executor"):
             self._op_executor = self._build_operator_executor()
 
-        history_pl = self._fetch_history(context)
-        if history_pl is None:
-            return None
-
         try:
-            pool_history = self._strip_non_pool(history_pl)
-            selected, rationale = self._op_executor.execute_with_rationale(
-                pool_history, context.current_timestamp
-            )
+            if self._precomputed:
+                # 预计算模式：guard 面板已含因子列（引擎 precompute_panel
+                # 钩子全期算好），调仓日只在当前截面跑 signal 算子
+                cross = context.get_current_slab()
+                pool_cross = self._strip_non_pool(cross)
+                selected, rationale = self._op_executor.execute_precomputed(
+                    pool_cross, self._factor_columns, context.current_timestamp
+                )
+            else:
+                # 兜底：未经引擎预计算钩子（如单测直接构造 DSLStrategy 调
+                # on_bar），走截断窗口历史面板跑 factor+signal 全链
+                history_pl = self._fetch_history(context)
+                if history_pl is None:
+                    return None
+                pool_history = self._strip_non_pool(history_pl)
+                selected, rationale = self._op_executor.execute_with_rationale(
+                    pool_history, context.current_timestamp
+                )
         except Exception as exc:
             self.step_failures.append(
                 {
@@ -186,7 +225,7 @@ class DSLStrategy(BaseStrategy):
 
         return SignalEvent(
             timestamp=context.current_timestamp,
-            trace_id=f"op_{context.current_timestamp.isoformat()}",
+            trace_id=f"{bar_trace_id(context.current_timestamp)}_op",
             event_id=f"op_{context.current_timestamp.isoformat()}",
             signals=final_weights,
             strategy_id=self.strategy_id,
@@ -194,9 +233,15 @@ class DSLStrategy(BaseStrategy):
         )
 
     def _fetch_history(self, context) -> pl.DataFrame | None:
-        """取 VisibilityGuard 历史面板，失败记诊断并返回 None。"""
+        """取截断窗口历史面板（最近 W 个交易日），失败记诊断并返回 None。
+
+        替代 get_history_df() 全历史面板：因子算子仅需回溯窗口内的历史
+        （ewm 类已含 4×span 收敛余量），把逐调仓日 O(全部历史) 降到
+        O(W)。首 bar 的 regime 预填（_seed_regime_from_history）仍走
+        get_history_df()，每 run 仅一次。
+        """
         try:
-            return context.get_history_df()
+            return context.get_history_tail(self._history_window_bars)
         except Exception as exc:
             self.step_failures.append(
                 {
@@ -267,9 +312,7 @@ class DSLStrategy(BaseStrategy):
         if past.height == 0:
             return
         bench = past.filter(pl.col("symbol") == cfg.benchmark)
-        self._bench_closes.extend(
-            float(c) for c in bench["close"] if c is not None
-        )
+        self._bench_closes.extend(float(c) for c in bench["close"] if c is not None)
         if not cfg.uses_relative:
             return
         current_syms = bars["symbol"].to_list()
@@ -322,7 +365,7 @@ class DSLStrategy(BaseStrategy):
         closes = list(self._bench_closes)
         if len(closes) < cfg.window:
             return "bull"
-        ma = sum(closes[-cfg.window:]) / cfg.window
+        ma = sum(closes[-cfg.window :]) / cfg.window
         return "bull" if closes[-1] > ma else "bear"
 
     def _relative_state(self, cfg: RegimeConfig) -> str:
@@ -378,7 +421,7 @@ class DSLStrategy(BaseStrategy):
         ts = context.current_timestamp
         return SignalEvent(
             timestamp=ts,
-            trace_id=f"rg_{ts.isoformat()}",
+            trace_id=bar_trace_id(ts),
             event_id=f"rg_{ts.isoformat()}",
             signals=dict.fromkeys(tradable, weight),
             strategy_id=self.strategy_id,

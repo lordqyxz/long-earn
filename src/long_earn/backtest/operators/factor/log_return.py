@@ -23,7 +23,8 @@ class LogReturn(Operator):
     params_cls: ClassVar[type[OperatorParams]] = LogReturnParams
     min_history: ClassVar[int] = 1
 
-    def apply(self, panel, params):
+    def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, LogReturnParams)
         expr = (
             (pl.col(params.field) / pl.col(params.field).shift(params.period))
             .log()

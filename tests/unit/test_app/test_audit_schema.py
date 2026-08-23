@@ -106,41 +106,65 @@ def test_openapi_emits_audit_named_schemas(monkeypatch: pytest.MonkeyPatch) -> N
     assert schema_ref["$ref"].endswith("/AuditEventsResponse")
 
 
-def _make_by_trace() -> dict[str, dict[str, Any]]:
-    """构造与 export_trade_attribution 中间结构一致的 by_trace（信号单链）。"""
+def _make_by_trace() -> dict[str, dict[str, dict[str, Any]]]:
+    """构造与 export_trade_attribution 中间结构一致的 by_trace（信号单链）。
+
+    结构为 trace → event_type → entry：确定性 trace_id 落地后因果链上
+    事件可共享同一 trace（见 bar_trace_id），按事件类型二级索引。
+    """
+
+    def _entry(
+        parent: str,
+        etype: str,
+        payload: dict[str, Any],
+        component: str,
+        ts: str,
+    ) -> dict[str, Any]:
+        return {
+            "parent": parent,
+            "event_type": etype,
+            "payload": payload,
+            "component": component,
+            "status": "SUCCESS",
+            "timestamp": ts,
+        }
+
     return {
         "sig-1": {
-            "parent": "",
-            "event_type": "SIGNAL",
-            "payload": {
-                "signals": {"A": 0.5},
-                "strategy_id": "test-mom",
-                "risk_triggered": False,
-            },
-            "component": "Strategy",
-            "status": "SUCCESS",
-            "timestamp": "2023-01-03 09:30:00",
+            "SIGNAL": _entry(
+                "",
+                "SIGNAL",
+                {
+                    "signals": {"A": 0.5},
+                    "strategy_id": "test-mom",
+                    "risk_triggered": False,
+                },
+                "Strategy",
+                "2023-01-03 09:30:00",
+            )
         },
         "ord-1": {
-            "parent": "sig-1",
-            "event_type": "ORDER",
-            "payload": {"symbol": "A", "type": "BUY", "quantity": 500.0},
-            "component": "Portfolio",
-            "status": "SUCCESS",
-            "timestamp": "2023-01-03 09:31:00",
+            "ORDER": _entry(
+                "sig-1",
+                "ORDER",
+                {"symbol": "A", "type": "BUY", "quantity": 500.0},
+                "Portfolio",
+                "2023-01-03 09:31:00",
+            )
         },
         "fill-1": {
-            "parent": "ord-1",
-            "event_type": "FILL",
-            "payload": {
-                "symbol": "A",
-                "type": "BUY",
-                "price": 10.0,
-                "quantity": 500.0,
-            },
-            "component": "Broker",
-            "status": "SUCCESS",
-            "timestamp": "2023-01-03 09:32:00",
+            "FILL": _entry(
+                "ord-1",
+                "FILL",
+                {
+                    "symbol": "A",
+                    "type": "BUY",
+                    "price": 10.0,
+                    "quantity": 500.0,
+                },
+                "Broker",
+                "2023-01-03 09:32:00",
+            )
         },
     }
 

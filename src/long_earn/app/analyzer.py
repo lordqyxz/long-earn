@@ -511,9 +511,13 @@ class BacktestAnalyzer:
         # 年化收益率：算术年化 mean(daily_return) * 252（与引擎 _calculate_metrics
         # 一致；几何年化在亏损/短样本下与引擎结果差异显著，会造成列表页与详情页
         # 数值对不上）
-        daily_vol = float(returns_series.std())
+        # polars 聚合结果可能为 None（空序列）或 timedelta（duration 列），
+        # 此处仅接受数值列，防御性收窄后再转 float
+        _std = returns_series.std()
+        daily_vol = float(_std) if isinstance(_std, (int, float)) else 0.0
         annual_volatility = daily_vol * (252**0.5)
-        annual_return = float(returns_series.mean()) * 252
+        _mean = returns_series.mean()
+        annual_return = (float(_mean) if isinstance(_mean, (int, float)) else 0.0) * 252
 
         # 夏普比率：与引擎一致（算术年化收益 / 年化波动率，不扣无风险利率）。
         # 原实现额外减 0.02 且年化口径用几何，导致与列表页（引擎 RUN_END 值）
@@ -525,7 +529,8 @@ class BacktestAnalyzer:
         # 最大回撤 & 持续天数
         cumulative_max = portfolio_series.cum_max()
         drawdowns = (portfolio_series - cumulative_max) / cumulative_max
-        max_drawdown = float(drawdowns.min())
+        _min = drawdowns.min()
+        max_drawdown = float(_min) if isinstance(_min, (int, float)) else 0.0
 
         # 最大回撤持续天数
         in_drawdown = (drawdowns < 0).cast(pl.Int32)
@@ -731,13 +736,16 @@ class BacktestAnalyzer:
         finally:
             conn.close()
 
-        # 每个 trace 一条事件记录：parent/event_type/payload 用于链解析，
+        # 每个 trace 一组事件记录（trace → event_type → entry）：确定性
+        # trace_id 落地后信号/订单/成交沿因果链共享同一 trace（见
+        # domain.entities.bar_trace_id），单层索引会互相覆盖，按
+        # event_type 二级索引；parent/payload 用于链解析，
         # component/status/timestamp 用于 hover 摘要
-        by_trace: dict[str, dict[str, Any]] = {}
+        by_trace: dict[str, dict[str, dict[str, Any]]] = {}
         fills: list[tuple[str, str, dict[str, Any]]] = []
         for trace, parent, etype, component, status, ts, payload in rows:
             p = self._payload_as_dict(payload)
-            by_trace[trace] = {
+            by_trace.setdefault(trace, {})[etype] = {
                 "parent": parent or "",
                 "event_type": etype,
                 "payload": p,
@@ -758,7 +766,7 @@ class BacktestAnalyzer:
         cls,
         fill_trace: str,
         order_trace_id: str,
-        by_trace: dict[str, dict[str, Any]],
+        by_trace: dict[str, dict[str, dict[str, Any]]],
     ) -> dict[str, Any]:
         """解析单笔 FILL 的上游归因链（2 跳：FILL→ORDER→SIGNAL/RISK_TRIGGER）。"""
         # 待成交单（限价/止损触发）parent 形如 pend_xxx，无独立 ORDER 事件
@@ -776,18 +784,23 @@ class BacktestAnalyzer:
                 },
             }
 
-        order_entry = by_trace.get(order_trace_id)
+        # 同 trace 事件组里按事件类型取节点（信号链上 FILL/ORDER/SIGNAL
+        # 共享 trace，见 bar_trace_id 的确定性派生约定）
+        order_entry = by_trace.get(order_trace_id, {}).get("ORDER")
         order = None
         upstream_trace = ""
         upstream_type = ""
         upstream_payload: dict[str, Any] = {}
-        if order_entry is not None and order_entry["event_type"] == "ORDER":
+        if order_entry is not None:
             order = order_entry["payload"]
             upstream_trace = order_entry["parent"]
-            up = by_trace.get(upstream_trace)
-            if up is not None:
-                upstream_type = up["event_type"]
-                upstream_payload = up["payload"]
+            up_events = by_trace.get(upstream_trace, {})
+            for candidate in ("SIGNAL", "RISK_TRIGGER"):
+                up_entry = up_events.get(candidate)
+                if up_entry is not None:
+                    upstream_type = candidate
+                    upstream_payload = up_entry["payload"]
+                    break
 
         chain = {
             "fill": fill_trace,
@@ -879,18 +892,26 @@ class BacktestAnalyzer:
         fill_trace: str,
         order_trace: str,
         upstream_trace: str,
-        by_trace: dict[str, dict[str, Any]],
+        by_trace: dict[str, dict[str, dict[str, Any]]],
     ) -> dict[str, dict[str, Any]]:
-        """按审计链节点（upstream/order/fill）构造紧凑事件摘要，供前端 hover 展示。"""
+        """按审计链节点（upstream/order/fill）构造紧凑事件摘要，供前端 hover 展示。
+
+        同 trace 事件组里按节点语义选事件类型：upstream 优先
+        SIGNAL/RISK_TRIGGER，order 取 ORDER，fill 取 FILL。
+        """
+        nodes: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+            ("upstream", upstream_trace, ("SIGNAL", "RISK_TRIGGER", "ORDER")),
+            ("order", order_trace, ("ORDER",)),
+            ("fill", fill_trace, ("FILL",)),
+        )
         events: dict[str, dict[str, Any]] = {}
-        for key, trace in (
-            ("upstream", upstream_trace),
-            ("order", order_trace),
-            ("fill", fill_trace),
-        ):
+        for key, trace, preferred_types in nodes:
             if not trace:
                 continue
-            ent = by_trace.get(trace)
+            group = by_trace.get(trace)
+            if not group:
+                continue
+            ent = next((group[t] for t in preferred_types if t in group), None)
             if ent is None:
                 continue
             events[key] = {

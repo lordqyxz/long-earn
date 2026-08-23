@@ -4,7 +4,6 @@
 """
 
 import math
-import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -386,13 +385,13 @@ class Portfolio:
             orders.append(
                 OrderEvent(
                     timestamp=order_ts if order_ts is not None else event.timestamp,
-                    trace_id=str(uuid.uuid4()),
+                    trace_id=event.trace_id,
                     event_id=f"ord_{event.event_id}_{symbol}",
                     symbol=symbol,
                     order_type=order_type,
                     quantity=qty,
                     price=price,
-                    order_id=f"ord_{uuid.uuid4().hex[:8]}",
+                    order_id=f"ord_{event.event_id}_{symbol}",
                     # P1-08: 从 SignalEvent.metadata 读取订单执行类型
                     exec_type=event.metadata.get("exec_type", ExecType.MARKET),
                     stop_price=event.metadata.get("stop_price"),

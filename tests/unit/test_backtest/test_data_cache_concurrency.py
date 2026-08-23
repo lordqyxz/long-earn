@@ -24,9 +24,7 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(), reason="PostgreSQL 服务不可用"
-)
+pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
 
 
 def _price_frame(symbol: str, day: int) -> pd.DataFrame:

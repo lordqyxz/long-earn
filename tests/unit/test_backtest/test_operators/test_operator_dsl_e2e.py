@@ -203,8 +203,10 @@ class TestRebalanceFreqGate:
             yaml_str = OPERATOR_YAML.replace(
                 "universe: { type: csi300 }",
                 f"universe: {{ type: csi300, rebalance_freq: {freq} }}",
-            ).replace("params: { field: mom, top: 2, ascending: false }",
-                      "params: { field: mom, top: 1, ascending: false }")
+            ).replace(
+                "params: { field: mom, top: 2, ascending: false }",
+                "params: { field: mom, top: 1, ascending: false }",
+            )
             dsl = parse_strategy_yaml(yaml_str)
             engine = EventDrivenBacktestEngine(
                 data_provider=mock_data_provider(_alternating_panel())

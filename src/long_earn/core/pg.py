@@ -24,6 +24,7 @@ import os
 from typing import Any
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 # 默认连接参数 — 唯一真相源（AppConfig 从本模块派生，不重复定义）
@@ -104,9 +105,7 @@ def pg_connect(
         已打开的 psycopg Connection（默认 autocommit=False，调用方负责
         commit/rollback 与 close）
     """
-    conn = psycopg.connect(
-        pg_conninfo(overrides=overrides), autocommit=autocommit
-    )
+    conn = psycopg.connect(pg_conninfo(overrides=overrides), autocommit=autocommit)
     if read_only:
         conn.read_only = True
     if row_factory is not None:
@@ -120,13 +119,17 @@ def ensure_database(dbname: str = "") -> None:
     Docker 首次启动或全新环境时调用；幂等（已存在则跳过）。
     """
     target = dbname or resolve_pg_params()["dbname"]
-    admin = psycopg.connect(pg_conninfo(overrides={"dbname": "postgres"}), autocommit=True)
+    admin = psycopg.connect(
+        pg_conninfo(overrides={"dbname": "postgres"}), autocommit=True
+    )
     try:
         exists = admin.execute(
             "SELECT 1 FROM pg_database WHERE datname = %s", (target,)
         ).fetchone()
         if not exists:
-            admin.execute(f'CREATE DATABASE "{target}"')
+            admin.execute(
+                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target))
+            )
     finally:
         admin.close()
 
@@ -136,6 +139,10 @@ def pg_version() -> str:
     conn = pg_connect(read_only=True)
     try:
         row = conn.execute("SELECT version()").fetchone()
-        return str(row["version"] if isinstance(row, dict) else row[0])
+        if row is None:
+            return ""
+        if isinstance(row, dict):
+            return str(row.get("version", ""))
+        return str(row[0])
     finally:
         conn.close()

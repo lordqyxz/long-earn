@@ -1,7 +1,14 @@
 import os
-from typing import Any
+from typing import Any, cast
 
 from openai import OpenAI
+
+# moonshot 的 $web_search 是厂商扩展内置工具，OpenAI SDK 的
+# ChatCompletionToolParam 联合类型不含该类型，用 Any 兜底
+# （第三方库扩展类型不兼容，见 AGENTS.md Any 兜底规则）
+_WEB_SEARCH_TOOLS: Any = [
+    {"type": "builtin_function", "function": {"name": "$web_search"}}
+]
 
 
 def kimi_web_search(query: str) -> list[dict[str, Any]]:
@@ -22,40 +29,44 @@ def kimi_web_search(query: str) -> list[dict[str, Any]]:
 
     client = OpenAI(api_key=api_key, base_url="https://api.moonshot.cn/v1")
 
-    tools = [{"type": "builtin_function", "function": {"name": "$web_search"}}]
-
     response = client.chat.completions.create(
         model="kimi-k2-turbo-preview",
         messages=[{"role": "user", "content": query}],
-        tools=tools,
+        tools=_WEB_SEARCH_TOOLS,
     )
 
     if response.choices[0].finish_reason == "tool_calls":
         tool_calls = response.choices[0].message.tool_calls
-        arguments = tool_calls[0].function.arguments
+        if not tool_calls:
+            return []
+        first_call: Any = tool_calls[0]
+        arguments = first_call.function.arguments
 
+        # assistant 段回带 tool_calls、tool 段回填调用结果；消息列表由
+        # OpenAI SDK 联合类型推导会有噪音，显式标注 list[Any] 规避
+        tool_messages: list[Any] = [
+            {"role": "user", "content": query},
+            {"role": "assistant", "tool_calls": tool_calls},
+            {"role": "tool", "tool_call_id": first_call.id, "content": arguments},
+        ]
         tool_response = client.chat.completions.create(
             model="kimi-k2-turbo-preview",
-            messages=[
-                {"role": "user", "content": query},
-                {"role": "assistant", "tool_calls": tool_calls},
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_calls[0].id,
-                    "content": arguments,
-                },
-            ],
-            tools=tools,
+            messages=tool_messages,
+            tools=_WEB_SEARCH_TOOLS,
         )
 
         content = tool_response.choices[0].message.content
 
-        results = []
+        results: list[dict[str, Any]] = []
         if isinstance(content, str):
             results.append({"title": "搜索结果", "url": "", "content": content})
         elif isinstance(content, list):
-            for item in content:
-                if item.get("type") == "text":
+            # OpenAI SDK 的 content 联合类型在 stub 中推导噪音大（list 分支
+            # 收敛为 Never，带注解赋值仍会被收窄），显式 cast 为 list[Any]
+            # 以遍历文本分片
+            parts = cast(list[Any], content)
+            for item in parts:
+                if isinstance(item, dict) and item.get("type") == "text":
                     results.append(
                         {
                             "title": "搜索结果",

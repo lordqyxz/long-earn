@@ -325,7 +325,9 @@ def test_audit_auto_tags_by_dsl_kind():
     )
     assert run_start, "无 RUN_START 审计事件"
     payload = _payload_of(run_start[-1])
-    assert payload["tags"] == [RUN_TAG_TEST], f"research 策略应自动带 test 标签，实际 {payload['tags']}"
+    assert payload["tags"] == [RUN_TAG_TEST], (
+        f"research 策略应自动带 test 标签，实际 {payload['tags']}"
+    )
 
     # production → 自动 prod 标签（清理豁免）
     from long_earn.backtest.engine.dsl import StrategyDSL
@@ -339,12 +341,12 @@ def test_audit_auto_tags_by_dsl_kind():
     )
     assert run_start, "无 RUN_START 审计事件"
     payload = _payload_of(run_start[-1])
-    assert payload["tags"] == [RUN_TAG_PROD], f"production 策略应自动带 prod 标签，实际 {payload['tags']}"
+    assert payload["tags"] == [RUN_TAG_PROD], (
+        f"production 策略应自动带 prod 标签，实际 {payload['tags']}"
+    )
 
     # 显式传 tags 优先于 DSL kind 推导
-    engine.run(
-        prod_strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST]
-    )
+    engine.run(prod_strategy, "2023-01-01", "2023-01-02", ["AAPL"], tags=[RUN_TAG_TEST])
     run_start = _query_audit_rows(
         "WHERE event_type = %s", ["RUN_START"], run_id=engine._current_run_id
     )

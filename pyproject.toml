@@ -118,6 +118,21 @@ exclude_lines = [
     "raise NotImplementedError",
 ]
 
+[tool.pyright]
+# 类型检查配置：入口为 src/long_earn；tests/ 以单文件诊断为主
+# （tests 引用 mock 驱动，严格全量校验会大量误报，与 AGENTS.md 门槛一致）
+include = ["src"]
+exclude = ["**/__pycache__", "**/archive"]
+pythonVersion = "3.13"
+# 依赖完整解析（polars/pandas/psycopg 等 stubs 缺失时降级 basic 会漏报真错）
+typeCheckingMode = "basic"
+# 第三方无 stubs 库静默（如 xtquant/akshare），避免 import 噪音
+reportMissingImports = true
+# 首次启用暂不强开严格模式：核心链路零错优先，后续逐步收紧
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+
 [tool.importlinter]
 root_package = "long_earn"
 
@@ -202,4 +217,6 @@ dev = [
     "types-pyyaml>=6.0.12.20260510",
     "types-pytz>=2026.2.0.20260506",
     "hypothesis>=6.130",
+    "pyright>=1.1.400",
+    "pandas-stubs>=3.0.0",
 ]

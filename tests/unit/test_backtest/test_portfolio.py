@@ -75,7 +75,9 @@ class TestSignalToOrder:
         assert len(orders) == 1
         assert orders[0].symbol == "000001"
         assert orders[0].order_type == "BUY"
-        assert orders[0].quantity == pytest.approx(49900.0, rel=1e-6)  # 向下取整到100股整倍数
+        assert orders[0].quantity == pytest.approx(
+            49900.0, rel=1e-6
+        )  # 向下取整到100股整倍数
 
     def test_multi_weight_generates_multiple_orders(self):
         """多个权重信号生成多个订单"""

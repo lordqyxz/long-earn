@@ -16,9 +16,12 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
+from langchain_core.runnables import RunnableConfig
+
 from long_earn.strategy_rd.htr_subgraph import (
     create_htr_subgraph as create_strategy_rd_subgraph,
 )
+from long_earn.strategy_rd.state import State
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -134,13 +137,13 @@ class StrategyResearchService:
         if checkpointer is not None:
             self.logger.info(f"[循环] checkpoint 已启用，thread_id={thread_id}")
         t0 = time.time()
-        invoke_input: dict[str, Any] = {"query": idea}
+        invoke_input: State = {"query": idea}
         if history_return != 0.0:
             invoke_input["history_return"] = history_return
         if round_history:
             invoke_input["round_history"] = round_history
 
-        invoke_config: dict[str, Any] | None = None
+        invoke_config: RunnableConfig | None = None
         if checkpointer is not None and thread_id:
             invoke_config = {"configurable": {"thread_id": thread_id}}
 
@@ -174,7 +177,9 @@ class StrategyResearchService:
         )
 
     @staticmethod
-    def _thread_already_completed(subgraph: Any, invoke_config: dict) -> bool:
+    def _thread_already_completed(
+        subgraph: Any, invoke_config: RunnableConfig | None
+    ) -> bool:
         """检查 thread 是否已存在完成态（避免重跑）。"""
         try:
             snapshot = subgraph.get_state(invoke_config)
@@ -367,13 +372,15 @@ class StrategyResearchService:
             self.logger.info("#" * 60)
 
             if progress_callback:
-                progress_callback({
-                    "type": "round_start",
-                    "round": round_num,
-                    "total_rounds": max_rounds,
-                    "family_idx": family_idx,
-                    "idea": current_idea[:120],
-                })
+                progress_callback(
+                    {
+                        "type": "round_start",
+                        "round": round_num,
+                        "total_rounds": max_rounds,
+                        "family_idx": family_idx,
+                        "idea": current_idea[:120],
+                    }
+                )
 
             thread_id = (
                 f"{thread_id_prefix}-round{round_num}-family{family_idx}"
@@ -425,18 +432,21 @@ class StrategyResearchService:
                     stagnation_count += 1
 
             if progress_callback:
-                progress_callback({
-                    "type": "round_complete",
-                    "round": round_num,
-                    "total_rounds": max_rounds,
-                    "improved": bool(best_yaml),
-                    "metrics": (
-                        self._metrics_to_dict(metrics) if metrics
-                        else {"round": round_num, "status": "no_strategy"}
-                    ),
-                    "best_recent_return": best_recent_return,
-                    "stagnation_count": stagnation_count,
-                })
+                progress_callback(
+                    {
+                        "type": "round_complete",
+                        "round": round_num,
+                        "total_rounds": max_rounds,
+                        "improved": bool(best_yaml),
+                        "metrics": (
+                            self._metrics_to_dict(metrics)
+                            if metrics
+                            else {"round": round_num, "status": "no_strategy"}
+                        ),
+                        "best_recent_return": best_recent_return,
+                        "stagnation_count": stagnation_count,
+                    }
+                )
 
             # 家族切换判定：连续无改善达阈值 → 换家族 idea 继续
             if should_stop or stagnation_count >= _FAMILY_PIVOT_THRESHOLD:
@@ -452,25 +462,29 @@ class StrategyResearchService:
                     )
                     self.logger.info("=" * 60)
                     if progress_callback:
-                        progress_callback({
-                            "type": "family_switch",
-                            "family_idx": family_idx,
-                            "idea": current_idea[:120],
-                            "total_families": len(_IDEA_FAMILY_POOL),
-                        })
+                        progress_callback(
+                            {
+                                "type": "family_switch",
+                                "family_idx": family_idx,
+                                "idea": current_idea[:120],
+                                "total_families": len(_IDEA_FAMILY_POOL),
+                            }
+                        )
                     continue
                 else:
                     self.logger.info("[循环] 策略家族池已耗尽，停止迭代")
                     break
 
         if progress_callback:
-            progress_callback({
-                "type": "research_complete",
-                "best_recent_return": best_recent_return,
-                "best_round": best_round_info.get("round", 0),
-                "best_history_return": best_round_info.get("history_return", 0.0),
-                "total_rounds_completed": len(all_results),
-            })
+            progress_callback(
+                {
+                    "type": "research_complete",
+                    "best_recent_return": best_recent_return,
+                    "best_round": best_round_info.get("round", 0),
+                    "best_history_return": best_round_info.get("history_return", 0.0),
+                    "total_rounds_completed": len(all_results),
+                }
+            )
 
         summary = ResearchLoopSummary(
             idea=idea,

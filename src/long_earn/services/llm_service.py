@@ -5,8 +5,13 @@
 
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.language_models import BaseLanguageModel
+from langchain_core.language_models import (
+    BaseLanguageModel,
+    LanguageModelInput,
+    LanguageModelOutput,
+)
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
 
 from long_earn.services import LLMService, LoggerService
 from long_earn.utils.llm_factory import create_llm
@@ -70,8 +75,10 @@ class LLMServiceImpl(LLMService):
             self._llm = self._build_llm()
         return self._llm
 
-    def _bind_format(self, llm: BaseLanguageModel, format: str) -> BaseLanguageModel:
-        """根据 format 参数绑定模型配置"""
+    def _bind_format(
+        self, llm: BaseLanguageModel, format: str
+    ) -> Runnable[LanguageModelInput, LanguageModelOutput]:
+        """根据 format 参数绑定模型配置（bind 返回 Runnable 而非 BaseLanguageModel）"""
         if format != "json":
             return llm
         if self.config.llm_type == "ollama":
@@ -106,11 +113,7 @@ class LLMServiceImpl(LLMService):
                 llm = self._build_llm()
                 llm = self._bind_format(llm, format)
                 response = llm.invoke(prompt)
-                content_preview = (
-                    response.content[:100]
-                    if hasattr(response, "content")
-                    else str(response)[:100]
-                )
+                content_preview = str(getattr(response, "content", response))[:100]
                 self.logger.debug(
                     f"LLM 调用 #{call_id} 完成（第{attempt + 1}次尝试），"
                     f"响应预览: {content_preview!r}"

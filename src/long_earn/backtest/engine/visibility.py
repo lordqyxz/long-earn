@@ -64,6 +64,14 @@ class VisibilityContext:
         """获取当前时刻所有股票的截面数据 (Slab)"""
         return self._guard.read_current_slab()
 
+    def get_history_tail(self, n_bars: int) -> pl.DataFrame:
+        """获取最近 n_bars 个交易日的全部行（含当前 bar）。
+
+        供策略因子窗口截断使用：有限窗口算子（rolling/shift）只需
+        W 个交易日历史即可复现全量值，替代全历史面板。
+        """
+        return self._guard.read_history_tail(n_bars)
+
 
 class VisibilityGuard:
     """可见性守护者
@@ -91,6 +99,16 @@ class VisibilityGuard:
         self._timestamps: list[datetime] = (
             self._full_data.select("timestamp").to_series().to_list()
         )
+        # 交易日边界索引：_days[i] = 第 i 个不同 timestamp；
+        # _day_starts[i] = 该交易日首行行号。供 read_history_tail O(log D) 定位。
+        self._days: list[datetime] = []
+        self._day_starts: list[int] = []
+        _prev: datetime | None = None
+        for _i, _t in enumerate(self._timestamps):
+            if _t != _prev:
+                self._days.append(_t)
+                self._day_starts.append(_i)
+                _prev = _t
         self.current_timestamp: datetime | None = None
         self._context = VisibilityContext(self)
         # 历史切片指针：指向 _full_data 中最后一个 <= current_timestamp 的行 +1
@@ -140,9 +158,9 @@ class VisibilityGuard:
         history = self._get_history_slice()
 
         # 核心逻辑：仅筛选 <= current_timestamp 的数据
+        # 面板构造期已按 timestamp 升序（filter 保序），无需再 sort
         result = (
             history.filter(pl.col("symbol") == symbol)
-            .sort("timestamp", descending=False)
             .tail(window)
             .select(field)
             .to_series()
@@ -180,3 +198,17 @@ class VisibilityGuard:
         return self._full_data.slice(
             self._slab_start_idx, self._slab_end_idx - self._slab_start_idx
         )
+
+    def read_history_tail(self, n_bars: int) -> pl.DataFrame:
+        """最近 n_bars 个交易日（含当前 bar）的全部行。
+
+        O(log D) 定位 + O(1) 切片，供策略因子窗口截断使用：
+        有限窗口算子（rolling/shift）只需 W 个交易日历史即可复现全量值；
+        ewm 类算子需调用方在 W 上加收敛余量（见 lookback_profile）。
+        """
+        if self.current_timestamp is None:
+            raise FutureDataError("时间轴尚未初始化")
+        day_idx = bisect.bisect_left(self._days, self.current_timestamp)
+        start_day = max(0, day_idx - n_bars + 1)
+        start_row = self._day_starts[start_day]
+        return self._full_data.slice(start_row, self._history_end_idx - start_row)

@@ -5,7 +5,6 @@
 """
 
 import math
-import uuid
 from dataclasses import dataclass
 
 from loguru import logger
@@ -82,14 +81,16 @@ def validate_order_fields(order: OrderEvent) -> tuple[OrderSkipReason, str] | No
     引擎预检（记 ORDER_SKIPPED 审计）与 Broker 入口（抛异常 fail closed）
     共用本函数，保证两层判定一致、不留判定漂移空间。
     """
-    if order.quantity is None or not math.isfinite(order.quantity) or order.quantity <= 0:
+    if (
+        order.quantity is None
+        or not math.isfinite(order.quantity)
+        or order.quantity <= 0
+    ):
         return (
             OrderSkipReason.INVALID_QUANTITY,
             f"{order.symbol} quantity={order.quantity}",
         )
-    if order.price is not None and (
-        not math.isfinite(order.price) or order.price <= 0
-    ):
+    if order.price is not None and (not math.isfinite(order.price) or order.price <= 0):
         return (
             OrderSkipReason.INVALID_PRICE,
             f"{order.symbol} 限价 price={order.price}",
@@ -203,12 +204,14 @@ class Broker:
 
         raise OrderExecutionError(f"未知订单执行类型: {order_type}")
 
-    def check_pending_orders(self, price_lookup: dict[str, float]) -> list[FillEvent]:
+    def check_pending_orders(
+        self, price_lookup: dict[str, float | None]
+    ) -> list[FillEvent]:
         """
         检查所有待成交订单（每个 bar 调用一次）
 
         Args:
-            price_lookup: symbol → current_price 映射
+            price_lookup: symbol → current_price 映射；缺失/None 的 symbol 跳过撮合
 
         Returns:
             本 bar 产生的成交事件列表
@@ -323,8 +326,8 @@ class Broker:
 
         fill = FillEvent(
             timestamp=order.timestamp,
-            trace_id=str(uuid.uuid4()),
-            event_id=f"fill_{order.order_id}",
+            trace_id=order.trace_id,
+            event_id=f"fill_{order.order_id}_{order.timestamp:%Y%m%d}",
             order_id=order.order_id,
             symbol=order.symbol,
             order_type=order.order_type,
@@ -388,8 +391,8 @@ class Broker:
 
         return FillEvent(
             timestamp=order.timestamp,
-            trace_id=str(uuid.uuid4()),
-            event_id=f"fill_{order.order_id}",
+            trace_id=order.trace_id,
+            event_id=f"fill_{order.order_id}_{order.timestamp:%Y%m%d}",
             order_id=order.order_id,
             symbol=order.symbol,
             order_type=order.order_type,

@@ -20,6 +20,7 @@ from long_earn.backtest.domain.entities import (
     OrderEvent,
     PerformanceMetrics,
     SignalEvent,
+    bar_trace_id,
 )
 from long_earn.backtest.engine.audit import RUN_TAG_PROD, RUN_TAG_TEST, OrderSkipReason
 from long_earn.backtest.engine.broker import (
@@ -87,6 +88,7 @@ class EventDrivenBacktestEngine:
         max_position_pct: float = 1.0,
         max_positions: int = 0,
         audit_logger: InMemoryAuditTrail | None = None,
+        enable_panel_cache: bool = False,
     ):
         self.data_provider = data_provider
         self.universe_provider = universe_provider
@@ -98,6 +100,9 @@ class EventDrivenBacktestEngine:
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
         self.max_positions = max_positions
+        # merged panel 跨 run 磁盘缓存（参数寻优/并行回测同参数面板复用）；
+        # 默认关闭以保护单测隔离（Mock provider 面板可变）
+        self.enable_panel_cache = enable_panel_cache
         self._max_turnover: float | None = None
         # 当前回测 run_id / db_audit：存为实例变量让内部方法（风控/结果构建等）
         # 无需透传即可写审计日志。每次 run() 开头重置。
@@ -395,11 +400,28 @@ class EventDrivenBacktestEngine:
                 )
                 return empty_result
 
+            strategy.init()
+
+            # 因子全期预计算钩子：策略声明 precompute_panel 时，全期一次性
+            # 计算 factor 列（O(T·U)），调仓日只在当前截面跑 signal 算子。
+            # 与逐 bar 截断历史计算逐值等价（算子因果性证明背书，见
+            # test_precompute_equivalence.py）。鸭子类型探测，不引入对
+            # DSLStrategy 的类型依赖；须在 init() 之后（init 重置预计算状态）。
+            precompute = getattr(strategy, "precompute_panel", None)
+            if callable(precompute):
+                # 预计算钩子总是返回 DataFrame（precompute_panel 签名），
+                # getattr 让类型退化为 object，显式断言回 DataFrame
+                enriched = precompute(full_data)
+                assert isinstance(enriched, pl.DataFrame), (
+                    f"precompute_panel 应返回 DataFrame，得到 {type(enriched)}"
+                )
+                full_data = enriched
+
+            assert full_data is not None, "full_data 在预计算后不应为 None"
             guard = VisibilityGuard(full_data)
             portfolio = Portfolio(cost_config=self.cost_config)
             broker = Broker(self.cost_config)
             broker.reset()
-            strategy.init()
 
             # warmup_days > 0 时 full_data 含预热期数据；交易时间戳仍按
             # [start_date, end_date] 过滤，避免在 warmup 期产生交易。
@@ -560,7 +582,7 @@ class EventDrivenBacktestEngine:
         slab = guard.read_current_slab()
         mkt_event = MarketDataEvent(
             timestamp=ts,
-            trace_id=str(uuid.uuid4()),
+            trace_id=f"{bar_trace_id(ts)}_mkt",
             event_id=f"mkt_{ts.isoformat()}",
             slab=slab,
         )
@@ -574,7 +596,8 @@ class EventDrivenBacktestEngine:
             sym = row.get("symbol", "")
             close = row.get("close", None)
             if sym and close is not None:
-                prev_close = self._prev_close_map.get(sym, close)
+                # close 已保证非 None，转 float 满足 _compute_price_limits 契约
+                prev_close = self._prev_close_map.get(sym, float(close))
                 up, down = self._compute_price_limits(prev_close, sym)
                 self._current_limit_up_map[sym] = up
                 self._current_limit_down_map[sym] = down
@@ -777,7 +800,11 @@ class EventDrivenBacktestEngine:
             check_price = high_price if (high_price and high_price > 0) else close_price
             # P3-02: NaN/Inf 价格会令 pnl_pct 判定失真（NaN 比较恒 False），
             # 导致"触发止盈"却按 NaN 价成交污染组合——显式跳过。
-            if check_price is None or not math.isfinite(check_price) or check_price <= 0:
+            if (
+                check_price is None
+                or not math.isfinite(check_price)
+                or check_price <= 0
+            ):
                 continue
 
             pnl_pct = (
@@ -786,7 +813,7 @@ class EventDrivenBacktestEngine:
             if pnl_pct < self.take_profit:
                 continue
 
-            risk_trace_id = str(uuid.uuid4())
+            risk_trace_id = f"{bar_trace_id(ts)}_risk_tp_{symbol}"
             self._log_audit(
                 "RISK_TRIGGER",
                 risk_trace_id,
@@ -811,7 +838,7 @@ class EventDrivenBacktestEngine:
                 continue
             order = OrderEvent(
                 timestamp=ts,
-                trace_id=str(uuid.uuid4()),
+                trace_id=f"{bar_trace_id(ts)}_tp_{symbol}",
                 event_id=f"tp_{ts.isoformat()}_{symbol}",
                 symbol=symbol,
                 order_type="SELL",
@@ -882,7 +909,11 @@ class EventDrivenBacktestEngine:
             )
             check_price = low_price if (low_price and low_price > 0) else close_price
             # P3-02: NaN/Inf 价格会使止损判定失真（NaN 比较恒 False），显式跳过
-            if check_price is None or not math.isfinite(check_price) or check_price <= 0:
+            if (
+                check_price is None
+                or not math.isfinite(check_price)
+                or check_price <= 0
+            ):
                 continue
 
             pnl_pct = (
@@ -901,7 +932,7 @@ class EventDrivenBacktestEngine:
             if ref_price > 0:
                 # G2: 风控触发独立审计——记录触发原因/持仓详情/触发价格，
                 # 让"为什么产生这个 SELL"可追溯。trace_id 供后续 FILL 归因关联
-                risk_trace_id = str(uuid.uuid4())
+                risk_trace_id = f"{bar_trace_id(ts)}_risk_sl_{symbol}"
                 self._log_audit(
                     "RISK_TRIGGER",
                     risk_trace_id,
@@ -927,7 +958,7 @@ class EventDrivenBacktestEngine:
                     continue
                 order = OrderEvent(
                     timestamp=ts,
-                    trace_id=str(uuid.uuid4()),
+                    trace_id=f"{bar_trace_id(ts)}_sl_{symbol}",
                     event_id=f"sl_{ts.isoformat()}_{symbol}",
                     symbol=symbol,
                     order_type="SELL",
@@ -1016,7 +1047,7 @@ class EventDrivenBacktestEngine:
 
         # G2: 最大回撤触发独立审计——记录触发时的回撤值/峰值/当前净值，
         # trace_id 供循环内每笔清仓 FILL 的 ORDER 归因关联
-        risk_trace_id = str(uuid.uuid4())
+        risk_trace_id = f"{bar_trace_id(ts)}_risk_dd"
         self._log_audit(
             "RISK_TRIGGER",
             risk_trace_id,
@@ -1053,7 +1084,7 @@ class EventDrivenBacktestEngine:
                     continue
                 order = OrderEvent(
                     timestamp=ts,
-                    trace_id=str(uuid.uuid4()),
+                    trace_id=f"{bar_trace_id(ts)}_dd_{symbol}",
                     event_id=f"dd_{ts.isoformat()}_{symbol}",
                     symbol=symbol,
                     order_type="SELL",
@@ -1508,10 +1539,13 @@ class EventDrivenBacktestEngine:
         col_data = slab[col].drop_nulls()
         if col_data.len() == 0:
             return {"min": 0.0, "max": 0.0, "mean": 0.0}
+        values = [float(v) for v in col_data.to_list() if v is not None]
+        if not values:
+            return {"min": 0.0, "max": 0.0, "mean": 0.0}
         return {
-            "min": float(col_data.min()),
-            "max": float(col_data.max()),
-            "mean": float(col_data.mean()),
+            "min": min(values),
+            "max": max(values),
+            "mean": sum(values) / len(values),
         }
 
     @staticmethod
@@ -1962,9 +1996,18 @@ class EventDrivenBacktestEngine:
                 f"{data_start}~{end[:10]} (warmup={warmup_days}d)"
             )
             t0 = time.perf_counter()
-            df = self.data_provider.get_merged_panel_as_polars(
-                symbols, data_start, end[:10]
-            )
+            if self.enable_panel_cache:
+                from long_earn.backtest.data.panel_cache import (  # noqa: PLC0415
+                    cached_merged_panel,
+                )
+
+                df = cached_merged_panel(
+                    self.data_provider, symbols, data_start, end[:10]
+                )
+            else:
+                df = self.data_provider.get_merged_panel_as_polars(
+                    symbols, data_start, end[:10]
+                )
             logger.info(
                 f"[回测引擎] 合并面板加载完成: "
                 f"rows={0 if df is None else len(df)}, "

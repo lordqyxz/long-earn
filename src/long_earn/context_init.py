@@ -11,7 +11,6 @@ from long_earn.backtest.data.connector import (
 )
 from long_earn.config import AppConfig, RuntimeContext
 from long_earn.event_inference import create_event_inference_subgraph
-from long_earn.event_inference.collectors import create_default_collector_registry
 from long_earn.ontology import Connector, OntologyRegistry
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.services.backtest_service import BacktestServiceImpl
@@ -122,13 +121,8 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
         """通过生产事件推理子图采集并写回事件。"""
         if runtime_context is None:
             raise RuntimeError("RuntimeContext 尚未完成装配")
-        registry = create_default_collector_registry(
-            market_intelligence=market_intelligence,
-        )
-        subgraph = create_event_inference_subgraph(
-            runtime_context,
-            registry=registry,
-        )
+        # 生产子图内部会构造默认 CollectorRegistry（基于 runtime_context 装配）
+        subgraph = create_event_inference_subgraph(runtime_context)
         subgraph.invoke({"query": query})
 
     context_preparation = ContextPreparationServiceImpl(

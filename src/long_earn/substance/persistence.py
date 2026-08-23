@@ -22,7 +22,7 @@ import psycopg
 from loguru import logger
 
 from long_earn.core.pg import pg_connect
-from long_earn.substance.model import Substance
+from long_earn.substance.model import FilterLogic, Substance
 
 SCHEMA_VERSION = 3
 
@@ -151,7 +151,7 @@ def _row_to_substance(row: Any) -> Substance:
         content=row[2] or "",
         keys=_as_list(row[3]),
         filter_keys=_as_list(row[4]),
-        filter_logic=row[5] or "and_any",
+        filter_logic=FilterLogic(row[5]) if row[5] else FilterLogic.AND_ANY,
         created_at=row[6],
         visible_from=row[7],
         expires_at=row[8],

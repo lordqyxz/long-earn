@@ -1,4 +1,4 @@
-"""算子因果性（无未来函数）证明测试。
+﻿"""算子因果性（无未来函数）证明测试。
 
 每个注册算子用 :func:`prove_causality` 做**未来扰动不变性**验证：扰动全部
 ``timestamp > T`` 的数据后，若 ``t <= T`` 输出逐元素不变，则该算子在 T 切面
@@ -65,9 +65,9 @@ PARAM_CASES = [
     # operator_dev 新增算子（htr_subgraph 接入后由 LLM 生成）
     (
         "gross_margin_stability",
-        GrossMarginStabilityParams(field="close", window=60, min_periods=30, eps=1e-10),
+        GrossMarginStabilityParams(field="close", window=60, min_samples=30, eps=1e-10),
     ),
-    ("roe_quality", RoeQualityParams(field="close", window=20, min_periods=5)),
+    ("roe_quality", RoeQualityParams(field="close", window=20, min_samples=5)),
     (
         "lowvol_momentum_combo",
         LowvolMomentumComboParams(
@@ -106,9 +106,8 @@ def test_operator_is_causal(
         OPERATOR_REGISTRY[op_name], params, panel, perturb_strategy=strategy
     )
     failed = [r for r in reports if not r.passed]
-    assert not failed, (
-        f"{op_name}[{strategy.value}] 因果性证明失败：\n"
-        + "\n".join(f"  T={r.split_timestamp}: {r.detail}" for r in failed)
+    assert not failed, f"{op_name}[{strategy.value}] 因果性证明失败：\n" + "\n".join(
+        f"  T={r.split_timestamp}: {r.detail}" for r in failed
     )
 
 
@@ -147,3 +146,4 @@ def test_causality_prover_detects_future_leak(
         ), f"prover[{strategy.value}] 未能检出未来函数泄漏"
     finally:
         OPERATOR_REGISTRY.pop("_test_future_leak", None)
+

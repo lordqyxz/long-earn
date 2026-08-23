@@ -42,7 +42,7 @@ class ContextPreparationServiceImpl:
         return "\n".join(self._activate(query, k, "二次激活"))
 
     def _activate(self, query: str, k: int, phase: str) -> list[str]:
-        activate_events = getattr(self._memory, "activate_events", None)
+        activate_events = self._memory.activate_events
         if not callable(activate_events):
             return []
         try:

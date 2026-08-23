@@ -85,9 +85,7 @@ def _numpy_total_return(equity: list[float]) -> float:
     return (equity[-1] / equity[0]) - 1 if equity[0] > 0 else 0.0
 
 
-def _numpy_beta(
-    port_equity: list[float], bm_prices: list[float]
-) -> float:
+def _numpy_beta(port_equity: list[float], bm_prices: list[float]) -> float:
     """用 numpy 计算 Beta：Cov(R_p, R_m) / Var(R_m)，ddof=1。"""
     eq_arr = np.array(port_equity, dtype=float)
     bm_arr = np.array(bm_prices, dtype=float)
@@ -98,9 +96,7 @@ def _numpy_beta(
     return cov / var_bm if var_bm > 0 else 0.0
 
 
-def _numpy_alpha(
-    port_equity: list[float], bm_prices: list[float]
-) -> float:
+def _numpy_alpha(port_equity: list[float], bm_prices: list[float]) -> float:
     """Jensen's Alpha: α = R_p_annual - β · R_m_annual (R_f=0)。"""
     eq_arr = np.array(port_equity, dtype=float)
     bm_arr = np.array(bm_prices, dtype=float)
@@ -112,18 +108,14 @@ def _numpy_alpha(
     return port_annual - beta * bm_annual
 
 
-def _numpy_information_ratio(
-    port_equity: list[float], bm_prices: list[float]
-) -> float:
+def _numpy_information_ratio(port_equity: list[float], bm_prices: list[float]) -> float:
     """信息比率：IR = α / tracking_error。"""
     alpha = _numpy_alpha(port_equity, bm_prices)
     tracking_error = _numpy_tracking_error(port_equity, bm_prices)
     return alpha / tracking_error if tracking_error > 0 else 0.0
 
 
-def _numpy_tracking_error(
-    port_equity: list[float], bm_prices: list[float]
-) -> float:
+def _numpy_tracking_error(port_equity: list[float], bm_prices: list[float]) -> float:
     """跟踪误差：std(excess_returns, ddof=1) * sqrt(252)。"""
     eq_arr = np.array(port_equity, dtype=float)
     bm_arr = np.array(bm_prices, dtype=float)
@@ -389,9 +381,7 @@ def test_alpha_beta_ir_matches_numpy(mock_data_provider):
     assert result.tracking_error == pytest.approx(numpy_te, rel=1e-4, abs=1e-6), (
         f"引擎 TE={result.tracking_error:.6f} != numpy={numpy_te:.6f}"
     )
-    assert result.benchmark_return == pytest.approx(
-        numpy_bm_ret, rel=1e-4, abs=1e-6
-    ), (
+    assert result.benchmark_return == pytest.approx(numpy_bm_ret, rel=1e-4, abs=1e-6), (
         f"引擎 BM_ret={result.benchmark_return:.6f} != numpy={numpy_bm_ret:.6f}"
     )
 

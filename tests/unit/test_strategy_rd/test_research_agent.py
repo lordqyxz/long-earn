@@ -276,9 +276,7 @@ class TestEvidenceGatePipeline:
         assert "sharpe_ratio" in bt_result
 
         # Step 2: record_path_outcome（仅训练集证据）
-        rec = next(
-            t for t in agent._build_tools() if t.name == "record_path_outcome"
-        )
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
         out = rec.invoke(
             {
                 "path_summary": "quality_momentum v1 训练集通过",
@@ -307,9 +305,7 @@ class TestEvidenceGatePipeline:
         assert "passed" in oos_result
 
         # Step 3: record_path_outcome（训练集 + OOS 证据）
-        rec = next(
-            t for t in agent._build_tools() if t.name == "record_path_outcome"
-        )
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
         out = rec.invoke(
             {
                 "path_summary": "quality_momentum v1 OOS 通过",
@@ -329,9 +325,7 @@ class TestEvidenceGatePipeline:
         bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
         bt.invoke({"strategy_yaml": strategy_yaml})
 
-        rec = next(
-            t for t in agent._build_tools() if t.name == "record_path_outcome"
-        )
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
         out = rec.invoke(
             {
                 "path_summary": "degenerate strategy",
@@ -369,9 +363,7 @@ class TestEvidenceGatePipeline:
         # 低 sharpe + 多 trial → DSR 应拒绝
         assert parsed["passed"] is False
 
-    def test_evidence_cleared_between_invocations(
-        self, agent: ResearchAgent
-    ) -> None:
+    def test_evidence_cleared_between_invocations(self, agent: ResearchAgent) -> None:
         """每次 invoke 重置证据缓存和 trial count"""
         strategy_yaml = self._valid_strategy()
         bt = next(t for t in agent._build_tools() if t.name == "run_backtest")

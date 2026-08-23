@@ -35,6 +35,27 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 
+def _invalidate_panel_cache() -> None:
+    """数据更新后清空 merged panel 跨 run 缓存（防陈旧面板命中）。
+
+    panel_cache 以 (symbols, start, end) 为 key 落盘 Arrow，不感知底层
+    数据变更；增量下载后若不清空，回测会继续命中旧面板——数据正确性
+    问题（代价只是缓存重建一次，可接受）。
+    """
+    from long_earn.core.storage import panel_cache_dir
+
+    cache_dir = panel_cache_dir()
+    n = 0
+    for f in cache_dir.glob("*.arrow"):
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass  # 竞争删除无害
+    if n:
+        print(f"[守护] 已清空 panel 缓存 {n} 个文件（底层数据已更新）", flush=True)
+
+
 def main() -> None:
     """守护循环：以子进程运行 download 子命令，崩溃则重启。"""
     # 解析 --restart-delay（本脚本专属参数，需从 argv 中剔除后再透传）
@@ -69,6 +90,8 @@ def main() -> None:
         r = subprocess.run(cmd, cwd=str(project_root), check=False)
 
         if r.returncode == 0:
+            # 数据已更新：清空 panel 缓存，防回测命中陈旧面板
+            _invalidate_panel_cache()
             print("[守护] 下载子进程正常退出", flush=True)
             return
 

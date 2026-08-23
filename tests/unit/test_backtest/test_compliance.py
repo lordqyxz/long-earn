@@ -560,9 +560,7 @@ def test_gem_board_18pct_buy_fills(mock_data_provider):
         and e.get("payload", {}).get("reason") == "limit_up_reject"
     ]
     fills = [e for e in trail if e.get("event_type") == "FILL"]
-    assert not limit_skips, (
-        f"创业板 +18% 不应被误判涨停拒买: {limit_skips[:2]}"
-    )
+    assert not limit_skips, f"创业板 +18% 不应被误判涨停拒买: {limit_skips[:2]}"
     assert fills, "创业板 +18% 的买入单应正常成交"
 
 

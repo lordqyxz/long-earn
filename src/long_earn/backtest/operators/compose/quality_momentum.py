@@ -22,6 +22,7 @@ class QualityMomentum(Operator):
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
+        assert isinstance(params, QualityMomentumParams)
         p = params
         # 保留原始行序，确保因果性验证通过（面板可能 shuffle）。
         panel = panel.with_row_index("__qm_row_id")

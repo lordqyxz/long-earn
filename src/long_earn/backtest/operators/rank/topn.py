@@ -28,6 +28,8 @@ class RankTop(Operator):
     # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
     field_params: ClassVar[list[str]] = ["field"]
     params_cls: ClassVar[type[OperatorParams]] = RankTopParams
+    # over("timestamp") 截面内排名：截面运算（可作预计算路径的信号算子）
+    cross_sectional: ClassVar[bool] = True
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.DataFrame:

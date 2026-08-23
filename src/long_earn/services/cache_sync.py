@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 # 环境变量：显式设置后 MiniQmtClient.is_available 返回 False，强制只读缓存
 CACHE_ONLY_ENV = "LONG_EARN_CACHE_ONLY"
 
+# PG 迁移后无本地缓存文件路径：DataCache 的 db_path 已废弃，
+# 报告里的 cache_path 统一用 PG 缓存标识（兼容旧调用方读取该字段）
+_PG_CACHE_LABEL = "pg://long_earn"
+
 
 def is_cache_only() -> bool:
     """检测当前是否处于显式纯缓存模式。"""
@@ -117,7 +121,7 @@ def sync_data_cache(
         return {
             "status": "skipped",
             "reason": "xtquant_unavailable",
-            "cache_path": str(cache.db_path),
+            "cache_path": _PG_CACHE_LABEL,
         }
 
     from long_earn.services.incremental_sync import (  # noqa: PLC0415
@@ -139,7 +143,7 @@ def sync_data_cache(
         return {
             "status": "error",
             "reason": f"ingestion_failed: {exc}",
-            "cache_path": str(cache.db_path),
+            "cache_path": _PG_CACHE_LABEL,
         }
 
     result = report.as_dict()
@@ -151,7 +155,7 @@ def sync_data_cache(
             f"数据同步完成: 行情 {result.get('price_symbols', 0)} 只, "
             f"财务 {result.get('financial_symbols', 0)} 只"
         )
-        _log(f"缓存路径: {result.get('cache_path', cache.db_path)}")
+        _log(f"缓存路径: {result.get('cache_path', _PG_CACHE_LABEL)}")
 
     _log("=" * 60)
     _log("策略: DuckDB 缓存优先；缺失/过期时 Provider 自动从 miniqmt 增量补齐")
