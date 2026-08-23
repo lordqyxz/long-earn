@@ -370,10 +370,6 @@ def agent(
 def web(
     host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
     port: int = typer.Option(8090, "--port", help="监听端口"),
-    db: str = typer.Option("", "--db", help="DuckDB 审计数据库路径"),
-    substances: str = typer.Option(
-        "", "--substances", help="SubstanceStore JSONL 路径（事件流端点）"
-    ),
     allow_remote: bool = typer.Option(
         False,
         "--allow-remote",
@@ -386,8 +382,6 @@ def web(
     serve_visualization_fastapi(
         host=host,
         port=port,
-        db_path=db,
-        substances_path=substances,
         allow_remote=allow_remote,
     )
 

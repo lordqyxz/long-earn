@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from long_earn.substance.model import Substance, SubstanceForm
@@ -26,7 +25,7 @@ class EventAnalyzer:
     Usage::
 
         analyzer = EventAnalyzer()
-        analyzer.load(AppConfig.from_env().memory_path)
+        analyzer.load()
         events = analyzer.list_events(limit=50, symbol="600519")
     """
 
@@ -36,13 +35,9 @@ class EventAnalyzer:
 
     # ── 加载 ──────────────────────────────────────────────────
 
-    def load(self, path: str | Path | None = None) -> bool:
-        """从 PostgreSQL 加载物质（PG 全量迁移后 path 参数已废弃，兼容旧签名）。
-
-        PG 时代物质存储位于 PostgreSQL（core.pg 裁决连接参数），
-        path 参数保留仅为兼容旧调用方（如 AppConfig.memory_path）。
-        """
-        ok = self._store.load(path)
+    def load(self) -> bool:
+        """从 PostgreSQL 加载物质（连接参数由 core.pg 裁决）。"""
+        ok = self._store.load()
         self._loaded = ok
         return ok
 

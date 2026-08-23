@@ -46,7 +46,7 @@ class SubstanceStore:
         self._retrieval = RetrievalIndex(alpha=alpha)
         self._graph = GraphIndex()
         self._dirty = True
-        self._persist_path: str | Path | None = None
+        self._persist_bound = False
 
     # ── 物质管理 ──────────────────────────────────────────────
 
@@ -71,9 +71,9 @@ class SubstanceStore:
 
         self._dirty = True
 
-        # 原子追加到 DuckDB（O(log n)），不再全量重写
-        if self._persist_path is not None:
-            save_substance(substance, self._persist_path)
+        # 原子追加到 PostgreSQL（O(log n)），不再全量重写
+        if self._persist_bound:
+            save_substance(substance)
         return substance.sid
 
     def add_knowledge(
@@ -260,26 +260,22 @@ class SubstanceStore:
 
     # ── 持久化 ────────────────────────────────────────────────
 
-    def save(self, path: str | Path | None = None) -> None:
+    def save(self) -> None:
         """全量同步到 PostgreSQL（批量原子写入）。
 
-        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
-        裁决。适用于初始化导入、compress 批量变更后的落盘。
+        适用于初始化导入、compress 批量变更后的落盘。
         日常 add 已在 ``add()`` 内原子追加，无需调本方法。
         """
-        save_many(self._substances, path)
-        self._persist_path = path or self._persist_path
+        save_many(self._substances)
+        self._persist_bound = True
 
-    def load(self, path: str | Path | None = None) -> bool:
+    def load(self) -> bool:
         """从 PostgreSQL 加载全部物质到内存热存储。
-
-        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
-        裁决。
 
         Returns:
             是否成功加载（PG 中有物质）
         """
-        self._substances = load_all(path)
+        self._substances = load_all()
         self._sid_to_index = {s.sid: idx for idx, s in enumerate(self._substances)}
         # 重建图索引
         for s in self._substances:
@@ -291,17 +287,11 @@ class SubstanceStore:
                     weight=s.confidence,
                 )
         self._dirty = True
-        if path is not None:
-            self._persist_path = path
         return len(self._substances) > 0
 
-    def bind_persistence(self, path: str | Path | None = None) -> None:
-        """绑定持久化 — 之后每次 ``add`` 自动原子追加到 PostgreSQL。
-
-        PG 全量迁移后 path 参数已废弃（兼容旧签名），连接参数由 core.pg
-        裁决；传任意非空值即可激活自动落盘。
-        """
-        self._persist_path = path or "pg"
+    def bind_persistence(self) -> None:
+        """绑定持久化 — 之后每次 ``add`` 自动原子追加到 PostgreSQL。"""
+        self._persist_bound = True
 
     def remove(self, sid: str) -> bool:
         """删除物质（motion.compress 压缩后调用）。
@@ -316,9 +306,9 @@ class SubstanceStore:
         # 重建索引映射（pop 后下标偏移）
         self._sid_to_index = {sub.sid: i for i, sub in enumerate(self._substances)}
         self._dirty = True
-        # 同步删除 DuckDB 行
-        if self._persist_path is not None:
-            return delete_substance(sid, self._persist_path)
+        # 同步删除 PostgreSQL 行
+        if self._persist_bound:
+            return delete_substance(sid)
         return True
 
     # ── 文档加载（Markdown 标题感知切分）───────────────────────

@@ -254,7 +254,6 @@ class TestMemoryServiceSaveEvents:
         from long_earn.substance.model import SubstanceForm
 
         config = MagicMock()
-        config.memory_path = str(tmp_path / "sub.duckdb")
         config.init_dir = ""
         logger = MagicMock()
         svc = MemoryServiceImpl(config, logger)

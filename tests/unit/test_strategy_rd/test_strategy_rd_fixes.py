@@ -27,7 +27,6 @@ def _make_mock_context() -> RuntimeContext:
     mock_config.llm_type = "ollama"
     mock_config.llm_model = "test"
     mock_config.llm_base_url = "http://localhost"
-    mock_config.memory_path = "~/.long_earn/substances.duckdb"
     mock_config.init_dir = "./init"
     mock_config.max_iterations = 1
     mock_config.backtest_start_date = "2020-01-01"
@@ -448,7 +447,6 @@ class TestSearchExperienceMinSharpeBoundary:
         from long_earn.services.memory_service import MemoryServiceImpl
 
         config = MagicMock()
-        config.memory_path = ":memory:"
         service = MemoryServiceImpl(config, MagicMock())
         return service
 
@@ -553,7 +551,6 @@ class TestMemorySaveExperience:
         from long_earn.services.memory_service import MemoryServiceImpl
 
         config = MagicMock()
-        config.memory_path = ":memory:"
         service = MemoryServiceImpl(config, MagicMock(spec=LoggerService))
 
         exp_id = service.save_experience(

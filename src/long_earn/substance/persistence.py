@@ -167,15 +167,12 @@ def _row_to_substance(row: Any) -> Substance:
     )
 
 
-def save_substance(substance: Substance, path: str | Path | None = None) -> None:
+def save_substance(substance: Substance) -> None:
     """原子写单条物质到 PostgreSQL（UPSERT，O(log n)）。
 
     Args:
         substance: 待持久化的物质
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
     """
-    del path
     conn = _connect()
     try:
         conn.execute(_UPSERT_SQL, _substance_params(substance))
@@ -188,15 +185,12 @@ def save_substance(substance: Substance, path: str | Path | None = None) -> None
             conn.close()
 
 
-def save_many(substances: Iterable[Substance], path: str | Path | None = None) -> int:
+def save_many(substances: Iterable[Substance]) -> int:
     """批量原子写入（单事务，失败回滚）。返回写入条数。
 
     Args:
         substances: 待持久化的物质集合
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
     """
-    del path
     substances_list = list(substances)
     if not substances_list:
         return 0
@@ -238,14 +232,8 @@ def _substance_params(s: Substance) -> list[Any]:
     ]
 
 
-def load_all(path: str | Path | None = None) -> list[Substance]:
-    """从 PostgreSQL 全量加载物质（启动时一次性载入内存热存储）。
-
-    Args:
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
-    """
-    del path
+def load_all() -> list[Substance]:
+    """从 PostgreSQL 全量加载物质（启动时一次性载入内存热存储）。"""
     conn = _connect()
     try:
         rows = conn.execute(
@@ -273,14 +261,8 @@ def load_all(path: str | Path | None = None) -> list[Substance]:
     return substances
 
 
-def count_substances(path: str | Path | None = None) -> int:
-    """返回 PostgreSQL 中物质总数（替代 meta.json 的权威计数）。
-
-    Args:
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
-    """
-    del path
+def count_substances() -> int:
+    """返回 PostgreSQL 中物质总数（替代 meta.json 的权威计数）。"""
     conn = _connect()
     try:
         result = conn.execute("SELECT COUNT(*) FROM substances;").fetchone()
@@ -294,14 +276,8 @@ def count_substances(path: str | Path | None = None) -> int:
             conn.close()
 
 
-def drop_all(path: str | Path | None = None) -> None:
-    """清空物质表（迁移/重置专用，业务代码不应调用）。
-
-    Args:
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
-    """
-    del path
+def drop_all() -> None:
+    """清空物质表（迁移/重置专用，业务代码不应调用）。"""
     conn = _connect()
     try:
         conn.execute("DELETE FROM substances;")
@@ -314,18 +290,15 @@ def drop_all(path: str | Path | None = None) -> None:
             conn.close()
 
 
-def delete_substance(sid: str, path: str | Path | None = None) -> bool:
+def delete_substance(sid: str) -> bool:
     """从 PostgreSQL 删除单条物质（motion.compress 压缩后调用）。
 
     Args:
         sid: 物质唯一标识
-        path: 兼容旧签名，DuckDB 时代路径参数；PG 时代已废弃，
-            连接参数由 ``core.pg`` 裁决，新代码无需传入。
 
     Returns:
         是否删除成功
     """
-    del path
     conn = _connect()
     try:
         conn.execute("DELETE FROM substances WHERE sid = %s", [sid])

@@ -17,7 +17,6 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -36,16 +35,15 @@ _CACHE_SLOW_QUERY_SECONDS = 1.0
 _WRITE_LOCKS_GUARD = threading.Lock()
 _WRITE_LOCKS: dict[str, threading.RLock] = {}
 
+# PG 统一存储的进程内单写者锁命名空间（跨 DataCache 实例共享同一把锁）
+_PG_LOCK_NAMESPACE = "pg"
 
-def _process_write_lock(db_path: Path) -> threading.RLock:
-    """返回同一数据库路径在当前进程内共享的单写者锁。
 
-    PG 迁移后 db_path 仅作锁命名空间保留（兼容旧调用方）。
-    """
+def _process_write_lock() -> threading.RLock:
+    """返回当前进程内共享的 PG 单写者锁（跨 DataCache 实例）。"""
 
-    key = str(db_path.resolve())
     with _WRITE_LOCKS_GUARD:
-        return _WRITE_LOCKS.setdefault(key, threading.RLock())
+        return _WRITE_LOCKS.setdefault(_PG_LOCK_NAMESPACE, threading.RLock())
 
 
 # ── 宽表 panel_daily（合并面板物化形态）───────────────────────────────
@@ -161,17 +159,10 @@ def _panel_rebuild_sql(symbols: list[str] | None) -> str:
 class DataCache:
     """PostgreSQL 数据缓存管理器"""
 
-    def __init__(self, db_path: str | Path = ""):
-        """初始化缓存
-
-        Args:
-            db_path: [已废弃] DuckDB 时代路径参数，保留仅为兼容旧调用方；
-                PG 时代连接参数由 core.pg 统一裁决（PG_HOST 等环境变量）
-        """
-        # 锁命名空间：沿用 db_path 保证同进程多 DataCache 实例共享写锁
-        self._lock_key = Path(db_path) if db_path else Path("pg_default")
+    def __init__(self) -> None:
+        """初始化缓存（连接参数由 core.pg 统一裁决，PG_HOST 等环境变量）。"""
         self._local = threading.local()
-        self._write_lock = _process_write_lock(self._lock_key)
+        self._write_lock = _process_write_lock()
         with self._write_lock:
             self._init_tables()
 

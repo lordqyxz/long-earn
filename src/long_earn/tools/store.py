@@ -3,9 +3,7 @@
 基于物质-运动统一架构（SubstanceStore）的知识持久化。
 提供 init_system 供系统初始化使用。
 
-ADR-007 Phase 4：写入路径收敛到 AppConfig.memory_path。
-PG 全量迁移后：物质存储位于 PostgreSQL（core.pg 裁决连接参数），
-memory_path 仅保留为兼容旧调用方。
+ADR-007 Phase 4：物质存储位于 PostgreSQL（core.pg 裁决连接参数）。
 """
 
 from pathlib import Path
@@ -21,8 +19,7 @@ def init_system(config: AppConfig | None = None) -> None:
     """系统初始化 — 扫描 init 目录并加载到记忆系统（PostgreSQL 持久化）。
 
     Args:
-        config: 应用配置，None 则从环境变量加载。统一走 ``AppConfig.memory_path``
-            （PG 时代该路径仅作兼容，连接由 core.pg 裁决）
+        config: 应用配置，None 则从环境变量加载
     """
     LOGGER.info("开始系统初始化...")
     config = config or AppConfig.from_env()
@@ -33,8 +30,6 @@ def init_system(config: AppConfig | None = None) -> None:
         count = store.load_directory(init_dir)
         if count > 0:
             LOGGER.info(f"知识库加载完成，共 {count} 条事实")
-
-            memory_path = Path(config.memory_path).expanduser()
-            store.save(memory_path)
+            store.save()
 
     LOGGER.info("系统初始化完成")

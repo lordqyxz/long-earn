@@ -112,24 +112,6 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
     return origin is not None and _origin_matches_host(origin, host)
 
 
-def _resolve_paths(
-    db_path: str | Path, substances_path: str | Path
-) -> tuple[Path, Path]:
-    """解析数据库路径。
-
-    db_path 语义为**审计数据库**路径（BacktestAnalyzer 消费），默认取
-    ``AppConfig.backtest_audit_path``（独立审计库，与价格缓存分库）。
-    """
-    from long_earn.config import AppConfig  # noqa: PLC0415
-
-    cfg = AppConfig.from_env()
-    resolved_db = Path(db_path) if db_path else Path(cfg.backtest_audit_path)
-    resolved_substances = (
-        Path(substances_path) if substances_path else Path(cfg.memory_path)
-    )
-    return resolved_db, resolved_substances
-
-
 def _register_run_routes(  # noqa: C901
     app: FastAPI, analyzer: BacktestAnalyzer
 ) -> None:
@@ -755,7 +737,6 @@ async def _run_pipeline_and_broadcast(
 
 def _register_research_routes(  # noqa: C901, PLR0915
     app: FastAPI,
-    _db_path: Path,
 ) -> None:
     """注册策略研究 WebSocket 和 REST 端点。"""
 
@@ -943,17 +924,8 @@ def _register_api_routes(
     _register_ws_routes(app, event_analyzer)
 
 
-def _create_app(
-    db_path: str | Path = "",
-    substances_path: str | Path = "",
-    remote_mode: bool = False,
-) -> FastAPI:
-    """创建 FastAPI 应用实例。
-
-    Args:
-        db_path: DuckDB 审计数据库路径
-        substances_path: SubstanceStore DuckDB 路径
-    """
+def _create_app(remote_mode: bool = False) -> FastAPI:
+    """创建 FastAPI 应用实例（审计与物质存储均连接 PostgreSQL）。"""
     app = FastAPI(title="Long Earn 可视化仪表盘", version="2.0.0")
     app.state.active_ws = set()  # type: ignore[attr-defined]
     app.state.remote_mode = remote_mode
@@ -971,29 +943,23 @@ def _create_app(
                 return PlainTextResponse("Origin is not allowed", status_code=403)
         return await call_next(request)
 
-    resolved_db, resolved_substances = _resolve_paths(db_path, substances_path)
-
     from long_earn.config import AppConfig  # noqa: PLC0415
 
     cfg = AppConfig.from_env()
-    # PG 全量迁移后：BacktestAnalyzer 直接连 PostgreSQL（core.pg 裁决连接
-    # 参数），resolved_db 仅保留用于向后兼容显式传库路径的场景（本地 duckdb
-    # 已废弃，传了也忽略——BacktestAnalyzer 构造签名兼容）。
+    # 审计分析器直连 PostgreSQL（core.pg 裁决连接参数）
     analyzer = BacktestAnalyzer()
     logger.info(
         f"审计分析器已连接: PostgreSQL ({cfg.pg_host}:{cfg.pg_port}/{cfg.pg_db})"
     )
 
     event_analyzer = EventAnalyzer()
-    # PG 全量迁移后：物质存储位于 PostgreSQL，直接加载（resolved_substances
-    # 仅保留用于向后兼容显式传路径的场景，本地 duckdb 已废弃）。
-    event_analyzer.load(resolved_substances)
+    event_analyzer.load()
     if event_analyzer.is_ready:
         logger.info(f"事件物质已加载: PostgreSQL ({event_analyzer.store.count} 条)")
 
     # 先注册 API 和 WebSocket 路由（优先级高）
     _register_api_routes(app, analyzer, event_analyzer)
-    _register_research_routes(app, resolved_db)
+    _register_research_routes(app)
 
     if _WEB_DIST.exists() and (_WEB_DIST / "index.html").exists():
         # 生产模式：React SPA
@@ -1022,8 +988,6 @@ def _create_app(
 def serve_visualization_fastapi(
     host: str = "127.0.0.1",
     port: int = 8090,
-    db_path: str | Path = "",
-    substances_path: str | Path = "",
     reload: bool = False,
     allow_remote: bool = False,
 ) -> None:
@@ -1032,17 +996,12 @@ def serve_visualization_fastapi(
     Args:
         host: 监听地址
         port: 监听端口
-        db_path: DuckDB 审计数据库路径；空字符串时取 AppConfig.backtest_audit_path
-            （独立审计库；价格行情仍从缓存库读取）
-        substances_path: SubstanceStore DuckDB 路径；空字符串时取 AppConfig.memory_path
         reload: 是否启用热重载（开发模式）
         allow_remote: 显式允许绑定非 loopback 地址；远程部署仍需额外认证
     """
     _validate_bind_host(host, allow_remote)
     remote_mode = not _is_loopback_host(host)
-    app = _create_app(
-        db_path=db_path, substances_path=substances_path, remote_mode=remote_mode
-    )
+    app = _create_app(remote_mode=remote_mode)
 
     logger.info(f"FastAPI 可视化服务启动: http://{host}:{port}")
     logger.info("  页面:")

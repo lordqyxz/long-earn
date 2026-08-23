@@ -36,25 +36,20 @@ class MemoryServiceImpl(MemoryService):
         self.logger = logger
         self._store = SubstanceStore()
         self._initialized = False
-        self._persistent_path: Path | None = None
         # ADR-014 阶段 D：可选注入 OntologyGraph，motion.activate 走图遍历
         self._ontology_graph = ontology_graph
 
     def initialize(self) -> None:
         """初始化记忆系统（加载 PostgreSQL 持久化或从 init 目录构建）。
 
-        PG 全量迁移后：物质存储位于 PostgreSQL（core.pg 裁决连接参数），
-        memory_path 仅保留为兼容旧签名（文件路径语义废弃）。优先从 PG
+        物质存储位于 PostgreSQL（core.pg 裁决连接参数）。优先从 PG
         加载既有物质；PG 为空时从 init 目录构建并落库。
         """
         if self._initialized:
             return
 
-        persistent_path = Path(self.config.memory_path).expanduser()
-        self._persistent_path = persistent_path
-        # 绑定持久化（PG 时代 path 参数仅作开关，连接由 core.pg 裁决）
-        self._store.bind_persistence(persistent_path)
-        if self._store.load(persistent_path):
+        self._store.bind_persistence()
+        if self._store.load():
             self._initialized = True
             self.logger.info(f"记忆已加载 ({self._store.count} 条物质)")
             return
@@ -63,7 +58,7 @@ class MemoryServiceImpl(MemoryService):
         if init_dir.exists():
             count = self._store.load_directory(init_dir)
             if count > 0:
-                self._store.save(persistent_path)
+                self._store.save()
                 self.logger.info(f"记忆初始化完成 ({count} 条事实)")
 
         self._initialized = True
@@ -402,12 +397,3 @@ class MemoryServiceImpl(MemoryService):
         }
 
     # ── 内部 ───────────────────────────────────────────────────
-
-    def _auto_save(self) -> None:
-        """[已废弃] 自动持久化 — add 已在绑定时自动追加，保留为未绑定场景兜底。"""
-        if self._persistent_path is None:
-            return
-        try:
-            self._store.save(self._persistent_path)
-        except Exception as e:
-            self.logger.warning(f"记忆自动保存失败: {e}")

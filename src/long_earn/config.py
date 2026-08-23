@@ -209,9 +209,6 @@ class AppConfig:
         llm_model: LLM 模型名称
         llm_base_url: LLM API 基础 URL
         data_dir: 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
-        memory_path: 记忆持久化路径（PG 全量迁移后仅作兼容，物质库位于 PostgreSQL）
-        backtest_cache_path: 回测缓存路径（PG 全量迁移后仅作兼容，价格/财务数据位于 PostgreSQL）
-        backtest_audit_path: 回测审计路径（PG 全量迁移后仅作兼容，审计位于 PostgreSQL）
         hypothesis_tree_dir: 假设树 JSON 存储目录
         init_dir: 知识库初始化目录
         max_iterations: 最大迭代次数
@@ -226,12 +223,6 @@ class AppConfig:
     llm_base_url: str = "https://api.deepseek.com/v1"
     # 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
     data_dir: str = str(_storage.DEFAULT_DATA_DIR)
-    # 记忆持久化路径（由 data_dir 派生）
-    memory_path: str = str(_storage.substances_db_path())
-    # 回测缓存 DuckDB 路径（由 data_dir 派生）
-    backtest_cache_path: str = str(_storage.backtest_cache_path())
-    # 回测审计日志独立 DuckDB 路径（由 data_dir 派生）
-    backtest_audit_path: str = str(_storage.backtest_audit_path())
     # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；ADR-018 后仅供兼容）
     hypothesis_tree_dir: str = str(_storage.hypothesis_tree_dir())
     # 策略研发产物路径（由 data_dir 派生）
@@ -247,7 +238,7 @@ class AppConfig:
     # 控制 ParallelRunner / Walk-Forward fold 级并行的并发度
     max_workers: int = 0
     # PostgreSQL 统一存储连接配置（审计/缓存/物质库；从 core.pg 派生，
-    # 不重复默认值字面量 — 与 backtest_cache_path 从 storage 派生同构）
+    # 不重复默认值字面量）
     pg_host: str = _pg.DEFAULT_PG_HOST
     pg_port: int = _pg.DEFAULT_PG_PORT
     pg_db: str = _pg.DEFAULT_PG_DB
@@ -296,9 +287,6 @@ class AppConfig:
             llm_model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
             llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
             data_dir=str(paths["data_dir"]),
-            memory_path=str(paths["substances_db_path"]),
-            backtest_cache_path=str(paths["backtest_cache_path"]),
-            backtest_audit_path=str(paths["backtest_audit_path"]),
             hypothesis_tree_dir=str(paths["hypothesis_tree_dir"]),
             strategy_results_path=str(paths["strategy_results_path"]),
             best_strategy_path=str(paths["best_strategy_path"]),

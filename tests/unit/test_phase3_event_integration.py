@@ -1,4 +1,4 @@
-"""ADR-007 Phase 3 子图集成测试。
+﻿"""ADR-007 Phase 3 子图集成测试。
 
 覆盖：
 - MemoryServiceImpl.activate_events() — WorldInfo 激活 + 格式化
@@ -69,10 +69,9 @@ def _make_relation(
     )
 
 
-def _make_memory_service(tmp_path) -> MemoryServiceImpl:
+def _make_memory_service() -> MemoryServiceImpl:
     """构造已初始化的 MemoryServiceImpl（不加载 init 目录）。"""
     config = MagicMock()
-    config.memory_path = str(tmp_path / "sub.duckdb")
     config.init_dir = ""
     logger = MagicMock()
     svc = MemoryServiceImpl(config, logger)
@@ -133,7 +132,7 @@ class TestActivateEvents:
 
     def test_returns_formatted_event_strings(self, tmp_path):
         """命中关键词的事件被激活并格式化为带元数据头的字符串。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         result = svc.activate_events("茅台 财报", k=5)
@@ -147,7 +146,7 @@ class TestActivateEvents:
 
     def test_empty_query_returns_empty(self, tmp_path):
         """空 query 返回空列表。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         assert svc.activate_events("", k=5) == []
@@ -155,7 +154,7 @@ class TestActivateEvents:
 
     def test_no_match_returns_empty(self, tmp_path):
         """无关键词命中返回空列表。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         result = svc.activate_events("不存在的关键词xyz", k=5)
@@ -163,7 +162,7 @@ class TestActivateEvents:
 
     def test_conflict_group_mutually_exclusive(self, tmp_path):
         """同 conflict_group 取 insertion_order 最高者（e1 胜 e2）。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         # 触发 600519，应同时命中 e1（order=2）和 e2（order=1），但 conflict_group 互斥
@@ -176,7 +175,7 @@ class TestActivateEvents:
 
     def test_include_relations_flag(self, tmp_path):
         """include_relations=True 时返回 RELATION 物质。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         without_rel = svc.activate_events("茅台", k=10, include_relations=False)
@@ -189,7 +188,7 @@ class TestActivateEvents:
 
     def test_respects_k_limit(self, tmp_path):
         """k 限制返回条数。"""
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         result = svc.activate_events("茅台", k=1)
@@ -206,7 +205,7 @@ class TestGetEventContext:
         """正常返回事件上下文字符串。"""
         from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         mixin = KnowledgeContextMixin()
@@ -222,7 +221,7 @@ class TestGetEventContext:
         """同一 query 二次调用命中缓存。"""
         from long_earn.strategy_rd.agents.mixins import KnowledgeContextMixin
 
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         mixin = KnowledgeContextMixin()
@@ -425,7 +424,7 @@ class TestStockAnalysisEventContextNode:
         """节点根据 stock_name/code 激活事件并写入 state。"""
         from long_earn.stock_analysis.subgraph import event_context_node
 
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         _populate_store(svc._store)
 
         context = MagicMock()
@@ -444,7 +443,7 @@ class TestStockAnalysisEventContextNode:
         """无 stock_name/code 返回空事件上下文。"""
         from long_earn.stock_analysis.subgraph import event_context_node
 
-        svc = _make_memory_service(tmp_path)
+        svc = _make_memory_service()
         context = MagicMock()
         context.logger = MagicMock()
         context.require_memory.return_value = svc

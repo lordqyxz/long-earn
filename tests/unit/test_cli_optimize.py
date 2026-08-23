@@ -68,15 +68,11 @@ def test_web_command_defaults_to_loopback_and_forwards_remote_opt_in(
         {
             "host": "127.0.0.1",
             "port": 8090,
-            "db_path": "",
-            "substances_path": "",
             "allow_remote": False,
         },
         {
             "host": "0.0.0.0",
             "port": 8090,
-            "db_path": "",
-            "substances_path": "",
             "allow_remote": True,
         },
     ]
