@@ -88,7 +88,6 @@ class EventDrivenBacktestEngine:
         max_position_pct: float = 1.0,
         max_positions: int = 0,
         audit_logger: InMemoryAuditTrail | None = None,
-        enable_panel_cache: bool = False,
     ):
         self.data_provider = data_provider
         self.universe_provider = universe_provider
@@ -100,9 +99,6 @@ class EventDrivenBacktestEngine:
         self.max_drawdown_limit = max_drawdown_limit
         self.max_position_pct = max_position_pct
         self.max_positions = max_positions
-        # merged panel 跨 run 磁盘缓存（参数寻优/并行回测同参数面板复用）；
-        # 默认关闭以保护单测隔离（Mock provider 面板可变）
-        self.enable_panel_cache = enable_panel_cache
         self._max_turnover: float | None = None
         # 当前回测 run_id / db_audit：存为实例变量让内部方法（风控/结果构建等）
         # 无需透传即可写审计日志。每次 run() 开头重置。
@@ -407,6 +403,8 @@ class EventDrivenBacktestEngine:
             # 与逐 bar 截断历史计算逐值等价（算子因果性证明背书，见
             # test_precompute_equivalence.py）。鸭子类型探测，不引入对
             # DSLStrategy 的类型依赖；须在 init() 之后（init 重置预计算状态）。
+            # 契约：钩子内部自行降级（factor 失败返回原面板回退截断路径，
+            # 不炸 run），引擎不做异常兜底。
             precompute = getattr(strategy, "precompute_panel", None)
             if callable(precompute):
                 # 预计算钩子总是返回 DataFrame（precompute_panel 签名），
@@ -1996,18 +1994,9 @@ class EventDrivenBacktestEngine:
                 f"{data_start}~{end[:10]} (warmup={warmup_days}d)"
             )
             t0 = time.perf_counter()
-            if self.enable_panel_cache:
-                from long_earn.backtest.data.panel_cache import (  # noqa: PLC0415
-                    cached_merged_panel,
-                )
-
-                df = cached_merged_panel(
-                    self.data_provider, symbols, data_start, end[:10]
-                )
-            else:
-                df = self.data_provider.get_merged_panel_as_polars(
-                    symbols, data_start, end[:10]
-                )
+            df = self.data_provider.get_merged_panel_as_polars(
+                symbols, data_start, end[:10]
+            )
             logger.info(
                 f"[回测引擎] 合并面板加载完成: "
                 f"rows={0 if df is None else len(df)}, "

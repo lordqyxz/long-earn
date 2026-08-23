@@ -113,6 +113,45 @@ class FinancialTableSchema:
         return ",\n    ".join(col_defs)
 
 
+# ── 合并面板财务字段（宽表 panel_daily 的财务列单一事实源）─────────────
+#
+# 顺序即列序：``cache.py`` 的 panel_daily DDL、financial_quarterly_union
+# 视图、``wide_panel.py`` 的 ADBC 查询都从此读取。与
+# ``miniqmt_provider.FINANCIAL_FIELD_MAP`` 镜像（key 集合一致），
+# 由单测 ``test_financial_field_map_mirrors_panel_fields`` 锁定。
+PANEL_FINANCIAL_FIELDS: tuple[str, ...] = (
+    # 利润表（income_stmt）
+    "revenue",
+    "net_profit",
+    "eps",
+    "research_expenses",
+    # 资产负债表（balance_sheet）
+    "total_equity",
+    "total_assets",
+    "total_liabilities",
+    # 现金流量表（cashflow_stmt）
+    "ocf",
+    "capex",
+    "investing_cf",
+    "financing_cf",
+    "net_cash_change",
+    "cash_from_sales",
+    # 每股指标/主要指标（pershareindex）
+    "bps",
+    "ocf_per_share",
+    "debt_to_assets",
+    "net_profit_margin",
+    "roe_weighted",
+    "net_profit_yoy",
+    "revenue_yoy",
+    "roe",
+    "gross_margin",
+    # 资本变动（capital）
+    "total_shares",
+    "float_shares",
+)
+
+
 # ── 主键列常量（8 表共用）──────────────────────────────────────────────
 
 _SYMBOL_COL = FinancialColumn("symbol", "VARCHAR", nullable=False)

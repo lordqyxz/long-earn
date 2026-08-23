@@ -79,6 +79,36 @@ class TestOperatorDslE2E:
         assert result.success, result.message
         assert (result.trade_count or 0) > 0
 
+    def test_precompute_failure_falls_back_to_incremental(
+        self, mock_data_provider, monkeypatch: pytest.MonkeyPatch
+    ):
+        """预计算 factor 失败 → 降级逐 bar 截断路径，run 以 success 完成。
+
+        回归守护：预计算路径 factor 异常不炸整个 run（RUN_ERROR），与
+        on_bar 旧路径的降级契约一致（见 dsl_strategy.precompute_panel）。
+        """
+        from typing import NoReturn
+
+        import long_earn.backtest.engine.dsl_strategy as dsl_strategy_mod
+
+        def _boom(*args: object) -> NoReturn:
+            raise RuntimeError("factor boom")
+
+        monkeypatch.setattr(dsl_strategy_mod, "precompute_factors", _boom)
+
+        dsl = parse_strategy_yaml(OPERATOR_YAML)
+        strategy = DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl)
+        engine = EventDrivenBacktestEngine(
+            data_provider=mock_data_provider(_trending_panel())
+        )
+        result = engine.run(strategy, "2024-01-01", "2024-01-30", SYMBOLS)
+
+        # 非 RUN_ERROR：回退截断历史路径后交易正常产生
+        assert result.success, result.message
+        assert (result.trade_count or 0) > 0
+        # 预计算标志保持 False（on_bar 全程走截断路径）
+        assert strategy._precomputed is False
+
     def test_parse_rejects_unknown_operator(self):
         with pytest.raises(ValueError, match=r"nonexistent_op|未知算子"):
             parse_strategy_yaml(

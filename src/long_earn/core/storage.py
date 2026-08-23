@@ -107,17 +107,6 @@ def hypothesis_tree_dir() -> Path:
     return d
 
 
-def panel_cache_dir() -> Path:
-    """merged panel 跨 run 缓存目录（Arrow IPC 文件）。
-
-    同 (symbols, start, end) 的合并面板在参数寻优 / 并行回测中被
-    反复构建；此处落盘复用，key 语义见 ``backtest.data.panel_cache``。
-    """
-    d = get_data_dir() / "panel_cache"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def strategy_results_path() -> Path:
     """策略研发结果 JSON 路径。"""
     return get_data_dir() / "strategy_research_results.json"

@@ -37,6 +37,7 @@ from long_earn.backtest.data.financial.sync import (
 )
 from long_earn.backtest.data.miniqmt_provider import FINANCIAL_FIELD_MAP
 from long_earn.backtest.data.polars_adapter import to_polars_panel
+from long_earn.backtest.data.wide_panel import read_wide_panel
 
 
 class DataConnector(Protocol):
@@ -476,7 +477,22 @@ class CompositeDataConnector:
         start_date: str,
         end_date: str,
     ) -> pl.DataFrame:
-        """获取合并面板并转为 polars（实现 DataConnector Protocol）。"""
+        """获取合并面板并转为 polars（实现 DataConnector Protocol）。
+
+        宽表快路径优先：PG ``panel_daily`` 直读（ADBC Arrow 二进制协议），
+        含脏标记惰性重建与覆盖引导；缓存 miss / 数据不足 / 任何异常
+        自动回退 ``get_merged_panel`` 旧路径（pandas merge + ffill +
+        miniqmt 增量下载）。
+        """
+        wide = read_wide_panel(
+            self.cache,
+            symbols,
+            self._normalize_date(start_date),
+            self._normalize_date(end_date),
+        )
+        if wide is not None:
+            self._log_source("PG 宽表 panel_daily（ADBC 直读）")
+            return wide
         df = self.get_merged_panel(symbols, start_date, end_date)
         n = len(symbols)
         if n >= 200 and not df.empty:

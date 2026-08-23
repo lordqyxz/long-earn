@@ -21,10 +21,10 @@
 > **主线：策略研发 — 寻找收益率最佳策略**（动量 × 财务质量 × 牛熊门控）。
 > 2026-08-22 战果：引擎 4 bug 修复（rebalance_freq 门控 / 创业板涨跌停 ±20% / PG 审计毒化自愈 / 并行重复 attach）+ regime 哑铃 DSL 落地 + 指数行情入库。训练集最优为哑铃 W120_512890（质量动量 + 沪深300×120日均线门控 + 熊市红利低波ETF：-27.86% → +30.08%），但测试集 Walk-Forward fold 0（2025Q1）-30.66%，被稳定性门拒绝、未合并——指数横盘期的风格崩盘，指数绝对 MA 门防不住。当前无通过 OOS 门的合并候选，`best_strategy.yaml` 未变更。
 > 2026-08-23 工程修复：并行回测内存放大治理（SharedMemory→mmap IPC 文件，worker 私有面板拷贝从 ~3 份/worker 降到共享页缓存；网格峰值内存从 112GB 级回落）+ regime warmup 盲区回归修复；附带消除 pytest 单独跑 backtest 测试的 -1 退出码。
-> 2026-08-23 性能优化（对标 NautilusTrader 调研，计划见 `docs/superpowers/plans/2026-08-23-backtest-perf-optimization.md`）：确定性事件 ID（时间戳派生 bar_trace_id 替代逐事件 uuid4，审计因果链贯穿）+ VisibilityGuard 窗口截断（O(T²)→O(T·W)）+ 因子全期预计算（O(T·U)，等价性由算子因果性证明背书，多 seed 测试守护）+ merged panel 跨 run Arrow 缓存（service 层开启，PG 刷新后删 `panel_cache/` 目录失效）+ 审计批量写入（缓冲 500 条 executemany，查询前 flush 保 read-your-writes）。基准（5 标的 × 2 年小面板）：带审计端到端 2.27s→0.43s（-81%，审计开销 -98%）；大池下 O(T²) 消除收益随池规模放大。下一热点：`portfolio.update_market_values` 每 bar polars filter。
+> 2026-08-23 性能优化（对标 NautilusTrader 调研，计划见 `docs/superpowers/plans/2026-08-23-backtest-perf-optimization.md`）：确定性事件 ID（时间戳派生 bar_trace_id 替代逐事件 uuid4，审计因果链贯穿）+ VisibilityGuard 窗口截断（O(T²)→O(T·W)）+ 因子全期预计算（O(T·U)，等价性由算子因果性证明背书，多 seed 测试守护）+ merged panel 跨 run Arrow 缓存（service 层开启，key 含 PG 数据版本水位，写事务原子自增自动失效）+ 审计批量写入（缓冲 500 条 executemany，查询前 flush 保 read-your-writes）。基准（5 标的 × 2 年小面板）：带审计端到端 2.27s→0.43s（-81%，审计开销 -98%）；大池下 O(T²) 消除收益随池规模放大。下一热点：`portfolio.update_market_values` 每 bar polars filter。
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
-- [ ] **regime 门升级：池相对强度模式**（`mode: relative`）— 门信号从「指数绝对 MA」升级为「股票池动量 vs 指数动量」，直击 2025Q1 型风格崩盘（指数横盘 ±2% 但质量动量池崩盘）；备选方案：月度再平衡降低单期风格暴露。训练集内迭代，通过后再走 OOS 门。（2026-08-23：relative/combined 模式已落地；修复增量追踪 warmup 盲区回归——deque 现从 warmup 历史预填，absolute 对照组数值恢复）
+- [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 开发已落地（relative/combined 模式 + warmup 盲区回归修复已沉淀进上"当前冲刺"说明）；剩余任务：训练集内迭代，通过 OOS 门产出合并候选
 - [ ] **指数行情纳入正式下载管线**（`download_data.py`）— regime benchmark（000300/000905/000001/399006，2015-01-05 起经临时脚本入库）无增量维护；数据过期会使门控静默退化为永远牛市（数据正确性威胁）
 - [~] **Web 前端开发**（`web/`）— 次线，按需继续开发
 

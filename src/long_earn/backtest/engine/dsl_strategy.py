@@ -13,6 +13,7 @@ from collections import deque
 from typing import Any
 
 import polars as pl
+from loguru import logger
 
 from long_earn.backtest.domain.entities import SignalEvent, bar_trace_id
 from long_earn.backtest.engine.dsl import (
@@ -146,10 +147,23 @@ class DSLStrategy(BaseStrategy):
         标的保留在面板内（regime 门控需要），其因子列多算几列开销可忽略
         （over("symbol") 按 symbol 分区，互不影响）。等价性由算子因果性
         证明背书（见 operator_executor.precompute_factors）。
+
+        失败降级契约（与 on_bar 旧路径一致）：factor 计算异常不炸整个
+        run，返回原面板且 ``_precomputed`` 保持 False——on_bar 自动回退
+        逐 bar 截断历史路径（自带 step_failures / metrics_unreliable
+        语义），仅损失预计算性能收益。
         """
         if not hasattr(self, "_op_executor"):
             self._op_executor = self._build_operator_executor()
-        enriched, cols = precompute_factors(self._op_executor.factor_specs, full_data)
+        try:
+            enriched, cols = precompute_factors(
+                self._op_executor.factor_specs, full_data
+            )
+        except Exception as exc:
+            logger.warning(
+                f"因子预计算失败，回退逐 bar 截断历史路径: {type(exc).__name__}: {exc}"
+            )
+            return full_data
         self._precomputed = True
         self._factor_columns = cols
         return enriched

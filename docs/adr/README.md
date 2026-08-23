@@ -27,6 +27,7 @@ ADR 只记录决策背景与方案选型理由；实施进度、Phase 状态、�
 | [ADR-017](017-self-evolution-capability.md) | 自我进化能力 | 经验回写/热启动/元指标/失败反思/prompt 自审。**Deferred**，前置：统计门验证有效 + 稳健策略基线产出 |
 | [ADR-018](018-think-on-graph-research-agent.md) | ToG 策略研发飞轮 | HTR 控制器 -> ResearchAgent（LLM ⊗ Graph）；假设树/统计门保留为状态与硬约束；`prepare_context` 事件基础设施化；数据层取消降级叙事 |
 | [ADR-019](019-postgresql-unified-storage.md) | 统一存储迁移至 PostgreSQL | DuckDB 三库 -> PostgreSQL（Docker `pg`）；MVCC 多写者并发安全（并行回测审计不丢行） |
+| [ADR-020](020-wide-panel-materialization.md) | PG 宽表物化 + ADBC 直读 | `panel_daily` 手工增量物化视图（脏标记 + 惰性 symbol 级重建）替代 panel 文件缓存；ADBC Arrow 零拷贝直读；降级回退旧路径 |
 
 ## 已废弃 / 已退役
 

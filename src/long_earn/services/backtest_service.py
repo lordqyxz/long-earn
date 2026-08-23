@@ -225,10 +225,6 @@ class BacktestServiceImpl(BacktestService):
                 max_drawdown_limit=dsl.risk_control.max_drawdown_limit,
                 max_position_pct=dsl.risk_control.max_position_per_stock,
                 audit_provider=audit_provider,
-                # merged panel 跨 run 磁盘缓存：寻优循环对同一
-                # (symbols, start, end) 反复 run 时免重复拉数；
-                # PG 全量刷新后删 panel_cache 目录即可失效
-                enable_panel_cache=True,
             )
 
             data_provider = self.data_provider

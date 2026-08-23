@@ -25,6 +25,7 @@ from loguru import logger
 
 from long_earn.backtest.data.financial.schemas import (
     _PG_TYPE_MAP,
+    PANEL_FINANCIAL_FIELDS,
     FinancialSchemaRegistry,
 )
 from long_earn.core.pg import pg_connect
@@ -45,6 +46,116 @@ def _process_write_lock(db_path: Path) -> threading.RLock:
     key = str(db_path.resolve())
     with _WRITE_LOCKS_GUARD:
         return _WRITE_LOCKS.setdefault(key, threading.RLock())
+
+
+# ── 宽表 panel_daily（合并面板物化形态）───────────────────────────────
+#
+# panel_daily = price_daily 行情列 + PIT as-of 财务列（PANEL_FINANCIAL_FIELDS），
+# 是「手工增量物化视图」：PG 原生物化视图只支持全量 REFRESH（CONCURRENTLY
+# 亦全表重算），千万行宽表按 symbol 粒度增量重建的成本优势不可替代。
+# 更新机制：写事务内脏标记（panel_dirty）→ 读者惰性重建（ensure_panel_fresh）
+# → 批量刷新显式全量（rebuild_panel_symbols(None)）。
+
+# 重建跨进程互斥的 advisory xact lock ID（int64 全局约定值）
+_PANEL_REBUILD_LOCK_ID = 917_263_150_001
+
+# panel_daily 行情侧固定列集（price_daily 子集；wide_panel 读路径共用）
+PANEL_PRICE_FIELDS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "is_tradable",
+)
+
+# 财务聚合视图涉及的 5 张标量表（financial_quarterly_union 数据源）；
+# holdernum / top10 等其余细表不属于 panel 列集，写它们不触发脏标记
+_PANEL_SOURCE_TABLES: frozenset[str] = frozenset(
+    schema.table_name for schema in FinancialSchemaRegistry.scalar_tables()[:5]
+)
+
+
+def _financial_union_view_sql() -> str:
+    """构造 financial_quarterly_union 视图 DDL（5 张标量表按报告期聚合）。
+
+    与 ``DataCache.get_financials`` 的 UNION ALL + MAX 聚合契约一致：
+    同一 (symbol, report_date) 跨表字段合并（同字段只在一表有值），
+    ``announce_date`` 取 MAX（财报更正重发后可见性起点后移）。
+    """
+    tables = FinancialSchemaRegistry.scalar_tables()[:5]
+    sub_selects: list[str] = []
+    for schema in tables:
+        table_fields = {c.name for c in schema.columns}
+        cols = ["symbol", "report_date", "announce_date"]
+        for fname in PANEL_FINANCIAL_FIELDS:
+            if fname in table_fields:
+                cols.append(fname)
+            else:
+                # 缺失列补 NULL（显式类型断言，保证 UNION ALL 列型一致）
+                cols.append(f"NULL::DOUBLE PRECISION AS {fname}")
+        sub_selects.append(f"SELECT {', '.join(cols)} FROM {schema.table_name}")
+    agg_cols = ",\n       ".join(f"MAX({f}) AS {f}" for f in PANEL_FINANCIAL_FIELDS)
+    union_body = "\n       UNION ALL\n       ".join(sub_selects)
+    return (
+        "CREATE OR REPLACE VIEW financial_quarterly_union AS\n"
+        "SELECT symbol, report_date, MAX(announce_date) AS announce_date,\n"
+        f"       {agg_cols}\n"
+        f"FROM (\n       {union_body}\n) t\n"
+        "GROUP BY symbol, report_date"
+    )
+
+
+def _panel_rebuild_sql(symbols: list[str] | None) -> str:
+    """构造 panel_daily 重建 INSERT ... SELECT（PIT as-of 语义）。
+
+    语义与 ``financial.panel.quarterly_to_daily_asof`` 的 merge_asof
+    backward 契约一致：每根 K 线取 ``announce_date <= date`` 的最新一期
+    财报；同公告日多报（如年报+一季报同日披露）取 report_date 最新
+    （DISTINCT ON ... report_date DESC 等价于 merge_asof 稳定排序取末行）。
+
+    财务有效期展开为 ``[announce_date, 下一公告日)`` 半开区间，K 线日期
+    落入区间即取该期财报 —— 与 backward asof 等价且为纯集合运算
+    （无逐行 LATERAL 探测）。
+
+    Args:
+        symbols: 增量重建的 symbol 集；None 为全量重建。增量语句含
+            2 个占位参数（财务侧 CTE 过滤 + 行情侧 WHERE 过滤）。
+    """
+    fin_cols = ", ".join(PANEL_FINANCIAL_FIELDS)
+    f_cols = ", ".join(f"f.{c}" for c in PANEL_FINANCIAL_FIELDS)
+    all_cols = ", ".join(
+        ["symbol", "date", *PANEL_PRICE_FIELDS, *PANEL_FINANCIAL_FIELDS]
+    )
+    fin_filter = "WHERE symbol = ANY(%s::varchar[])" if symbols is not None else ""
+    price_filter = "WHERE p.symbol = ANY(%s::varchar[])" if symbols is not None else ""
+    return f"""
+        WITH fin AS (
+            SELECT symbol, report_date, announce_date, {fin_cols}
+            FROM financial_quarterly_union
+            {fin_filter}
+        ),
+        fin_span AS (
+            SELECT DISTINCT ON (symbol, announce_date)
+                symbol, announce_date, {fin_cols},
+                LEAD(announce_date) OVER (
+                    PARTITION BY symbol ORDER BY announce_date
+                ) AS valid_until
+            FROM fin
+            ORDER BY symbol, announce_date, report_date DESC
+        )
+        INSERT INTO panel_daily ({all_cols})
+        SELECT
+            p.symbol, p.date,
+            p.open, p.high, p.low, p.close, p.volume, p.is_tradable,
+            {f_cols}
+        FROM price_daily p
+        LEFT JOIN fin_span f
+            ON f.symbol = p.symbol
+            AND f.announce_date <= p.date
+            AND (f.valid_until IS NULL OR p.date < f.valid_until)
+        {price_filter}
+    """
 
 
 class DataCache:
@@ -99,6 +210,115 @@ class DataCache:
                 raise
             else:
                 conn.execute("COMMIT")
+
+    def ensure_panel_fresh(self) -> None:
+        """脏标记非空时惰性重建对应 symbol 集合（读者触发）。
+
+        跨进程互斥：advisory xact lock 保证同一时刻只有一个进程在重建；
+        后到者在锁上等待，拿到锁后重查脏集合（先到者已提交并清除），
+        为空则直接提交返回，不重复劳动。进程内由 ``_write_transaction``
+        的 RLock 串行化。崩溃自愈：重建事务回滚 → 脏标记保留 → 下次重试。
+        """
+        row = self._get_conn().execute("SELECT COUNT(*) FROM panel_dirty").fetchone()
+        if not row or not row[0]:
+            return
+        with self._write_transaction() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", [_PANEL_REBUILD_LOCK_ID])
+            rows = conn.execute("SELECT symbol FROM panel_dirty").fetchall()
+            symbols = [r[0] for r in rows]
+            if not symbols:
+                return
+            self._rebuild_panel_symbols_locked(conn, symbols)
+            conn.execute("DELETE FROM panel_dirty")
+
+    def panel_uncovered_symbols(self, symbols: list[str]) -> list[str]:
+        """返回 panel_daily 覆盖不足的 symbol（缺失或行数与 price_daily 不一致）。
+
+        供 ``wide_panel`` 覆盖引导使用：不一致的 symbol 需增量重建。
+        行数 + 存在性双判据——存在性捕获首读 bootstrap（panel 空），
+        行数捕获部分损坏 / 历史日期修正（同 symbol 行数变化）。
+        """
+        if not symbols:
+            return []
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT s.symbol
+            FROM (
+                SELECT symbol, COUNT(*) AS c
+                FROM price_daily
+                WHERE symbol = ANY(%s::varchar[])
+                GROUP BY symbol
+            ) s
+            LEFT JOIN (
+                SELECT symbol, COUNT(*) AS c
+                FROM panel_daily
+                WHERE symbol = ANY(%s::varchar[])
+                GROUP BY symbol
+            ) p USING (symbol)
+            WHERE p.symbol IS NULL OR p.c <> s.c
+            ORDER BY s.symbol
+            """,
+            [symbols, symbols],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def max_price_date(self, symbols: list[str]) -> str | None:
+        """返回 symbols 在 price_daily 中的最大日期（YYYY-MM-DD）。
+
+        供 ``wide_panel`` 数据充足性门控：None 表示缓存 miss，
+        由调用方回退旧路径触发增量下载。
+        """
+        if not symbols:
+            return None
+        row = (
+            self._get_conn()
+            .execute(
+                "SELECT MAX(date) FROM price_daily WHERE symbol = ANY(%s::varchar[])",
+                [symbols],
+            )
+            .fetchone()
+        )
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
+
+    def rebuild_panel_symbols(self, symbols: list[str] | None = None) -> None:
+        """显式重建 panel_daily（全量或指定 symbol 集）并清除对应脏标记。
+
+        全量重建供 ``scripts/download_data.py`` 在数据批量刷新后调用；
+        增量重建供覆盖引导（``wide_panel``）与运维修复使用。
+
+        advisory lock 与 ``ensure_panel_fresh`` 同一把：所有重建路径
+        跨进程互斥，避免多进程交叉 DELETE 不同顺序 symbol 集的行锁
+        死锁，也避免重复劳动。
+        """
+        with self._write_transaction() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", [_PANEL_REBUILD_LOCK_ID])
+            if symbols is None:
+                conn.execute("TRUNCATE panel_daily")
+                conn.execute(_panel_rebuild_sql(None))
+                conn.execute("TRUNCATE panel_dirty")
+                return
+            if not symbols:
+                return
+            self._rebuild_panel_symbols_locked(conn, symbols)
+            conn.execute(
+                "DELETE FROM panel_dirty WHERE symbol = ANY(%s::varchar[])",
+                [symbols],
+            )
+
+    def _rebuild_panel_symbols_locked(self, conn: Any, symbols: list[str]) -> None:
+        """写事务内重建指定 symbol 集（调用方持有事务与 advisory lock）。"""
+        t0 = time.perf_counter()
+        conn.execute(
+            "DELETE FROM panel_daily WHERE symbol = ANY(%s::varchar[])", [symbols]
+        )
+        conn.execute(_panel_rebuild_sql(symbols), [symbols, symbols])
+        logger.info(
+            f"[panel_daily] 重建 {len(symbols)} 只 symbol 完成, "
+            f"耗时 {time.perf_counter() - t0:.1f}s"
+        )
 
     @staticmethod
     def _fetchdf(
@@ -221,6 +441,39 @@ class DataCache:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 宽表 panel_daily：合并面板物化形态（行情 + PIT as-of 财务）。
+        # 列集 = price_daily 行情列 + PANEL_FINANCIAL_FIELDS 财务列；
+        # 更新机制见 ensure_panel_fresh / rebuild_panel_symbols（脏标记
+        # 增量重建，替代已删除的 data_version 水位 + panel_cache 文件缓存）
+        panel_fin_ddl = ",\n                ".join(
+            f"{f} DOUBLE PRECISION" for f in PANEL_FINANCIAL_FIELDS
+        )
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS panel_daily (
+                symbol VARCHAR NOT NULL,
+                date DATE NOT NULL,
+                open DOUBLE PRECISION,
+                high DOUBLE PRECISION,
+                low DOUBLE PRECISION,
+                close DOUBLE PRECISION,
+                volume DOUBLE PRECISION,
+                is_tradable BOOLEAN,
+                {panel_fin_ddl},
+                PRIMARY KEY (symbol, date)
+            )
+        """)
+
+        # 脏标记表：写事务内记录待重建 symbol（与数据写入同事务原子
+        # 提交，读侧永远看不到「数据已变但标记未变」的中间态）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS panel_dirty (
+                symbol VARCHAR PRIMARY KEY
+            )
+        """)
+
+        # 五表财务聚合视图（panel_daily 重建的数据源，幂等替换）
+        conn.execute(_financial_union_view_sql())
 
         conn.commit()
         logger.info("缓存数据库初始化完成 (PostgreSQL)")
@@ -398,6 +651,13 @@ class DataCache:
                 ON CONFLICT (symbol, date) DO UPDATE SET {update_cols}
                 """
             )
+            # 宽表脏标记：本批 symbol 的 panel_daily 行已过期（与数据
+            # 同事务原子提交，读者 ensure_panel_fresh 惰性增量重建）
+            conn.execute(
+                "INSERT INTO panel_dirty (symbol) "
+                "SELECT DISTINCT symbol FROM temp_price "
+                "ON CONFLICT (symbol) DO NOTHING"
+            )
         logger.info(f"缓存行情数据: {len(df)} 条记录, {df['symbol'].nunique()} 只股票")
 
     def get_financial_range(self, symbol: str) -> tuple[str, str] | None:
@@ -551,6 +811,14 @@ class DataCache:
                 ON CONFLICT ({pk}) DO UPDATE SET {update_cols}
                 """
             )
+            # 宽表脏标记：仅 panel 列集来源的 5 张标量表触发（holdernum/
+            # top10 不在 financial_quarterly_union 中，写它们不污染宽表）
+            if table_name in _PANEL_SOURCE_TABLES:
+                conn.execute(
+                    "INSERT INTO panel_dirty (symbol) "
+                    "SELECT DISTINCT symbol FROM temp_fin "
+                    "ON CONFLICT (symbol) DO NOTHING"
+                )
         logger.debug(
             f"缓存 {table_name}: {len(df)} 行, {df['symbol'].nunique()} 只股票"
         )

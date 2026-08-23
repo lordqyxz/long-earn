@@ -35,25 +35,21 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 
-def _invalidate_panel_cache() -> None:
-    """数据更新后清空 merged panel 跨 run 缓存（防陈旧面板命中）。
+def _rebuild_wide_panel() -> None:
+    """数据更新后全量重建宽表 panel_daily（物化合并面板）。
 
-    panel_cache 以 (symbols, start, end) 为 key 落盘 Arrow，不感知底层
-    数据变更；增量下载后若不清空，回测会继续命中旧面板——数据正确性
-    问题（代价只是缓存重建一次，可接受）。
+    下载子进程的写事务已对每只更新的 symbol 原子打脏标记，读者会
+    惰性增量重建——正确性不依赖本函数；守护进程空闲时立即全量重建
+    只为让后续回测首读即命中宽表（省去首读等待）。
     """
-    from long_earn.core.storage import panel_cache_dir
+    from long_earn.backtest.data.cache import DataCache
 
-    cache_dir = panel_cache_dir()
-    n = 0
-    for f in cache_dir.glob("*.arrow"):
-        try:
-            f.unlink()
-            n += 1
-        except OSError:
-            pass  # 竞争删除无害
-    if n:
-        print(f"[守护] 已清空 panel 缓存 {n} 个文件（底层数据已更新）", flush=True)
+    try:
+        DataCache().rebuild_panel_symbols(None)
+        print("[守护] 宽表 panel_daily 全量重建完成", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        # 重建失败不阻断守护流程：脏标记仍在，读者惰性重建兜底
+        print(f"[守护] 宽表重建失败（读者惰性重建兜底）: {exc}", flush=True)
 
 
 def main() -> None:
@@ -90,8 +86,8 @@ def main() -> None:
         r = subprocess.run(cmd, cwd=str(project_root), check=False)
 
         if r.returncode == 0:
-            # 数据已更新：清空 panel 缓存，防回测命中陈旧面板
-            _invalidate_panel_cache()
+            # 数据已更新：立即全量重建宽表（脏标记惰性重建兜底）
+            _rebuild_wide_panel()
             print("[守护] 下载子进程正常退出", flush=True)
             return
 
