@@ -1,7 +1,7 @@
-"""miniQMT 数据采集执行器 — 行情与财务数据增量入库。
+"""miniQMT 数据采集执行器 — 行情/财务/基准指数数据增量入库。
 
-由 ``IncrementalSyncService`` 协调调用，负责 miniQMT 采集和 DuckDB 写入。
-依赖 MiniQMT 客户端（xtquant）与 DuckDB 本地数据层。
+由 ``IncrementalSyncService`` 协调调用，负责 miniQMT 采集和 PostgreSQL 写入。
+依赖 MiniQMT 客户端（xtquant）与 PostgreSQL 本地数据层（ADR-019）。
 """
 
 from __future__ import annotations
@@ -38,6 +38,18 @@ _FINANCIAL_BATCH = 100
 # 全量下载的板块名
 SECTOR_ALL_A = "沪深A股"
 SECTOR_ALL_ETF = "沪深ETF"
+
+# 基准指数行情清单：regime 牛熊门控 benchmark 基础设施数据。
+# 指数不属于任何板块接口（沪深A股/沪深ETF）的返回范围，必须显式点名下载，
+# 否则无增量维护，数据过期会使 regime 门控静默退化（数据正确性威胁）。
+INDEX_QUOTES: tuple[str, ...] = (
+    "000300.SH",  # 沪深300
+    "000905.SH",  # 中证500
+    "000001.SH",  # 上证指数
+    "399006.SZ",  # 创业板指
+)
+# 指数行情全量下载起始日（与既有入库历史起点一致）
+INDEX_QUOTES_START = "2015-01-05"
 
 # 保留用于签名兼容（主进程直接调 xtquant，单线程串行，max_workers 实际忽略）
 DEFAULT_MAX_WORKERS = 4
@@ -255,6 +267,29 @@ class DataIngestionService:
             )
             self._download_concurrent(
                 full_missing, start_date, end_date, "price", batch_size, max_workers
+            )
+
+    def _download_index_quotes(
+        self,
+        start_date: str,
+        end_date: str,
+        batch_size: int,
+        full: bool,
+    ) -> None:
+        """下载基准指数行情（regime 门控 benchmark 基础设施，增量维护）。
+
+        指数不在板块接口返回中，必须显式点名；缺增量维护会使 regime 门控
+        静默退化（如永远牛市误判）。指数无财务数据，只下行情；增量判定
+        复用行情的按交易日精确补齐逻辑（upsert 幂等）。
+        """
+        start = start_date or INDEX_QUOTES_START
+        mode = "全量" if full else "增量"
+        self._info(f"[指数行情] {len(INDEX_QUOTES)} 只基准指数{mode}维护")
+        if full:
+            self.download_prices(list(INDEX_QUOTES), start, end_date, batch_size)
+        else:
+            self.download_prices_incremental(
+                list(INDEX_QUOTES), start, end_date, batch_size
             )
 
     def download_financials(
@@ -588,6 +623,9 @@ class DataIngestionService:
                 price_symbols, start_date, end, price_batch, max_workers
             )
 
+        # 指数行情：regime 门控 benchmark 数据，显式点名维护（无财务）
+        self._download_index_quotes(start_date, end, price_batch, full)
+
         # 财务：全量 or 智能增量 or 跳过
         if skip_financial:
             self._info("[财务] 已跳过（skip_financial=True）")
@@ -619,6 +657,7 @@ class DataIngestionService:
             "mode": "full" if full else "smart",
             "price_symbols": len(price_symbols),
             "financial_symbols": len(financial_symbols),
+            "index_quotes": len(INDEX_QUOTES),
         }
 
     # ── P1-01 成分股快照采集 ──────────────────────────────────────

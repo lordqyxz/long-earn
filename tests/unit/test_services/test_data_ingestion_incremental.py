@@ -24,7 +24,11 @@ import pytest
 
 from long_earn.backtest.data.cache import DataCache
 from long_earn.core.pg import pg_version
-from long_earn.services.data_ingestion_service import DataIngestionService
+from long_earn.services.data_ingestion_service import (
+    INDEX_QUOTES,
+    INDEX_QUOTES_START,
+    DataIngestionService,
+)
 
 
 def _pg_available() -> bool:
@@ -513,4 +517,49 @@ class TestResolveLastTradingDate:
         svc = self._svc_with_trading_dates([])
         assert svc._resolve_last_trading_date("2026-07-12") == pd.Timestamp(
             "2026-07-12"
+        )
+
+
+# ── _download_index_quotes 指数行情维护 ──────────────────────────
+
+
+class TestDownloadIndexQuotes:
+    """指数行情显式点名维护（关键环节：regime 门控 benchmark 数据）。
+
+    指数不在板块接口返回中，漏接/接错会使 regime 门控因数据过期静默退化。
+    """
+
+    END = "2026-08-28"
+
+    @staticmethod
+    def _svc() -> DataIngestionService:
+        svc = _make_service(MagicMock())
+        svc.download_prices = MagicMock()
+        svc.download_prices_incremental = MagicMock()
+        return svc
+
+    def test_smart_mode_uses_incremental_with_default_start(self):
+        """智能模式 → 走增量路径，起始日缺省为 INDEX_QUOTES_START。"""
+        svc = self._svc()
+        svc._download_index_quotes("", self.END, 200, full=False)
+        svc.download_prices_incremental.assert_called_once_with(
+            list(INDEX_QUOTES), INDEX_QUOTES_START, self.END, 200
+        )
+        svc.download_prices.assert_not_called()
+
+    def test_full_mode_uses_full_download(self):
+        """强制全量模式 → 走全量路径。"""
+        svc = self._svc()
+        svc._download_index_quotes("2020-01-01", self.END, 200, full=True)
+        svc.download_prices.assert_called_once_with(
+            list(INDEX_QUOTES), "2020-01-01", self.END, 200
+        )
+        svc.download_prices_incremental.assert_not_called()
+
+    def test_explicit_start_overrides_default(self):
+        """显式 start_date 覆盖缺省起始日。"""
+        svc = self._svc()
+        svc._download_index_quotes("2020-01-01", self.END, 200, full=False)
+        svc.download_prices_incremental.assert_called_once_with(
+            list(INDEX_QUOTES), "2020-01-01", self.END, 200
         )

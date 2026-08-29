@@ -184,7 +184,7 @@ prompt = prompt_template.format(query=query)
 
 ### 6.2 数据层
 
-- **数据缓存**：回测引擎使用 PostgreSQL 本地缓存（`long_earn` 库，Docker 容器 `pg`，连接参数由 `core/pg.py` 统一裁决），全量数据通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。**ADR-018**：面板路径为 PostgreSQL Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
+- **数据缓存**：回测引擎使用 PostgreSQL 本地缓存（`long_earn` 库，Docker 容器 `pg`，连接参数由 `core/pg.py` 统一裁决），全量数据（沪深A股 + 沪深ETF 行情/财务、基准指数行情）通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。regime 门控 benchmark 四指数（000300/000905/000001/399006）已纳入正式管线增量维护（`DataIngestionService.INDEX_QUOTES` 显式点名），不依赖临时脚本。**ADR-018**：面板路径为 PostgreSQL Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **数据层三组接口**：`DataConnector`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。具体能力清单与方法签名以 `services/__init__.py` 与 `backtest/data/connector.py` 代码为准。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 PostgreSQL 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 PG 连接冲突），通过 stdout 解析结果。
 
@@ -211,7 +211,7 @@ uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
 uv run lint-imports                        # 架构依赖校验
 uv run python scripts/check_deprecated_syntax.py  # 退役语法 grep 卡口（检测 ${var} / 路径 2 回退）
-uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情及财务数据到 PostgreSQL 缓存（需 miniQMT 连接）
+uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情、财务数据及基准指数行情到 PostgreSQL 缓存（需 miniQMT 连接）
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```
 
