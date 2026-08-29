@@ -23,9 +23,11 @@
 > 2026-08-23 工程修复：并行回测内存放大治理（SharedMemory→mmap IPC 文件，worker 私有面板拷贝从 ~3 份/worker 降到共享页缓存；网格峰值内存从 112GB 级回落）+ regime warmup 盲区回归修复；附带消除 pytest 单独跑 backtest 测试的 -1 退出码。
 > 2026-08-23 性能优化（对标 NautilusTrader 调研，计划见 `docs/superpowers/plans/2026-08-23-backtest-perf-optimization.md`）：确定性事件 ID（时间戳派生 bar_trace_id 替代逐事件 uuid4，审计因果链贯穿）+ VisibilityGuard 窗口截断（O(T²)→O(T·W)）+ 因子全期预计算（O(T·U)，等价性由算子因果性证明背书，多 seed 测试守护）+ merged panel 跨 run Arrow 缓存（service 层开启，key 含 PG 数据版本水位，写事务原子自增自动失效）+ 审计批量写入（缓冲 500 条 executemany，查询前 flush 保 read-your-writes）。基准（5 标的 × 2 年小面板）：带审计端到端 2.27s→0.43s（-81%，审计开销 -98%）；大池下 O(T²) 消除收益随池规模放大。下一热点：`portfolio.update_market_values` 每 bar polars filter。
 > 2026-08-30 数据正确性修复：基准指数行情（000300/000905/000001/399006）纳入正式下载管线（`DataIngestionService.INDEX_QUOTES` 显式点名 + 按交易日增量维护，随 `download_data.py` 每次运行自动补齐），消除 regime 门控 benchmark 数据过期的静默退化威胁；存量数据已真机补齐到 2026-08-28。
+> 2026-08-30 引擎正确性修复：`run_walk_forward_parallel` test 折起点误用 `train_ts[0]`（test 回测覆盖训练期，OOS 指标污染，edff513）；此前所有折级 OOS 指标均受此影响，本轮合并门为首个干净窗口验证。
+> 2026-08-30 策略研发轮次结果：relative/combined 网格（1 对照 + 18 组合，训练集内）冠军 `com_rw60_m0`（训练 +162.17%，夏普 1.495，回撤 -20.57%），但 OOS 合并门 **CONTINUE**——测试集三折全负（-26%~-30%/折，夏普 -2.1~-2.9），S1 稳定性门拒绝；归因：价格动量股票腿在 2025-2026 震荡市风格翻转（反复止损），指数级门控无法挽救选股层 alpha 反号。纯 relative 模式训练集即全负，已排除。`best_strategy.yaml` 未变更（现任基准 OOS mean sharpe 1.47，合并门槛极高）。
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
-- [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 开发已落地（relative/combined 模式 + warmup 盲区回归修复已沉淀进上"当前冲刺"说明）；剩余任务：训练集内迭代，通过 OOS 门产出合并候选
+- [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（股票腿动量因子 OOS 反号，非门控问题）。下一轮方向：重设计股票腿（动量→基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
 - [~] **Web 前端开发**（`web/`）— 次线，按需继续开发
 
 ---
@@ -33,7 +35,8 @@
 ## 观察项（需跟进）
 
 - [~] **后台测试/冒烟 run 持续堆积**：持续有进程向共享 PG 写测试/冒烟回测 run（曾观测 dry-run 187 个无效 run 堆积），现均带 `test` 标签可被清理接口清除；建议排查写入源头进程，或定期使用看板清理按钮。
-- [ ] **并行 run_candidates 偶发 worker 失败**：哑铃网格阶段 2 中第 9/10 号任务（W250_511260 / W250_CASH）ERR——worker 内失败、无 RUN_START，疑似 worker 复用时环境性失败；单进程复现可跑通。影响面小（同窗结论不受影响），但动摇并行结果可信度，下轮大网格前值得排查。（2026-08-23：并行数据底座已从 SharedMemory 换为 mmap IPC 文件，Windows 句柄类环境性失败可能同源消除，待大网格复验）
+- [ ] **财务增量重复下载低效**：最新公告日距今 >120 天且此后无新公告的股票（今日观测 4620 只），每次 `initialize_context` 启动同步都判 stale 并全量重下（约 20 分钟/次）——下载无新行、公告日不更新、下轮仍 stale 的死循环。可考虑：对「已下载但无新公告」的股票记录 last_checked 水位跳过重复下载。
+- [ ] **并行 run_candidates 偶发 worker 失败**：哑铃网格阶段 2 中第 9/10 号任务（W250_511260 / W250_CASH）ERR——worker 内失败、无 RUN_START，疑似 worker 复用时环境性失败；单进程复现可跑通。影响面小（同窗结论不受影响），但动摇并行结果可信度，下轮大网格前值得排查。（2026-08-23：并行数据底座已从 SharedMemory 换为 mmap IPC 文件，Windows 句柄类环境性失败可能同源消除，待大网格复验；2026-08-30 大网格 19 任务两阶段未复现）
 
 ---
 
