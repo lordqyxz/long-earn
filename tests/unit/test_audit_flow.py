@@ -697,38 +697,25 @@ def test_parallel_grid_creates_pg_audit_provider():
     临时文件，也不再需要主进程合并逻辑。用 mock 替换 provider，避免依赖真实
     PG 服务；真实写入路径留给集成测试。
     """
-    import tempfile
-    from pathlib import Path
     from unittest.mock import patch
 
-    tmp_dir = Path(tempfile.mkdtemp())
-    audit_base = tmp_dir / "audit.duckdb"
+    panel = _trending_panel(days=12)
+    provider = _MockPanelProvider(panel)
+    runner = ParallelRunner(max_workers=1, data_provider=provider)
 
-    try:
-        panel = _trending_panel(days=12)
-        provider = _MockPanelProvider(panel)
-        runner = ParallelRunner(max_workers=1, data_provider=provider)
+    # mock 掉 PostgresAuditProvider：仅验证 worker 会构造 provider 并注入引擎
+    with patch(
+        "long_earn.backtest.engine.audit.PostgresAuditProvider", autospec=True
+    ) as mock_cls:
+        result = runner.run_grid(
+            strategy_template=_MOMENTUM_YAML,
+            param_grid=ParamGrid(),
+            start_date="2024-01-01",
+            end_date="2024-01-12",
+            symbols=["A.SZ", "B.SH"],
+            write_pg=True,
+        )
 
-        # mock 掉 PostgresAuditProvider：仅验证 worker 会构造 provider 并注入引擎
-        with patch(
-            "long_earn.backtest.engine.audit.PostgresAuditProvider", autospec=True
-        ) as mock_cls:
-            result = runner.run_grid(
-                strategy_template=_MOMENTUM_YAML,
-                param_grid=ParamGrid(),
-                start_date="2024-01-01",
-                end_date="2024-01-12",
-                symbols=["A.SZ", "B.SH"],
-                audit_db_path=audit_base,
-            )
-
-        assert result.success_count >= 1, "并行回测应至少有 1 个成功任务"
-        # worker 应构造 PostgresAuditProvider（无路径参数，直接写 PG 主库）
-        mock_cls.assert_called_once_with()
-        # 迁移后不应再产生 worker 专属 DuckDB 临时文件
-        assert not list(tmp_dir.glob("*.duckdb")), "不应再产生 worker DuckDB 临时文件"
-
-    finally:
-        import shutil
-
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    assert result.success_count >= 1, "并行回测应至少有 1 个成功任务"
+    # worker 应构造 PostgresAuditProvider（无路径参数，直接写 PG 主库）
+    mock_cls.assert_called_once_with()

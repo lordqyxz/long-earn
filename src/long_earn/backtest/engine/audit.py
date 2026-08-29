@@ -4,7 +4,6 @@ import threading
 from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -129,9 +128,8 @@ class PostgresAuditProvider(AuditProvider):
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        # db_path 参数保留仅为兼容旧签名；PG 时代连接参数由 core.pg 统一裁决
-        del db_path
+    def __init__(self) -> None:
+        # 连接参数由 core.pg 统一裁决
         self._conn: psycopg.Connection | None = None
         self._lock = threading.Lock()
         self._seq = 0

@@ -377,7 +377,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             benchmark_symbol=benchmark_symbol,
             allow_large_grid=allow_large_grid,
-            audit_db_path="pg",
+            write_pg=True,
         )
 
         return {
@@ -438,7 +438,7 @@ class BacktestServiceImpl(BacktestService):
             symbols=formatted_symbols,
             n_splits=n_splits,
             benchmark_symbol=benchmark_symbol,
-            audit_db_path="pg",
+            write_pg=True,
         )
 
         return result
@@ -524,7 +524,7 @@ class BacktestServiceImpl(BacktestService):
                 end_date=end_date,
                 symbols=formatted_symbols,
                 n_splits=n_splits,
-                audit_db_path="pg",
+                write_pg=True,
             )
         except Exception as e:
             if self.logger:
@@ -715,7 +715,7 @@ class BacktestServiceImpl(BacktestService):
             start_date=start_date,
             end_date=end_date,
             symbols=formatted_symbols,
-            audit_db_path="pg",
+            write_pg=True,
             tags=tags,
         )
 

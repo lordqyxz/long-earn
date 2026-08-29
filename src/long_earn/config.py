@@ -223,16 +223,16 @@ class AppConfig:
     llm_base_url: str = "https://api.deepseek.com/v1"
     # 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
     data_dir: str = str(_storage.DEFAULT_DATA_DIR)
-    # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；ADR-018 后仅供兼容）
+    # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；每轮 save_tree 写 JSON）
     hypothesis_tree_dir: str = str(_storage.hypothesis_tree_dir())
     # 策略研发产物路径（由 data_dir 派生）
     strategy_results_path: str = str(_storage.strategy_results_path())
     best_strategy_path: str = str(_storage.best_strategy_path())
     init_dir: str = "./init"
     max_iterations: int = 3
-    # HTR 每轮选择的最大假设数（废弃，ADR-018 后不再使用；仅供兼容）
+    # HTR 每轮选择的最大假设数（htr_subgraph._select_node 读取，>1 激活 fan-out）
     htr_max_select: int = 1
-    # HTR 六步循环最大周期数（废弃，ADR-018 后不再使用；仅供兼容）
+    # HTR 六步循环最大周期数（htr_subgraph._decide_node 读取，达到强制停止）
     htr_max_cycles: int = 10
     # 回测并行 worker 数（0=自动使用 os.cpu_count()，1=串行，>1=指定核数）
     # 控制 ParallelRunner / Walk-Forward fold 级并行的并发度

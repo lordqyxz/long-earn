@@ -13,7 +13,6 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -52,10 +51,9 @@ class BacktestTask:
     max_positions: int = 0
     task_id: str = ""
     param_desc: str = ""
-    # 审计开关：非空字符串表示启用 worker 审计（worker 直接并发写 PG 主库
-    # backtest_audit.logs，PostgreSQL MVCC 原生支持多写者）；空串表示关闭。
-    # 不再承载临时文件路径语义。
-    audit_db_path: str = ""
+    # 审计开关：True 表示启用 worker 审计（worker 直接并发写 PG 主库
+    # backtest_audit.logs，PostgreSQL MVCC 原生支持多写者）；False 表示关闭。
+    write_pg: bool = False
     # ADR-008 B5：warmup 注入契约。每 task 独立算（run_grid 每 combo、
     # run_candidates 每候选），worker 透传给 engine.run(warmup_days=...)。
     warmup_days: int = 0
@@ -150,7 +148,7 @@ def _run_one_backtest(task: BacktestTask) -> BacktestOutcome:
         # 注入 PostgresAuditProvider：worker 直接并发写 PG 主库审计表，
         # PostgreSQL MVCC 原生支持多写者，无需 worker 临时文件与合并。
         audit_provider = None
-        if task.audit_db_path:
+        if task.write_pg:
             from long_earn.backtest.engine.audit import (  # noqa: PLC0415
                 PostgresAuditProvider,
             )
@@ -363,7 +361,7 @@ class ParallelRunner:
         benchmark_symbol: str = "",
         max_positions: int = 0,
         allow_large_grid: bool = False,
-        audit_db_path: Path | str | None = None,
+        write_pg: bool = False,
         tags: list[str] | None = None,
     ) -> GridResult:
         """参数网格并行回测。"""
@@ -427,7 +425,6 @@ class ParallelRunner:
             )
 
         # 构造 BacktestTask 列表
-        audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
             panel_path = ctx.get_worker_args()
 
@@ -445,7 +442,7 @@ class ParallelRunner:
                     max_positions=max_positions,
                     task_id=str(idx),
                     param_desc=td["param_desc"],
-                    audit_db_path="pg" if audit_base else "",
+                    write_pg=write_pg,
                     # 统一用 max_warmup：预取区间即 [start - max_warmup, end]，
                     # 全部 task 的防御性日期过滤退化为 no-op（引擎跳过整面板复制）；
                     # 多给的 warmup 历史只会让时序因子更早可用，不改变取值
@@ -472,7 +469,7 @@ class ParallelRunner:
         symbols: list[str],
         n_splits: int = 3,
         benchmark_symbol: str = "",
-        audit_db_path: Path | str | None = None,
+        write_pg: bool = False,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
@@ -501,7 +498,6 @@ class ParallelRunner:
         splitter = TimeSeriesSplit(n_splits=n_splits)
         splits = splitter.split(timestamps)
 
-        audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
             panel_path = ctx.get_worker_args()
 
@@ -528,7 +524,7 @@ class ParallelRunner:
                         max_position_pct=max_position_pct,
                         task_id=train_task_id,
                         param_desc=f"fold {fold_idx} train",
-                        audit_db_path="pg" if audit_base else "",
+                        write_pg=write_pg,
                         warmup_days=warmup_days,
                         tags=tags or [],
                     )
@@ -546,7 +542,7 @@ class ParallelRunner:
                         max_position_pct=max_position_pct,
                         task_id=test_task_id,
                         param_desc=f"fold {fold_idx} test",
-                        audit_db_path="pg" if audit_base else "",
+                        write_pg=write_pg,
                         warmup_days=warmup_days,
                         tags=tags or [],
                     )
@@ -637,7 +633,7 @@ class ParallelRunner:
         end_date: str,
         symbols: list[str],
         benchmark_symbol: str = "",
-        audit_db_path: Path | str | None = None,
+        write_pg: bool = False,
         tags: list[str] | None = None,
     ) -> list[BacktestOutcome]:
         """批量候选并行回测（ADR-010 阶段 5 收尾）。
@@ -691,7 +687,6 @@ class ParallelRunner:
             f"max_workers={self.max_workers}, max_warmup={max_warmup}"
         )
 
-        audit_base = Path(audit_db_path) if audit_db_path else None
         with SharedDataContext(full_data) as ctx:
             panel_path = ctx.get_worker_args()
 
@@ -708,7 +703,7 @@ class ParallelRunner:
                     max_position_pct=c["max_position_pct"],
                     max_positions=c["max_positions"],
                     task_id=c["task_id"],
-                    audit_db_path="pg" if audit_base else "",
+                    write_pg=write_pg,
                     # 同 run_grid：统一 max_warmup 让防御性过滤退化为 no-op
                     warmup_days=max_warmup,
                     tags=tags or [],

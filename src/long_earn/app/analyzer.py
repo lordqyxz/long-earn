@@ -38,10 +38,6 @@ class BacktestAnalyzer:
     所有连接默认 read_only（删除等写操作走独立的可写连接并立即提交）。
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        # db_path 参数保留仅为兼容旧签名（PG 时代连接参数由 core.pg 统一裁决）
-        del db_path
-
     def _get_conn(self) -> Any:
         # 只读连接：审计/分析消费侧一律只读，遵循单写者纪律。
         # row_factory=None：全模块查询均以 row[N] 元组下标访问（保持
