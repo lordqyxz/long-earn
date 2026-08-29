@@ -187,6 +187,7 @@ prompt = prompt_template.format(query=query)
 - **数据缓存**：回测引擎使用 PostgreSQL 本地缓存（`long_earn` 库，Docker 容器 `pg`，连接参数由 `core/pg.py` 统一裁决），全量数据（沪深A股 + 沪深ETF 行情/财务、基准指数行情）通过 `scripts/download_data.py` 脚本从 miniqmt (xtquant) 下载。regime 门控 benchmark 四指数（000300/000905/000001/399006）已纳入正式管线增量维护（`DataIngestionService.INDEX_QUOTES` 显式点名），不依赖临时脚本。**ADR-018**：面板路径为 PostgreSQL Cache + 显式主源 miniqmt；失败即失败并打日志，不做静默跨源降级。ciccwm 通过 `MarketIntelligenceProvider` 提供情报独占能力；akshare 仅在调用方显式点名时使用。正常回测时数据提供者会按需增量补充缓存，但不得手动 DELETE/DROP 缓存内容。
 - **数据层三组接口**：`DataConnector`（历史面板）、`MarketIntelligenceProvider`（市场情报，ciccwm 独占）、`RealtimeDataProvider`（实时行情）面向业务分离，不混用。具体能力清单与方法签名以 `services/__init__.py` 与 `backtest/data/connector.py` 代码为准。
 - **并发下载工程实践**：`DataIngestionService` 支持 `--max-workers`（默认 4，范围 1-8），采用 `subprocess.run` 子进程隔离每批下载任务（防 xtquant C++ SIGABRT 崩溃影响主进程）+ `ThreadPoolExecutor` 并发子进程生成临时文件，主进程串行写入 PostgreSQL 避免锁冲突。子进程内绕过 `MiniQmtDataProvider` 初始化（避免 PG 连接冲突），通过 stdout 解析结果。
+- **增量同步判定铁律（防死循环）**：增量判定必须区分三态并按事件密度选型——**数据状态**（`max(date)` 等最后数据点）只适用于日更/高频域（行情，上游推进即自愈）；**检查水位**（`checked_until`「上次查过的时间」）是稀疏事件域（财务公告等）的必需品；**存在性**（有无即判）适用于一次性内容（标的详情）。**禁止只用 `today - max(announce_date) > 阈值` 判 stale**：无新公告的沉默股票会形成「判 stale → 下载 0 行 → 状态不推进 → 再判 stale」死循环（2026-08-30 实证：4620 只 × 每次同步重复下载约 20 分钟）。配套规则：判定为「需检查」的 symbol 在批次下载成功后**必须推进检查水位**（空结果也推进），失败批次保留水位待重试。同款判定逻辑在多处出现时必须共享同一水位（如财务启动同步与回测读路径 `ensure_financial_cache`）。
 
 ### 6.3 记忆系统
 
