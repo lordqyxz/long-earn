@@ -1,6 +1,6 @@
 """Executor 失败路径逃生口单元测试（ADR-016 阶段 3）
 
-验证 LLM 失败分类 → refine 重试 / directional prune 契约。
+验证失败分类（规则先行、LLM 兜底，ADR-021）→ refine 重试 / directional prune 契约。
 """
 
 from __future__ import annotations
@@ -16,12 +16,11 @@ from long_earn.strategy_rd.escape_hatch import (
 
 
 class TestClassifyFailureType:
-    """LLM 失败类型分类契约"""
+    """失败类型分类契约（ADR-021：规则先行、LLM 兜底）"""
 
-    def test_returns_fixable_when_llm_says_fixable(self) -> None:
-        """LLM 返回 fixable"""
+    def test_rule_matched_error_skips_llm(self) -> None:
+        """确定性可判定异常（ValueError 等）直接 fixable，不消耗 LLM"""
         llm = MagicMock()
-        llm.invoke.return_value = MagicMock(content="fixable")
 
         result = classify_failure_type(
             error=ValueError("YAML 缩进错误"),
@@ -29,26 +28,41 @@ class TestClassifyFailureType:
             llm_service=llm,
         )
         assert result == "fixable"
+        llm.invoke.assert_not_called()
 
-    def test_returns_directional_when_llm_says_directional(self) -> None:
-        """LLM 返回 directional"""
+    def test_rule_matched_yaml_error_skips_llm(self) -> None:
+        import yaml
+
+        llm = MagicMock()
+
+        result = classify_failure_type(
+            error=yaml.YAMLError("mapping values not allowed"),
+            hypothesis="测试假设",
+            llm_service=llm,
+        )
+        assert result == "fixable"
+        llm.invoke.assert_not_called()
+
+    def test_llm_fallback_directional_for_unrulable_error(self) -> None:
+        """规则未命中（RuntimeError）时走 LLM，可判 directional"""
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="directional")
 
         result = classify_failure_type(
-            error=ValueError("因子在训练集无信号"),
+            error=RuntimeError("策略逻辑根本性失效"),
             hypothesis="动量因子假设",
             llm_service=llm,
         )
         assert result == "directional"
+        llm.invoke.assert_called_once()
 
-    def test_case_insensitive(self) -> None:
+    def test_llm_fallback_case_insensitive(self) -> None:
         """大小写不敏感"""
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="DIRECTIONAL")
 
         result = classify_failure_type(
-            error=ValueError("假设不合理"),
+            error=RuntimeError("假设不合理"),
             hypothesis="测试假设",
             llm_service=llm,
         )
@@ -60,7 +74,7 @@ class TestClassifyFailureType:
         llm.invoke.side_effect = RuntimeError("LLM 不可用")
 
         result = classify_failure_type(
-            error=ValueError("某错误"),
+            error=RuntimeError("某错误"),
             hypothesis="测试假设",
             llm_service=llm,
         )
@@ -72,7 +86,7 @@ class TestClassifyFailureType:
         llm.invoke.return_value = "fixable"
 
         result = classify_failure_type(
-            error=ValueError("某错误"),
+            error=RuntimeError("某错误"),
             hypothesis="测试假设",
             llm_service=llm,
         )

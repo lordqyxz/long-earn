@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,6 +20,11 @@ if TYPE_CHECKING:
 
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
+
+# A 股/ETF 6 位代码：支持 600519 / SH600519 / sz000001 / 000001.SZ 等写法。
+# 注意：Python re 中 CJK 属于 \w，中英相邻处 \b 不成立，须用显式断言；
+# 前后排除字母数字，避免命中长数字串的切片（如日期 20260830）。
+_STOCK_CODE_RE = re.compile(r"(?i)(?<![a-z0-9])(?:sh|sz)?(\d{6})(?![0-9])")
 
 
 def _retry_with_exponential_backoff(
@@ -69,10 +75,16 @@ def _retry_with_exponential_backoff(
     return {"error": str(last_exception) if last_exception else "未知错误"}, max_retries
 
 
-def get_stock_data(
+def resolve_stock_ref(
     state: StockAnalysisState, context: "RuntimeContext"
 ) -> StockAnalysisState:
-    """获取股票数据，带重试机制
+    """解析股票标的（ADR-021）：确定性规则先行，LLM 仅作未命中兜底。
+
+    解析顺序：
+    1. 状态中已有 stock_code → 直接使用；
+    2. 查询文本中的 6 位代码（正则）；
+    3. 已知名称 → 代码（板块字典，确定性）；
+    4. 以上全部未命中才调用 LLM 抽取（agent 节点层兜底）。
 
     Args:
         state: 状态
@@ -80,13 +92,20 @@ def get_stock_data(
     """
     logger = context.logger
     stock_service = context.require_stock()
+    query = state.get("query", "")
     stock_code = state.get("stock_code", "")
     stock_name = state.get("stock_name", "")
-    current_retry_count = state.get("retry_count", 0)
 
-    if not stock_code and not stock_name:
+    if not stock_code:
+        match = _STOCK_CODE_RE.search(query)
+        if match:
+            stock_code = match.group(1)
+
+    if stock_name and not stock_code:
+        stock_code = stock_service.get_stock_code_by_name(stock_name)
+
+    if not stock_code and query.strip():
         llm_service = context.require_llm()
-        query = state.get("query", "")
         formatted_prompt = render(extract_prompt, {"query": query})
         response = llm_service.invoke(formatted_prompt)
         response_content = (
@@ -95,14 +114,44 @@ def get_stock_data(
 
         try:
             extraction_result = json.loads(response_content)
-            stock_name = extraction_result.get("stock_name", "")
-            stock_code = extraction_result.get("stock_code", "")
         except json.JSONDecodeError:
-            stock_name = ""
-            stock_code = ""
+            extraction_result = {}
 
-    if stock_name and not stock_code:
-        stock_code = stock_service.get_stock_code_by_name(stock_name)
+        llm_name = str(extraction_result.get("stock_name", "") or "")
+        llm_code = str(extraction_result.get("stock_code", "") or "")
+        if llm_code and not stock_code:
+            stock_code = llm_code
+        if llm_name and not stock_name:
+            stock_name = llm_name
+        if stock_name and not stock_code:
+            stock_code = stock_service.get_stock_code_by_name(stock_name)
+
+    if logger and stock_code:
+        logger.info(
+            f"[标的解析] {query[:60]} → {stock_code}（{stock_name or '未知名称'}）"
+        )
+
+    return {
+        "stock_code": stock_code,
+        "stock_name": stock_name,
+    }
+
+
+def get_stock_data(
+    state: StockAnalysisState, context: "RuntimeContext"
+) -> StockAnalysisState:
+    """获取股票数据，带重试机制（纯确定性取数，ADR-021）。
+
+    标的解析由前置节点 ``resolve_stock_ref`` 完成，本节点不做任何推理。
+
+    Args:
+        state: 状态
+        context: 运行时上下文
+    """
+    logger = context.logger
+    stock_service = context.require_stock()
+    stock_code = state.get("stock_code", "")
+    current_retry_count = state.get("retry_count", 0)
 
     stock_info, info_retries = _retry_with_exponential_backoff(
         stock_service.get_stock_data,
@@ -147,7 +196,6 @@ def get_stock_data(
         "stock_data": stock_data,
         "retry_count": current_retry_count + total_retries,
         "stock_code": stock_code,
-        "stock_name": stock_name,
     }
 
 
@@ -275,6 +323,10 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     # 初始化智能体
     workflow = StateGraph(StockAnalysisState)
     workflow.add_node(
+        "resolve_stock_ref",
+        lambda state: resolve_stock_ref(cast(StockAnalysisState, state), context),
+    )
+    workflow.add_node(
         "get_stock_data",
         lambda state: get_stock_data(cast(StockAnalysisState, state), context),
     )
@@ -298,7 +350,8 @@ def create_stock_analysis_subgraph(context: "RuntimeContext"):
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("error_handler", error_handler_node)
 
-    workflow.add_edge(START, "get_stock_data")
+    workflow.add_edge(START, "resolve_stock_ref")
+    workflow.add_edge("resolve_stock_ref", "get_stock_data")
     workflow.add_conditional_edges(
         "get_stock_data",
         route_stock_data,

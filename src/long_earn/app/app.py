@@ -701,7 +701,14 @@ async def _run_pipeline_and_broadcast(
                 },
             )
 
-        ctx.prepare_context(query, force_refresh=True)
+        # ADR-021：事件采集推理是 LLM 步骤，此处显式触发（不再隐藏在
+        # prepare_context 内）；随后确定性激活一次完成上下文落位。
+        from long_earn.event_inference import (  # noqa: PLC0415
+            create_event_inference_subgraph,
+        )
+
+        create_event_inference_subgraph(ctx).invoke({"query": query})
+        ctx.prepare_context(query)
 
         # PG 全量迁移后：物质存储位于 PostgreSQL，直接重载（路径参数兼容）
         ea.load()

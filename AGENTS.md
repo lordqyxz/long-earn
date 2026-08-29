@@ -120,6 +120,7 @@ prompt = prompt_template.format(query=query)
 2. **`uv run ruff check src/` 全局零错**：风格、复杂度（McCabe ≤15）、Pylint 规则。
 3. **`uv run lint-imports`**：架构依赖契约（数据层不依赖上层、服务层不依赖 tools）必须保持 0 broken。
 4. **`uv run pytest tests/unit/`**：单元测试全绿。
+5. **`uv run python scripts/check_llm_call_sites.py`**：LLM 调用点分层卡口（ADR-021）——LLM 推理只允许出现在 agent 节点层，白名单外出现即失败。
 
 > pyright 为全项目权威类型检查工具，不使用 mypy CLI。第三方库（pandas / OpenAI SDK 等）类型推断噪音以 `cast()` 或显式注解收窄，禁止用 `# type: ignore` 掩盖。
 
@@ -144,6 +145,10 @@ prompt = prompt_template.format(query=query)
 - 重复边界用例（同一逻辑的多个细微变体）
 - 实现细节（日志调用、属性赋值、`repr()` 格式）
 - 需要大量 mock 链的端到端子图流程（属于集成测试范畴）
+
+### 4.4 代码评审规则归结
+
+按路径组织的评审规则清单维护在 [docs/review-rules.md](docs/review-rules.md)（评审 subagent 依据 AGENTS.md + ADR 动态归结、稳定后写回的产物）；本文件与 ADR 为其上游真相源，冲突时以上游为准。
 
 ---
 
@@ -192,11 +197,17 @@ prompt = prompt_template.format(query=query)
 ### 6.3 记忆系统
 
 - 基于物质-运动统一架构（ADR-007），事件/关系/知识/策略经验统一为 `Substance`，检索走 WorldInfo 关键词触发 + 语义相似度双通道。持久化至 PostgreSQL 的 `substances` 表（PG 事务式存储，`save_many` 幂等 UPSERT，原子追加）。旧 `memory/` 模块（ADR-004）已删除。
-- **ADR-018**：研究/分析入口统一走 `RuntimeContext.prepare_context(query)`（激活事件；miss 时默认 Collector 轻量推理后再激活）。`Connector` 注入 `memory_provider`。
+- **ADR-018**：研究/分析入口统一走 `RuntimeContext.prepare_context(query)`（激活事件）。**ADR-021**：该入口是纯确定性激活（返回结构化 `ContextActivation`，不内嵌推理）；miss 时的采集推理由调用方 agent 显式构造事件推理子图触发（ResearchAgent `_prepare_event_context` / app 事件管线）。`Connector` 注入 `memory_provider`。
 
 ### 6.4 集成测试
 
 - 运行 `tests/integration/` 或根级集成测试文件前需配置环境变量（见第八节）。
+
+### 6.5 Agent 分层（ADR-021）
+
+- **LLM 推理只存在于 agent 节点层**（LangGraph 图节点 / ReAct 工具闭包 / persona 节点）；`services` / `tools` / 数据基础设施等脚手架层不得内嵌 LLM 调用，只产确定性、类型化的结构化中间态（dataclass）。
+- **确定性先行、LLM 兜底**：路由、分类、解析、文件/路径/标的选择等规则可判定的，必须代码先行（如 stock_analysis `resolve_stock_ref`：正则 → 字典 → LLM）；兜底点必须在 agent 层。
+- 执法卡口 `scripts/check_llm_call_sites.py`（已入 CI）：白名单外出现 LLM 调用标记即失败；白名单扩容须在脚本中登记架构理由。
 
 ---
 
@@ -212,6 +223,7 @@ uv run ruff check .                        # 代码检查（lint + 复杂度）
 uv run ruff format .                       # 代码格式化
 uv run lint-imports                        # 架构依赖校验
 uv run python scripts/check_deprecated_syntax.py  # 退役语法 grep 卡口（检测 ${var} / 路径 2 回退）
+uv run python scripts/check_llm_call_sites.py    # LLM 调用点分层卡口（ADR-021，agent 层白名单外即失败）
 uv run python scripts/download_data.py     # 全量下载沪深A股+ETF行情、财务数据及基准指数行情到 PostgreSQL 缓存（需 miniQMT 连接）
 uv run python scripts/download_data.py --max-workers 4  # 并发下载（subprocess 隔离防 xtquant SIGABRT 崩溃，1-8，默认 4）
 ```

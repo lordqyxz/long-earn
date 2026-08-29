@@ -3,7 +3,8 @@
 阶段 2：当 executor 内 develop_strategy + backtest 因算子缺失失败时，
 在 executor 内部同步研发算子并重试，不中断六步循环。
 
-阶段 3：当 executor 回测失败（非算子缺失）时，LLM 分类失败类型：
+阶段 3：当 executor 回测失败（非算子缺失）时，分类失败类型
+（ADR-021：确定性异常类型规则先行，未命中才 LLM 兜底）：
 - fixable（YAML 语法、参数范围）→ refine + 重试
 - directional（假设不合理、无信号）→ 直接 prune
 
@@ -18,6 +19,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from long_earn.backtest.operators._loader import list_operators
 from long_earn.operator_dev.spec import OperatorSpec, OperatorSpecPriority
@@ -357,13 +360,37 @@ _FAILURE_CLASSIFICATION_PROMPT = """你是量化交易策略研发助手。execu
 只返回 fixable 或 directional，不要解释。"""
 
 
+# ADR-021：确定性可判定为 fixable 的异常类型。
+# 语法 / 参数 / 字段 / IO / 导入类异常均属可修复（refine 或补数据即可重试），
+# 直接规则判定，不消耗 LLM；未命中类型的异常才走 LLM 兜底。
+_FIXABLE_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    ValueError,
+    KeyError,
+    IndexError,
+    TypeError,
+    AttributeError,
+    ArithmeticError,
+    OSError,
+    ImportError,
+    SyntaxError,
+    yaml.YAMLError,
+)
+
+
+def _classify_by_rules(error: Exception) -> str | None:
+    """确定性规则分类：命中返回 ``fixable``，未命中返回 None（交由 LLM 兜底）。"""
+    if isinstance(error, _FIXABLE_EXCEPTION_TYPES):
+        return "fixable"
+    return None
+
+
 def classify_failure_type(
     error: Exception,
     hypothesis: str,
     llm_service: Any,
     logger: LoggerService | None = None,
 ) -> str:
-    """LLM 分类 executor 失败类型（ADR-016 阶段 3）。
+    """分类 executor 失败类型（ADR-016 阶段 3；ADR-021 规则先行、LLM 兜底）。
 
     Args:
         error: executor 捕获的异常
@@ -374,6 +401,14 @@ def classify_failure_type(
     Returns:
         "fixable" 或 "directional"，LLM 调用失败时默认 "fixable"
     """
+    ruled = _classify_by_rules(error)
+    if ruled is not None:
+        if logger:
+            logger.info(
+                f"[逃生口-失败路径] 规则分类: {ruled}（{type(error).__name__}）"
+            )
+        return ruled
+
     prompt = _FAILURE_CLASSIFICATION_PROMPT.format(
         error_message=str(error)[:500],
         hypothesis=hypothesis[:200],

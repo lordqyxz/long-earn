@@ -19,6 +19,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
+from long_earn.event_inference import create_event_inference_subgraph
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -87,6 +88,8 @@ class ResearchAgent:
         self._evidence_cache: dict[str, _StrategyEvidence] = {}
         # DSR 多重检验校正：本 session 已探索策略数（run_backtest 调用次数）
         self._strategy_trial_count: int = 0
+        # 事件采集推理子图（ADR-021：miss/强制刷新时在 agent 层显式触发）
+        self._event_inference = create_event_inference_subgraph(context)
 
         prompt_template = MarkdownPromptTemplate(
             "research_agent_prompt.md",
@@ -198,6 +201,20 @@ class ResearchAgent:
         merged["outcome"] = "success"
         return True, "", merged
 
+    def _prepare_event_context(self, query: str, *, force_infer: bool = False) -> str:
+        """确定性激活上下文；miss 或强制刷新时在 agent 层显式触发事件采集。
+
+        ADR-021：事件采集是 LLM 推理步骤，不再隐藏在上下文准备服务内部；
+        本方法是该推理在本 agent 的显式触发点。
+        """
+        if not force_infer:
+            text = self.context.prepare_context(query)
+            if text:
+                return text
+        self._logger.info(f"[ToG] 上下文未命中，显式触发事件采集: {query[:80]}")
+        self._event_inference.invoke({"query": query})
+        return self.context.prepare_context(query)
+
     def _build_tools(self) -> list[Any]:
         return [
             self._make_prepare_context_tool(),
@@ -219,12 +236,11 @@ class ResearchAgent:
     def _make_prepare_context_tool(self) -> Any:
         logger = self._logger
         monitoring = self._monitoring
-        ctx = self.context
         agent = self
 
         @tool
         def prepare_context(query: str, refresh_events: bool = False) -> str:
-            """锚定研究问题：激活事件/知识子图；必要时自动采集事件。
+            """锚定研究问题：激活事件/知识子图；未命中时显式采集事件。
 
             Args:
                 query: 研究意图或标的描述
@@ -235,7 +251,7 @@ class ResearchAgent:
             """
             with monitoring.track("research.prepare_context"):
                 logger.info(f"[ToG] prepare_context: {query[:80]}")
-                text = ctx.prepare_context(query, force_refresh=refresh_events)
+                text = agent._prepare_event_context(query, force_infer=refresh_events)
                 agent._last_context = text
                 return (
                     text or "（无激活上下文；可继续 expand_relations / list_operators）"
@@ -962,11 +978,11 @@ class ResearchAgent:
         self._beam_paths = []
         self._evidence_cache = {}
         query = idea if not constraints else f"{idea} (约束: {constraints})"
-        # 入口自动准备上下文（基础设施，非可选）
+        # 入口自动准备上下文（miss 时显式触发事件采集，见 _prepare_event_context）
         try:
-            self._last_context = self.context.prepare_context(query)
+            self._last_context = self._prepare_event_context(query)
         except Exception as exc:
-            self._logger.warning(f"prepare_context 失败（非致命）: {exc}")
+            self._logger.warning(f"上下文准备失败（非致命）: {exc}")
             self._last_context = ""
 
         user_content = query

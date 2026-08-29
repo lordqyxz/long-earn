@@ -21,6 +21,8 @@ jobs:
             echo "❌ 发现 \${var} 形式的提示词占位符（如上）。请使用 jinja2 {{ var }} 语法（ADR-011）。"
             exit 1
           fi
+      - name: ADR-021 卡口 — LLM 调用点分层检查
+        run: uv run python scripts/check_llm_call_sites.py
       # 质量门槛对齐 AGENTS.md：ruff 卡 src/；类型检查以 Serena LSP 为准，不跑 mypy
       - run: uv run ruff check src/
       - run: uv run ruff format --check src/

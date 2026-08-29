@@ -86,7 +86,5 @@ class TestRuntimeContext:
         assert ctx.config is config
         assert ctx.config.llm_type == "deepseek"
 
-        ctx.prepare_context("茅台", k=2, force_refresh=True)
-        mock_context_preparation.prepare.assert_called_once_with(
-            "茅台", k=2, force_refresh=True
-        )
+        ctx.prepare_context("茅台", k=2)
+        mock_context_preparation.prepare.assert_called_once_with("茅台", k=2)

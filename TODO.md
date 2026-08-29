@@ -38,6 +38,7 @@
 - [ ] **财务增量重复下载死循环**（2026-08-30 立项，同款排查完毕）：根因为「数据状态驱动判定」缺检查水位——`today - max(announce_date) > 120 天` 判 stale，沉默股票下载 0 行、状态不推进、永出不了 stale 集（实证 4620 只 × 每次启动同步 ≈ 20 分钟）。**同款问题两处**：① 启动同步 `_select_financials_to_refresh`（最重）；② 回测读路径 `financial/sync.py::is_financial_stale`（历史窗口守卫使训练/测试窗休眠，但终点在近 120 天内的回测每次 `get_financial_panel` 触发整列表重拉）。行情路径同款模式但日更自愈，仅 ~12 只退市/停牌标的永久 stale（成本可忽略，修水位表时顺带统一）。修复方案已定：`financial_sync_watermark` 水位表 + 判定改造（见 2026-08-30 会话），两处共享。
 - [ ] **启动同步重复劳动（轻微）**：`_enrich_sectors_from_xtquant` 每次同步全量拉 THY1/DY1 板块映射（只回填空行，首轮后为 2 次 API 调用 + 空转）；`_is_price_stale`（`get_price_panel` 路径）被 ~12 只永久 stale 标的拖累反复进刷新分支（刷新增量，浪费有界）。均自限、非死循环，可在水位修复轮次顺带评估。
 - [ ] **并行 run_candidates 偶发 worker 失败**：哑铃网格阶段 2 中第 9/10 号任务（W250_511260 / W250_CASH）ERR——worker 内失败、无 RUN_START，疑似 worker 复用时环境性失败；单进程复现可跑通。影响面小（同窗结论不受影响），但动摇并行结果可信度，下轮大网格前值得排查。（2026-08-23：并行数据底座已从 SharedMemory 换为 mmap IPC 文件，Windows 句柄类环境性失败可能同源消除，待大网格复验；2026-08-30 大网格 19 任务两阶段未复现）
+- [ ] **HTR 遗留线清退（ADR-021 联动）**（2026-08-30 立项）：`strategy_rd/htr_subgraph.py` + `strategy_rd/agents/`（约 9 处 LLM 调用点，含 `_should_retrieve` 检索路由、`decide` 循环控制流等 LLM 干确定性活的违例，及 `strategy_rd_supervisor.py` 死代码）+ `skills/personas/` 大师库，仍被 `cli.py` 与 `app/app.py` 的 research 端点使用。清退方案：调用方迁移至 ToG `ResearchAgent` 后整体删除遗留线，LLM 控制流决策按 ADR-021 规则化；`check_llm_call_sites.py` 白名单中遗留线条目随清退移除。迁移前冻结：不得新增调用方或在遗留线内扩展功能。
 
 ---
 

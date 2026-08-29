@@ -166,20 +166,40 @@ class MemoryService(Protocol):
         ...
 
 
-# ── LLM Service ──────────────────────────────────────────────────
+# ── Context Preparation Service ──────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ContextActivation:
+    """上下文激活结果 — 确定性脚手架的结构化产物（ADR-021）。
+
+    脚手架层不内嵌 LLM 推理；未命中（``missed``）时的采集推理由
+    调用方在 agent 层显式触发。
+    """
+
+    items: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        """可直接注入 prompt 的激活文本。"""
+        return "\n".join(self.items)
+
+    @property
+    def missed(self) -> bool:
+        """是否未命中任何事件/知识。"""
+        return not self.items
 
 
 class ContextPreparationService(Protocol):
-    """研究与分析入口的上下文准备服务。"""
+    """研究与分析入口的上下文准备服务（纯确定性激活，ADR-021）。"""
 
     def prepare(
         self,
         query: str,
         *,
         k: int = 5,
-        force_refresh: bool = False,
-    ) -> str:
-        """激活已有事件，必要时采集事件后再次激活。"""
+    ) -> ContextActivation:
+        """激活与查询相关的事件/知识，不触发任何采集推理。"""
         ...
 
 

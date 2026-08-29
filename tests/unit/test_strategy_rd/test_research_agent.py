@@ -57,6 +57,10 @@ class TestResearchAgentTools:
                 return_value=MagicMock(),
             ),
             patch(
+                "long_earn.strategy_rd.research_agent.create_event_inference_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
                 "long_earn.strategy_rd.research_agent.MarkdownPromptTemplate",
             ),
         ):
@@ -247,6 +251,10 @@ class TestEvidenceGatePipeline:
         with (
             patch(
                 "long_earn.strategy_rd.research_agent.create_react_agent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.strategy_rd.research_agent.create_event_inference_subgraph",
                 return_value=MagicMock(),
             ),
             patch(

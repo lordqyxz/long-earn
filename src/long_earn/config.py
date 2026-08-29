@@ -141,13 +141,15 @@ class RuntimeContext:
         query: str,
         *,
         k: int = 5,
-        force_refresh: bool = False,
     ) -> str:
-        """向后兼容入口；实际编排委托给上下文准备服务。"""
+        """确定性激活上下文，返回可注入 prompt 的文本（不触发采集推理）。
+
+        ADR-021：本入口是纯确定性脚手架；未命中时的采集推理由
+        agent 层显式构造推理子图触发。"""
         service = self.__dict__.get("context_preparation")
         if service is None:
             service = ContextPreparationServiceImpl(self.memory, self.logger)
-        return service.prepare(query, k=k, force_refresh=force_refresh)
+        return service.prepare(query, k=k).text
 
 
 @dataclass

@@ -10,7 +10,6 @@ from long_earn.backtest.data.connector import (
     CompositeDataConnector as DataConnectorImpl,
 )
 from long_earn.config import AppConfig, RuntimeContext
-from long_earn.event_inference import create_event_inference_subgraph
 from long_earn.ontology import Connector, OntologyRegistry
 from long_earn.operator_dev.backlog import OperatorBacklog
 from long_earn.services.backtest_service import BacktestServiceImpl
@@ -117,19 +116,9 @@ def create_runtime_context(config: AppConfig | None = None) -> RuntimeContext:
 
     runtime_context: RuntimeContext | None = None
 
-    def infer_events(query: str) -> None:
-        """通过生产事件推理子图采集并写回事件。"""
-        if runtime_context is None:
-            raise RuntimeError("RuntimeContext 尚未完成装配")
-        # 生产子图内部会构造默认 CollectorRegistry（基于 runtime_context 装配）
-        subgraph = create_event_inference_subgraph(runtime_context)
-        subgraph.invoke({"query": query})
-
-    context_preparation = ContextPreparationServiceImpl(
-        memory,
-        logger,
-        infer_events=infer_events,
-    )
+    # ADR-021：上下文准备服务只做确定性激活；事件采集推理由 agent 层
+    # 显式构造推理子图触发，组合根不再注入隐式推理回调。
+    context_preparation = ContextPreparationServiceImpl(memory, logger)
 
     runtime_context = RuntimeContext(
         config=config,
