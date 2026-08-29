@@ -506,7 +506,9 @@ class ParallelRunner:
             for fold_idx, (train_ts, test_ts) in enumerate(splits):
                 train_start = str(train_ts[0])
                 train_end = str(train_ts[-1])
-                test_start = str(train_ts[0]) if test_ts else train_end
+                # test 折窗口严格取 test_ts（与 core.py walk_forward 一致）：
+                # 若误用 train_ts[0]，"test" 回测会覆盖训练期，OOS 指标被污染
+                test_start = str(test_ts[0]) if test_ts else train_end
                 test_end = str(test_ts[-1]) if test_ts else train_end
 
                 train_task_id = f"{fold_idx}_train"
