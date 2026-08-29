@@ -47,7 +47,7 @@ def _rebuild_wide_panel() -> None:
     try:
         DataCache().rebuild_panel_symbols(None)
         print("[守护] 宽表 panel_daily 全量重建完成", flush=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # 重建失败不阻断守护流程：脏标记仍在，读者惰性重建兜底
         print(f"[守护] 宽表重建失败（读者惰性重建兜底）: {exc}", flush=True)
 

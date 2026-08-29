@@ -18,7 +18,6 @@ from long_earn.core.stdio import ensure_utf8_stdio  # noqa: E402
 
 ensure_utf8_stdio()
 
-import yaml  # noqa: E402
 from long_earn.config import AppConfig  # noqa: E402
 from long_earn.context_init import initialize_context  # noqa: E402
 from long_earn.services.backtest_service import BacktestServiceImpl  # noqa: E402
@@ -128,9 +127,9 @@ def main() -> None:
         print(f"  最近6个月总收益率: {r_ret*100:.2f}%")
         print(f"  训练集总收益率:     {t_ret*100:.2f}%")
         if not recent.get("metrics_unreliable", True):
-            print(f"  指标可信: 是")
+            print("  指标可信: 是")
         else:
-            print(f"  指标可信: 否（策略可能退化，需检查因子/信号失败）")
+            print("  指标可信: 否（策略可能退化，需检查因子/信号失败）")
 
     # 保存策略到数据目录（统一存储位置）
     from long_earn.core.storage import best_strategy_path

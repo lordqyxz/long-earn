@@ -21,7 +21,6 @@ sys.path.insert(0, str(project_root / "src"))
 
 from long_earn.cli import app  # noqa: E402
 
-
 if __name__ == "__main__":
     # 注入 research 子命令，后续参数原样透传
     sys.argv = [sys.argv[0], "research", *sys.argv[1:]]
