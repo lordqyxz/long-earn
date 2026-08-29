@@ -463,6 +463,17 @@ class DataCache:
             )
         """)
 
+        # 财务同步水位表：记录每只股票「上次检查截止日」，供财务增量判定
+        # 区分「数据旧」与「最近查过」——沉默股票（无新公告、重下返回 0 行、
+        # 公告日不推进）靠水位退出待查集，否则每次同步都重复重下（死循环）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS financial_sync_watermark (
+                symbol VARCHAR PRIMARY KEY,
+                checked_until DATE NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 五表财务聚合视图（panel_daily 重建的数据源，幂等替换）
         conn.execute(_financial_union_view_sql())
 
@@ -738,6 +749,63 @@ class DataCache:
             symbols,
         ).fetchall()
         return {r[0]: str(r[1]) for r in rows if r[1] is not None}
+
+    # ── 财务同步水位（沉默股票死循环治理）────────────────────────────
+
+    def get_financial_sync_watermarks(self, symbols: list[str]) -> dict[str, str]:
+        """批量获取财务同步水位（上次检查截止日）。
+
+        与 get_financial_latest_announces 配合做增量判定：公告日反映
+        「数据的最后状态」，水位反映「上次问过上游没有」——沉默股票
+        公告日永不推进，只有水位能证明「最近查过、无新数据」。
+
+        Returns:
+            {symbol: checked_until_str}，格式 YYYY-MM-DD；无记录不出现。
+        """
+        if not symbols:
+            return {}
+        conn = self._get_conn()
+        placeholders = ", ".join(["%s"] * len(symbols))
+        rows = conn.execute(
+            f"""
+            SELECT symbol, MAX(checked_until) as checked
+            FROM financial_sync_watermark
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            symbols,
+        ).fetchall()
+        return {r[0]: str(r[1]) for r in rows if r[1] is not None}
+
+    def advance_financial_sync_watermarks(
+        self,
+        symbols: list[str],
+        checked_until: str,
+    ) -> None:
+        """批量推进财务同步水位（批次检查成功后调用，含空返回）。
+
+        ON CONFLICT 幂等 upsert。调用方契约：仅在批次「成功检查」后推进
+        （含合法的 0 行返回=沉默股票）；xtquant 异常/失败批次不得推进，
+        保留下轮重试。
+        """
+        if not symbols:
+            return
+        rows = [(sym, checked_until) for sym in symbols]
+        with self._write_transaction() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO financial_sync_watermark
+                    (symbol, checked_until, updated_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (symbol) DO UPDATE
+                SET checked_until = EXCLUDED.checked_until,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+            )
+        logger.debug(
+            f"财务同步水位推进: {len(symbols)} 只 -> {checked_until}"
+        )
 
     # ── 8 张细表通用 CRUD（ADR-014 阶段 B）────────────────────────────
 

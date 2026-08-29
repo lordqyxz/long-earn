@@ -4,8 +4,10 @@
 1. schema 版本化守卫：版本匹配保留数据，版本不匹配 DROP 重建
 2. get_financial_latest_announce / get_financial_latest_announces 接口契约
 3. get_price_latest_dates 批量接口契约
-4. _select_financials_to_refresh 财务增量判定逻辑（关键环节）
+4. _select_financials_to_refresh 财务增量判定逻辑（关键环节，
+   公告日/同步水位双水位判定）
 5. _select_prices_to_refresh 行情按交易日精确判定逻辑（关键环节）
+6. 财务同步水位接口 + 批次检查成功推进水位（沉默股票死循环治理）
 
 PG 全量迁移后：DataCache 忽略 db_path 连 PG（core.pg 裁决连接参数），
 测试数据用唯一 symbol 隔离并清理，避免污染 PG 共享库。
@@ -65,6 +67,7 @@ def _cleanup_test_data():
             "cashflow_stmt",
             "pershareindex",
             "capital",
+            "financial_sync_watermark",
         ):
             conn.execute(f"DELETE FROM {table} WHERE symbol LIKE %s", [f"%-{_UNIQ}.%"])
         conn.commit()
@@ -229,12 +232,12 @@ class TestGetFinancialLatestAnnounce:
 
 
 class TestSelectFinancialsToRefresh:
-    """增量预检：按 announce_date 最新公告日阈值筛选需下载股票"""
+    """增量预检：按「公告日 / 同步水位」双水位筛选需下载股票"""
 
     TODAY = "2026-07-12"  # 固定今日，避免时间漂移影响断言
 
     def test_empty_cache_marks_all_for_full_download(self, tmp_path):
-        """缓存为空 → 全部进 full_missing 组，stale 为空"""
+        """无数据且无水位 → 全部进 full_missing 组，stale 为空"""
         cache = _make_cache(tmp_path)
         svc = _make_service(cache)
 
@@ -247,7 +250,7 @@ class TestSelectFinancialsToRefresh:
         assert stale_start == self.TODAY
 
     def test_empty_cache_empty_start(self, tmp_path):
-        """缓存为空且 start_date 空 → full_missing 包含全部，stale_start=today"""
+        """无数据且无水位且 start_date 空 → full_missing 包含全部，stale_start=today"""
         cache = _make_cache(tmp_path)
         svc = _make_service(cache)
 
@@ -259,9 +262,9 @@ class TestSelectFinancialsToRefresh:
         assert stale_start == self.TODAY
 
     def test_stale_announce_marks_for_incremental(self, tmp_path):
-        """最新公告日距今 > 120 天 → 进 stale 组，起始日 = 公告日 + 1 天"""
+        """最新公告日距今 > 7 天（无水位）→ 进 stale 组，起始日 = 公告日 + 1 天"""
         cache = _make_cache(tmp_path)
-        # 公告日 2025-01-01，距今 > 120 天 → 过期
+        # 公告日 2025-01-01，距今 > 7 天 → 待查
         _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])
         svc = _make_service(cache)
 
@@ -272,11 +275,41 @@ class TestSelectFinancialsToRefresh:
         assert stale == [_sym("000001.SZ")]
         assert stale_start == "2025-01-02"  # 公告日 + 1 天
 
-    def test_fresh_announce_skipped(self, tmp_path):
-        """最新公告日距今 ≤ 120 天 → 跳过（既不在 full_missing 也不在 stale）"""
+    def test_recent_watermark_skips_quiet_stock(self, tmp_path):
+        """死循环回归：沉默股票（公告日久远）水位新 → 跳过，不重复重查。
+
+        旧规则按公告日距今 > 120 天判定，无新公告的股票每次同步都重下
+        （返回 0 行、公告日不推进、下轮仍 stale）。水位证明最近查过即跳过。
+        """
         cache = _make_cache(tmp_path)
-        # 公告日 2026-06-01，距今 41 天 ≤ 120 → 新鲜
-        _save_financial_rows(cache, _sym("000001.SZ"), ["2026-06-01"])
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])  # 557 天前
+        cache.advance_financial_sync_watermarks([_sym("000001.SZ")], "2026-07-10")
+        svc = _make_service(cache)
+
+        full_missing, stale, _ = svc._select_financials_to_refresh(
+            [_sym("000001.SZ")], self.TODAY, start_date=""
+        )
+        assert full_missing == []
+        assert stale == []  # 旧规则此处会判 stale 触发死循环
+
+    def test_stale_watermark_rechecks_quiet_stock_from_watermark(self, tmp_path):
+        """沉默股票水位过期（无公告日）→ 重查，起始日 = 水位 + 1 天"""
+        cache = _make_cache(tmp_path)
+        cache.advance_financial_sync_watermarks([_sym("000001.SZ")], "2026-06-01")
+        svc = _make_service(cache)
+
+        full_missing, stale, stale_start = svc._select_financials_to_refresh(
+            [_sym("000001.SZ")], self.TODAY, start_date=""
+        )
+        assert full_missing == []
+        assert stale == [_sym("000001.SZ")]
+        assert stale_start == "2026-06-02"
+
+    def test_recent_announce_skipped(self, tmp_path):
+        """最新公告日距今 ≤ 7 天（无水位）→ 跳过"""
+        cache = _make_cache(tmp_path)
+        # 公告日 2026-07-09，距今 3 天 ≤ 7 → 新鲜
+        _save_financial_rows(cache, _sym("000001.SZ"), ["2026-07-09"])
         svc = _make_service(cache)
 
         full_missing, stale, _ = svc._select_financials_to_refresh(
@@ -286,13 +319,14 @@ class TestSelectFinancialsToRefresh:
         assert stale == []
 
     def test_mixed_population(self, tmp_path):
-        """混合场景：无缓存 + 过期 + 新鲜 → 正确分组到 full_missing / stale"""
+        """混合场景：无缓存 + 待查 + 已查 → 正确分组到 full_missing / stale"""
         cache = _make_cache(tmp_path)
-        # 过期（公告日 2025-01-01）
+        # 待查（公告日 2025-01-01，无水位）
         _save_financial_rows(cache, _sym("000001.SZ"), ["2025-01-01"])
-        # 新鲜（公告日 2026-06-01）
+        # 已查（公告日 2026-06-01，水位 2026-07-11 → max 距今 1 天）
         _save_financial_rows(cache, _sym("000002.SZ"), ["2026-06-01"])
-        # 000003.SZ 无缓存
+        cache.advance_financial_sync_watermarks([_sym("000002.SZ")], "2026-07-11")
+        # 000003.SZ 无缓存无水位
         svc = _make_service(cache)
 
         full_missing, stale, stale_start = svc._select_financials_to_refresh(
@@ -300,16 +334,16 @@ class TestSelectFinancialsToRefresh:
             self.TODAY,
             start_date="2020-01-01",
         )
-        # 000001 过期 → stale；000003 无缓存 → full_missing；000002 新鲜 → 跳过
+        # 000001 待查 → stale；000003 无缓存 → full_missing；000002 已查 → 跳过
         assert full_missing == [_sym("000003.SZ")]
         assert stale == [_sym("000001.SZ")]
         # stale 起始日 = 2025-01-02
         assert stale_start == "2025-01-02"
 
     def test_mixed_stale_only_uses_min_stale_start(self, tmp_path):
-        """仅过期股票（无全量缺失）→ 起始日取最早过期起始日"""
+        """仅待查股票（无全量缺失）→ 起始日取最早待查起始日"""
         cache = _make_cache(tmp_path)
-        # 两只都过期，公告日不同
+        # 两只都待查，公告日不同
         _save_financial_rows(
             cache, _sym("000001.SZ"), ["2025-01-01"]
         )  # 起始 2025-01-02
@@ -323,7 +357,7 @@ class TestSelectFinancialsToRefresh:
         )
         assert full_missing == []
         assert set(stale) == {_sym("000001.SZ"), _sym("000002.SZ")}
-        # 最早过期起始日 = 2025-01-02
+        # 最早待查起始日 = 2025-01-02
         assert stale_start == "2025-01-02"
 
 
@@ -370,6 +404,80 @@ class TestBatchLatestInterfaces:
         """空输入返回空 dict"""
         cache = _make_cache(tmp_path)
         assert cache.get_price_latest_dates([]) == {}
+
+    def test_financial_sync_watermarks_roundtrip(self, tmp_path):
+        """批量推进 + 批量读取水位；未推进的 symbol 不出现在结果"""
+        cache = _make_cache(tmp_path)
+        cache.advance_financial_sync_watermarks(
+            [_sym("000001.SZ"), _sym("000002.SZ")], "2026-07-12"
+        )
+        result = cache.get_financial_sync_watermarks(
+            [_sym("000001.SZ"), _sym("000002.SZ"), _sym("999999.SZ")]
+        )
+        assert "2026-07-12" in str(result[_sym("000001.SZ")])
+        assert _sym("000002.SZ") in result
+        assert _sym("999999.SZ") not in result
+
+    def test_financial_sync_watermark_upsert_latest_wins(self, tmp_path):
+        """重复推进同一 symbol → 取最新 checked_until（幂等 upsert）"""
+        cache = _make_cache(tmp_path)
+        cache.advance_financial_sync_watermarks([_sym("000001.SZ")], "2026-07-01")
+        cache.advance_financial_sync_watermarks([_sym("000001.SZ")], "2026-07-12")
+        result = cache.get_financial_sync_watermarks([_sym("000001.SZ")])
+        assert "2026-07-12" in str(result[_sym("000001.SZ")])
+
+    def test_financial_sync_watermarks_empty_input(self, tmp_path):
+        """空输入推进/读取均为 no-op"""
+        cache = _make_cache(tmp_path)
+        cache.advance_financial_sync_watermarks([], "2026-07-12")
+        assert cache.get_financial_sync_watermarks([]) == {}
+
+
+# ── 财务批次检查与水位推进（死循环治理关键环节）──────────────────
+
+
+class TestFinancialBatchWatermark:
+    """批次检查成功（含合法 0 行）推进水位；异常不推进（下轮重试）。"""
+
+    END = "2026-07-12"
+
+    def test_empty_result_advances_watermark(self, tmp_path):
+        """合法 0 行（沉默股票）→ 检查成功，水位推进到窗口截止日"""
+        cache = _make_cache(tmp_path)
+        svc = _make_service(cache)
+        sym = _sym("000001.SZ")
+        svc.data_provider._fetch_financials_by_table.return_value = {}
+
+        svc._download_concurrent(
+            [sym], "2025-01-01", self.END, "financial", 100, 4, advance_watermark=True
+        )
+        marks = svc.cache.get_financial_sync_watermarks([sym])
+        assert sym in marks
+        assert self.END in marks[sym]
+
+    def test_none_result_is_failure_and_keeps_watermark(self, tmp_path):
+        """下载异常（None）→ 批次失败，水位不推进（下轮重试）"""
+        cache = _make_cache(tmp_path)
+        svc = _make_service(cache)
+        sym = _sym("000001.SZ")
+        svc.data_provider._fetch_financials_by_table.return_value = None
+
+        svc._download_concurrent(
+            [sym], "2025-01-01", self.END, "financial", 100, 4, advance_watermark=True
+        )
+        assert svc.cache.get_financial_sync_watermarks([sym]) == {}
+
+    def test_watermark_not_advanced_when_disabled(self, tmp_path):
+        """advance_watermark=False（默认）→ 即使成功也不推进"""
+        cache = _make_cache(tmp_path)
+        svc = _make_service(cache)
+        sym = _sym("000001.SZ")
+        svc.data_provider._fetch_financials_by_table.return_value = {}
+
+        svc._download_concurrent(
+            [sym], "2025-01-01", self.END, "financial", 100, 4
+        )
+        assert svc.cache.get_financial_sync_watermarks([sym]) == {}
 
 
 # ── _select_prices_to_refresh 行情增量判定 ────────────────────────

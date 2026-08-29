@@ -804,14 +804,16 @@ class MiniQmtDataProvider:
         symbols: list[str],
         start_date: str,
         end_date: str,
-    ) -> dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame] | None:
         """ADR-014 阶段 B：按 8 张表 schema 分别从 miniqmt 取数。
 
         每张表用 ``_extract_by_schema`` 从 xtquant 原始字段按 schema.xt_fields
         候选顺序提取标准字段名，写入各自 DuckDB 细表。
 
         Returns:
-            {table_name: DataFrame}，只含成功取数的表
+            {table_name: DataFrame}，只含成功取数的表；None 仅表示下载异常
+            （xtquant 不可用等）；空 dict 表示「检查成功但窗口内无数据」
+            （沉默股票的合法返回，调用方不得当作失败）。
         """
         try:
             start_fmt = start_date.replace("-", "")
@@ -834,7 +836,7 @@ class MiniQmtDataProvider:
             return result
         except Exception as e:
             logger.warning(f"miniqmt 按表财务数据下载失败: {e}")
-            return {}
+            return None
 
     def _fetch_financial_table(
         self,

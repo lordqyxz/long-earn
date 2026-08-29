@@ -54,9 +54,12 @@ INDEX_QUOTES_START = "2015-01-05"
 # 保留用于签名兼容（主进程直接调 xtquant，单线程串行，max_workers 实际忽略）
 DEFAULT_MAX_WORKERS = 4
 
-# 财务数据新鲜度阈值：最新公告日距今超此天数视为需要增量补齐
-# 基于 announce_date（公告日，PIT 真实可见日），而非 report_date（报告期末）
-_FINANCIAL_STALE_DAYS = 120
+# 财务重查间隔：距「数据最新公告日 / 上次检查水位」二者较新者超过此天数
+# 才再次问上游。沉默股票（无新公告、重下返回 0 行、公告日永不推进）靠
+# 水位退出待查集，否则每次同步都重复重查（死循环，2026-08-30 治理）。
+# 注意：待查窗口起点仍取公告日 + 1 天不变——xtquant get_financial_data
+# 按 report_time 过滤，缩窗会漏掉新报告期行；水位只影响「是否检查」。
+_FINANCIAL_RECHECK_DAYS = 7
 
 # datetime.weekday() 的周六值（>= 此值即周末）
 _WEEKDAY_SATURDAY = 5
@@ -305,7 +308,13 @@ class DataIngestionService:
             self._info("[财务] 无标的需要下载（ETF 无财务数据）")
             return
         self._download_concurrent(
-            symbols, start_date, end_date, "financial", batch_size, max_workers
+            symbols,
+            start_date,
+            end_date,
+            "financial",
+            batch_size,
+            max_workers,
+            advance_watermark=True,
         )
 
     def _select_financials_to_refresh(
@@ -314,15 +323,17 @@ class DataIngestionService:
         today: str,
         start_date: str = "",
     ) -> tuple[list[str], list[str], str]:
-        """财务增量预检：按公告日阈值判定，分两组返回需下载的股票。
+        """财务增量预检：按「公告日 / 同步水位」双水位判定，分组返回需下载的股票。
 
-        判定规则（按 announce_date 最新公告日阈值）：
-        - 缓存为空（无该 symbol 记录）→ full_missing 组，起始日沿用 start_date（空=最早）
-        - 最新公告日距今 > _FINANCIAL_STALE_DAYS → stale 组，起始日 = 最新公告日 + 1 天
-        - 最新公告日距今 ≤ 阈值 → 跳过（最近数据已齐）
+        判定规则（recheck 间隔）：
+        - 缓存无数据且无检查水位 → full_missing 组，起始日沿用 start_date（空=最早）
+        - max(最新公告日, 检查水位) 距今 > _FINANCIAL_RECHECK_DAYS → stale 组，
+          起始日 = 公告日 + 1 天（无数据时用水位 + 1 天）
+        - 距今 ≤ 间隔 → 跳过（最近已查过，含沉默股票——重查也不会有新数据）
 
-        分组返回的原因：无缓存股票需要全量历史，过期股票只需补最近；
-        若混用统一起始日会导致过期股票也全量重下，浪费带宽。
+        沉默股票治理（2026-08-30）：无新公告的股票重下永远返回 0 行、公告日
+        永不推进；旧规则（公告日距今 > 120 天即重下）使其每轮同步都全量重查
+        （实测 4620 只/次，约 20 分钟）。水位证明「最近查过」后即可跳过。
 
         Args:
             symbols: 候选股票列表
@@ -331,15 +342,16 @@ class DataIngestionService:
 
         Returns:
             (full_missing, stale, stale_start)
-            - full_missing: 无缓存的股票列表，需用 start_date 全量下载
-            - stale: 有缓存但公告日过期的股票列表，需从 stale_start 起补齐
-            - stale_start: stale 组的下载起始日（取最早过期起始日）；
+            - full_missing: 无缓存且从未检查的股票列表，需用 start_date 全量下载
+            - stale: 需重查的股票列表，需从 stale_start 起补齐
+            - stale_start: stale 组的下载起始日（取最早待查起始日）；
               stale 为空时返回 today（无意义，调用方应检查 stale 是否为空）
         """
         today_ts = pd.Timestamp(today)
-        threshold = timedelta(days=_FINANCIAL_STALE_DAYS)
-        # 批量查最新公告日，避免逐股查 5208 次
+        recheck = timedelta(days=_FINANCIAL_RECHECK_DAYS)
+        # 批量查最新公告日与同步水位，避免逐股查询
         latest_map = self.cache.get_financial_latest_announces(symbols)
+        watermark_map = self.cache.get_financial_sync_watermarks(symbols)
         full_missing: list[str] = []
         stale: list[str] = []
         stale_starts: list[str] = []
@@ -347,15 +359,30 @@ class DataIngestionService:
 
         for sym in symbols:
             latest_announce = latest_map.get(sym)
-            if latest_announce is None:
-                # 缓存为空：全量下载
+            checked_until = watermark_map.get(sym)
+            if latest_announce is None and checked_until is None:
+                # 既无数据也从未检查：全量下载
                 full_missing.append(sym)
                 continue
 
-            latest_ts = pd.Timestamp(latest_announce)
-            if (today_ts - latest_ts) > threshold:
-                # 过期：从最新公告日次日起补齐
-                inc_start = (latest_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            # 双水位取较新者判定「最近问过没有」；窗口起点取标记 + 1 天
+            # （report_time 过滤语义，缩窗会漏新报告期行）
+            if latest_announce is not None:
+                effective_latest = pd.Timestamp(latest_announce)
+                if checked_until is not None:
+                    effective_latest = max(
+                        effective_latest, pd.Timestamp(checked_until)
+                    )
+                window_marker = latest_announce
+            else:
+                assert checked_until is not None  # 循环不变量：二者不同时为空
+                effective_latest = pd.Timestamp(checked_until)
+                window_marker = checked_until
+
+            if (today_ts - effective_latest) > recheck:
+                inc_start = (
+                    pd.Timestamp(window_marker) + pd.Timedelta(days=1)
+                ).strftime("%Y-%m-%d")
                 stale.append(sym)
                 stale_starts.append(inc_start)
             else:
@@ -366,7 +393,7 @@ class DataIngestionService:
         self._info(
             f"[财务][增量] 共 {len(symbols)} 只，需刷新 "
             f"{len(full_missing) + len(stale)} 只"
-            f"（无缓存 {len(full_missing)} / 过期 {len(stale)}），跳过 {fresh_count} 只"
+            f"（无缓存 {len(full_missing)} / 待查 {len(stale)}），跳过 {fresh_count} 只"
         )
         return full_missing, stale, stale_start
 
@@ -378,12 +405,14 @@ class DataIngestionService:
         batch_size: int = _FINANCIAL_BATCH,
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> None:
-        """财务增量下载：按公告日阈值判定，仅下载缺失/过期的股票。
+        """财务增量下载：按「公告日 / 同步水位」判定，仅下载缺失/需重查的股票。
 
-        分两阶段下载（避免无缓存股票的全量历史拖累过期股票）：
-        1. stale 组：公告日过期的股票，从各自最新公告日次日起补齐到 end_date
-        2. full_missing 组：无缓存的股票，用 start_date 全量下载
-        靠 INSERT OR REPLACE upsert 幂等合并到 DuckDB 缓存。
+        分两阶段下载（避免无缓存股票的全量历史拖累待查股票）：
+        1. stale 组：距最近公告日/检查水位超过 recheck 间隔的股票，
+           从各自公告日（无数据用水位）次日起补齐到 end_date
+        2. full_missing 组：无缓存且从未检查的股票，用 start_date 全量下载
+        批次检查成功后推进同步水位（沉默股票靠水位退出待查集，治理死循环）。
+        靠 upsert 幂等合并到缓存。
         """
         if not symbols:
             self._info("[财务] 无标的需要下载（ETF 无财务数据）")
@@ -399,11 +428,17 @@ class DataIngestionService:
         # 阶段1：过期股票（只补最近，快速）
         if stale:
             self._info(
-                f"[财务][增量] 阶段1：{len(stale)} 只过期，"
+                f"[财务][增量] 阶段1：{len(stale)} 只待查，"
                 f"起始日 {stale_start} ~ {today}"
             )
             self._download_concurrent(
-                stale, stale_start, today, "financial", batch_size, max_workers
+                stale,
+                stale_start,
+                today,
+                "financial",
+                batch_size,
+                max_workers,
+                advance_watermark=True,
             )
 
         # 阶段2：无缓存股票（全量历史，耗时）
@@ -413,7 +448,13 @@ class DataIngestionService:
                 f"起始日 {start_date or '(最早)'} ~ {today}"
             )
             self._download_concurrent(
-                full_missing, start_date, today, "financial", batch_size, max_workers
+                full_missing,
+                start_date,
+                today,
+                "financial",
+                batch_size,
+                max_workers,
+                advance_watermark=True,
             )
 
     def _download_concurrent(
@@ -424,6 +465,7 @@ class DataIngestionService:
         kind: str,
         batch_size: int,
         max_workers: int,  # 保留参数兼容签名，单线程直接调用忽略
+        advance_watermark: bool = False,
     ) -> None:
         """单线程串行下载+写入：主进程直接调 xtquant 下载一批 → 写入一批 → 下一批。
 
@@ -435,6 +477,10 @@ class DataIngestionService:
 
         ADR-014 阶段 B：financial 分支改为按 8 张表分别取数（_fetch_financials_by_table），
         覆盖 Capital/Holdernum/Top10holder/Top10flowholder（旧路径只下 4 表）。
+
+        Args:
+            advance_watermark: 财务批次检查成功后推进同步水位（含合法 0 行；
+                异常批次不推进）。仅 kind="financial" 时生效。
         """
         total = len(symbols)
         if total == 0:
@@ -466,6 +512,8 @@ class DataIngestionService:
                 wrote_ok = self._fetch_financial_batch_by_table(
                     batch, start_date, end_date, batch_num, total_batches
                 )
+                if wrote_ok and advance_watermark:
+                    self.cache.advance_financial_sync_watermarks(batch, end_date)
             if wrote_ok:
                 ok_count += len(batch)
             else:
@@ -495,6 +543,10 @@ class DataIngestionService:
         写入对应细表，本方法只负责异常隔离 + 进度日志。
         覆盖 Income/Balance/CashFlow/Pershareindex/Capital/Holdernum/
         Top10holder/Top10flowholder 全部 8 张表。
+
+        Returns:
+            True 表示本批检查成功（含合法 0 行=沉默股票，水位照常推进）；
+            False 仅表示下载异常（xtquant 不可用等，水位不推进，下轮重试）。
         """
         try:
             table_dfs = self.data_provider._fetch_financials_by_table(
@@ -502,12 +554,15 @@ class DataIngestionService:
                 start_date,
                 end_date,
             )
-            if not table_dfs:
+            if table_dfs is None:
                 return False
             if batch_num % 5 == 0 or batch_num == total_batches:
-                tables_str = ", ".join(
-                    f"{name}:{len(df)}" for name, df in table_dfs.items()
-                )
+                if table_dfs:
+                    tables_str = ", ".join(
+                        f"{name}:{len(df)}" for name, df in table_dfs.items()
+                    )
+                else:
+                    tables_str = "无新数据"
                 self._info(
                     f"[财务] 写入进度 {batch_num}/{total_batches} ({tables_str})"
                 )
