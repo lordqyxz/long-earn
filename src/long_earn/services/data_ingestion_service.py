@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from long_earn.backtest.data.cache import DataCache
+from long_earn.backtest.data.financial.sync import FINANCIAL_RECHECK_DAYS
 from long_earn.backtest.data.miniqmt_provider import (
     BOARD_NAME_MAP,
     INDEX_SECTOR_MAP,
@@ -54,12 +55,11 @@ INDEX_QUOTES_START = "2015-01-05"
 # 保留用于签名兼容（主进程直接调 xtquant，单线程串行，max_workers 实际忽略）
 DEFAULT_MAX_WORKERS = 4
 
-# 财务重查间隔：距「数据最新公告日 / 上次检查水位」二者较新者超过此天数
-# 才再次问上游。沉默股票（无新公告、重下返回 0 行、公告日永不推进）靠
-# 水位退出待查集，否则每次同步都重复重查（死循环，2026-08-30 治理）。
-# 注意：待查窗口起点仍取公告日 + 1 天不变——xtquant get_financial_data
-# 按 report_time 过滤，缩窗会漏掉新报告期行；水位只影响「是否检查」。
-_FINANCIAL_RECHECK_DAYS = 7
+# 财务重查间隔（FINANCIAL_RECHECK_DAYS）定义在 backtest.data.financial.sync：
+# 启动同步与回测读路径（is_financial_stale）共享同一水位与同一间隔常量
+# （AGENTS.md 6.2 铁律）。沉默股票（无新公告、重下返回 0 行、公告日永不推进）
+# 靠检查水位退出待查集；待查窗口起点仍取公告日 + 1 天不变——xtquant
+# get_financial_data 按 report_time 过滤，缩窗会漏掉新报告期行。
 
 # datetime.weekday() 的周六值（>= 此值即周末）
 _WEEKDAY_SATURDAY = 5
@@ -327,7 +327,7 @@ class DataIngestionService:
 
         判定规则（recheck 间隔）：
         - 缓存无数据且无检查水位 → full_missing 组，起始日沿用 start_date（空=最早）
-        - max(最新公告日, 检查水位) 距今 > _FINANCIAL_RECHECK_DAYS → stale 组，
+        - max(最新公告日, 检查水位) 距今 > FINANCIAL_RECHECK_DAYS → stale 组，
           起始日 = 公告日 + 1 天（无数据时用水位 + 1 天）
         - 距今 ≤ 间隔 → 跳过（最近已查过，含沉默股票——重查也不会有新数据）
 
@@ -348,7 +348,7 @@ class DataIngestionService:
               stale 为空时返回 today（无意义，调用方应检查 stale 是否为空）
         """
         today_ts = pd.Timestamp(today)
-        recheck = timedelta(days=_FINANCIAL_RECHECK_DAYS)
+        recheck = timedelta(days=FINANCIAL_RECHECK_DAYS)
         # 批量查最新公告日与同步水位，避免逐股查询
         latest_map = self.cache.get_financial_latest_announces(symbols)
         watermark_map = self.cache.get_financial_sync_watermarks(symbols)

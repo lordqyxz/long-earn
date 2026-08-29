@@ -17,6 +17,15 @@ from long_earn.backtest.data.cache import DataCache
 _SYNC_SLOW_SYMBOLS = 500
 _SYNC_SLOW_SECONDS = 1.0
 
+# 财务重查间隔（天）：距「最新公告日 / 检查水位」二者较新者超过此间隔才再次
+# 问上游。启动同步（services.data_ingestion_service）与回测读路径共用本常量，
+# 保证「同款判定逻辑共享同一水位」（AGENTS.md 6.2 铁律）。
+FINANCIAL_RECHECK_DAYS = 7
+
+# 请求区间追溯阈值：backtest end_date 早于此刻此天数时，面板只需覆盖到
+# end_date，end_date 之后的新公告与本次读取无关，直接判新鲜
+_REQUEST_WINDOW_STALE_DAYS = 120
+
 
 class FinancialCacheIngestor(Protocol):
     """能把季频财务数据拉取并写入 ``DataCache`` 的数据源（如 miniqmt）。"""
@@ -56,27 +65,42 @@ def is_financial_stale(
     symbols: list[str],
     end_date: str = "",
 ) -> bool:
-    """检测财务缓存是否过期（批量查最新公告日）。"""
-    threshold = timedelta(days=120)
+    """检测财务缓存是否过期（双水位判定：公告日 / 同步检查水位）。
+
+    沉默股票（无新公告、重下返回 0 行）的公告日永不推进，单看公告日会把
+    「数据旧」误判为「没查过」，读路径每次都全量重拉（与启动同步同款死循环）。
+    同步水位证明「最近查过、无新数据」后即视为新鲜。
+
+    水位由启动同步（``download_financials_incremental``）独占推进；本路径
+    只读不写——其取数窗口是回测区间而非「至今」，不能宣称检查到今天。
+    """
     now = datetime.now()
     if end_date:
         end_dt = pd.to_datetime(end_date)
-        if (now - end_dt) > threshold:
+        if (now - end_dt) > timedelta(days=_REQUEST_WINDOW_STALE_DAYS):
             return False
     if not symbols:
         return False
     t0 = time.perf_counter()
     latest_map = cache.get_financial_latest_announces(symbols)
+    watermark_map = cache.get_financial_sync_watermarks(symbols)
     elapsed = time.perf_counter() - t0
     if elapsed > _SYNC_SLOW_SECONDS or len(symbols) >= _SYNC_SLOW_SYMBOLS:
         logger.info(
             f"财务新鲜度检测: {len(symbols)} 只, "
             f"缓存命中 {len(latest_map)}, 耗时 {elapsed:.1f}s"
         )
-    if len(latest_map) < len(symbols):
-        return True
-    for latest_str in latest_map.values():
-        if (now - pd.to_datetime(latest_str)) > threshold:
+    recheck = timedelta(days=FINANCIAL_RECHECK_DAYS)
+    for sym in symbols:
+        markers = []
+        if latest_str := latest_map.get(sym):
+            markers.append(pd.Timestamp(latest_str))
+        if watermark_str := watermark_map.get(sym):
+            markers.append(pd.Timestamp(watermark_str))
+        if not markers:
+            # 既无数据也从未检查过 → 需要补
+            return True
+        if (now - max(markers)) > recheck:
             return True
     return False
 

@@ -25,6 +25,7 @@
 > 2026-08-30 数据正确性修复：基准指数行情（000300/000905/000001/399006）纳入正式下载管线（`DataIngestionService.INDEX_QUOTES` 显式点名 + 按交易日增量维护，随 `download_data.py` 每次运行自动补齐），消除 regime 门控 benchmark 数据过期的静默退化威胁；存量数据已真机补齐到 2026-08-28。
 > 2026-08-30 引擎正确性修复：`run_walk_forward_parallel` test 折起点误用 `train_ts[0]`（test 回测覆盖训练期，OOS 指标污染，edff513）；此前所有折级 OOS 指标均受此影响，本轮合并门为首个干净窗口验证。
 > 2026-08-30 策略研发轮次结果：relative/combined 网格（1 对照 + 18 组合，训练集内）冠军 `com_rw60_m0`（训练 +162.17%，夏普 1.495，回撤 -20.57%），但 OOS 合并门 **CONTINUE**——测试集三折全负（-26%~-30%/折，夏普 -2.1~-2.9），S1 稳定性门拒绝；归因：价格动量股票腿在 2025-2026 震荡市风格翻转（反复止损），指数级门控无法挽救选股层 alpha 反号。纯 relative 模式训练集即全负，已排除。`best_strategy.yaml` 未变更（现任基准 OOS mean sharpe 1.47，合并门槛极高）。
+> 2026-08-30 数据层死循环治理：财务同步水位表落地（`financial_sync_watermark` + 双水位判定，46382d8）；启动同步与回测读路径（`financial/sync.py::is_financial_stale`）共享同一水位与 `FINANCIAL_RECHECK_DAYS=7` 常量（常量下沉至 backtest.data.financial.sync，遵循 AGENTS.md 6.2「同款判定共享同一水位」铁律）。沉默股票从每次同步全量重查（实测 4620 只 ≈ 20 分钟/次）降为每 7 天一次小窗检查；批次成功才推进水位（含合法 0 行），异常保留重试；PIT 对齐不受影响（行数据仍带真实 announce_date）。行情路径评估后不引入水位：日更域数据状态自愈，仅 ~12 只退市/停牌标的每次多查数秒，且水位会有损逐日精确补齐语义。
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
 - [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（股票腿动量因子 OOS 反号，非门控问题）。下一轮方向：重设计股票腿（动量→基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
@@ -35,8 +36,7 @@
 ## 观察项（需跟进）
 
 - [~] **后台测试/冒烟 run 持续堆积**：持续有进程向共享 PG 写测试/冒烟回测 run（曾观测 dry-run 187 个无效 run 堆积），现均带 `test` 标签可被清理接口清除；建议排查写入源头进程，或定期使用看板清理按钮。
-- [ ] **财务增量重复下载死循环**（2026-08-30 立项，同款排查完毕）：根因为「数据状态驱动判定」缺检查水位——`today - max(announce_date) > 120 天` 判 stale，沉默股票下载 0 行、状态不推进、永出不了 stale 集（实证 4620 只 × 每次启动同步 ≈ 20 分钟）。**同款问题两处**：① 启动同步 `_select_financials_to_refresh`（最重）；② 回测读路径 `financial/sync.py::is_financial_stale`（历史窗口守卫使训练/测试窗休眠，但终点在近 120 天内的回测每次 `get_financial_panel` 触发整列表重拉）。行情路径同款模式但日更自愈，仅 ~12 只退市/停牌标的永久 stale（成本可忽略，修水位表时顺带统一）。修复方案已定：`financial_sync_watermark` 水位表 + 判定改造（见 2026-08-30 会话），两处共享。
-- [ ] **启动同步重复劳动（轻微）**：`_enrich_sectors_from_xtquant` 每次同步全量拉 THY1/DY1 板块映射（只回填空行，首轮后为 2 次 API 调用 + 空转）；`_is_price_stale`（`get_price_panel` 路径）被 ~12 只永久 stale 标的拖累反复进刷新分支（刷新增量，浪费有界）。均自限、非死循环，可在水位修复轮次顺带评估。
+- [ ] **启动同步重复劳动（轻微）**：`_enrich_sectors_from_xtquant` 每次同步全量拉 THY1/DY1 板块映射（只回填空行，首轮后为 2 次 API 调用 + 空转）；`_is_price_stale`（`get_price_panel` 路径）被 ~12 只永久 stale 标的拖累反复进刷新分支（刷新增量，浪费有界）。均自限、非死循环。（2026-08-30 评估：行情路径不引入水位，见冲刺记录；板块回填空转留待后续）
 - [ ] **并行 run_candidates 偶发 worker 失败**：哑铃网格阶段 2 中第 9/10 号任务（W250_511260 / W250_CASH）ERR——worker 内失败、无 RUN_START，疑似 worker 复用时环境性失败；单进程复现可跑通。影响面小（同窗结论不受影响），但动摇并行结果可信度，下轮大网格前值得排查。（2026-08-23：并行数据底座已从 SharedMemory 换为 mmap IPC 文件，Windows 句柄类环境性失败可能同源消除，待大网格复验；2026-08-30 大网格 19 任务两阶段未复现）
 - [ ] **HTR 遗留线清退（ADR-021 联动）**（2026-08-30 立项）：`strategy_rd/htr_subgraph.py` + `strategy_rd/agents/`（约 9 处 LLM 调用点，含 `_should_retrieve` 检索路由、`decide` 循环控制流等 LLM 干确定性活的违例，及 `strategy_rd_supervisor.py` 死代码）+ `skills/personas/` 大师库，仍被 `cli.py` 与 `app/app.py` 的 research 端点使用。清退方案：调用方迁移至 ToG `ResearchAgent` 后整体删除遗留线，LLM 控制流决策按 ADR-021 规则化；`check_llm_call_sites.py` 白名单中遗留线条目随清退移除。迁移前冻结：不得新增调用方或在遗留线内扩展功能。
 
