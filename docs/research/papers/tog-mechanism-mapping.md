@@ -30,11 +30,15 @@
 
 Agent **可以**决定探索哪条路，**不可以**：
 
-- 跳过回测或 OOS / DSR / PBO
+- 跳过回测或 OOS 硬门（稳定性 + held-out 合并）即宣称 `success`
+- 用训练集证据写 `success`（仅允许 `outcome=candidate`）
 - 跳过 `prove_causality` 上线算子
 - 交叉使用训练 / 测试 / 验证集
 
-这些由工具实现与 AcceptanceGate 强制，而非 prompt 约定。
+DSR / PBO / MinTRL / haircut 为**诊断**（ADR-022）：须显式 `passed|failed|skipped`，不替代 OOS 硬门。
+统计门论文映射见 [statistical-gates-mapping.md](statistical-gates-mapping.md)。
+
+这些由工具实现与写回校验强制，而非仅靠 prompt 约定。
 
 ## 4. 与旧 HTR 的关系
 

@@ -10,18 +10,21 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 import pytest
 
 from long_earn.strategy_optimization.overfit_gates import (
+    MERGE_THRESHOLD_DEFAULT,
     BacktestOverfitGate,
     DeflatedSharpeGate,
-    MERGE_THRESHOLD_DEFAULT,
     WalkForwardStabilityGate,
     daily_return_moments,
     diagnostic_to_dict,
+    evaluate_haircut_sharpe,
     evaluate_merge_gate,
+    evaluate_mintrl,
 )
 
 
@@ -185,6 +188,152 @@ class TestBacktestOverfitGate:
         result1 = gate.evaluate(is_sharpes, oos_sharpes)
         result2 = gate.evaluate(is_sharpes, oos_sharpes)
         assert result1.pbo_probability == result2.pbo_probability
+
+    def test_pair_legacy_reason_tag(self) -> None:
+        """legacy pair 路径 reason 含 method=pair_legacy。"""
+        gate = BacktestOverfitGate(n_samples=50)
+        result = gate.evaluate([1.5, 1.0, 0.5], [1.4, 0.9, 0.4])
+        assert "method=pair_legacy" in result.reason
+
+
+def _build_correlated_returns_matrix(
+    *,
+    t_rows: int = 200,
+    n_cols: int = 4,
+    seed: int = 42,
+) -> list[list[float]]:
+    """同噪声+漂移：各列高度相关，CSCV PBO 应偏低。"""
+    rng = random.Random(seed)
+    base = [rng.gauss(0.001, 0.01) for _ in range(t_rows)]
+    return [
+        [base[t] + rng.gauss(0.0, 0.0005) for _ in range(n_cols)]
+        for t in range(t_rows)
+    ]
+
+
+def _build_anticorrelated_returns_matrix(
+    *,
+    t_rows: int = 200,
+    n_cols: int = 4,
+    n_blocks: int = 8,
+) -> list[list[float]]:
+    """块内单峰列：IS 赢家 OOS 常落后，CSCV PBO 应偏高。"""
+    block_size = t_rows // n_blocks
+    usable_t = block_size * n_blocks
+    matrix: list[list[float]] = []
+    for t in range(usable_t):
+        block_idx = t // block_size
+        peak_col = block_idx % n_cols
+        row = [-0.002] * n_cols
+        row[peak_col] = 0.03
+        matrix.append(row)
+    return matrix
+
+
+class TestBacktestOverfitGateMatrixCSCV:
+    """S3 扩展：T×N 收益矩阵标准 CSCV PBO。"""
+
+    def test_correlated_columns_low_pbo(self) -> None:
+        """相关列（同噪声+漂移）→ PBO 较低，倾向通过。"""
+        gate = BacktestOverfitGate(threshold=0.5, n_samples=200)
+        matrix = _build_correlated_returns_matrix()
+        result = gate.evaluate_returns_matrix(matrix, n_blocks=8)
+        assert result.status != "skipped"
+        assert "method=cscv_matrix" in result.reason
+        assert result.pbo_probability <= 0.5
+        assert result.passed
+
+    def test_anticorrelated_columns_high_pbo(self) -> None:
+        """反相关/块轮换列 → PBO 较高，倾向拒绝。"""
+        gate = BacktestOverfitGate(threshold=0.49, n_samples=200)
+        matrix = _build_anticorrelated_returns_matrix()
+        result = gate.evaluate_returns_matrix(matrix, n_blocks=8)
+        assert result.status == "failed"
+        assert result.pbo_probability >= 0.49
+        assert not result.passed
+
+    def test_insufficient_matrix_skipped(self) -> None:
+        """矩阵不足（T 或 N）→ skipped。"""
+        gate = BacktestOverfitGate()
+        too_few_cols = [[0.01] for _ in range(100)]
+        result_cols = gate.evaluate_returns_matrix(too_few_cols, n_blocks=8)
+        assert result_cols.skipped
+        assert "method=cscv_matrix" in result_cols.reason
+
+        too_few_rows = [[0.01, 0.02, 0.03] for _ in range(10)]
+        result_rows = gate.evaluate_returns_matrix(too_few_rows, n_blocks=8)
+        assert result_rows.skipped
+
+    def test_matrix_reproducible_with_fixed_seed(self) -> None:
+        """矩阵 CSCV 固定种子可复现。"""
+        gate = BacktestOverfitGate(n_samples=100)
+        matrix = _build_correlated_returns_matrix(seed=7)
+        r1 = gate.evaluate_returns_matrix(matrix, n_blocks=8)
+        r2 = gate.evaluate_returns_matrix(matrix, n_blocks=8)
+        assert r1.pbo_probability == r2.pbo_probability
+
+
+class TestMinTRLDiagnostic:
+    """MinTRL 诊断契约（不硬拒）。"""
+
+    def test_sufficient_observations_passed(self) -> None:
+        """T >= mintrl → passed。"""
+        result = evaluate_mintrl(observed_sharpe=1.0, n_observations=500)
+        assert result["status"] == "passed"
+        assert result["passed"] is True
+        assert result["mintrl"] > 0
+        assert result["n_observations"] == 500
+
+    def test_insufficient_observations_failed(self) -> None:
+        """T < mintrl → failed。"""
+        # SR=0.5 → mintrl≈16.4，T=10 不足
+        result = evaluate_mintrl(observed_sharpe=0.5, n_observations=10)
+        assert result["status"] == "failed"
+        assert result["passed"] is False
+        assert result["n_observations"] < result["mintrl"]
+
+    def test_zero_sharpe_skipped(self) -> None:
+        """SR≈0 → skipped。"""
+        result = evaluate_mintrl(observed_sharpe=0.0, n_observations=252)
+        assert result["status"] == "skipped"
+        assert result["skipped"] is True
+
+
+class TestHaircutSharpeDiagnostic:
+    """Haircut Sharpe 诊断契约（Bonferroni / 期望最大噪声）。"""
+
+    def test_high_sharpe_few_trials_passed(self) -> None:
+        """高 SR、少试验 → haircut > 0，passed。"""
+        result = evaluate_haircut_sharpe(
+            observed_sharpe=2.0,
+            n_trials=1,
+            n_observations=252,
+        )
+        assert result["status"] == "passed"
+        assert result["haircut_sharpe"] > 0
+        assert result["method"] == "expected_max_noise"
+        assert "method=expected_max_noise" in result["reason"]
+
+    def test_low_sharpe_many_trials_failed(self) -> None:
+        """低 SR、多试验 → haircut <= 0，failed。"""
+        result = evaluate_haircut_sharpe(
+            observed_sharpe=0.15,
+            n_trials=100,
+            n_observations=252,
+        )
+        assert result["status"] == "failed"
+        assert result["haircut_sharpe"] <= 0
+        assert result["n_trials"] == 100
+
+    def test_insufficient_observations_skipped(self) -> None:
+        """T < 2 → skipped。"""
+        result = evaluate_haircut_sharpe(
+            observed_sharpe=1.0,
+            n_trials=1,
+            n_observations=1,
+        )
+        assert result["status"] == "skipped"
+        assert result["skipped"] is True
 
 
 class TestMergeAndDiagnostics:

@@ -482,6 +482,7 @@ class ParallelRunner:
         benchmark_symbol: str = "",
         write_pg: bool = False,
         tags: list[str] | None = None,
+        gap: int = 0,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
         from long_earn.backtest.engine.timeseries_split import (  # noqa: PLC0415
@@ -513,7 +514,7 @@ class ParallelRunner:
         timestamps = engine._get_timestamps(
             full_data, start_date=start_date, end_date=end_date
         )
-        splitter = TimeSeriesSplit(n_splits=n_splits)
+        splitter = TimeSeriesSplit(n_splits=n_splits, gap=gap)
         splits = splitter.split(timestamps)
 
         with SharedDataContext(full_data) as ctx:

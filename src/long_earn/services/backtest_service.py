@@ -470,6 +470,7 @@ class BacktestServiceImpl(BacktestService):
         n_splits: int = 3,
         universe_type: str = "main_board+gem",
         benchmark_symbol: str = "",
+        gap: int = 0,
     ) -> dict[str, Any]:
         """Walk-Forward 并行回测。"""
         from long_earn.backtest.engine.parallel import ParallelRunner  # noqa: PLC0415
@@ -483,7 +484,7 @@ class BacktestServiceImpl(BacktestService):
         if self.logger:
             self.logger.info(
                 f"[walk_forward_parallel] 股票池: {universe_type}, "
-                f"{len(formatted_symbols)} 只, n_splits={n_splits}"
+                f"{len(formatted_symbols)} 只, n_splits={n_splits}, gap={gap}"
             )
 
         runner = ParallelRunner(
@@ -498,6 +499,7 @@ class BacktestServiceImpl(BacktestService):
             n_splits=n_splits,
             benchmark_symbol=benchmark_symbol,
             write_pg=True,
+            gap=gap,
         )
 
         return result
@@ -508,6 +510,7 @@ class BacktestServiceImpl(BacktestService):
         start_date: str = "",
         end_date: str = "",
         n_splits: int = 3,
+        gap: int = 5,
     ) -> dict[str, Any]:
         """Walk-Forward OOS 验证（ADR-010 Phase 3 held-out 门）。
 
@@ -519,6 +522,7 @@ class BacktestServiceImpl(BacktestService):
             start_date: OOS 起始日期（默认 config.test_start_date）
             end_date: OOS 结束日期（默认 config.test_end_date）
             n_splits: Walk-Forward 折叠数
+            gap: train/test 间隔离交易日数（purge/embargo，默认 5）
 
         Returns:
             WalkForwardResult dict: n_splits / fold_results / average_test_metrics /
@@ -533,17 +537,18 @@ class BacktestServiceImpl(BacktestService):
             start_date, end_date, test_start, test_end
         )
         if boundary_error:
-            return self._empty_oos_result(n_splits, boundary_error)
+            return self._empty_oos_result(n_splits, boundary_error, gap=gap)
 
         if self.logger:
             self.logger.info(
-                f"[OOS] Walk-Forward {start_date}~{end_date} n_splits={n_splits}"
+                f"[OOS] Walk-Forward {start_date}~{end_date} "
+                f"n_splits={n_splits} gap={gap}"
             )
 
         try:
             dsl = parse_strategy_yaml(strategy_yaml)
         except ValueError as e:
-            return self._empty_oos_result(n_splits, f"策略解析失败: {e}")
+            return self._empty_oos_result(n_splits, f"策略解析失败: {e}", gap=gap)
 
         try:
             formatted_symbols, universe_type = self._resolve_oos_symbols(
@@ -551,7 +556,7 @@ class BacktestServiceImpl(BacktestService):
             )
             if not formatted_symbols:
                 return self._empty_oos_result(
-                    n_splits, f"股票池 '{universe_type}' 为空，数据源不可用"
+                    n_splits, f"股票池 '{universe_type}' 为空，数据源不可用", gap=gap
                 )
 
             if self.logger:
@@ -584,15 +589,16 @@ class BacktestServiceImpl(BacktestService):
                 symbols=formatted_symbols,
                 n_splits=n_splits,
                 write_pg=True,
+                gap=gap,
             )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[OOS] Walk-Forward 失败: {e}")
-            return self._empty_oos_result(n_splits, str(e))
+            return self._empty_oos_result(n_splits, str(e), gap=gap)
 
         if isinstance(wf_result, dict) and wf_result.get("error"):
             # 引擎返回错误（如加载数据为空）
-            return self._empty_oos_result(n_splits, wf_result["error"])
+            return self._empty_oos_result(n_splits, wf_result["error"], gap=gap)
 
         return self._aggregate_oos_result(wf_result, n_splits)
 
@@ -617,7 +623,7 @@ class BacktestServiceImpl(BacktestService):
             return f"OOS 区间必须位于测试集 {test_start}~{test_end} 内"
         return ""
 
-    def _empty_oos_result(self, n_splits: int, error: str) -> dict[str, Any]:
+    def _empty_oos_result(self, n_splits: int, error: str, *, gap: int = 0) -> dict[str, Any]:
         """构造空的 OOS 结果（失败/错误路径）。"""
         return {
             "n_splits": n_splits,
@@ -626,6 +632,7 @@ class BacktestServiceImpl(BacktestService):
             "failed_folds": list(range(n_splits)),
             "oos_sharpe": None,
             "error": error,
+            "gap": gap,
         }
 
     def _resolve_oos_symbols(self, dsl: Any, start_date: str) -> tuple[list[str], str]:

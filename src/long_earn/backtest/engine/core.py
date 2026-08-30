@@ -1995,6 +1995,7 @@ class EventDrivenBacktestEngine:
         n_splits: int = 3,
         benchmark_symbol: str = "",
         warmup_days: int = 0,
+        gap: int = 0,
     ) -> dict[str, Any]:
         """执行 Walk-Forward 滚动回测（自动样本外验证）
 
@@ -2009,6 +2010,7 @@ class EventDrivenBacktestEngine:
                 在 fold 训练期初会全 NaN，需把取数窗口向前推 warmup 天，
                 让 fold 训练期首个 timestamp 就有非 NaN 因子值。
                 交易时间戳仍按 fold 的 [train_start, train_end] / [test_start, test_end] 过滤。
+            gap: train/test 间隔离样本数（purge/embargo）
 
         Returns:
             {
@@ -2033,7 +2035,7 @@ class EventDrivenBacktestEngine:
         timestamps = self._get_timestamps(
             full_data, start_date=start_date, end_date=end_date
         )
-        splitter = TimeSeriesSplit(n_splits=n_splits)
+        splitter = TimeSeriesSplit(n_splits=n_splits, gap=gap)
         splits = splitter.split(timestamps)
 
         fold_results: list[dict[str, Any]] = []

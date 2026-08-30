@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any, Literal
 
 DiagnosticStatus = Literal["passed", "failed", "skipped"]
@@ -238,6 +239,9 @@ class DeflatedSharpeGate:
 _PBO_THRESHOLD_DEFAULT = 0.5
 _CSCV_N_SAMPLES_DEFAULT = 1000
 _MIN_STRATEGIES_FOR_PBO = 2
+_MIN_BLOCKS_FOR_MATRIX_CSCV = 2
+_SHARPE_EPS = 1e-12
+_Z_ALPHA_95 = 1.96
 
 # held-out 合并相对提升阈值（与历史 HTR 默认对齐）
 MERGE_THRESHOLD_DEFAULT = 0.05
@@ -297,13 +301,13 @@ class BacktestOverfitGate:
             status: DiagnosticStatus = "passed"
             reason = (
                 f"通过（PBO={pbo:.3f} <= {self.threshold}，"
-                f"N={n}, samples={self.n_samples}）"
+                f"N={n}, samples={self.n_samples}, method=pair_legacy）"
             )
         else:
             status = "failed"
             reason = (
                 f"过拟合概率过高（PBO={pbo:.3f} > {self.threshold}，"
-                f"N={n}, samples={self.n_samples}）"
+                f"N={n}, samples={self.n_samples}, method=pair_legacy）"
             )
 
         return PBOResult(
@@ -313,6 +317,231 @@ class BacktestOverfitGate:
             n_strategies=n,
             n_samples=self.n_samples,
         )
+
+    def evaluate_returns_matrix(
+        self,
+        returns_matrix: list[list[float]],
+        *,
+        n_blocks: int = 8,
+    ) -> PBOResult:
+        """标准 CSCV PBO（T×N 收益矩阵，行=时间、列=策略）。"""
+        if not returns_matrix:
+            return _pbo_matrix_skipped("收益矩阵为空", n_strategies=0)
+
+        n_cols = len(returns_matrix[0])
+        if any(len(row) != n_cols for row in returns_matrix):
+            return _pbo_matrix_skipped(
+                "收益矩阵列数不一致",
+                n_strategies=n_cols,
+            )
+
+        t_rows = len(returns_matrix)
+        if n_cols < _MIN_STRATEGIES_FOR_PBO:
+            return _pbo_matrix_skipped(
+                f"策略列不足（N={n_cols} < {_MIN_STRATEGIES_FOR_PBO}）",
+                n_strategies=n_cols,
+            )
+        if t_rows < _MIN_BLOCKS_FOR_MATRIX_CSCV * n_blocks:
+            return _pbo_matrix_skipped(
+                f"时间行不足（T={t_rows} < {2 * n_blocks}）",
+                n_strategies=n_cols,
+            )
+        if n_blocks % 2 != 0:
+            return _pbo_matrix_skipped(
+                f"n_blocks 须为偶数（got {n_blocks}）",
+                n_strategies=n_cols,
+            )
+
+        block_size = t_rows // n_blocks
+        usable_t = block_size * n_blocks
+        trimmed = [row[:n_cols] for row in returns_matrix[:usable_t]]
+
+        blocks: list[list[list[float]]] = []
+        for b in range(n_blocks):
+            start = b * block_size
+            end = start + block_size
+            blocks.append([row[:] for row in trimmed[start:end]])
+
+        half = n_blocks // 2
+        all_combos = list(combinations(range(n_blocks), half))
+        rng = random.Random(42)
+        if len(all_combos) > self.n_samples:
+            sampled_combos = rng.sample(all_combos, self.n_samples)
+            actual_samples = self.n_samples
+        else:
+            sampled_combos = all_combos
+            actual_samples = len(all_combos)
+
+        below_median_count = 0
+        for combo in sampled_combos:
+            is_set = set(combo)
+            is_rows = [
+                row for i, blk in enumerate(blocks) if i in is_set for row in blk
+            ]
+            oos_rows = [
+                row for i, blk in enumerate(blocks) if i not in is_set for row in blk
+            ]
+            is_sharpes = [
+                _column_sharpe(_col_values(is_rows, c)) for c in range(n_cols)
+            ]
+            oos_sharpes = [
+                _column_sharpe(_col_values(oos_rows, c)) for c in range(n_cols)
+            ]
+            best_is_col = max(range(n_cols), key=lambda c: is_sharpes[c])
+            oos_median = _median(oos_sharpes)
+            if oos_sharpes[best_is_col] < oos_median:
+                below_median_count += 1
+
+        pbo = below_median_count / actual_samples if actual_samples > 0 else 0.0
+
+        if pbo <= self.threshold:
+            status: DiagnosticStatus = "passed"
+            reason = (
+                f"通过（PBO={pbo:.3f} <= {self.threshold}，"
+                f"T={usable_t}, N={n_cols}, blocks={n_blocks}, "
+                f"samples={actual_samples}, method=cscv_matrix）"
+            )
+        else:
+            status = "failed"
+            reason = (
+                f"过拟合概率过高（PBO={pbo:.3f} > {self.threshold}，"
+                f"T={usable_t}, N={n_cols}, blocks={n_blocks}, "
+                f"samples={actual_samples}, method=cscv_matrix）"
+            )
+
+        return PBOResult(
+            status=status,
+            reason=reason,
+            pbo_probability=pbo,
+            n_strategies=n_cols,
+            n_samples=actual_samples,
+        )
+
+
+def evaluate_mintrl(
+    observed_sharpe: float,
+    n_observations: int,
+    *,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+    confidence: float = 0.95,
+) -> dict[str, Any]:
+    """MinTRL 诊断（Bailey；相对 SR*=0，不硬拒）。"""
+    if n_observations < 1:
+        return diagnostic_to_dict(
+            status="skipped",
+            reason="观测数不足，跳过 MinTRL",
+            simplified=True,
+            mintrl=0.0,
+            n_observations=n_observations,
+            observed_sharpe=observed_sharpe,
+        )
+
+    sr = observed_sharpe
+    if abs(sr) < _SHARPE_EPS:
+        return diagnostic_to_dict(
+            status="skipped",
+            reason=f"Sharpe 近零（|SR|={abs(sr):.2e}），跳过 MinTRL",
+            simplified=skew == 0.0 and kurtosis == _NORMAL_KURTOSIS,
+            mintrl=0.0,
+            n_observations=n_observations,
+            observed_sharpe=observed_sharpe,
+        )
+
+    z_alpha = _Z_ALPHA_95
+    variance_factor = 1.0 - skew * sr + ((kurtosis - 1.0) / 4.0) * sr**2
+    mintrl = 1.0 + variance_factor * (z_alpha / sr) ** 2
+
+    if mintrl < 1.0:
+        return diagnostic_to_dict(
+            status="skipped",
+            reason=(
+                f"MinTRL 非正（mintrl={mintrl:.3f}，skew={skew:.3f}，"
+                f"kurt={kurtosis:.3f}），跳过"
+            ),
+            simplified=skew == 0.0 and kurtosis == _NORMAL_KURTOSIS,
+            mintrl=mintrl,
+            n_observations=n_observations,
+            observed_sharpe=observed_sharpe,
+        )
+
+    if n_observations >= mintrl:
+        status: DiagnosticStatus = "passed"
+        reason = (
+            f"通过（T={n_observations} >= mintrl={mintrl:.1f}，"
+            f"SR={sr:.3f}, confidence={confidence}）"
+        )
+    else:
+        status = "failed"
+        reason = (
+            f"样本不足（T={n_observations} < mintrl={mintrl:.1f}，"
+            f"SR={sr:.3f}, confidence={confidence}）"
+        )
+
+    return diagnostic_to_dict(
+        status=status,
+        reason=reason,
+        simplified=skew == 0.0 and kurtosis == _NORMAL_KURTOSIS,
+        mintrl=mintrl,
+        n_observations=n_observations,
+        observed_sharpe=observed_sharpe,
+        confidence=confidence,
+    )
+
+
+def evaluate_haircut_sharpe(
+    observed_sharpe: float,
+    n_trials: int,
+    n_observations: int,
+    *,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """Haircut Sharpe 诊断（Bonferroni / 期望最大噪声折减，不硬拒）。"""
+    if n_observations < _DSR_MIN_OBSERVATIONS:
+        return diagnostic_to_dict(
+            status="skipped",
+            reason=f"回测天数不足（n={n_observations} < 2），跳过 haircut",
+            simplified=True,
+            haircut_sharpe=0.0,
+            observed_sharpe=observed_sharpe,
+            n_trials=n_trials,
+            n_observations=n_observations,
+            alpha=alpha,
+            method="expected_max_noise",
+        )
+
+    se = 1.0 / math.sqrt(n_observations)
+    n = max(n_trials, 1)
+    noise_penalty = math.sqrt(2.0 * math.log(n)) * se
+    haircut = observed_sharpe - noise_penalty
+
+    if haircut > 0:
+        status: DiagnosticStatus = "passed"
+        reason = (
+            f"通过（haircut={haircut:.4f} > 0，SR={observed_sharpe:.3f}，"
+            f"N={n_trials}, T={n_observations}, method=expected_max_noise）"
+        )
+    else:
+        status = "failed"
+        reason = (
+            f"折减后 Sharpe 非正（haircut={haircut:.4f} <= 0，"
+            f"SR={observed_sharpe:.3f}，N={n_trials}, T={n_observations}, "
+            f"method=expected_max_noise）"
+        )
+
+    return diagnostic_to_dict(
+        status=status,
+        reason=reason,
+        simplified=True,
+        haircut_sharpe=haircut,
+        observed_sharpe=observed_sharpe,
+        n_trials=n_trials,
+        n_observations=n_observations,
+        sr_standard_error=se,
+        noise_penalty=noise_penalty,
+        alpha=alpha,
+        method="expected_max_noise",
+    )
 
 
 def diagnostic_to_dict(
@@ -355,19 +584,14 @@ def evaluate_merge_gate(
     passed = oos_mean_sharpe > needed if current_best is not None else True
     if current_best is None:
         reason = (
-            f"尚无 current best，以 OOS mean sharpe={oos_mean_sharpe:.4f} "
-            "建立基线候选"
+            f"尚无 current best，以 OOS mean sharpe={oos_mean_sharpe:.4f} 建立基线候选"
         )
         passed = True
     elif passed:
-        reason = (
-            f"OOS mean={oos_mean_sharpe:.4f} > "
-            f"best={current_best:.4f}+{threshold}"
-        )
+        reason = f"OOS mean={oos_mean_sharpe:.4f} > best={current_best:.4f}+{threshold}"
     else:
         reason = (
-            f"OOS mean={oos_mean_sharpe:.4f} <= "
-            f"best={current_best:.4f}+{threshold}"
+            f"OOS mean={oos_mean_sharpe:.4f} <= best={current_best:.4f}+{threshold}"
         )
     return {
         "passed": passed,
@@ -410,6 +634,42 @@ def daily_return_moments(
     skew = m3 / (m2**1.5)
     kurt = m4 / (m2 * m2)  # Pearson
     return skew, kurt
+
+
+def _pbo_matrix_skipped(reason: str, *, n_strategies: int) -> PBOResult:
+    return PBOResult(
+        status="skipped",
+        reason=f"{reason}，跳过 PBO（method=cscv_matrix）",
+        pbo_probability=0.0,
+        n_strategies=n_strategies,
+        n_samples=0,
+    )
+
+
+def _col_values(matrix_rows: list[list[float]], col: int) -> list[float]:
+    return [row[col] for row in matrix_rows]
+
+
+def _column_sharpe(returns: list[float]) -> float:
+    """列收益 Sharpe（mean/std）；std=0 时返回 -inf。"""
+    if not returns:
+        return float("-inf")
+    mean = sum(returns) / len(returns)
+    if len(returns) < _DSR_MIN_OBSERVATIONS:
+        return float("-inf")
+    std = _population_std(returns)
+    if std <= _SHARPE_EPS:
+        return float("-inf")
+    return mean / std
+
+
+def _population_std(values: list[float]) -> float:
+    n = len(values)
+    if n < 1:
+        return 0.0
+    mean = sum(values) / n
+    var = sum((x - mean) ** 2 for x in values) / n
+    return math.sqrt(var)
 
 
 def _compute_pbo_cscv(

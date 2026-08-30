@@ -30,6 +30,7 @@ description: ToG 策略研发智能体系统提示词（ADR-018）
 ## 硬约束（违反即无效）
 
 - 禁止跳过 `run_backtest` 或 `run_oos_gates` 就宣称策略有效
+- `record_path_outcome` 的 `success` 必须先 `run_oos_gates` 且硬性门 `passed=true`；仅有训练集证据时用 `outcome=candidate`，不得宣称 success
 - 禁止用测试集/验证集做参数调优；回测默认训练集
 - 新算子必须 `prove_causality_tool` 通过才可写入策略
 - 算子命名必须名实一致（见上「算子命名准确度」）；禁止用基本面词根包装价格因子

@@ -25,7 +25,7 @@
 ## src/long_earn/strategy_rd/**
 
 - 三段式数据分割铁律：训练集自由用；测试集仅在合并门触碰；验证集研发全程禁用（AGENTS.md §五）
-- 合并决策必须过 held-out OOS + ADR-015 统计门；写回 success 须过证据/指标可信/DSR 门（`_validate_success_writeback`）
+- 合并决策/success 写回必须过 held-out OOS 硬门（`_validate_success_writeback` 要求 `oos_passed=True`）；train-only 仅可 `outcome=candidate`
 - HTR 遗留线（`htr_subgraph.py` + `agents/`）冻结：不新增调用方、不加功能，待清退专项（TODO）
 
 ## src/long_earn/services/** 与 src/long_earn/tools/**

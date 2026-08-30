@@ -130,4 +130,5 @@ PostgreSQL `long_earn` 权威缓存不得随意 DELETE/DROP；全量刷新仅经
 | ADR 编写规范 | [docs/adr/AGENTS.md](docs/adr/AGENTS.md) |
 | 运行时总览 | [docs/architecture.md](docs/architecture.md) |
 | 评审规则 | [docs/review-rules.md](docs/review-rules.md) |
+| 研究与论文 | [docs/research/papers/README.md](docs/research/papers/README.md) |
 | 待办 | [TODO.md](TODO.md) |

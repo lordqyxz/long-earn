@@ -93,6 +93,16 @@ class TestResearchAgentTools:
         )
         backtest_tool.invoke({"strategy_yaml": strategy_yaml})
 
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.7}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
+            ],
+        }
+        oos_tool = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+        oos_result = json.loads(oos_tool.invoke({"strategy_yaml": strategy_yaml}))
+        assert oos_result["passed"] is True
+
         record_tool = next(
             t for t in agent._build_tools() if t.name == "record_path_outcome"
         )
@@ -105,6 +115,8 @@ class TestResearchAgentTools:
         )
         assert "sid_exp_1" in out
         agent.context.memory.save_experience.assert_called_once()
+        call_args = agent.context.memory.save_experience.call_args[0][0]
+        assert call_args.metrics.get("outcome") == "success"
 
     def test_record_path_outcome_rejects_success_without_evidence(
         self, agent: ResearchAgent
@@ -201,6 +213,9 @@ class TestResearchAgentTools:
         assert "merge" in parsed
         assert "dsr" in parsed
         assert "pbo" in parsed
+        assert "mintrl" in parsed["dsr"]
+        assert "haircut" in parsed["dsr"]
+        assert parsed["dsr"]["observed_sharpe_source"] == "oos_mean"
         assert len(agent._evidence_cache) == 1
         ev = next(iter(agent._evidence_cache.values()))
         assert ev.oos_passed is not None
@@ -283,14 +298,14 @@ class TestEvidenceGatePipeline:
         )
 
     def test_full_pipeline_train_only(self, agent: ResearchAgent) -> None:
-        """训练集证据 → 写回 success（无 OOS 路径）"""
+        """训练集证据 → 拒绝写回 success（须 OOS 硬门）"""
         strategy_yaml = self._valid_strategy()
         # Step 1: run_backtest
         bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
         bt_result = bt.invoke({"strategy_yaml": strategy_yaml})
         assert "sharpe_ratio" in bt_result
 
-        # Step 2: record_path_outcome（仅训练集证据）
+        # Step 2: record_path_outcome（仅训练集证据 → 拒绝 success）
         rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
         out = rec.invoke(
             {
@@ -299,7 +314,29 @@ class TestEvidenceGatePipeline:
                 "metrics_json": '{"sharpe_ratio": 0.5}',
             }
         )
+        assert "拒绝写回成功" in out
+        assert "须 OOS 硬性门控通过" in out
+        agent.context.memory.save_experience.assert_not_called()
+
+    def test_full_pipeline_train_only_as_candidate(self, agent: ResearchAgent) -> None:
+        """训练集证据 → candidate 可写回"""
+        strategy_yaml = self._valid_strategy()
+        bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
+        bt.invoke({"strategy_yaml": strategy_yaml})
+
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
+        out = rec.invoke(
+            {
+                "path_summary": "quality_momentum v1 训练集候选",
+                "strategy_yaml": strategy_yaml,
+                "metrics_json": '{"sharpe_ratio": 0.5}',
+                "outcome": "candidate",
+            }
+        )
         assert "sid_exp_1" in out
+        agent.context.memory.save_experience.assert_called_once()
+        call_args = agent.context.memory.save_experience.call_args[0][0]
+        assert call_args.metrics.get("outcome") == "candidate"
 
     def test_full_pipeline_with_oos(self, agent: ResearchAgent) -> None:
         """训练集 + OOS 证据 → 写回 success"""
@@ -319,6 +356,7 @@ class TestEvidenceGatePipeline:
         oos_result = oos.invoke({"strategy_yaml": strategy_yaml})
         parsed_oos = json.loads(oos_result)
         assert "passed" in parsed_oos
+        assert parsed_oos["passed"] is True
         assert parsed_oos["stability"]["passed"] is True
 
         # Step 3: record_path_outcome（训练集 + OOS 证据）
@@ -393,6 +431,8 @@ class TestEvidenceGatePipeline:
         )
         assert "sid_exp_1" in out
         agent.context.memory.save_experience.assert_called_once()
+        call_args = agent.context.memory.save_experience.call_args[0][0]
+        assert call_args.metrics.get("outcome") == "success"
 
     def test_evidence_cleared_between_invocations(self, agent: ResearchAgent) -> None:
         """invoke 必须清空上一轮证据缓存，防止证据跨 invoke 泄漏绕过证据门
@@ -453,7 +493,17 @@ class TestEvidenceGatePipeline:
             "      n: 20\n"
         )
         oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+        daily_returns_a = [0.001 * (i % 5 - 2) for i in range(20)]
+        daily_returns_b = [0.002 * (i % 7 - 3) for i in range(20)]
 
+        agent.context.backtest_service.run.return_value = {
+            "sharpe_ratio": 0.5,
+            "total_return": 0.1,
+            "trade_count": 42,
+            "metrics": {"sharpe_ratio": 0.5, "total_return": 0.1},
+            "strategy_diagnostics": {"degenerate": False, "trade_count": 42},
+            "daily_returns": daily_returns_a,
+        }
         agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
                 {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
@@ -464,7 +514,16 @@ class TestEvidenceGatePipeline:
         assert first["passed"] is True
         assert agent._current_best_oos == pytest.approx(0.45)
         assert first["pbo"]["status"] == "skipped"
+        assert "method" in first["pbo"]
 
+        agent.context.backtest_service.run.return_value = {
+            "sharpe_ratio": 0.6,
+            "total_return": 0.12,
+            "trade_count": 42,
+            "metrics": {"sharpe_ratio": 0.6, "total_return": 0.12},
+            "strategy_diagnostics": {"degenerate": False, "trade_count": 42},
+            "daily_returns": daily_returns_b,
+        }
         agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
                 {"test": {"sharpe_ratio": 0.8}, "trading_days": 63},
@@ -476,3 +535,7 @@ class TestEvidenceGatePipeline:
         assert agent._current_best_oos == pytest.approx(0.75)
         assert second["pbo"]["status"] != "skipped"
         assert second["pbo"]["skipped"] is False
+        assert second["pbo"]["method"] in ("cscv_matrix", "pair_legacy")
+        agent.context.backtest_service.run_oos.assert_called()
+        oos_call_kwargs = agent.context.backtest_service.run_oos.call_args.kwargs
+        assert oos_call_kwargs.get("gap") == 5

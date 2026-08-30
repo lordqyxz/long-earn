@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,32 @@ if TYPE_CHECKING:
 
 _DEFAULT_RECURSION_LIMIT = 50
 _BEAM_WIDTH = 3
+
+
+def _daily_returns_as_floats(
+    daily_returns: list[dict[str, Any]] | list[float] | None,
+) -> list[float]:
+    """从回测 daily_returns 提取 float 序列（与 overfit_gates 解析一致）。"""
+    if not daily_returns:
+        return []
+    values: list[float] = []
+    for item in daily_returns:
+        if isinstance(item, (int, float)):
+            values.append(float(item))
+        elif isinstance(item, dict) and "value" in item:
+            try:
+                values.append(float(item["value"]))
+            except (TypeError, ValueError):
+                continue
+    return values
+
+
+def _pbo_method_from_reason(reason: str) -> str:
+    """从 PBO reason 解析 method 标签。"""
+    match = re.search(r"method=([\w_]+)", reason)
+    if match:
+        return match.group(1)
+    return "unknown"
 
 
 def _strategy_fingerprint(strategy_yaml: str) -> str:
@@ -90,8 +117,9 @@ class ResearchAgent:
         # 试验登记（ADR-022）：调用次数 + 唯一指纹 → N_eff
         self._strategy_trial_count: int = 0
         self._trial_fingerprints: set[str] = set()
-        # PBO 候选矩阵：session 内 (IS sharpe, OOS mean sharpe)
+        # PBO 候选矩阵：session 内 (IS sharpe, OOS mean sharpe) 与日收益列
         self._oos_candidate_pairs: list[tuple[float, float]] = []
+        self._oos_return_columns: list[list[float]] = []
         # held-out 合并基线（session 内 current best OOS mean sharpe）
         self._current_best_oos: float | None = None
         # 事件采集推理子图（ADR-021：miss/强制刷新时在 agent 层显式触发）
@@ -162,8 +190,9 @@ class ResearchAgent:
 
         证据门（ADR-022）：
         1. 证据存在：必须有 run_backtest 或 run_oos_gates 证据
-        2. 指标可信：回测指标不可信直接拒绝
-        3. OOS 硬性门控：稳定性 + 合并阈值（DSR/PBO 仅为诊断，不硬拒）
+        2. OOS 硬性门控：``evidence.oos_passed is True``（稳定性 + 合并阈值）
+        3. 指标可信：回测指标不可信直接拒绝
+        4. DSR/PBO 仅为诊断，不硬拒
 
         Returns:
             (allowed, error_message, merged_metrics)
@@ -186,11 +215,16 @@ class ResearchAgent:
             and evidence.backtest_metrics is not None
             and _evidence_metrics_block_reason(evidence.backtest_metrics) is None
         )
-        has_oos_pass = evidence.oos_passed is True
-        if not has_reliable_backtest and not has_oos_pass:
+        if evidence.oos_passed is not True:
+            if has_reliable_backtest:
+                return (
+                    False,
+                    "拒绝写回成功：须 OOS 硬性门控通过；仅有训练集证据时可使用 outcome=candidate 写回候选",
+                    metrics,
+                )
             return (
                 False,
-                "拒绝写回成功：证据不足（需可靠训练集回测或 OOS 硬性门控通过）",
+                "拒绝写回成功：须 OOS 硬性门控通过，请先调用 run_oos_gates",
                 metrics,
             )
 
@@ -209,6 +243,52 @@ class ResearchAgent:
             merged["dsr_status"] = evidence.oos_dsr_status
 
         merged["outcome"] = "success"
+        return True, "", merged
+
+    def _validate_candidate_writeback(
+        self,
+        strategy_yaml: str,
+        metrics: dict[str, Any],
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """校验 candidate 写回：允许仅有可靠训练集回测证据的候选路径。
+
+        Returns:
+            (allowed, error_message, merged_metrics)
+        """
+        yaml_text = strategy_yaml.strip()
+        if not yaml_text:
+            return False, "拒绝写回候选：缺少 strategy_yaml，无法核对证据", metrics
+
+        fp = _strategy_fingerprint(yaml_text)
+        evidence = self._evidence_cache.get(fp)
+        if evidence is None:
+            return (
+                False,
+                "拒绝写回候选：无 run_backtest 证据，请先调用 run_backtest",
+                metrics,
+            )
+
+        has_reliable_backtest = (
+            evidence.backtest_reliable
+            and evidence.backtest_metrics is not None
+            and _evidence_metrics_block_reason(evidence.backtest_metrics) is None
+        )
+        if not has_reliable_backtest:
+            return (
+                False,
+                "拒绝写回候选：需可靠训练集回测证据",
+                metrics,
+            )
+
+        merged = dict(metrics)
+        if not merged and evidence.backtest_metrics:
+            merged = dict(evidence.backtest_metrics)
+
+        block = _evidence_metrics_block_reason(merged)
+        if block is not None:
+            return False, f"拒绝写回候选：{block}", merged
+
+        merged["outcome"] = "candidate"
         return True, "", merged
 
     def _prepare_event_context(self, query: str, *, force_infer: bool = False) -> str:
@@ -626,17 +706,81 @@ class ResearchAgent:
 
         return run_oos_gates
 
+    def _build_oos_hard_gate(
+        self, fold_results: list[Any]
+    ) -> tuple[Any, float | None, dict[str, Any], bool, list[str]]:
+        """Walk-Forward 稳定性 + 合并门；返回稳定性、OOS 均值与硬性通过结论。"""
+        from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+            WalkForwardStabilityGate,
+            evaluate_merge_gate,
+            mean_fold_sharpe,
+        )
+
+        stability = WalkForwardStabilityGate().evaluate(fold_results)
+        oos_mean = mean_fold_sharpe(fold_results)
+        merge: dict[str, Any]
+        if oos_mean is None:
+            merge = {
+                "passed": False,
+                "reason": "无有效 OOS mean sharpe，无法评估合并门",
+                "oos_mean_sharpe": None,
+                "current_best": self._current_best_oos,
+                "threshold": 0.05,
+            }
+        else:
+            merge = evaluate_merge_gate(oos_mean, self._current_best_oos)
+
+        hard_passed = bool(stability.passed and merge.get("passed"))
+        reason_parts = [f"稳定性: {stability.reason}", f"合并: {merge['reason']}"]
+        return stability, oos_mean, merge, hard_passed, reason_parts
+
+    def _evaluate_pbo_diagnostic(
+        self, train_bt: dict[str, Any], oos_mean: float | None
+    ) -> dict[str, Any]:
+        """登记本候选 IS/OOS 与收益列后评估 PBO 诊断。"""
+        from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+            _MIN_STRATEGIES_FOR_PBO,
+            BacktestOverfitGate,
+            diagnostic_to_dict,
+        )
+
+        is_sharpe = 0.0
+        raw_is = train_bt.get("sharpe_ratio")
+        if isinstance(raw_is, (int, float)):
+            is_sharpe = float(raw_is)
+        return_col = _daily_returns_as_floats(train_bt.get("daily_returns"))
+        if return_col:
+            self._oos_return_columns.append(return_col)
+        if oos_mean is not None:
+            self._oos_candidate_pairs.append((is_sharpe, float(oos_mean)))
+
+        pbo_gate = BacktestOverfitGate()
+        n_cols = len(self._oos_return_columns)
+        if n_cols >= _MIN_STRATEGIES_FOR_PBO:
+            t_len = min(len(col) for col in self._oos_return_columns)
+            matrix = [
+                [self._oos_return_columns[j][i] for j in range(n_cols)]
+                for i in range(t_len)
+            ]
+            pbo = pbo_gate.evaluate_returns_matrix(matrix, n_blocks=8)
+        else:
+            is_list = [p[0] for p in self._oos_candidate_pairs]
+            oos_list = [p[1] for p in self._oos_candidate_pairs]
+            pbo = pbo_gate.evaluate(is_list, oos_list)
+
+        return diagnostic_to_dict(
+            status=pbo.status,
+            reason=pbo.reason,
+            pbo_probability=pbo.pbo_probability,
+            n_strategies=pbo.n_strategies,
+            n_samples=pbo.n_samples,
+            method=_pbo_method_from_reason(pbo.reason),
+        )
+
     def _run_oos_gates_impl(self, strategy_yaml: str) -> dict[str, Any]:
         """``run_oos_gates`` 确定性实现（ADR-022 §A）。"""
         from long_earn.strategy_optimization.acceptance import (  # noqa: PLC0415
             is_metrics_unreliable,
-        )
-        from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
-            BacktestOverfitGate,
-            WalkForwardStabilityGate,
-            diagnostic_to_dict,
-            evaluate_merge_gate,
-            mean_fold_sharpe,
         )
 
         bt = self.context.backtest_service
@@ -664,6 +808,7 @@ class ResearchAgent:
                 strategy_yaml=strategy_yaml,
                 start_date=self.context.config.test_start_date,
                 end_date=self.context.config.test_end_date,
+                gap=5,
             )
         except Exception as exc:
             return {"passed": False, "error": f"OOS 执行失败: {exc}"}
@@ -674,52 +819,19 @@ class ResearchAgent:
             if not fold_results and "metrics" in oos:
                 fold_results = [oos]
 
-        stability = WalkForwardStabilityGate().evaluate(fold_results)
-        oos_mean = mean_fold_sharpe(fold_results)
-        merge: dict[str, Any]
-        if oos_mean is None:
-            merge = {
-                "passed": False,
-                "reason": "无有效 OOS mean sharpe，无法评估合并门",
-                "oos_mean_sharpe": None,
-                "current_best": self._current_best_oos,
-                "threshold": 0.05,
-            }
-        else:
-            merge = evaluate_merge_gate(oos_mean, self._current_best_oos)
+        stability, oos_mean, merge, hard_passed, reason_parts = (
+            self._build_oos_hard_gate(fold_results)
+        )
 
-        hard_passed = bool(stability.passed and merge.get("passed"))
-        reason_parts = [f"稳定性: {stability.reason}", f"合并: {merge['reason']}"]
-
-        # —— DSR 诊断 ——
+        train_dict = train_bt if isinstance(train_bt, dict) else {}
         dsr_payload = self._evaluate_dsr_diagnostic(
-            train_bt=train_bt if isinstance(train_bt, dict) else {},
+            train_bt=train_dict,
             fold_results=fold_results,
-            observed_sharpe=(
-                float(stability.worst_fold_sharpe)
-                if stability.fold_sharpes
-                else (oos_mean or 0.0)
-            ),
+            oos_mean=oos_mean,
+            worst_fold_sharpe=stability.worst_fold_sharpe,
+            has_fold_sharpes=bool(stability.fold_sharpes),
         )
-
-        # —— PBO 诊断（登记本候选后评估） ——
-        is_sharpe = 0.0
-        if isinstance(train_bt, dict):
-            raw_is = train_bt.get("sharpe_ratio")
-            if isinstance(raw_is, (int, float)):
-                is_sharpe = float(raw_is)
-        if oos_mean is not None:
-            self._oos_candidate_pairs.append((is_sharpe, float(oos_mean)))
-        is_list = [p[0] for p in self._oos_candidate_pairs]
-        oos_list = [p[1] for p in self._oos_candidate_pairs]
-        pbo = BacktestOverfitGate().evaluate(is_list, oos_list)
-        pbo_payload = diagnostic_to_dict(
-            status=pbo.status,
-            reason=pbo.reason,
-            pbo_probability=pbo.pbo_probability,
-            n_strategies=pbo.n_strategies,
-            n_samples=pbo.n_samples,
-        )
+        pbo_payload = self._evaluate_pbo_diagnostic(train_dict, oos_mean)
 
         if hard_passed and oos_mean is not None:
             prev = self._current_best_oos
@@ -757,14 +869,28 @@ class ResearchAgent:
         *,
         train_bt: dict[str, Any],
         fold_results: list[Any],
-        observed_sharpe: float,
+        oos_mean: float | None,
+        worst_fold_sharpe: float,
+        has_fold_sharpes: bool,
     ) -> dict[str, Any]:
-        """构造 DSR 诊断片段（可含完整 skew/kurt）。"""
+        """构造 DSR 诊断片段（可含完整 skew/kurt、MinTRL、haircut）。"""
         from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
             DeflatedSharpeGate,
             daily_return_moments,
             diagnostic_to_dict,
+            evaluate_haircut_sharpe,
+            evaluate_mintrl,
         )
+
+        if oos_mean is not None:
+            observed_sharpe = float(oos_mean)
+            observed_sharpe_source = "oos_mean"
+        elif has_fold_sharpes:
+            observed_sharpe = float(worst_fold_sharpe)
+            observed_sharpe_source = "worst_fold"
+        else:
+            observed_sharpe = 0.0
+            observed_sharpe_source = "worst_fold"
 
         n_obs = 252
         if fold_results:
@@ -781,7 +907,9 @@ class ResearchAgent:
                 if isinstance(td, int) and td > 0:
                     n_obs = max(td, 63)
 
-        moments = daily_return_moments(train_bt.get("daily_returns"))
+        train_returns = train_bt.get("daily_returns")
+        moments = daily_return_moments(train_returns)
+        moments_source = "train_daily_returns" if moments else "none"
         skew = moments[0] if moments else None
         kurt = moments[1] if moments else None
         dsr = DeflatedSharpeGate().evaluate(
@@ -791,14 +919,31 @@ class ResearchAgent:
             skew=skew,
             kurtosis=kurt,
         )
-        return diagnostic_to_dict(
+        mintrl_skew = skew if skew is not None else 0.0
+        mintrl_kurt = kurt if kurt is not None else 3.0
+        payload = diagnostic_to_dict(
             status=dsr.status,
             reason=dsr.reason,
             simplified=dsr.simplified,
             t_statistic=dsr.t_statistic,
             n_trials=self._n_eff_trials,
             n_observations=n_obs,
+            moments_source=moments_source,
+            observed_sharpe_source=observed_sharpe_source,
+            mintrl=evaluate_mintrl(
+                observed_sharpe=observed_sharpe,
+                n_observations=n_obs,
+                skew=mintrl_skew,
+                kurtosis=mintrl_kurt,
+            ),
+            haircut=evaluate_haircut_sharpe(
+                observed_sharpe=observed_sharpe,
+                n_trials=self._n_eff_trials,
+                n_observations=n_obs,
+            ),
         )
+        return payload
+
     def _make_run_param_search_tool(self) -> Any:
         """参数网格搜索工具 — 在训练集上暴力搜索最优参数组合。
 
@@ -1007,10 +1152,11 @@ class ResearchAgent:
 
             Args:
                 path_summary: 路径摘要 / 策略名
-                strategy_yaml: 策略 YAML（success 时必填以核对证据）
+                strategy_yaml: 策略 YAML（success/candidate 时必填以核对证据）
                 metrics_json: 指标 JSON 字符串
                 reflection: 反思文本
-                outcome: ``success`` 或 ``failure``；success 须有回测/OOS 证据
+                outcome: ``success`` / ``failure`` / ``candidate``（大小写不敏感）。
+                    success 须 OOS 硬性门控通过；candidate 允许仅有训练集证据。
             """
             with monitoring.track("research.record_path_outcome"):
                 logger.info(
@@ -1023,9 +1169,15 @@ class ResearchAgent:
                     except json.JSONDecodeError:
                         metrics = {"raw": metrics_json[:500]}
 
-                is_failure = outcome.strip().lower() == "failure"
-                if is_failure:
+                outcome_norm = outcome.strip().lower()
+                if outcome_norm == "failure":
                     metrics["outcome"] = "failure"
+                elif outcome_norm == "candidate":
+                    allowed, err, metrics = agent._validate_candidate_writeback(
+                        strategy_yaml, metrics
+                    )
+                    if not allowed:
+                        return err
                 else:
                     allowed, err, metrics = agent._validate_success_writeback(
                         strategy_yaml, metrics
