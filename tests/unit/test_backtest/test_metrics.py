@@ -232,12 +232,14 @@ def test_total_return_matches_numpy(mock_data_provider):
 def test_volume_limit_marks_metrics_unreliable(mock_data_provider):
     """C5：成交量限制导致部分成交时 metrics_unreliable=True。
 
-    极低成交量参与率（0.0001）使首笔买入订单部分成交（partial_fill=True），
-    _total_partial_fills/_total_orders > 0.5 触发 metrics_unreliable。
+    极低成交量参与率（0.0001）+ 放大成交量面板（1e6 股/日）→ 参与率
+    限额 100 股（恰 1 手），首笔买入订单被截断为整手部分成交
+    （partial_fill=True），_total_partial_fills/_total_orders > 0.5
+    触发 metrics_unreliable。
     _SimpleBuyStrategy 仅首 bar 发一次信号，故仅 1 笔订单。
     （原命名 test_filter_all_rejected_marks_metrics_unreliable 误导，已修正。）
     """
-    panel = _simple_panel(days=20)
+    panel = _simple_panel(days=20).with_columns(pl.lit(1_000_000.0).alias("volume"))
     provider = mock_data_provider(panel)
 
     # 极低成交量参与率 + 大资金 = 几乎所有订单部分成交
@@ -250,6 +252,25 @@ def test_volume_limit_marks_metrics_unreliable(mock_data_provider):
     assert result.metrics_unreliable, (
         "成交量限制导致大量部分成交时应标记 metrics_unreliable=True"
     )
+
+
+def test_volume_below_lot_produces_no_fill(mock_data_provider):
+    """P0-04 收口：参与率限额不足 1 手时无成交（碎股取整）。
+
+    面板 volume=1e5 × participation=0.0001 → 限额 10 股 < 100 股一手。
+    旧行为会产生 10 股的碎股部分成交（并触发 metrics_unreliable）；
+    整手取整后买入数量向下取整到 0 → 无成交，trade_count=0。
+    """
+    panel = _simple_panel(days=20)  # volume=100000
+    provider = mock_data_provider(panel)
+
+    from long_earn.backtest.engine.broker import TradingCostConfig
+
+    cost = TradingCostConfig(max_volume_participation=0.0001)
+    engine = EventDrivenBacktestEngine(data_provider=provider, cost_config=cost)
+    result = engine.run(_SimpleBuyStrategy(), "2024-01-01", "2024-01-22", ["A.SZ"])
+    assert result.success
+    assert result.trade_count == 0, "参与率限额不足 1 手时不应产生任何成交"
 
 
 def test_high_skip_ratio_marks_metrics_unreliable(mock_data_provider):

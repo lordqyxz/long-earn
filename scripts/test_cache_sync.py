@@ -73,7 +73,7 @@ def main() -> None:
         print("❌ 同步后 miniQMT 应仍可用于按需同步")
         return
 
-    print("\n✅ 冒烟测试通过：同步 → DuckDB 优先访问 → miniQMT 按需补齐")
+    print("\n✅ 冒烟测试通过：同步 → PostgreSQL 优先访问 → miniQMT 按需补齐")
 
 
 if __name__ == "__main__":

@@ -860,54 +860,124 @@ class TestEventLoopOrder(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStopLossConservativeFill(unittest.TestCase):
     """stop_loss 触发时保守成交价测试
 
     防止"用日内最低价直接成交 → 给回测白送日内极值"的过于乐观行为。
+
+    引擎口径（core.py ``_check_stop_loss``）：触发判定用日内 low；
+    成交基准 ref_price = max(avg_cost*(1-stop_loss), 日内 low)（不优于止损线）；
+    最终 FILL 价由 broker ``_fill_market`` 在 ref_price 基础上扣减滑点。
     """
 
     @staticmethod
-    def _stop_panel(days: int = 4) -> pl.DataFrame:
-        """构造价格序列：从 10 跌到 7，且 low 比 close 更低"""
+    def _stop_panel() -> pl.DataFrame:
+        """构造「一次性买入 → 持有 → 跌破止损线」的合成行情（4 bar）
+
+        价格 10 → 9.5 → 8.4（low 7.9）→ 8.0：
+        - Day1 仅产生买入信号（T+1 于 Day2 以 open 成交，avg_cost ≈ 9.5）
+        - Day2 买入当日受 T+1 锁定，止损不检查该持仓
+        - Day3 日内 low=7.9 跌破止损线（≈9.5×0.9=8.55），触发止损卖出
+        - open=close 避免开盘触及涨跌停价导致买入被拒；
+          volume=1e7 避免成交量参与率限制产生部分成交
+        """
+        closes = [10.0, 9.5, 8.4, 8.0]
+        lows = [9.9, 9.4, 7.9, 7.8]
         rows = []
-        for i in range(days):
-            close = 10.0 - 1.0 * i  # 10, 9, 8, 7
-            low = close - 0.5  # 9.5, 8.5, 7.5, 6.5  ← 比 close 更低
+        for i, close in enumerate(closes):
             rows.append(
                 {
                     "timestamp": datetime(2024, 1, i + 1),
                     "symbol": "000001",
                     "open": close,
                     "high": close + 0.1,
-                    "low": low,
+                    "low": lows[i],
                     "close": close,
-                    "volume": 10000,
+                    "volume": 10_000_000,
                 }
             )
         return pl.DataFrame(rows)
 
     def test_stop_loss_fill_price_not_below_threshold(self):
-        """止损触发时 fill_price 不能优于 'avg_cost * (1 - stop_loss)'
+        """止损卖出 FILL 价必须落在「止损线 − 滑点容差」的保守带内，而非日内最低价
 
-        例：avg_cost=10, stop_loss=10%（线 9）；当价格跌破 9 时止损成交价
-        应 ≥ 9（含 broker 滑点扣减后约 9 * (1 - slip) 接近 9），
-        而不是日内最低价 6.5。
+        例：avg_cost≈9.5、stop_loss=10% → 止损线≈8.55；Day3 日内 low=7.9
+        触发止损。引擎保守口径下成交基准 = max(止损线, 日内 low) = 止损线，
+        FILL 价只应比止损线低一个滑点量级（默认约 2bps），绝不能按日内
+        最低价 7.9（比止损线低约 7.6%）成交。
+
+        断言从审计 trail 取 RISK_TRIGGER(stop_loss) 的 avg_cost 与
+        FILL→ORDER→RISK_TRIGGER 归因链对应的止损卖出 FILL 实际成交价。
         """
         provider = MockDataProvider(self._stop_panel())
         engine = EventDrivenBacktestEngine(
             data_provider=provider,
             stop_loss=0.10,  # 10% 止损
         )
-        strategy = _SimpleStrategy(weights={"000001": 1.0})
+        # 一次性买入后持有：每 bar 买入会稀释 avg_cost 使止损可能永不触发
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
 
         result = engine.run(strategy, "2024-01-01", "2024-01-04", ["000001"])
         self.assertTrue(result.success)
+        # 买入 + 止损卖出至少 2 笔成交
+        self.assertGreaterEqual(
+            result.trade_count or 0, 2, "止损场景 trade_count 应 >= 2（买入+止损卖出）"
+        )
 
-        # 价格从 10 到 7，必触发止损（pnl_pct < -10%）
-        # attribution 反映已实现 + 未实现 P&L
-        # 关键：trade_count 应包含止损触发的一笔卖单
-        self.assertGreater(result.trade_count or 0, 1)
+        trail = engine.audit_logger.get_full_trail()
+
+        # 止损必须真正触发，且清仓后不重复触发：恰好 1 次 RISK_TRIGGER(stop_loss)
+        sl_triggers = [
+            e
+            for e in trail
+            if e.get("event_type") == "RISK_TRIGGER"
+            and e.get("payload", {}).get("risk_type") == "stop_loss"
+        ]
+        self.assertEqual(
+            len(sl_triggers), 1, "止损应恰好触发 1 次 RISK_TRIGGER(stop_loss)"
+        )
+        risk_payload = sl_triggers[0].get("payload", {})
+        avg_cost = float(risk_payload["avg_cost"])
+        check_price = float(risk_payload["check_price"])  # 触发时日内最低价
+
+        # 归因链定位止损卖出 FILL：FILL.parent → ORDER，ORDER.parent → RISK_TRIGGER
+        # （风控订单 trace_id 形如 {bar}_sl_{symbol}，其 parent 为 {bar}_risk_sl_{symbol}）
+        order_parent_by_trace = {
+            e.get("trace_id"): e.get("parent_id")
+            for e in trail
+            if e.get("event_type") == "ORDER"
+        }
+        sell_fills = [
+            e
+            for e in trail
+            if e.get("event_type") == "FILL"
+            and e.get("payload", {}).get("type") == "SELL"
+            and str(order_parent_by_trace.get(e.get("trace_id"), "")).endswith(
+                "_risk_sl_000001"
+            )
+        ]
+        self.assertEqual(len(sell_fills), 1, "止损应产生恰好 1 笔卖出 FILL")
+        fill_price = float(sell_fills[0].get("payload", {})["price"])
+
+        stop_line = avg_cost * (1 - engine.stop_loss)
+        # 滑点容差：默认 slippage 2bps + 冲击成本（本场景 <1bps），取 0.5% 足够宽，
+        # 仍远小于止损线与日内最低价的差距（~7.6%）
+        slip_tolerance = 0.005
+        # 下界：成交价不得比止损线再低一个滑点量级以上——若按日内最低价成交
+        # （旧实现风险），此断言失败
+        self.assertGreaterEqual(
+            fill_price,
+            stop_line * (1 - slip_tolerance),
+            f"止损成交价 {fill_price} 不得显著优于止损线 {stop_line}"
+            f"（禁止按日内最低价 {check_price} 白送极值）",
+        )
+        # 上界：成交价不得优于止损线（保守口径上界，滑点只会让成交价更低）
+        self.assertLessEqual(
+            fill_price,
+            stop_line,
+            f"止损成交价 {fill_price} 不得优于止损线 {stop_line}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

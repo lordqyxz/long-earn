@@ -9,13 +9,14 @@
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 from loguru import logger
 
+from long_earn.backtest.engine.audit import RUN_TAG_PROD
 from long_earn.core.pg import pg_connect
 
 # 风险指标计算所需的最小日收益率数据点数
@@ -23,6 +24,11 @@ _MIN_DAILY_RETURNS_FOR_RISK = 2
 
 # 有效回测的最小成交笔数（FILL < 此值视为无效记录，避免冒烟/调试 run 混入看板）
 _MIN_VALID_FILLS = 5
+
+# 孤儿判定的新鲜度护栏（分钟）：run 的最早事件时间早于 now() - 该值 才视为
+# 孤儿（无 RUN_END 且已沉寂超过此时长）；防止把「正在运行的回测」（已写
+# RUN_START、未写 RUN_END 的正常中间态）的审计行当场误删。
+_ORPHAN_FRESHNESS_MINUTES = 30
 
 # 审计日志表名（PG schema 与 DuckDB 时代一致）
 _AUDIT_TABLE = '"backtest_audit".logs'
@@ -134,7 +140,10 @@ class BacktestAnalyzer:
             ).fetchall()
         except Exception:
             conn.close()
-            return []
+            # DB 故障不静默吞掉：静默返回空列表会让端点 200 空响应与
+            # 「确实没有 run」不可区分，向上抛出由端点自然 500。
+            logger.exception("查询回测运行汇总失败")
+            raise
 
         conn.close()
         runs: list[dict[str, Any]] = []
@@ -204,10 +213,18 @@ class BacktestAnalyzer:
         - test 标签：RUN_START payload.tags 含 ``RUN_TAG_TEST``（"test"，
           测试/冒烟回测专用标签）**且不含 ``RUN_TAG_PROD``（"prod"，
           生产策略 DSL ``kind: production`` 自动携带，清理豁免）
-        - 孤儿：无 RUN_END 事件（引擎 DATA_EMPTY 等路径直接 return 未写
-          RUN_END，此类 run 含 FILL 但看板不显示、无汇总指标）
+        - 孤儿：无 RUN_END 事件 **且最早事件时间早于
+          ``now() - _ORPHAN_FRESHNESS_MINUTES 分钟``**（新鲜度护栏：
+          正在运行的回测已写 RUN_START、未写 RUN_END 属正常中间态，
+          不得视为孤儿误删其审计行；引擎 DATA_EMPTY 等路径直接 return
+          未写 RUN_END 的历史孤儿仍会被正常识别）
         - 成交过少：FILL 笔数 < ``_MIN_VALID_FILLS``（冒烟/调试 run）
         """
+        # 新鲜度阈值在 Python 侧计算后作为参数传入 SQL（阈值判定在 SQL 内
+        # 完成）：引擎写审计用的是 naive 本地时间（audit.py ``datetime.now()``），
+        # PG 服务器时区不可控（Docker 默认 UTC），直接用 NOW() 比较会有时区
+        # 错位；cutoff 与写入侧同钟（naive 本地时间）才能精确表达「30 分钟前」。
+        cutoff = datetime.now() - timedelta(minutes=_ORPHAN_FRESHNESS_MINUTES)
         conn = self._get_conn()
         try:
             rows = conn.execute(
@@ -233,10 +250,18 @@ class BacktestAnalyzer:
                           AND payload->'tags' ? 'test'
                           AND NOT (payload->'tags' ? 'prod')
                     )
-                    -- 孤儿：无 RUN_END
-                    OR r.run_id NOT IN (
-                        SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
-                        WHERE event_type = 'RUN_END'
+                    -- 孤儿：无 RUN_END，且最早事件时间早于 cutoff（新鲜度
+                    -- 护栏：30 分钟内仍有事件写入的 run 可能是正在运行的
+                    -- 回测，不得按孤儿误删其审计行）
+                    OR (
+                        r.run_id NOT IN (
+                            SELECT DISTINCT run_id FROM {_AUDIT_TABLE}
+                            WHERE event_type = 'RUN_END'
+                        )
+                        AND (
+                            SELECT MIN(timestamp) FROM {_AUDIT_TABLE}
+                            WHERE run_id = r.run_id
+                        ) < %s
                     )
                     -- 成交过少：FILL 笔数 < {_MIN_VALID_FILLS}
                     OR r.run_id IN (
@@ -245,13 +270,17 @@ class BacktestAnalyzer:
                         GROUP BY run_id
                         HAVING COUNT(*) < {_MIN_VALID_FILLS}
                     )
-                """
+                """,
+                [cutoff],
             ).fetchall()
             conn.close()
             return [row[0] for row in rows]
         except Exception:
             conn.close()
-            return []
+            # DB 故障不静默吞掉：静默返回空列表会让清理端点误报「无无效
+            # run」，向上抛出由端点自然 500。
+            logger.exception("查询无效回测运行列表失败")
+            raise
 
     def get_zero_return_runs(self) -> list[str]:
         """获取收益率为 0 的回测运行 run_id 列表。
@@ -274,7 +303,38 @@ class BacktestAnalyzer:
             return [row[0] for row in rows]
         except Exception:
             conn.close()
-            return []
+            # DB 故障不静默吞掉：静默返回空列表与「无零收益 run」不可区分，
+            # 向上抛出由调用方（端点）自然 500。
+            logger.exception("查询零收益回测运行列表失败")
+            raise
+
+    def has_prod_tag(self, run_id: str) -> bool:
+        """判断 run 是否携带生产标签（RUN_START payload.tags 含 ``prod``）。
+
+        生产 run 由策略 DSL ``kind: production`` 自动打标（清理豁免），
+        删除端点据此默认拒绝删除、要求显式 force。
+
+        Args:
+            run_id: 回测运行 ID
+
+        Returns:
+            True 表示该 run 带生产标签
+        """
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                f"""
+                SELECT 1 FROM {_AUDIT_TABLE}
+                WHERE run_id = %s
+                  AND event_type = 'RUN_START'
+                  AND payload->'tags' ? %s
+                LIMIT 1
+                """,
+                [run_id, RUN_TAG_PROD],
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
 
     def get_run_summary(self, run_id: str) -> pl.DataFrame:
         """获取特定运行 ID 的审计统计概要"""

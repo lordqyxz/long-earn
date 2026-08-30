@@ -238,6 +238,10 @@ class TestSlippageSymmetry:
             exec_type=ExecType.MARKET,
         )
         buy_fill = broker._fill_market(buy_order, price, volume)
+        if buy_fill is None:
+            # 参与率限制+整手取整后不足 1 手：当日无成交（P0-04 新语义），
+            # 本属性只约束"有成交时"的滑点方向
+            return
         assert buy_fill.fill_price >= price, (
             f"BUY fill_price={buy_fill.fill_price} < current_price={price}"
         )
@@ -283,6 +287,9 @@ class TestSlippageSymmetry:
             exec_type=ExecType.MARKET,
         )
         buy_fill = broker._fill_market(buy_order, price, volume)
+        if buy_fill is None:
+            # 参与率限制+整手取整后不足 1 手：无买入成交，往返无从谈起
+            return
 
         # 卖出（同价）
         sell_order = OrderEvent(
@@ -296,6 +303,8 @@ class TestSlippageSymmetry:
             exec_type=ExecType.MARKET,
         )
         sell_fill = broker._fill_market(sell_order, price, volume)
+        if sell_fill is None:
+            return
 
         # 往返净收益 = 卖出收入 - 买入支出
         buy_cost = buy_fill.fill_price * qty + buy_fill.commission

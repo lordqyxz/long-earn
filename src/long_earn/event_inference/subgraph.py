@@ -108,15 +108,15 @@ def _conflict_node(
                 symbol_to_indices.setdefault(sym, []).append(idx)
 
     conflict_groups: dict[int, str] = {}
-    group_counter = 0
     for sym, indices in symbol_to_indices.items():
         if len(indices) < 2:  # noqa: PLR2004
             continue
         sentiments = {events[i].get("sentiment", "neutral") for i in indices}
-        # 同标的存在相反情绪 → 冲突组
+        # 同标的存在相反情绪 → 冲突组。group_id 仅由 symbol 构成（同一标的
+        # 本就只归一组），不含运行内计数器，保证跨运行 group_id 稳定、
+        # conflict_group 互斥语义跨运行成立
         if {"positive", "negative"} <= sentiments:
-            group_id = f"conflict_{sym}_{group_counter}"
-            group_counter += 1
+            group_id = f"conflict_{sym}"
             for i in indices:
                 conflict_groups[i] = group_id
 

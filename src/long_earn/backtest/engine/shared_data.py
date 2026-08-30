@@ -56,6 +56,9 @@ class SharedDataContext:
         return self
 
     def __exit__(self, *args: Any) -> None:
+        # 注销 atexit 钩子：长进程（research loop）多次 run_grid 会累积
+        # handler，每个 handler 持有 self 阻止对象回收
+        atexit.unregister(self._cleanup)
         self._cleanup()
 
     def _cleanup(self) -> None:

@@ -136,6 +136,9 @@ class Broker:
     5. 生成 FillEvent。
     """
 
+    # A股最小交易单位：100股 = 1手（与 Portfolio.BOARD_LOT 同口径）
+    BOARD_LOT: int = 100
+
     def __init__(self, cost_config: TradingCostConfig | None = None):
         self.cost_config = cost_config or TradingCostConfig()
         # 待成交订单：order_id → OpenOrder
@@ -177,7 +180,8 @@ class Broker:
         order_type = order.exec_type or ExecType.MARKET
 
         if order_type == ExecType.MARKET:
-            return [self._fill_market(order, current_price, daily_volume)]
+            fill = self._fill_market(order, current_price, daily_volume)
+            return [fill] if fill is not None else []
 
         fills: list[FillEvent] = []
 
@@ -194,7 +198,9 @@ class Broker:
             triggered = self._check_stop_trigger(order, current_price)
             if triggered:
                 if order_type == ExecType.STOP:
-                    fills.append(self._fill_market(order, current_price, daily_volume))
+                    fill = self._fill_market(order, current_price, daily_volume)
+                    if fill is not None:
+                        fills.append(fill)
                 else:
                     # STOP_LIMIT: 触发后转为限价待成交
                     self._pend_order(order)
@@ -205,19 +211,23 @@ class Broker:
         raise OrderExecutionError(f"未知订单执行类型: {order_type}")
 
     def check_pending_orders(
-        self, price_lookup: dict[str, float | None]
+        self,
+        price_lookup: dict[str, float | None],
+        volume_lookup: dict[str, float | None] | None = None,
     ) -> list[FillEvent]:
         """
         检查所有待成交订单（每个 bar 调用一次）
 
         Args:
             price_lookup: symbol → current_price 映射；缺失/None 的 symbol 跳过撮合
+            volume_lookup: symbol → 当日成交量映射（可选）。提供时 STOP 触发
+                成交同样受成交量参与率限制与冲击成本约束——与 submit_order
+                即时路径（P0-04）同口径，防止挂单路径绕过成交限制
 
         Returns:
             本 bar 产生的成交事件列表
         """
         fills: list[FillEvent] = []
-        expired_ids: list[str] = []
 
         for oid, open_order in list(self.pending_orders.items()):
             # 可能被 OCO 取消，跳过已移除的订单
@@ -237,14 +247,14 @@ class Broker:
                 continue
 
             otype = order.exec_type or ExecType.MARKET
-            new_fills = self._process_pending_order(otype, open_order, order, sym_price)
+            sym_volume = (volume_lookup or {}).get(order.symbol) or 0.0
+            new_fills = self._process_pending_order(
+                otype, open_order, order, sym_price, daily_volume=sym_volume
+            )
             if new_fills:
                 fills.extend(new_fills)
                 self._cancel_oco_siblings(order)
                 self._finalize_order(oid)
-
-        for oid in expired_ids:
-            self._cancel_order(oid)
 
         return fills
 
@@ -254,6 +264,7 @@ class Broker:
         open_order: OpenOrder,
         order: OrderEvent,
         sym_price: float,
+        daily_volume: float = 0.0,
     ) -> list[FillEvent]:
         """根据订单类型处理单个待成交订单"""
         if otype == ExecType.LIMIT:
@@ -266,7 +277,8 @@ class Broker:
             )
             if triggered:
                 open_order.trigger_activated = True
-                return [self._fill_market(order, sym_price)]
+                fill = self._fill_market(order, sym_price, daily_volume=daily_volume)
+                return [fill] if fill is not None else []
             return []
 
         if otype == ExecType.STOP_LIMIT:
@@ -289,8 +301,12 @@ class Broker:
         order: OrderEvent,
         current_price: float,
         daily_volume: float = 0.0,
-    ) -> FillEvent:
+    ) -> FillEvent | None:
         """市价单立即成交（含滑点 + 最低佣金保护 + 成交量限制 + 冲击成本）。
+
+        Returns:
+            成交事件；参与率限制 + 整手取整后无成交（如成交量过小）时
+            返回 None，调用方按无成交处理。
 
         P0-04 修复：
         - 成交量参与率限制：fill_quantity = min(order.quantity, volume * participation)
@@ -303,6 +319,17 @@ class Broker:
         if daily_volume > 0 and self.cost_config.max_volume_participation > 0:
             max_qty = daily_volume * self.cost_config.max_volume_participation
             fill_qty = min(order.quantity, max_qty)
+            # A股买入须为 100 股整倍数（零股仅可卖出不能买入）；卖出不取整，
+            # 允许清仓残余零股。取整后不足 1 手视为无成交（否则会产生
+            # 碎股成交，且 0 数量成交仍被收取最低佣金）。
+            if order.order_type == "BUY":
+                fill_qty = math.floor(fill_qty / self.BOARD_LOT) * self.BOARD_LOT
+                if fill_qty <= 0:
+                    logger.debug(
+                        f"订单 {order.order_id} 参与率限制+整手取整后无成交，"
+                        f"跳过撮合: {order.symbol} volume={daily_volume}"
+                    )
+                    return None
 
         partial_fill = fill_qty < order.quantity
 

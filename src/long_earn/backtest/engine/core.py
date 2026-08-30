@@ -16,6 +16,7 @@ import polars as pl
 from loguru import logger
 
 from long_earn.backtest.domain.entities import (
+    FillEvent,
     MarketDataEvent,
     OrderEvent,
     PerformanceMetrics,
@@ -75,6 +76,11 @@ class EventDrivenBacktestEngine:
 
     MIN_TRADING_DAYS = 2
     MIN_BM_POINTS = 2
+
+    # OpenTelemetry 上下文由 telemetry.instrument_engine 在 run() 前注入。
+    # 声明为 Any 而非引入 telemetry 导入：telemetry 反向 import core，
+    # 此处标注精确类型会形成循环导入（Any 兜底理由：跨模块注入的运行期属性）。
+    _otel_ctx: Any = None
 
     def __init__(  # noqa: PLR0913
         self,
@@ -252,6 +258,63 @@ class EventDrivenBacktestEngine:
 
     # ── 主入口 ────────────────────────────────────────────────
 
+    def _failed_run_result(
+        self,
+        message: str,
+        run_id: str,
+        db_audit: Any,
+        run_start_ts: float,
+    ) -> BacktestResult:
+        """记录 RUN_END FAILED 审计并返回失败结果。
+
+        监督报告判据 3 要求 RUN_START/RUN_END 配对——run() 内的早退失败
+        路径（空数据/空交易窗）共用本方法，避免审计链路不配对。
+        """
+        latency_ms = (time.perf_counter() - run_start_ts) * 1000
+        self._log_audit(
+            "RUN_END",
+            str(uuid.uuid4()),
+            run_id,
+            "Engine",
+            "FAILED",
+            {
+                "success": False,
+                "total_return": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0,
+                "trading_days": 0,
+                "metrics_unreliable": True,
+                "latency_ms": latency_ms,
+            },
+            db_audit,
+            latency_ms=latency_ms,
+        )
+        return BacktestResult(success=False, message=message)
+
+    def _maybe_precompute_panel(
+        self, strategy: BaseStrategy, full_data: pl.DataFrame
+    ) -> pl.DataFrame:
+        """因子全期预计算钩子（鸭子类型探测）。
+
+        策略声明 ``precompute_panel`` 时，全期一次性计算 factor 列
+        （O(T·U)），调仓日只在当前截面跑 signal 算子。与逐 bar 截断历史
+        计算逐值等价（算子因果性证明背书，见 test_precompute_equivalence.py）。
+        鸭子类型探测，不引入对 DSLStrategy 的类型依赖；须在 init() 之后
+        调用（init 重置预计算状态）。契约：钩子内部自行降级（factor 失败
+        返回原面板回退截断路径，不炸 run），引擎不做异常兜底。
+        """
+        precompute = getattr(strategy, "precompute_panel", None)
+        if callable(precompute):
+            # 预计算钩子总是返回 DataFrame（precompute_panel 签名），
+            # getattr 让类型退化为 object，显式断言回 DataFrame
+            enriched = precompute(full_data)
+            assert isinstance(enriched, pl.DataFrame), (
+                f"precompute_panel 应返回 DataFrame，得到 {type(enriched)}"
+            )
+            return enriched
+        return full_data
+
     def run(  # noqa: PLR0912, PLR0913, PLR0915
         self,
         strategy: BaseStrategy,
@@ -371,51 +434,20 @@ class EventDrivenBacktestEngine:
                     {"message": "加载数据为空", "symbols_count": len(symbols)},
                     db_audit,
                 )
-                # 补全 RUN_END：监督报告判据 3 要求 RUN_START/RUN_END 配对，
-                # 原 DATA_EMPTY 路径直接 return 导致 RUN_END 缺失，审计日志
-                # 不配对（如 7/26 HTR 中 2 个节点只有 RUN_START 无 RUN_END）。
-                empty_result = BacktestResult(success=False, message="加载数据为空")
-                self._log_audit(
-                    "RUN_END",
-                    str(uuid.uuid4()),
-                    run_id,
-                    "Engine",
-                    "FAILED",
-                    {
-                        "success": False,
-                        "total_return": 0.0,
-                        "sharpe_ratio": 0.0,
-                        "max_drawdown": 0.0,
-                        "trade_count": 0,
-                        "trading_days": 0,
-                        "metrics_unreliable": True,
-                        "latency_ms": (time.perf_counter() - run_start_ts) * 1000,
-                    },
-                    db_audit,
-                    latency_ms=(time.perf_counter() - run_start_ts) * 1000,
+                return self._failed_run_result(
+                    "加载数据为空", run_id, db_audit, run_start_ts
                 )
-                return empty_result
 
             strategy.init()
 
             # 因子全期预计算钩子：策略声明 precompute_panel 时，全期一次性
             # 计算 factor 列（O(T·U)），调仓日只在当前截面跑 signal 算子。
             # 与逐 bar 截断历史计算逐值等价（算子因果性证明背书，见
-            # test_precompute_equivalence.py）。鸭子类型探测，不引入对
-            # DSLStrategy 的类型依赖；须在 init() 之后（init 重置预计算状态）。
-            # 契约：钩子内部自行降级（factor 失败返回原面板回退截断路径，
-            # 不炸 run），引擎不做异常兜底。
-            precompute = getattr(strategy, "precompute_panel", None)
-            if callable(precompute):
-                # 预计算钩子总是返回 DataFrame（precompute_panel 签名），
-                # getattr 让类型退化为 object，显式断言回 DataFrame
-                enriched = precompute(full_data)
-                assert isinstance(enriched, pl.DataFrame), (
-                    f"precompute_panel 应返回 DataFrame，得到 {type(enriched)}"
-                )
-                full_data = enriched
+            # test_precompute_equivalence.py）。契约细节见该方法 docstring；
+            # 须在 init() 之后调用（init 重置预计算状态）。
+            assert full_data is not None, "full_data 加载后不应为 None"
+            full_data = self._maybe_precompute_panel(strategy, full_data)
 
-            assert full_data is not None, "full_data 在预计算后不应为 None"
             guard = VisibilityGuard(full_data)
             portfolio = Portfolio(cost_config=self.cost_config)
             broker = Broker(self.cost_config)
@@ -427,13 +459,24 @@ class EventDrivenBacktestEngine:
                 full_data, start_date=start_date, end_date=end_date
             )
             n_bars = len(timestamps)
+            if n_bars == 0:
+                # 防御：日期过滤后交易窗为空。此前会走到末尾 timestamps[-1]
+                # 抛 IndexError，以 engine_error 形态呈现（错误分类失真，
+                # 走不到样本不足门槛）。
+                return self._failed_run_result(
+                    "交易时间窗为空（区间过滤后无交易数据）",
+                    run_id,
+                    db_audit,
+                    run_start_ts,
+                )
             logger.info(
                 f"[回测引擎] 数据就绪: symbols={len(symbols)}, "
                 f"bars={n_bars}, rows={len(full_data)}, "
                 f"开始逐日迭代 {start_date}~{end_date}"
             )
             loop_t0 = time.perf_counter()
-            progress_every = max(1, n_bars // 10) if n_bars else 1
+            # n_bars>=1（上方守卫已排除 0）；n_bars<10 时 n_bars//10=0，max 兜底
+            progress_every = max(1, n_bars // 10)
 
             for _bar_idx, ts in enumerate(timestamps):
                 self._process_timestamp(
@@ -464,6 +507,7 @@ class EventDrivenBacktestEngine:
                 benchmark_symbol,
                 metrics_unreliable=metrics_unreliable,
                 universe_pit_warning=universe_pit_warning,
+                trading_timestamps=timestamps,
             )
 
             # RUN_END：记录回测结果摘要（成功/失败都要记）
@@ -564,6 +608,43 @@ class EventDrivenBacktestEngine:
             )
         return df.sort("timestamp").to_series().to_list()
 
+    def _apply_fill_or_skip(
+        self,
+        portfolio: Portfolio,
+        fill: FillEvent,
+        order_trace_id: str,
+        db_audit: Any,
+    ) -> bool:
+        """应用成交到组合；被拒绝时记 ORDER_SKIPPED 审计并返回 False。
+
+        拒绝场景（Portfolio.update_from_fill 返回 False）：买入现金不足
+        （CASH_INSUFFICIENT）、卖出超持仓/无持仓（POSITION_INSUFFICIENT，
+        仅多头约束）。此前拒绝时引擎仍无条件记 FILL SUCCESS——审计记录了
+        未生效的成交，重放结果与持仓状态背离，违反可追溯可重放约束。
+        """
+        if portfolio.update_from_fill(fill):
+            return True
+        self._total_skipped += 1
+        self._log_audit(
+            "ORDER_SKIPPED",
+            str(uuid.uuid4()),
+            order_trace_id,
+            "Engine",
+            "SKIPPED",
+            {
+                "symbol": fill.symbol,
+                "order_type": fill.order_type,
+                "quantity": fill.fill_quantity,
+                "reason": (
+                    OrderSkipReason.CASH_INSUFFICIENT
+                    if fill.order_type == "BUY"
+                    else OrderSkipReason.POSITION_INSUFFICIENT
+                ),
+            },
+            db_audit,
+        )
+        return False
+
     # ── 单时间戳处理 ──────────────────────────────────────────
 
     def _process_timestamp(  # noqa: PLR0913
@@ -645,9 +726,16 @@ class EventDrivenBacktestEngine:
 
         # 检查待成交订单（限价/止损单）— 从 price_dict 提取 close 价格映射
         close_lookup = {s: fields.get("close") for s, fields in price_dict.items()}
-        pending_fills = broker.check_pending_orders(price_lookup=close_lookup)
+        # 成交量映射同步传入：挂单 STOP 触发成交与即时路径同受 P0-04 约束
+        volume_lookup = {s: fields.get("volume") for s, fields in price_dict.items()}
+        pending_fills = broker.check_pending_orders(
+            price_lookup=close_lookup, volume_lookup=volume_lookup
+        )
         for pf in pending_fills:
-            portfolio.update_from_fill(pf)
+            if not self._apply_fill_or_skip(
+                portfolio, pf, f"pend_{pf.order_id}", db_audit
+            ):
+                continue
             self._log_audit(
                 "FILL",
                 pf.trace_id,
@@ -858,7 +946,10 @@ class EventDrivenBacktestEngine:
                 self._db_audit,
             )
             fill = broker.execute_order(order, check_price)
-            portfolio.update_from_fill(fill)
+            if not self._apply_fill_or_skip(
+                portfolio, fill, order.trace_id, self._db_audit
+            ):
+                continue
             # 止盈卖出写入 FILL 审计（原因可追溯，含触发数值）
             self._log_audit(
                 "FILL",
@@ -980,7 +1071,10 @@ class EventDrivenBacktestEngine:
                 )
                 # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
                 fill = broker.execute_order(order, ref_price)
-                portfolio.update_from_fill(fill)
+                if not self._apply_fill_or_skip(
+                    portfolio, fill, order.trace_id, self._db_audit
+                ):
+                    continue
                 # 止损卖出写入 FILL 审计（原因可追溯，含触发数值）
                 self._log_audit(
                     "FILL",
@@ -1104,7 +1198,10 @@ class EventDrivenBacktestEngine:
                     self._db_audit,
                 )
                 fill = broker.execute_order(order, price)
-                portfolio.update_from_fill(fill)
+                if not self._apply_fill_or_skip(
+                    portfolio, fill, order.trace_id, self._db_audit
+                ):
+                    continue
                 # 最大回撤清仓写入 FILL 审计（原因可追溯，含触发数值）
                 self._log_audit(
                     "FILL",
@@ -1345,7 +1442,10 @@ class EventDrivenBacktestEngine:
                         order.symbol
                     ),
                 )
-                portfolio.update_from_fill(fill)
+                if not self._apply_fill_or_skip(
+                    portfolio, fill, order.trace_id, db_audit
+                ):
+                    continue
                 if fill.partial_fill:
                     self._total_partial_fills += 1
 
@@ -1369,7 +1469,28 @@ class EventDrivenBacktestEngine:
                 )
 
         # P1-08: 处理 SignalEvent.metadata["direct_orders"] 中的高级订单
-        # （LIMIT/STOP/STOP_LIMIT/OCO），绕过 Portfolio 权重系统直接提交给 Broker。
+        self._execute_direct_orders(
+            signal_event, portfolio, slab, broker, db_audit,
+            price_field=price_field, execution_ts=execution_ts,
+            price_dict=price_dict,
+        )
+
+    def _execute_direct_orders(  # noqa: PLR0913
+        self,
+        signal_event: Any,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        broker: Broker,
+        db_audit: Any,
+        price_field: str = "close",
+        execution_ts: Any = None,
+        price_dict: dict[str, dict[str, float]] | None = None,
+    ) -> None:
+        """处理 direct_orders 高级订单（LIMIT/STOP/STOP_LIMIT/OCO）。
+
+        绕过 Portfolio 权重系统直接提交给 Broker；自 _execute_signals
+        拆出以收敛分支数，且该路径的审计/风控/撮合口径自成一体。
+        """
         direct_orders = signal_event.metadata.get("direct_orders", [])
         for order in direct_orders:
             self._total_orders += 1
@@ -1444,9 +1565,17 @@ class EventDrivenBacktestEngine:
                 )
                 or 0.0
             )
+            # submit_order 允许 timestamp=None（docstring 承诺"由引擎填充"），
+            # 此前引擎从不补填——成交 ID 用 order.timestamp 格式化，None 会在
+            # Broker 内抛 TypeError 使整轮回测以 engine_error 失败
+            if order.timestamp is None:
+                order.timestamp = execution_ts
             fills = broker.submit_order(order, price, daily_volume=daily_volume)
             for fill in fills:
-                portfolio.update_from_fill(fill)
+                if not self._apply_fill_or_skip(
+                    portfolio, fill, order.trace_id, db_audit
+                ):
+                    continue
                 if fill.partial_fill:
                     self._total_partial_fills += 1
                 self._log_audit(
@@ -1599,6 +1728,7 @@ class EventDrivenBacktestEngine:
         benchmark_symbol: str = "",
         metrics_unreliable: bool = False,
         universe_pit_warning: bool = False,
+        trading_timestamps: list[Any] | None = None,
     ) -> BacktestResult:
         # 数据可信度门槛：交易日数 / equity_curve 长度不足时拒绝输出指标，
         # 防止把"全程持仓未变 → 零收益"误标为成功的回测结果。
@@ -1634,7 +1764,7 @@ class EventDrivenBacktestEngine:
 
         metrics = self._calculate_metrics(portfolio)
         bm = self._benchmark_or_none(
-            full_data, benchmark_symbol, portfolio.equity_curve
+            full_data, benchmark_symbol, portfolio.equity_curve, trading_timestamps
         )
 
         return BacktestResult(
@@ -1668,6 +1798,7 @@ class EventDrivenBacktestEngine:
         full_data: pl.DataFrame | None,
         benchmark_symbol: str,
         equity_curve: list[float],
+        trading_timestamps: list[Any] | None = None,
     ) -> dict[str, float]:
         if full_data is None or not benchmark_symbol:
             return _empty_bm()
@@ -1675,6 +1806,7 @@ class EventDrivenBacktestEngine:
             equity_curve,
             full_data,
             benchmark_symbol,
+            trading_timestamps=trading_timestamps,
         )
 
     # ── 基准对比 ──────────────────────────────────────────────
@@ -1684,11 +1816,17 @@ class EventDrivenBacktestEngine:
         equity_curve: list[float],
         full_data: pl.DataFrame,
         benchmark_symbol: str,
+        trading_timestamps: list[Any] | None = None,
     ) -> dict[str, float]:
         """计算 Alpha、Beta、信息比率等基准对比指标
 
         通过时间戳对齐确保组合权益曲线与基准价格序列严格对应，
         避免因基准数据缺失导致时序错位。
+
+        ``trading_timestamps``：交易循环实际使用的时间戳序列（已排除
+        warmup 预热期）。必须提供——equity_curve 每点对应交易期一个 bar，
+        若改用含 warmup 的全量时间轴做索引，前 warmup_n 个点会用 warmup
+        期基准价配交易期净值，alpha/beta/IR/tracking_error 全部失真。
 
         Alpha 使用 Jensen's Alpha 公式: α = R_p - β · R_m (假设 R_f = 0)
         """
@@ -1711,7 +1849,13 @@ class EventDrivenBacktestEngine:
             return _empty_bm()
 
         # 按组合的时间戳序列对齐权益曲线与基准价格
-        timestamps = EventDrivenBacktestEngine._get_timestamps(full_data)
+        if trading_timestamps is not None:
+            timestamps = trading_timestamps
+        else:
+            # 回退（无交易期时间轴可传时）：从尾部截取与 equity_curve 等长的
+            # 全量时间轴——equity_curve 对应交易期最后 len(equity_curve) 个 bar
+            timestamps = EventDrivenBacktestEngine._get_timestamps(full_data)
+            timestamps = timestamps[-len(equity_curve):] if equity_curve else []
 
         eq_aligned: list[float] = []
         bm_aligned: list[float] = []

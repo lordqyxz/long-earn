@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """对比当前最佳策略与候选新策略的回测指标（多核并行加速版）。
 
-严格遵守量化数据分割规范：
-- 训练集（2022-01-01 ~ 2024-12-31）：策略研发、参数寻优，可自由使用
-- 测试集（2025-01-01 ~ 2026-03-24）：仅 HTR 合并门，本脚本不触碰
-- 验证集（2026-03-25 ~ 2026-06-25）：开发阶段禁止使用
+严格遵守量化数据分割规范（三段窗口见 AppConfig 默认值/环境变量）：
+- 训练集（config.train_*）：策略研发、参数寻优，可自由使用（本脚本仅用训练集）
+- 测试集（config.test_*）：仅 HTR 合并门，本脚本不触碰
+- 验证集（config.validation_*）：开发阶段禁止使用
 
 加速方案：
-1. ParallelRunner 预取数据一次，mmap IPC 文件共享给两个策略
-2. ProcessPoolExecutor 并行回测基准 + 候选（2 核同时跑）
-3. worker 进程日志降噪（ERROR 级别），减少 I/O 开销
+1. ParallelRunner.run_candidates 预取数据一次，mmap IPC 文件共享给全部策略
+2. 每个策略 YAML 独立解析风控参数与 warmup（候选自带 risk_control 生效，
+   基准与候选互不污染，A/B 对照语义真实成立）
+3. ProcessPoolExecutor 并行回测，worker 进程日志降噪（ERROR 级别）
 
 用法:
     uv run python scripts/compare_strategies.py
@@ -41,21 +42,10 @@ from long_earn.backtest.data.cache import DataCache  # noqa: E402
 from long_earn.backtest.data.polars_adapter import (  # noqa: E402
     PandasToPolarsProvider,
 )
-from long_earn.backtest.engine.dsl import parse_strategy_yaml  # noqa: E402
-from long_earn.backtest.engine.parallel import (  # noqa: E402
-    BacktestTask,
-    ParallelRunner,
-    _run_one_backtest,
-)
-from long_earn.backtest.engine.shared_data import SharedDataContext  # noqa: E402
+from long_earn.backtest.engine.parallel import ParallelRunner  # noqa: E402
 from long_earn.config import AppConfig  # noqa: E402
 from long_earn.context_init import initialize_context  # noqa: E402
 from long_earn.core.storage import best_strategy_path  # noqa: E402
-
-# 严格遵循量化数据分割规范：仅用训练集
-TRAIN_START = "2022-01-01"
-TRAIN_END = "2024-12-31"
-
 
 # ── 候选策略 A：短期反转 + 中期动量 + 低波 + EP + ROE + 净利润同比 ─────
 # 核心假设：A 股短期反转效应稳健，用 5 日反转替换 120 日动量（避免与 60d 重复），
@@ -221,20 +211,8 @@ def fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
 
 
-def _worker_init() -> None:
-    """worker 进程初始化：日志降噪到 ERROR 级别。
-
-    Windows spawn 模式下 worker 不继承主进程的 loguru 配置，
-    需在 initializer 中重新配置，避免"现金不足跳过买入"等 WARNING 淹没 I/O。
-    """
-    from loguru import logger
-
-    logger.remove()
-    logger.add(sys.stderr, level="ERROR")
-
-
 def get_csi500_symbols() -> list[str]:
-    """从 DuckDB 缓存获取 csi500 成分股（避免依赖 miniqmt 实时连接）。"""
+    """从 PostgreSQL 缓存获取 csi500 成分股（避免依赖 miniqmt 实时连接）。"""
     cache = DataCache()
     # 优先用空 date 取最新快照（成分股变化慢，近似可接受）
     symbols = cache.get_universe("中证500", "")
@@ -243,88 +221,6 @@ def get_csi500_symbols() -> list[str]:
     if not symbols:
         raise RuntimeError("缓存中无 csi500/中证500 成分股数据")
     return symbols
-
-
-def run_parallel_backtest(
-    yamls: list[tuple[str, str]],
-    symbols: list[str],
-    start_date: str,
-    end_date: str,
-    max_workers: int,
-    data_provider: object,
-) -> list:
-    """并行回测多个策略 YAML。
-
-    Args:
-        yamls: [(yaml_str, label), ...]
-        symbols: 股票池
-        start_date / end_date: 回测窗口
-        max_workers: 并发 worker 数
-        data_provider: 数据提供者（用于预取数据）
-
-    Returns:
-        BacktestOutcome 列表（与 yamls 顺序一致）
-    """
-    from concurrent.futures import ProcessPoolExecutor
-
-    runner = ParallelRunner(max_workers=max_workers, data_provider=data_provider)
-
-    # 预取数据（主进程执行一次，mmap IPC 文件共享给所有 worker）
-    print(f"  预取数据: {len(symbols)} 只股票, {start_date} ~ {end_date}")
-    full_data = runner._prepare_data(symbols, start_date, end_date)
-    if full_data.is_empty():
-        return [
-            _make_error_outcome(str(i), "数据预取为空") for i in range(len(yamls))
-        ]
-
-    # 解析第一个 YAML 获取风控参数（两个策略风控配置相同）
-    first_dsl = parse_strategy_yaml(yamls[0][0])
-    stop_loss = first_dsl.risk_control.stop_loss
-    max_dd_limit = first_dsl.risk_control.max_drawdown_limit
-    max_pos_pct = first_dsl.risk_control.max_position_per_stock
-
-    outcomes: list = []
-    with SharedDataContext(full_data) as sctx:
-        panel_path = sctx.get_worker_args()
-        tasks = [
-            BacktestTask(
-                strategy_yaml=yaml_str,
-                start_date=start_date,
-                end_date=end_date,
-                symbols=symbols,
-                benchmark_symbol="000300.SH",
-                panel_path=panel_path,
-                stop_loss=stop_loss,
-                max_drawdown_limit=max_dd_limit,
-                max_position_pct=max_pos_pct,
-                task_id=str(idx),
-                param_desc=label,
-            )
-            for idx, (yaml_str, label) in enumerate(yamls)
-        ]
-
-        if max_workers <= 1:
-            print("  串行模式（max_workers=1）")
-            outcomes = [_run_one_backtest(t) for t in tasks]
-        else:
-            print(f"  并行模式（{max_workers} workers, {len(tasks)} 任务）")
-            with ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init
-            ) as ex:
-                outcomes = list(ex.map(_run_one_backtest, tasks))
-    return outcomes
-
-
-def _make_error_outcome(task_id: str, error: str):
-    """构造错误结果。"""
-    from long_earn.backtest.engine.parallel import BacktestOutcome
-
-    return BacktestOutcome(
-        task_id=task_id,
-        success=False,
-        error=error,
-        error_category="engine_error",
-    )
 
 
 def print_outcome(o, label: str) -> None:
@@ -346,16 +242,23 @@ def print_outcome(o, label: str) -> None:
     print(f"  指标可信:   {'否' if o.metrics_unreliable else '是'}")
 
 
-def print_comparison(baseline, candidate, candidate_label: str = "候选") -> None:
+def print_comparison(
+    baseline,
+    candidate,
+    candidate_label: str = "候选",
+    train_start: str = "",
+    train_end: str = "",
+) -> None:
     """打印对比表格。
 
     Args:
         baseline: 基准 BacktestOutcome
         candidate: 候选 BacktestOutcome
         candidate_label: 候选策略标签（如 "候选A" / "候选B"），用于表头与结论
+        train_start / train_end: 训练集窗口（用于表头展示）
     """
     print("\n" + "=" * 80)
-    print(f"对比结论（训练集 {TRAIN_START} ~ {TRAIN_END}）")
+    print(f"对比结论（训练集 {train_start} ~ {train_end}）")
     print("=" * 80)
     if not baseline.success or not candidate.success:
         print("  ⚠ 至少一个策略回测失败，无法对比")
@@ -416,8 +319,11 @@ def main() -> None:
     max_workers = min(max_workers, 3)
 
     config = AppConfig.from_env()
-    config.backtest_start_date = TRAIN_START
-    config.backtest_end_date = TRAIN_END
+    # 严格遵循量化数据分割规范：仅用训练集（窗口从 config 派生，不硬编码）
+    train_start = config.train_start_date
+    train_end = config.train_end_date
+    config.backtest_start_date = train_start
+    config.backtest_end_date = train_end
     ctx = initialize_context(config)
 
     # 1. 获取股票池（从缓存，避免 miniqmt 依赖）
@@ -427,7 +333,7 @@ def main() -> None:
     symbols = get_csi500_symbols()
     formatted_symbols = PandasToPolarsProvider.format_symbols(symbols)
     print(f"股票池: csi500, {len(formatted_symbols)} 只")
-    print(f"回测窗口: {TRAIN_START} ~ {TRAIN_END}")
+    print(f"回测窗口: {train_start} ~ {train_end}")
     print(f"并发 worker 数: {max_workers}")
 
     # 2. 读取基准策略 + 候选策略
@@ -444,16 +350,18 @@ def main() -> None:
         (CANDIDATE_B, "候选B: ReversalMomentumHybrid+风控"),
     ]
 
-    # 3. 并行回测
-    print(f"\n开始并行回测（{len(yamls)} 策略, {max_workers} workers）...")
+    # 3. 并行回测（run_candidates：每个 YAML 独立解析风控参数与 warmup。
+    #    候选 A 无 risk_control → 无风控裸跑；候选 B 自带 risk_control → 生效，
+    #    A/B 对照语义自此真实成立，不再被基准风控参数覆盖）
+    runner = ParallelRunner(max_workers=max_workers, data_provider=ctx.data_provider)
+    print(f"\n开始并行回测（{len(yamls)} 策略, max_workers={max_workers}）...")
     t0 = time.time()
-    outcomes = run_parallel_backtest(
-        yamls=yamls,
+    outcomes = runner.run_candidates(
+        strategy_yamls=[yaml_str for yaml_str, _ in yamls],
+        start_date=train_start,
+        end_date=train_end,
         symbols=formatted_symbols,
-        start_date=TRAIN_START,
-        end_date=TRAIN_END,
-        max_workers=max_workers,
-        data_provider=ctx.data_provider,
+        benchmark_symbol="000300.SH",
     )
     t1 = time.time()
     print(f"回测完成: {t1 - t0:.1f}s")
@@ -470,12 +378,24 @@ def main() -> None:
     print("\n" + "=" * 80)
     print("对比 1: 候选 A（反转+动量）vs 基准")
     print("=" * 80)
-    print_comparison(baseline_o, candidate_a_o, candidate_label="候选A")
+    print_comparison(
+        baseline_o,
+        candidate_a_o,
+        candidate_label="候选A",
+        train_start=train_start,
+        train_end=train_end,
+    )
 
     print("\n" + "=" * 80)
     print("对比 2: 候选 B（反转+动量+风控）vs 基准")
     print("=" * 80)
-    print_comparison(baseline_o, candidate_b_o, candidate_label="候选B")
+    print_comparison(
+        baseline_o,
+        candidate_b_o,
+        candidate_label="候选B",
+        train_start=train_start,
+        train_end=train_end,
+    )
 
     # 6. 选出最佳候选
     print("\n" + "=" * 80)

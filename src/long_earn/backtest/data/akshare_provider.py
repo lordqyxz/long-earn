@@ -153,7 +153,7 @@ class AkshareFallbackProvider:
 
         支持 csi300 / csi500 / sse50 / csi1000 四个指数；
         其他 universe_type 返回空列表（由上层降级链处理）。
-        获取后写入 DuckDB 缓存。
+        获取后写入 PostgreSQL 缓存（按当前快照保存，见下）。
         """
         if not self.is_available:
             return []
@@ -184,10 +184,19 @@ class AkshareFallbackProvider:
                 codes = df[code_col].astype(str).str.zfill(6).tolist()
                 symbols_xt = [ak_to_xt(c) for c in codes if c.isdigit()]
                 if symbols_xt:
-                    self.cache.save_universe(universe_type, date, symbols_xt)
+                    # P1-01 修复：akshare 仅返回当前成分股，不是历史成分股。
+                    # 用空 date（今日）保存，避免制造虚假的 PIT 历史快照。
+                    self.cache.save_universe(universe_type, "", symbols_xt)
+                    if date:
+                        logger.warning(
+                            f"[akshare 降级] 请求 {date} 的 {universe_type} 历史"
+                            f"成分股，但 akshare 仅能提供当前成分股 "
+                            f"({len(symbols_xt)} 只)，已按当前快照保存并返回"
+                            "（历史快照为幸存者偏差近似）"
+                        )
                     logger.info(
                         f"[akshare 降级] 获取 {universe_type} 成分股: "
-                        f"{len(symbols_xt)} 只，已写入缓存"
+                        f"{len(symbols_xt)} 只，已写入缓存（当前快照）"
                     )
                 return symbols_xt
         except Exception as e:

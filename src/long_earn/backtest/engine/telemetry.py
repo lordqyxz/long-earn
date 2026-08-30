@@ -74,7 +74,8 @@ def instrument_engine(engine: EventDrivenBacktestEngine) -> OtelSpanContext:
     引擎执行完成后可调用 ctx.get_trace() 获取完整 span 链路。
     """
     ctx = OtelSpanContext()
-    engine._otel_ctx = ctx  # type: ignore[attr-defined]
+    # _otel_ctx 已在 Engine 类体声明（Any，理由见 core.py 类属性注释）
+    engine._otel_ctx = ctx
     return ctx
 
 

@@ -9,9 +9,13 @@
 2. :func:`load_operator_class` —— 在隔离的模块命名空间编译执行审计通过的源码，
    提取出唯一一个 ``@operator`` 类，做契约校验后返回类对象。
 
-**注意**：AST 审计保证代码安全（不窃取数据 / 不执行系统命令）；**无未来函数**
-由 :mod:`long_earn.backtest.operators.causality` 的因果性证明在 test/validate
-节点保证——两者正交，共同构成算子上线的硬约束。
+**注意**：AST 审计 + 受限 builtins 共同保证代码安全（不窃取数据 / 不执行系统
+命令）；**无未来函数**由 :mod:`long_earn.backtest.operators.causality` 的因果性
+证明在 test/validate 节点保证——两者正交，共同构成算子上线的硬约束。
+
+已知残留风险（纵深防御边界）：polars/numpy 本身提供文件写出能力（如
+``DataFrame.write_parquet``），源码审计无法在不破坏算子功能的前提下封禁；
+根治方案是将编译执行移入无网络子进程（参照 ``ParallelRunner`` 的隔离模式）。
 """
 
 from __future__ import annotations
@@ -59,8 +63,13 @@ _FORBIDDEN_NAMES: frozenset[str] = frozenset(
         "ctypes",
         "importlib",
         "builtins",
+        "__builtins__",
         "globals",
         "locals",
+        "vars",
+        "getattr",
+        "setattr",
+        "delattr",
         "eval",
         "exec",
         "compile",
@@ -72,6 +81,90 @@ _FORBIDDEN_NAMES: frozenset[str] = frozenset(
         "__import__",
     }
 )
+
+
+# ── 受限 builtins（exec 命名空间唯一可见的内建集合）─────────────────────
+# 关键防线：若 exec 的 globals 缺少 "__builtins__" 键，CPython 会把完整
+# builtins 模块字典注入 ``__builtins__``，此时 ``__builtins__["__import__"]``
+# 的下标访问对 AST 名称审计不可见，可一行完成任意代码执行。显式提供受限
+# 集合后，名称审计 + builtins 白名单构成双保险。
+#
+# 注意：import 语句的字节码（IMPORT_NAME）必须经 builtins 中的
+# ``__import__`` 完成，因此不能整体省略——这里提供带运行期白名单守卫的
+# 替身（与静态审计共用 :func:`_assert_module_allowed`），eval/exec/open/
+# 裸 ``__import__`` 调用则完全不在此集合中。
+
+_real_import = __import__
+
+
+def _sandbox_import(
+    name: str,
+    globals: dict[str, object] | None = None,
+    locals: dict[str, object] | None = None,
+    fromlist: tuple[str, ...] = (),
+    level: int = 0,
+) -> object:
+    """受限 ``__import__``：运行期仅放行与审计同源的白名单模块。"""
+
+    root = name.split(".", maxsplit=1)[0]
+    _assert_module_allowed(name, root)
+    return _real_import(name, globals, locals, fromlist, level)
+
+
+_SANDBOX_BUILTINS: dict[str, object] = {
+    # 基础类型与构造（类体注解求值需要 str/int/list 等立即存在）
+    "bool": bool,
+    "int": int,
+    "float": float,
+    "str": str,
+    "bytes": bytes,
+    "list": list,
+    "dict": dict,
+    "tuple": tuple,
+    "set": set,
+    "frozenset": frozenset,
+    "type": type,
+    "object": object,
+    # 常用内建函数
+    "len": len,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "round": round,
+    "range": range,
+    "enumerate": enumerate,
+    "zip": zip,
+    "map": map,
+    "filter": filter,
+    "sorted": sorted,
+    "reversed": reversed,
+    "any": any,
+    "all": all,
+    "isinstance": isinstance,
+    "issubclass": issubclass,
+    "repr": repr,
+    "hash": hash,
+    "super": super,
+    "staticmethod": staticmethod,
+    "classmethod": classmethod,
+    "property": property,
+    # 受控异常集（apply 运行期抛错需要；engine 调用方法时仍沿用本命名空间）
+    "Exception": Exception,
+    "ValueError": ValueError,
+    "TypeError": TypeError,
+    "KeyError": KeyError,
+    "IndexError": IndexError,
+    "ArithmeticError": ArithmeticError,
+    "ZeroDivisionError": ZeroDivisionError,
+    "AttributeError": AttributeError,
+    "RuntimeError": RuntimeError,
+    "NotImplementedError": NotImplementedError,
+    # import 语句的运行期入口（白名单守卫替身，见上方注释）
+    "__import__": _sandbox_import,
+    # class 语句的字节码入口（创建类对象必需；类体仍运行在本受限命名空间）
+    "__build_class__": __build_class__,
+}
 
 
 def _check_import(node: ast.Import | ast.ImportFrom) -> None:
@@ -180,9 +273,12 @@ def load_operator_class(source: str, expected_name: str = "") -> type[Operator]:
 
     audit_source(source)  # 先审计，违规则抛
 
-    # 在隔离的模块命名空间编译执行
+    # 在隔离的模块命名空间编译执行（显式受限 builtins，见 _SANDBOX_BUILTINS）
     module_name = f"_opdev_sandbox_{uuid.uuid4().hex[:12]}"
-    mod_globals: dict[str, object] = {"__name__": module_name}
+    mod_globals: dict[str, object] = {
+        "__name__": module_name,
+        "__builtins__": dict(_SANDBOX_BUILTINS),
+    }
     try:
         exec(compile(source, f"<opdev:{module_name}>", "exec"), mod_globals)
     except Exception as exc:

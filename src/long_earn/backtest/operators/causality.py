@@ -75,7 +75,11 @@ class CausalityProof:
     parameter_hashes: tuple[str, ...]
 
 
-_TEMPORAL_PARAMETER_NAMES = frozenset(
+# 时序参数名总表（单一事实源）：算子参数中表达「回溯窗口」语义的全部键。
+# 消费方：本模块注册证明的边界参数扫描（_registration_parameter_cases）、
+# engine/dsl.lookback_profile 的 warmup 推断。新增时序参数名必须在此登记，
+# 两处自动同步（历史上 dsl 侧清单落后导致 warmup 低估，见 ADR-013 T6 同族）。
+TEMPORAL_PARAMETER_NAMES: frozenset[str] = frozenset(
     {
         "period",
         "periods",
@@ -166,7 +170,7 @@ def _registration_parameter_cases(
     cls = type(op).params_cls
     cases = list(current_params or [cls.model_validate(_default_parameter_data(op))])
     base = cases[0].model_dump()
-    temporal_names = _TEMPORAL_PARAMETER_NAMES.intersection(base)
+    temporal_names = TEMPORAL_PARAMETER_NAMES.intersection(base)
     for name in sorted(temporal_names):
         for boundary in (1, 29):
             candidate = dict(base)

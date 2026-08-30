@@ -4,6 +4,10 @@ Kimi 采集器包装现有 ``services/kimi_web_search.py``；ciccwm 采集器包
 ``CiccwmDataProvider`` 的热榜与专题资讯能力（ADR-006 独占接口）。
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from long_earn.event_inference.collectors.base import (
     CollectedItem,
     Collector,
@@ -14,6 +18,9 @@ from long_earn.event_inference.collectors.ciccwm_collector import (
     CiccwmTopicCollector,
 )
 from long_earn.event_inference.collectors.kimi_collector import KimiCollector
+
+if TYPE_CHECKING:
+    from long_earn.backtest.data.provider import MarketIntelligenceProvider
 
 __all__ = [
     "CiccwmHotCollector",
@@ -27,7 +34,7 @@ __all__ = [
 
 
 def create_default_collector_registry(
-    market_intelligence: object | None = None,
+    market_intelligence: MarketIntelligenceProvider | None = None,
 ) -> CollectorRegistry:
     """构造默认采集器注册表（ADR-018）。
 
@@ -37,6 +44,6 @@ def create_default_collector_registry(
     registry = CollectorRegistry()
     registry.register(KimiCollector())
     if market_intelligence is not None:
-        registry.register(CiccwmHotCollector(market_intelligence))  # type: ignore[arg-type]
-        registry.register(CiccwmTopicCollector(market_intelligence))  # type: ignore[arg-type]
+        registry.register(CiccwmHotCollector(market_intelligence))
+        registry.register(CiccwmTopicCollector(market_intelligence))
     return registry

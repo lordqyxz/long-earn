@@ -44,22 +44,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _latest_run_id() -> str:
-    """取最近一次写入的 run_id（测试串行运行，最近写入即本测试产物）。
-
-    用于 run_id 一致性等需要按 run_id 查询的测试。
-    """
-    conn = pg_connect(read_only=True, row_factory=None)
-    try:
-        row = conn.execute(
-            'SELECT run_id FROM "backtest_audit".logs '
-            "ORDER BY timestamp DESC, seq DESC LIMIT 1"
-        ).fetchone()
-        return str(row[0]) if row else ""
-    finally:
-        conn.close()
-
-
 def _query_audit_rows(
     where_sql: str = "",
     params: list[Any] | None = None,
@@ -415,10 +399,14 @@ def test_audit_run_id_consistency():
     engine.run(strategy, "2023-01-01", "2023-01-03", ["AAPL"], tags=[RUN_TAG_TEST])
     provider.close()
 
-    run_id = _latest_run_id()
-    assert run_id, "未能取得最新 run_id"
+    # 用本 engine 实例的 run_id 查询：共享 PG 存在并发写者，
+    # 按全表最新 timestamp 取 run 会验错对象。
+    # where_sql 以空格开头，配合 _query_audit_rows 的 " ORDER BY " 切分约定，
+    # 使 run_id 过滤插入 WHERE 段、ORDER BY 保留在尾部。
+    run_id = engine._current_run_id
+    assert run_id, "engine.run 后应有 _current_run_id"
     events = _query_audit_rows(
-        "WHERE run_id = %s ORDER BY timestamp ASC, seq ASC", [run_id]
+        " ORDER BY timestamp ASC, seq ASC", run_id=run_id
     )
     event_types = [r[3] for r in events]
     assert "RUN_START" in event_types, "缺少 RUN_START"
@@ -585,7 +573,14 @@ def test_direct_limit_order_audit():
 
 
 def test_max_position_pct_limit():
-    """P1-18: max_position_pct 限制应正确触发"""
+    """P1-18: max_position_pct 限制应正确触发
+
+    策略要求 100% 仓位，max_position_pct=0.05 应把目标仓位压制到组合净值的
+    5% 以内（portfolio._compute_order_infos 的买入封顶逻辑）。
+
+    实质断言（评审 H16）：从 FILL 审计事件取实际成交，任一买入 FILL 的
+    数量×成交价 / FILL 时点组合净值 ≤ max_position_pct + 容差。
+    """
     provider = PostgresAuditProvider()
     engine = EventDrivenBacktestEngine(
         audit_provider=provider,
@@ -593,10 +588,14 @@ def test_max_position_pct_limit():
         max_position_pct=0.05,  # 单只股票最多 5%
     )
 
+    # OHLC 齐全：T+1 以 open 价撮合，缺 open 列订单会被 PRICE_NOT_FOUND 跳过
     full_data = pl.DataFrame(
         {
             "timestamp": [datetime(2023, 1, 1), datetime(2023, 1, 2)],
             "symbol": ["AAPL", "AAPL"],
+            "open": [149.0, 151.0],
+            "high": [151.0, 153.0],
+            "low": [148.0, 150.0],
             "close": [150.0, 152.0],
             "volume": [10000.0, 12000.0],
         }
@@ -626,6 +625,24 @@ def test_max_position_pct_limit():
     # max_position_pct 限制后，单只股票仓位不应超过 5%
     # 回测应成功完成（不崩溃）
     assert result.success, "max_position_pct 限制后回测应成功"
+
+    # 实质断言：逐笔核对买入 FILL 的市值占比不超限
+    fill_rows = _query_audit_rows(
+        "WHERE event_type = %s",
+        ["FILL"],
+        run_id=engine._current_run_id,
+    )
+    buy_fills = [r for r in fill_rows if _payload_of(r).get("type") == "BUY"]
+    assert buy_fills, "场景应产生至少 1 笔买入 FILL（否则占比断言空转）"
+    # 容差覆盖滑点/整手取整与净值计价时点差异；超限实现（如 100% 仓位）会远超
+    tolerance = 0.005
+    for row in buy_fills:
+        payload = _payload_of(row)
+        ratio = (payload["quantity"] * payload["price"]) / payload["portfolio_value"]
+        assert ratio <= 0.05 + tolerance, (
+            f"买入 FILL（{payload['quantity']}股 @ {payload['price']}）"
+            f"占组合净值 {ratio:.4f}，超过 max_position_pct=0.05 + 容差"
+        )
 
 
 def test_stop_loss_risk_trigger_event():

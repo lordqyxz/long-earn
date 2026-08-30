@@ -25,8 +25,19 @@ class TimeSeriesSplit:
         Returns:
             n_splits 个 (train, test) 元组，train 严格在 test 之前，
             中间可选 gap 个样本隔离（防泄漏）。
+
+        Raises:
+            ValueError: 样本数不足（n < n_splits + 1）——此时 fold_size=0
+                会产出空 train/test 切分，下游 ``train_ts[0]`` 直接 IndexError
+                且错误形态失真（曾致 walk-forward 短区间回测报
+                engine_error 而非明确的样本不足）。
         """
         n = len(timestamps)
+        if n < self.n_splits + 1:
+            raise ValueError(
+                f"Walk-Forward 样本不足: 至少需要 n_splits+1={self.n_splits + 1} "
+                f"个时间戳，得到 {n}"
+            )
         fold_size = n // (self.n_splits + 1)
         splits: list[tuple[list[Any], list[Any]]] = []
         for i in range(1, self.n_splits + 1):
