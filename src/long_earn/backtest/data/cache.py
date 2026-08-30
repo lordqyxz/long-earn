@@ -13,8 +13,11 @@
   异常 rollback）+ 进程内单写者 RLock；
 - 批量装载（save_prices / save_financial_table）经 ``raw_psycopg_connection``
   逃生舱下沉 psycopg3 COPY 协议，与外层事务同块提交（脏标记原子性保持）；
-- SQL 执行统一 ``exec_driver_sql``：保持 psycopg ``%s`` 占位符与列表参数
-  （全仓 SQL 字符串零改写），行消费走 Row 整数下标（元组契约兼容）；
+- SQL 执行双轨：复杂分析 SQL（价格/财务/面板）统一 ``exec_driver_sql``
+  经 ``_exec`` 适配（保持 psycopg ``%s`` 占位符与列表参数，行消费走 Row
+  整数下标）；4 张简单表（universe / instrument_details / 水位 / 脏标记）
+  走 Core Table 元数据表达式（DDL 单一真相源 create_all + upsert/update
+  类型安全），见模块级「简单表 Core 元数据」注释；
 - ``_get_conn()`` 保留为实例级池化 psycopg 原生连接，仅供测试以 psycopg
   语义准备/清理数据使用，生产读路径一律走 ``_read()``。
 
@@ -33,7 +36,21 @@ from typing import Any
 
 import pandas as pd
 from loguru import logger
-from sqlalchemy import Connection
+from sqlalchemy import (
+    Column,
+    Connection,
+    Date,
+    DateTime,
+    MetaData,
+    String,
+    Table,
+    func,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, insert as pg_insert
 
 from long_earn.backtest.data.financial.schemas import (
     _PG_TYPE_MAP,
@@ -78,6 +95,85 @@ def _exec(conn: Connection, sql: str, params: list[Any] | None = None) -> Any:
     if len(params) > 0 and isinstance(params[0], tuple | dict):
         return conn.exec_driver_sql(sql, params)
     return conn.exec_driver_sql(sql, tuple(params))
+
+
+# ── 简单表 Core 元数据（DML 类型安全 + DDL 单一真相源）───────────────
+#
+# 这 4 张表结构简单稳定，用 SQLAlchemy Table 元数据统一管理（2026-08-30
+# 中间态决策：只做简单表，不做全仓 ORM——批量分析型负载与 ORM 会话模型
+# 冲突，复杂分析 SQL 保持 _exec 驱动级原生 SQL）：
+# - DDL：``_init_tables`` 经 ``_metadata.create_all`` 生成（checkfirst 幂等，
+#   等价 CREATE TABLE IF NOT EXISTS），消除 DDL 与 DML 的双定义漂移；
+# - DML：upsert/update 走 Core 表达式（on_conflict_do_update 等），列名
+#   拼写进 pyright 检查范围，非法列名运行期 KeyError（纵深防御）。
+_metadata = MetaData()
+
+universe_constituents_t = Table(
+    "universe_constituents",
+    _metadata,
+    Column("index_code", String, primary_key=True),
+    Column("symbol", String, primary_key=True),
+    Column("date", Date, primary_key=True),
+)
+
+instrument_details_t = Table(
+    "instrument_details",
+    _metadata,
+    Column("symbol", String, primary_key=True),
+    Column("name", String, nullable=False, server_default=text("''")),
+    Column("industry", String, server_default=text("''")),
+    Column("region", String, server_default=text("''")),
+    Column("listing_date", String, server_default=text("''")),
+    Column("total_shares", DOUBLE_PRECISION, server_default=text("0")),
+    Column("float_shares", DOUBLE_PRECISION, server_default=text("0")),
+    Column("market_value", DOUBLE_PRECISION, server_default=text("0")),
+    Column("flow_market_value", DOUBLE_PRECISION, server_default=text("0")),
+    Column("updated_at", DateTime, server_default=func.now()),
+)
+
+financial_sync_watermark_t = Table(
+    "financial_sync_watermark",
+    _metadata,
+    Column("symbol", String, primary_key=True),
+    Column("checked_until", Date, nullable=False),
+    Column("updated_at", DateTime, server_default=func.now()),
+)
+
+panel_dirty_t = Table(
+    "panel_dirty",
+    _metadata,
+    Column("symbol", String, primary_key=True),
+)
+
+# create_all 的简单表集合（_init_tables 使用）
+_SIMPLE_TABLES = (
+    universe_constituents_t,
+    instrument_details_t,
+    financial_sync_watermark_t,
+    panel_dirty_t,
+)
+
+
+def _instrument_details_upsert_stmt() -> Any:
+    """instrument_details 幂等 upsert（pk=symbol，非主键列取 EXCLUDED）。
+
+    单条与批量写入共用同一语句（executemany 语义由参数形态决定）。
+    """
+    ins = pg_insert(instrument_details_t)
+    return ins.on_conflict_do_update(
+        index_elements=[instrument_details_t.c.symbol],
+        set_={
+            "name": ins.excluded.name,
+            "industry": ins.excluded.industry,
+            "region": ins.excluded.region,
+            "listing_date": ins.excluded.listing_date,
+            "total_shares": ins.excluded.total_shares,
+            "float_shares": ins.excluded.float_shares,
+            "market_value": ins.excluded.market_value,
+            "flow_market_value": ins.excluded.flow_market_value,
+            "updated_at": func.now(),
+        },
+    )
 
 
 # ── 宽表 panel_daily（合并面板物化形态）───────────────────────────────
@@ -246,7 +342,9 @@ class DataCache:
         的 RLock 串行化。崩溃自愈：重建事务回滚 → 脏标记保留 → 下次重试。
         """
         with self._read() as conn:
-            row = _exec(conn, "SELECT COUNT(*) FROM panel_dirty").fetchone()
+            row = conn.execute(
+                select(func.count()).select_from(panel_dirty_t)
+            ).fetchone()
         if not row or not row[0]:
             return
         with self._write_transaction() as conn:
@@ -451,37 +549,12 @@ class DataCache:
                         f"ALTER TABLE cashflow_stmt ADD COLUMN IF NOT EXISTS {col_def}",
                     )
 
-            # 指数成分股
-            _exec(
-                conn,
-                """
-                CREATE TABLE IF NOT EXISTS universe_constituents (
-                    index_code VARCHAR NOT NULL,
-                    symbol VARCHAR NOT NULL,
-                    date DATE NOT NULL,
-                    PRIMARY KEY (index_code, symbol, date)
-                )
-            """,
-            )
-
-            # 标的详情（公司名称、行业、上市日期等）
-            _exec(
-                conn,
-                """
-                CREATE TABLE IF NOT EXISTS instrument_details (
-                    symbol VARCHAR PRIMARY KEY,
-                    name VARCHAR NOT NULL DEFAULT '',
-                    industry VARCHAR DEFAULT '',
-                    region VARCHAR DEFAULT '',
-                    listing_date VARCHAR DEFAULT '',
-                    total_shares DOUBLE PRECISION DEFAULT 0,
-                    float_shares DOUBLE PRECISION DEFAULT 0,
-                    market_value DOUBLE PRECISION DEFAULT 0,
-                    flow_market_value DOUBLE PRECISION DEFAULT 0,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """,
-            )
+            # 简单表 DDL（universe / instrument_details / 水位 / 脏标记）由
+            # Table 元数据单一生成：checkfirst 幂等，等价 CREATE TABLE IF
+            # NOT EXISTS（类型/默认值与旧手写 DDL 一致，DOUBLE_PRECISION
+            # 显式引用保持列型精确）。复杂表（price_daily / 8 张财务细表 /
+            # panel_daily）保持下方手写 DDL。
+            _metadata.create_all(conn, tables=list(_SIMPLE_TABLES))
 
             # 宽表 panel_daily：合并面板物化形态（行情 + PIT as-of 财务）。
             # 列集 = price_daily 行情列 + PANEL_FINANCIAL_FIELDS 财务列；
@@ -508,30 +581,8 @@ class DataCache:
             """,
             )
 
-            # 脏标记表：写事务内记录待重建 symbol（与数据写入同事务原子
-            # 提交，读侧永远看不到「数据已变但标记未变」的中间态）
-            _exec(
-                conn,
-                """
-                CREATE TABLE IF NOT EXISTS panel_dirty (
-                    symbol VARCHAR PRIMARY KEY
-                )
-            """,
-            )
-
-            # 财务同步水位表：记录每只股票「上次检查截止日」，供财务增量判定
-            # 区分「数据旧」与「最近查过」——沉默股票（无新公告、重下返回 0 行、
-            # 公告日不推进）靠水位退出待查集，否则每次同步都重复重下（死循环）
-            _exec(
-                conn,
-                """
-                CREATE TABLE IF NOT EXISTS financial_sync_watermark (
-                    symbol VARCHAR PRIMARY KEY,
-                    checked_until DATE NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """,
-            )
+            # 脏标记表与财务同步水位表的 DDL 已收敛到上方 create_all
+            # （Table 元数据单一真相源，见模块级「简单表 Core 元数据」注释）
 
             # 五表财务聚合视图（panel_daily 重建的数据源，幂等替换）
             _exec(conn, _financial_union_view_sql())
@@ -833,17 +884,12 @@ class DataCache:
         """
         if not symbols:
             return {}
-        placeholders = ", ".join(["%s"] * len(symbols))
+        wm = financial_sync_watermark_t.c
         with self._read() as conn:
-            rows = _exec(
-                conn,
-                f"""
-                SELECT symbol, MAX(checked_until) as checked
-                FROM financial_sync_watermark
-                WHERE symbol IN ({placeholders})
-                GROUP BY symbol
-                """,
-                symbols,
+            rows = conn.execute(
+                select(wm.symbol, func.max(wm.checked_until))
+                .where(wm.symbol.in_(symbols))
+                .group_by(wm.symbol)
             ).fetchall()
         return {r[0]: str(r[1]) for r in rows if r[1] is not None}
 
@@ -854,25 +900,31 @@ class DataCache:
     ) -> None:
         """批量推进财务同步水位（批次检查成功后调用，含空返回）。
 
-        ON CONFLICT 幂等 upsert。调用方契约：仅在批次「成功检查」后推进
-        （含合法的 0 行返回=沉默股票）；xtquant 异常/失败批次不得推进，
-        保留下轮重试。
+        Core 表达式 upsert（ON CONFLICT 幂等）。调用方契约：仅在批次
+        「成功检查」后推进（含合法的 0 行返回=沉默股票）；xtquant 异常/
+        失败批次不得推进，保留下轮重试。
         """
         if not symbols:
             return
-        rows = [(sym, checked_until) for sym in symbols]
+        wm = financial_sync_watermark_t.c
+        ins = pg_insert(financial_sync_watermark_t)
+        stmt = ins.on_conflict_do_update(
+            index_elements=[wm.symbol],
+            set_={
+                "checked_until": ins.excluded.checked_until,
+                "updated_at": func.now(),
+            },
+        )
         with self._write_transaction() as conn:
-            _exec(
-                conn,
-                """
-                INSERT INTO financial_sync_watermark
-                    (symbol, checked_until, updated_at)
-                VALUES (%s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (symbol) DO UPDATE
-                SET checked_until = EXCLUDED.checked_until,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                rows,
+            conn.execute(
+                stmt,
+                [
+                    {
+                        "symbol": sym,
+                        "checked_until": pd.Timestamp(checked_until).date(),
+                    }
+                    for sym in symbols
+                ],
             )
         logger.debug(f"财务同步水位推进: {len(symbols)} 只 -> {checked_until}")
 
@@ -1409,16 +1461,22 @@ class DataCache:
         if not date_fmt:
             date_fmt = datetime.now().strftime("%Y-%m-%d")
 
+        uc = universe_constituents_t.c
         with self._write_transaction() as conn:
-            # exec_driver_sql 以参数列表调用时走驱动 executemany
-            _exec(
-                conn,
-                """
-                INSERT INTO universe_constituents (index_code, symbol, date)
-                VALUES (%s, %s, %s::date)
-                ON CONFLICT (index_code, symbol, date) DO NOTHING
-                """,
-                [(index_code, sym, date_fmt) for sym in symbols],
+            # Core 表达式 executemany upsert（Date 列传 date 对象，
+            # 免 psycopg 文本参数与 DATE 列的类型不匹配）
+            conn.execute(
+                pg_insert(universe_constituents_t).on_conflict_do_nothing(
+                    index_elements=[uc.index_code, uc.symbol, uc.date]
+                ),
+                [
+                    {
+                        "index_code": index_code,
+                        "symbol": sym,
+                        "date": pd.Timestamp(date_fmt).date(),
+                    }
+                    for sym in symbols
+                ],
             )
         logger.info(f"缓存成分股: {index_code} @ {date}, {len(symbols)} 只")
 
@@ -1489,41 +1547,12 @@ class DataCache:
             return
         parsed = self._parse_xtquant_detail(detail)
         with self._write_transaction() as conn:
-            _exec(
-                conn,
-                """
-                INSERT INTO instrument_details
-                    (symbol, name, industry, region, listing_date,
-                     total_shares, float_shares, market_value, flow_market_value, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    industry = EXCLUDED.industry,
-                    region = EXCLUDED.region,
-                    listing_date = EXCLUDED.listing_date,
-                    total_shares = EXCLUDED.total_shares,
-                    float_shares = EXCLUDED.float_shares,
-                    market_value = EXCLUDED.market_value,
-                    flow_market_value = EXCLUDED.flow_market_value,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                [
-                    symbol,
-                    parsed["name"],
-                    parsed["industry"],
-                    parsed["region"],
-                    parsed["listing_date"],
-                    parsed["total_shares"],
-                    parsed["float_shares"],
-                    parsed["market_value"],
-                    parsed["flow_market_value"],
-                ],
-            )
+            conn.execute(_instrument_details_upsert_stmt(), parsed | {"symbol": symbol})
 
     def save_instrument_details_batch(
         self, items: list[tuple[str, dict[str, Any]]]
     ) -> int:
-        """批量保存标的详情。
+        """批量保存标的详情（Core 表达式 executemany upsert）。
 
         Args:
             items: [(symbol, detail_dict), ...]
@@ -1532,58 +1561,26 @@ class DataCache:
         """
         if not items:
             return 0
-        rows: list[tuple[Any, ...]] = []
+        rows: list[dict[str, Any]] = []
         for symbol, detail in items:
             if not symbol or not detail:
                 continue
             parsed = self._parse_xtquant_detail(detail)
-            rows.append(
-                (
-                    symbol,
-                    parsed["name"],
-                    parsed["industry"],
-                    parsed["region"],
-                    parsed["listing_date"],
-                    parsed["total_shares"],
-                    parsed["float_shares"],
-                    parsed["market_value"],
-                    parsed["flow_market_value"],
-                )
-            )
+            rows.append(parsed | {"symbol": symbol})
         if not rows:
             return 0
         with self._write_transaction() as conn:
-            # exec_driver_sql 以参数列表调用时走驱动 executemany
-            _exec(
-                conn,
-                """
-                INSERT INTO instrument_details
-                    (symbol, name, industry, region, listing_date,
-                     total_shares, float_shares, market_value, flow_market_value, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    industry = EXCLUDED.industry,
-                    region = EXCLUDED.region,
-                    listing_date = EXCLUDED.listing_date,
-                    total_shares = EXCLUDED.total_shares,
-                    float_shares = EXCLUDED.float_shares,
-                    market_value = EXCLUDED.market_value,
-                    flow_market_value = EXCLUDED.flow_market_value,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                rows,
-            )
+            conn.execute(_instrument_details_upsert_stmt(), rows)
         logger.info(f"缓存标的详情: {len(rows)} 条")
         return len(rows)
 
     def get_instrument_detail_cached(self, symbol: str) -> dict[str, Any] | None:
         """从缓存读取单个标的详情。"""
         with self._read() as conn:
-            row = _exec(
-                conn,
-                "SELECT * FROM instrument_details WHERE symbol = %s",
-                [symbol],
+            row = conn.execute(
+                select(instrument_details_t).where(
+                    instrument_details_t.c.symbol == symbol
+                )
             ).fetchone()
         if not row:
             return None
@@ -1607,12 +1604,10 @@ class DataCache:
         """
         if not symbols:
             return {}
-        placeholders = ", ".join(["%s"] * len(symbols))
+        ic = instrument_details_t.c
         with self._read() as conn:
-            rows = _exec(
-                conn,
-                f"SELECT symbol, name FROM instrument_details WHERE symbol IN ({placeholders})",
-                symbols,
+            rows = conn.execute(
+                select(ic.symbol, ic.name).where(ic.symbol.in_(symbols))
             ).fetchall()
         return {r[0]: r[1] for r in rows if r[1]}
 
@@ -1626,14 +1621,10 @@ class DataCache:
         if not symbol:
             return
         with self._write_transaction() as conn:
-            _exec(
-                conn,
-                """
-                UPDATE instrument_details
-                SET industry = %s, region = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE symbol = %s
-                """,
-                [industry, region, symbol],
+            conn.execute(
+                update(instrument_details_t)
+                .where(instrument_details_t.c.symbol == symbol)
+                .values(industry=industry, region=region, updated_at=func.now())
             )
 
     def batch_update_instrument_sectors(
@@ -1642,27 +1633,33 @@ class DataCache:
         """批量更新 instrument_details 的 industry 或 region 字段。
 
         通过 xtquant THY1（同花顺行业）/ DY1（地域）板块构建映射后批量回填，
-        仅更新空值行（不覆盖已有数据）。
+        仅更新空值行（不覆盖已有数据）。Core 表达式按列对象构造 SET/WHERE，
+        非法列名在元数据查找期即 KeyError（相比 f-string 列名注入面更窄）。
 
         Args:
-            mapping: ``{symbol: value}``，如 ``{"000002.SZ": "房地产"}``
+            mapping: ``{symbol: value}``，如 ``{"000002.SZ": "房地产"}```
             field: 目标字段名，``"industry"`` 或 ``"region"``
         Returns:
             实际更新行数
         """
         if not mapping or field not in ("industry", "region"):
             return 0
+        target_col = instrument_details_t.c[field]  # 非法列名在此 KeyError
         updated = 0
         with self._write_transaction() as conn:
             for symbol, value in mapping.items():
-                result = _exec(
-                    conn,
-                    f"""
-                    UPDATE instrument_details
-                    SET {field} = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE symbol = %s AND ({field} = '' OR {field} IS NULL)
-                    """,
-                    [value, symbol],
+                result = conn.execute(
+                    update(instrument_details_t)
+                    .where(
+                        instrument_details_t.c.symbol == symbol,
+                        or_(target_col == "", target_col.is_(None)),
+                    )
+                    .values(
+                        {
+                            target_col: value,
+                            instrument_details_t.c.updated_at: func.now(),
+                        }
+                    )
                 )
                 updated += result.rowcount or 0
         return updated
