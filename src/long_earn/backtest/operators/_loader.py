@@ -54,6 +54,12 @@ OPERATOR_REGISTRY: dict[str, Operator] = {}
 # 附带 prove_causality 报告，报告以结构化 CausalityProof 对象留存可查）。
 PROOF_REGISTRY: dict[str, CausalityProof] = {}
 
+# 已退役算子名 → 新名（名实不符清理）。get_operator 对旧名抛明确迁移错误，
+# 不静默别名，避免 YAML 继续引用误导性 ID。
+OPERATOR_RENAMES: dict[str, str] = {
+    "roe_quality": "return_quality",
+    "gross_margin_stability": "price_stability",
+}
 
 class OperatorNotFoundError(KeyError):
     """引用了未注册的算子名。"""
@@ -213,8 +219,18 @@ def register_operator(
 
 
 def get_operator(name: str) -> Operator:
-    """按名取算子；不存在抛 :class:`OperatorNotFoundError`。"""
+    """按名取算子；不存在抛 :class:`OperatorNotFoundError`。
 
+    若 ``name`` 属于 :data:`OPERATOR_RENAMES`，抛错并提示应改用的新名
+    （须同步改策略 YAML 的 ``op`` 字段，见 AGENTS.md 算子更名约定）。
+    """
+
+    if name in OPERATOR_RENAMES:
+        new_name = OPERATOR_RENAMES[name]
+        raise OperatorNotFoundError(
+            f"算子 '{name}' 已更名为 '{new_name}'（名实不符清理）；"
+            f"请将策略 YAML 中 op: {name} 改为 op: {new_name}"
+        )
     if name not in OPERATOR_REGISTRY:
         raise OperatorNotFoundError(
             f"未知算子 '{name}'，已注册: {sorted(OPERATOR_REGISTRY)}"

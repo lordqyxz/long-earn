@@ -107,7 +107,7 @@
 | 文首「后端 High 21」 | 笔误 → 订正为 17（正文 H1–H17） |
 | H17「invoke 应重置 trial_count」 | 已驳回（DSR 跨 invoke 累计） |
 | `connector._parse_quarter` 抛 ValueError | 评审过时：实现返回 `("", "")` 与 docstring 一致 |
-| 算子 `roe_quality` / `gross_margin_stability` 改名 | 冲突 YAML → 只改 docstring，不改 ID |
+| 算子 `roe_quality` / `gross_margin_stability` 改名 | **已改判并落地**：更名为 `return_quality` / `price_stability`，YAML/测试同步；旧名经 `OPERATOR_RENAMES` 报明确迁移错误（见 AGENTS.md 6.1） |
 | remote 完整鉴权 | 无身份产品 → 只加固 Origin |
 | 因果性补全基本面形式化证明 | 收窄注册声明，不扩写证明管线 |
 | 热注册强制覆盖磁盘 | warning + 指纹漂移告警，不默认覆盖 |

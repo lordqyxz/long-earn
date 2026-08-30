@@ -185,6 +185,7 @@ prompt = prompt_template.format(query=query)
 - **回测引擎内嵌**：回测引擎已整合到主项目（`src/long_earn/backtest/`），无需启动外部 HTTP 服务。策略通过 YAML DSL 描述，引擎直接调用。
 - **仅支持多头、不支持做空**：`Portfolio` 仅维护 `cash` + 多头 `positions`，无 `short_positions`；DSL `weights` 仅支持 `equal`。弱市下唯一可用风控是"空仓 + 止损 + 最大回撤清仓"，无法对冲/做空/动态降仓。
 - **表达式安全（已退役）**：ADR-003 的 AST 白名单求值器已于 2026-07 收尾时删除（Superseded by ADR-009）。所有策略走算子目录路径（[ADR-009](docs/adr/009-operator-catalog-and-operator-dev-subgraph.md)），以 `prove_causality` 因果性数学证明 + 算子目录白名单共同保证无未来函数。DSL 解析期强制拒绝旧式 `factors` 字段与 `filter`/`rank`/`expression` 信号类型。
+- **算子更名须连带迁移 YAML（铁律）**：算子注册名（`Operator.name`）是策略 YAML `op` 字段的契约 ID。发现名实不符（如实现是价格因子却冒用基本面名）时，**必须改名并同步全部策略 YAML / 模板 / 测试引用**，不得「只改正文保留误导 ID」。旧名登记于 `OPERATOR_RENAMES`，`get_operator(旧名)` 抛明确迁移错误（不静默别名）。例：`roe_quality` → `return_quality`，`gross_margin_stability` → `price_stability`（2026-08-30）。
 - **回测记录标签机制（铁律）**：回测审计记录（`backtest_audit.logs`）支持 run 级 `tags`（存于 RUN_START payload.tags，常量 `RUN_TAG_TEST = "test"`）。**测试/冒烟回测写共享 PG 时必须携带专用标签 `test`**：经引擎跑测试传 `tags=["test"]`（`EventDrivenBacktestEngine.run(tags=...)`），经 `AuditLogger` 直写用 `log_run_start({"tags": ["test"]})`。审计库清理接口（`DELETE /api/runs/clean`，口径见 `src/long_earn/app/analyzer.py::get_empty_or_error_runs`）以「带 test 标签」识别测试污染（替代旧 run_id 前缀启发式 run-/t-/conc-/rw-），并保留结构性无效口径（无 FILL 空跑 / RUN_ERROR / 无 RUN_END 孤儿 / 成交笔数 < 5）。生产回测不传 tags，不会被 test 标签清理误伤。
 
 ### 6.2 数据层

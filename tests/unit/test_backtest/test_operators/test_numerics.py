@@ -20,13 +20,13 @@ from long_earn.backtest.operators.compose.quality_momentum import QualityMomentu
 from long_earn.backtest.operators.factor.e2e_volatility import (
     P as E2EVolatilityParams,
 )
-from long_earn.backtest.operators.factor.gross_margin_stability import (
-    GrossMarginStabilityParams,
+from long_earn.backtest.operators.factor.price_stability import (
+    PriceStabilityParams,
 )
 from long_earn.backtest.operators.factor.log_return import LogReturnParams
 from long_earn.backtest.operators.factor.realized_vol import RealizedVolParams
 from long_earn.backtest.operators.factor.returns import ReturnsParams
-from long_earn.backtest.operators.factor.roe_quality import RoeQualityParams
+from long_earn.backtest.operators.factor.return_quality import ReturnQualityParams
 from long_earn.backtest.operators.factor.shift import ShiftParams
 from long_earn.backtest.operators.factor.windowed import WindowedParams
 from long_earn.backtest.operators.filter.threshold import FilterThresholdParams
@@ -398,35 +398,35 @@ class TestRealizedVolStability:
         assert out is not None
 
 
-class TestGrossMarginStabilityStability:
-    """gross_margin_stability 算子：毛利率稳定性，含除零保护"""
+class TestPriceStabilityNumerics:
+    """price_stability 算子：价格稳定性，含除零保护"""
 
     def test_handles_nan(self) -> None:
-        out = get_operator("gross_margin_stability").apply(
+        out = get_operator("price_stability").apply(
             _panel_with_nan(),
-            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
+            PriceStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
     def test_handles_inf(self) -> None:
-        out = get_operator("gross_margin_stability").apply(
+        out = get_operator("price_stability").apply(
             _panel_with_inf(),
-            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
+            PriceStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
     def test_handles_extreme(self) -> None:
-        out = get_operator("gross_margin_stability").apply(
+        out = get_operator("price_stability").apply(
             _panel_with_extreme(),
-            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
+            PriceStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
     def test_window_longer_than_data(self) -> None:
         panel = _panel_short_for_window()
-        out = get_operator("gross_margin_stability").apply(
+        out = get_operator("price_stability").apply(
             panel,
-            GrossMarginStabilityParams(field="close", window=100, min_samples=50),
+            PriceStabilityParams(field="close", window=100, min_samples=50),
         )
         assert out is not None
 
@@ -435,41 +435,41 @@ class TestGrossMarginStabilityStability:
             {"symbol": [], "timestamp": [], "close": []},
             schema={"symbol": pl.Utf8, "timestamp": pl.Int64, "close": pl.Float64},
         )
-        out = get_operator("gross_margin_stability").apply(
+        out = get_operator("price_stability").apply(
             empty,
-            GrossMarginStabilityParams(field="close", window=60, min_samples=30),
+            PriceStabilityParams(field="close", window=60, min_samples=30),
         )
         assert out is not None
 
 
-class TestRoeQualityStability:
-    """roe_quality 算子：ROE 质量，含 ret_std==0 分支"""
+class TestReturnQualityNumerics:
+    """return_quality 算子：收益质量，含 ret_std==0 分支"""
 
     def test_handles_nan(self) -> None:
-        out = get_operator("roe_quality").apply(
+        out = get_operator("return_quality").apply(
             _panel_with_nan(),
-            RoeQualityParams(field="close", window=20, min_samples=5),
+            ReturnQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_handles_inf(self) -> None:
-        out = get_operator("roe_quality").apply(
+        out = get_operator("return_quality").apply(
             _panel_with_inf(),
-            RoeQualityParams(field="close", window=20, min_samples=5),
+            ReturnQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_handles_extreme(self) -> None:
-        out = get_operator("roe_quality").apply(
+        out = get_operator("return_quality").apply(
             _panel_with_extreme(),
-            RoeQualityParams(field="close", window=20, min_samples=5),
+            ReturnQualityParams(field="close", window=20, min_samples=5),
         )
         assert out is not None
 
     def test_window_longer_than_data(self) -> None:
         panel = _panel_short_for_window()
-        out = get_operator("roe_quality").apply(
-            panel, RoeQualityParams(field="close", window=100, min_samples=50)
+        out = get_operator("return_quality").apply(
+            panel, ReturnQualityParams(field="close", window=100, min_samples=50)
         )
         assert out is not None
 
@@ -478,8 +478,8 @@ class TestRoeQualityStability:
             {"symbol": [], "timestamp": [], "close": []},
             schema={"symbol": pl.Utf8, "timestamp": pl.Int64, "close": pl.Float64},
         )
-        out = get_operator("roe_quality").apply(
-            empty, RoeQualityParams(field="close", window=20, min_samples=5)
+        out = get_operator("return_quality").apply(
+            empty, ReturnQualityParams(field="close", window=20, min_samples=5)
         )
         assert out is not None
 

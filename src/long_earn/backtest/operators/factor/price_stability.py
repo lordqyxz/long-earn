@@ -5,7 +5,7 @@ import polars as pl
 from long_earn.backtest.operators.base import Operator, OperatorParams, operator
 
 
-class GrossMarginStabilityParams(OperatorParams):
+class PriceStabilityParams(OperatorParams):
     field: str = "close"
     window: int = 60
     min_samples: int = 30
@@ -13,30 +13,30 @@ class GrossMarginStabilityParams(OperatorParams):
 
 
 @operator
-class GrossMarginStability(Operator):
-    """价格稳定性代理（**非基本面毛利率**）。
+class PriceStability(Operator):
+    """价格稳定性：滚动均值/波动 + 相对均值偏离。
 
-    名称保留 ``gross_margin_stability`` 以兼容既有策略 YAML；实际用
-    ``params.field`` 价格滚动均值/波动与短期偏离，不读取 ``gross_margin`` 列。
+    仅使用 ``params.field`` 价格序列，**不是**基本面毛利率因子。
+    旧名 ``gross_margin_stability`` 已废弃，见 ``OPERATOR_RENAMES``。
     """
 
-    name: ClassVar[str] = "gross_margin_stability"
+    name: ClassVar[str] = "price_stability"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = ["close"]
     # 实际依赖字段由 params.field 决定（参数驱动），field_params 据此标注
     field_params: ClassVar[list[str]] = ["field"]
-    params_cls: ClassVar[type[OperatorParams]] = GrossMarginStabilityParams
+    params_cls: ClassVar[type[OperatorParams]] = PriceStabilityParams
     min_history: ClassVar[int] = 0
 
     def apply(self, panel: pl.DataFrame, params: OperatorParams) -> pl.Series:
-        assert isinstance(params, GrossMarginStabilityParams)
+        assert isinstance(params, PriceStabilityParams)
         field = params.field
         window = params.window
         min_samples = params.min_samples
         eps = params.eps
 
         # 保留原始行序，确保因果性验证通过（面板可能 shuffle）。
-        panel = panel.with_row_index("__gms_row_id")
+        panel = panel.with_row_index("__ps_row_id")
         if "symbol" in panel.columns and "timestamp" in panel.columns:
             panel = panel.sort(["symbol", "timestamp"])
 
@@ -60,18 +60,16 @@ class GrossMarginStability(Operator):
                 window_size=window, min_samples=min_samples
             )
 
-        # Compute rolling mean and std, then combine level and stability.
-        # High mean and low volatility => positive score. Also add a small momentum term
-        # (current value relative to rolling mean) as a proxy for positive slope.
+        # High mean and low volatility => positive score. Also add a small
+        # momentum term (current vs rolling mean) as a slope proxy.
         out = panel.with_columns(
-            mean_expr.alias("_gms_mean"),
-            std_expr.alias("_gms_std"),
+            mean_expr.alias("_ps_mean"),
+            std_expr.alias("_ps_std"),
         ).with_columns(
             (
-                -pl.col("_gms_std") / (pl.col("_gms_mean").abs() + eps)
-                + (pl.col(field) - pl.col("_gms_mean")) / (pl.col("_gms_std") + eps)
-            ).alias("_gms_score")
+                -pl.col("_ps_std") / (pl.col("_ps_mean").abs() + eps)
+                + (pl.col(field) - pl.col("_ps_mean")) / (pl.col("_ps_std") + eps)
+            ).alias("_ps_score")
         )
-        # 恢复原始行序
-        out = out.sort("__gms_row_id")
-        return out["_gms_score"]
+        out = out.sort("__ps_row_id")
+        return out["_ps_score"]

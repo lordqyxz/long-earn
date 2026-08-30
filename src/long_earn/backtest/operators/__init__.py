@@ -13,6 +13,7 @@ import 本包即触发一次自动扫描，把 ``operators/<category>/*.py`` 中
 
 from long_earn.backtest.operators._loader import (
     OPERATOR_REGISTRY,
+    OPERATOR_RENAMES,
     PROOF_REGISTRY,
     OperatorNotFoundError,
     get_operator,
@@ -32,6 +33,7 @@ from long_earn.backtest.operators.causality import CausalityProof, PerturbStrate
 
 __all__ = [
     "OPERATOR_REGISTRY",
+    "OPERATOR_RENAMES",
     "PROOF_REGISTRY",
     "VALID_CATEGORIES",
     "CausalityProof",

@@ -40,8 +40,8 @@ EXPECTED_OPS = {
     "log_return",
     "realized_vol",
     # operator_dev 新增算子
-    "gross_margin_stability",
-    "roe_quality",
+    "price_stability",
+    "return_quality",
     "lowvol_momentum_combo",
     "quality_momentum",
     "e2e_volatility",
@@ -75,6 +75,14 @@ class TestLoader:
     def test_get_operator_unknown_raises(self):
         with pytest.raises(OperatorNotFoundError):
             get_operator("does_not_exist")
+
+    def test_get_operator_renamed_raises_with_hint(self):
+        """旧名须提示新名，强制 YAML 迁移（不静默别名）。"""
+        from long_earn.backtest.operators._loader import OPERATOR_RENAMES
+
+        for old, new in OPERATOR_RENAMES.items():
+            with pytest.raises(OperatorNotFoundError, match=new):
+                get_operator(old)
 
     def test_list_operators_schema(self):
         entry = list_operators()["shift"]
