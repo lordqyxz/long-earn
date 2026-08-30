@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import BaseModel, Field
 
 from long_earn.core.llm_utils import parse_llm_json
+from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.operator_dev.spec import OperatorSpec
 
 if TYPE_CHECKING:
@@ -103,15 +104,14 @@ class LLMImplementer:
         failure_section = (
             f"\n\n## 上次失败报告（请修复 source_code）\n{failure}" if failure else ""
         )
-        return (
-            "实现一个量化算子。严格只用 polars/numpy/math/long_earn.backtest.*，"
-            "禁止 os/subprocess/eval 等。必须因果（仅回溯历史，禁止读未来）。\n\n"
-            "请**仅**返回如下 JSON（不要 markdown，不要解释）：\n"
-            '{"source_code": "<完整可执行的 Python 源码>"}\n'
-            "source_code 必须可被 ast.parse 直接解析，禁止 ``` 围栏与前后散文。\n\n"
-            f"## 算子规约\n{spec!r}\n\n"
-            f"## 源码骨架参考（写入 source_code 字段的内容形态）\n{hint}\n"
-            f"{failure_section}"
+        prompt = MarkdownPromptTemplate(
+            "implement_prompt.md",
+            caller_file=__file__,
+        )
+        return prompt.format(
+            spec_repr=repr(spec),
+            source_hint=hint,
+            failure_section=failure_section,
         )
 
 

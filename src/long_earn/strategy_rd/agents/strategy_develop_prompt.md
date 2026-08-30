@@ -116,6 +116,15 @@ strategy:
 6. **因果性硬约束**：每个算子上线前均通过 `prove_causality`（未来扰动不变性）证明，
    策略层无需担心未来函数；输入面板由 VisibilityGuard 保证 `timestamp <= 当前时刻`
 
+### 算子命名准确度（铁律）
+
+`op` / 算子注册名是契约 ID，必须描述**实际计算**（数据域 + 变换），禁止用投资叙事或愿望代理命名。
+
+- **名实一致**：仅当算子真正读取对应财务列时，名称才可含 `roe` / `margin` / `earnings` / `pe` / `pb` 等基本面词根；若输入仅为 `close`/`high`/`low`/`volume` 等行情列，必须用 `return` / `price` / `vol` / `momentum` 等价格域词根。
+- **禁止反例**：价格滚动稳定性 ≠ `gross_margin_stability`；收益均值/波动 ≠ `roe_quality`。正确命名：`price_stability` / `return_quality`。
+- **叙事放 alias**：`alias: quality_score` 可以讲故事；`op` 必须忠于算法。
+- **只用目录**：策略 YAML 的 `op` 必须来自算子目录，禁止臆造名实不符的新算子名；缺算子时应改用目录内等价组合（如 `returns`/`windowed`），而非发明误导 ID。
+
 ### 股票池类型
 
 | 类型 | 说明 | 适用场景 |
@@ -315,11 +324,12 @@ strategy:
 2. **字段名必须来自可用字段列表**：只能使用 open/high/low/close/volume/revenue/net_profit/eps/research_expenses/total_equity/total_assets/total_liabilities/ocf/capex/bps/ocf_per_share/debt_to_assets/net_profit_margin/roe_weighted/net_profit_yoy/revenue_yoy/roe/gross_margin
 3. **仅使用算子目录路径**：所有因子用 `operator_factors`，所有信号步骤用 `type: operator` + 算子名 + params。旧式 `factors` 表达式、`type: filter`/`type: rank`/`type: expression` 信号已退役，解析期强制拒绝
 4. **算子参数必须合法**：`operator_factors` 和 `type: operator` signals 的 op 必须来自上方算子目录，params 必须匹配算子的 params_schema（必填参数不可省略）
-5. **日期格式**：YYYY-MM-DD
-6. **股票池必须有效**：从可用类型中选择。**默认推荐 `main_board+gem`（沪深除科创板所有标的）**，除非 idea 明确指定其他池子；按 idea 与市场环境主动选择，不要默认使用 csi300/csi500
-7. **权重方法**：`equal`（ADR-009 收尾后仅支持等权重；`signal`/`custom_formula` 已退役）
-8. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
-9. **T+1 执行**：回测引擎假设信号在 T 日生成，T+1 日执行
+5. **算子命名准确度**：`op` 必须名实一致（见上方铁律）；禁止臆造 `roe_quality` / `gross_margin_stability` 这类用基本面词包装价格计算的 ID
+6. **日期格式**：YYYY-MM-DD
+7. **股票池必须有效**：从可用类型中选择。**默认推荐 `main_board+gem`（沪深除科创板所有标的）**，除非 idea 明确指定其他池子；按 idea 与市场环境主动选择，不要默认使用 csi300/csi500
+8. **权重方法**：`equal`（ADR-009 收尾后仅支持等权重；`signal`/`custom_formula` 已退役）
+9. **仅使用 ASCII 半角字符**：代码中禁止使用全角中文标点
+10. **T+1 执行**：回测引擎假设信号在 T 日生成，T+1 日执行
 
 ## 思维链引导
 

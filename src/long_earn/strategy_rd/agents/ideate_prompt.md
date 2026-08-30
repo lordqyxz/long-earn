@@ -38,6 +38,13 @@
 可用算子包括：`returns`, `windowed`, `shift`, `arithmetic`, `filter_threshold`, `rank_top`,
 `sma`, `ema`, `rsi`, `macd`, `bollinger` 等。
 
+### 算子命名准确度（铁律）
+
+- **名实一致**：仅用基本面词根（`roe`/`margin`/`earnings` 等）命名真正读取财务列的算子；仅用行情列时用 `return`/`price`/`vol`/`momentum` 等价格域词根。
+- **禁止反例**：价格滚动稳定性 ≠ `gross_margin_stability`（→ `price_stability`）；收益均值/波动 ≠ `roe_quality`（→ `return_quality`）。
+- **叙事放 alias**：投资故事写在 `alias`，`op` 必须忠于算法。
+- **只用目录**：`op` 必须来自算子目录，缺算子时改用目录内组合，禁止臆造误导 ID。
+
 ## 任务
 生成 {{ branching_factor }} 个具体的策略改进假设。每个假设必须：
 1. 明确的改进方向（收益增强/风险控制/收益稳定性）

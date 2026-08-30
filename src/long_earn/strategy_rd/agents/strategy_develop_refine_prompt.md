@@ -49,6 +49,15 @@ ADR-009 收尾后策略**仅支持算子目录路径**：所有因子计算用 `
 ✅ 正确：`operator_factors: [{ op: windowed, alias: vol20, params: { field: close, window: 20, agg: std } }]`
 ❌ 错误：op 不在目录中、必填参数缺失、参数类型不匹配、缺少 alias
 
+### 算子命名准确度（铁律）
+
+`op` / 算子注册名是契约 ID，必须描述**实际计算**（数据域 + 变换），禁止用投资叙事或愿望代理命名。
+
+- **名实一致**：仅当算子真正读取对应财务列时，名称才可含 `roe` / `margin` / `earnings` / `pe` / `pb` 等基本面词根；若输入仅为 `close`/`high`/`low`/`volume` 等行情列，必须用 `return` / `price` / `vol` / `momentum` 等价格域词根。
+- **禁止反例**：价格滚动稳定性 ≠ `gross_margin_stability`；收益均值/波动 ≠ `roe_quality`。正确命名：`price_stability` / `return_quality`。
+- **叙事放 alias**：`alias: quality_score` 可以讲故事；`op` 必须忠于算法。
+- **只用目录**：策略 YAML 的 `op` 必须来自算子目录，禁止臆造名实不符的新算子名；缺算子时应改用目录内等价组合（如 `returns`/`windowed`），而非发明误导 ID。
+
 ### 5. 股票池
 ✅ 正确：`csi300`, `csi500`, `csi1000`, `sse50`, `all_a`, `main_board`, `gem`, `star_board`, `main_board+gem`, `main_board+star_board`（默认推荐 `main_board+gem`）
 ❌ 错误：使用不存在的股票池类型；或未按 idea 与市场环境主动选择，默认套用 csi300/csi500
@@ -169,10 +178,11 @@ operator_factors:
 2. **字段名必须有效**：只能从可用字段列表中选择
 3. **仅使用算子目录路径**：所有信号步骤必须用 `type: operator` + 算子名 + params；旧式 `factors`/`type: filter`/`type: rank`/`type: expression` 已退役
 4. **算子参数合法**：op 必须来自算子目录，params 必须匹配算子的 params_schema（必填参数不可省略）
-5. **日期格式**：YYYY-MM-DD
-6. **股票池有效**：从支持的类型中选择
-7. **权重方法**：`equal`（ADR-009 收尾后仅支持等权重）
-8. **仅使用 ASCII 半角字符**
+5. **算子命名准确度**：`op` 必须名实一致（见上方铁律）；禁止臆造用基本面词包装价格计算的 ID（反例：`roe_quality` / `gross_margin_stability`）
+6. **日期格式**：YYYY-MM-DD
+7. **股票池有效**：从支持的类型中选择
+8. **权重方法**：`equal`（ADR-009 收尾后仅支持等权重）
+9. **仅使用 ASCII 半角字符**
 
 ## 思维链引导
 

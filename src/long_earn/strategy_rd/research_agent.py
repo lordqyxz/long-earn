@@ -421,8 +421,10 @@ class ResearchAgent:
             """研发缺失算子：写入 OperatorBacklog 并尝试跑 operator_dev 子图一轮。
 
             Args:
-                name: 算子名（snake_case）
-                intent: 研发意图描述
+                name: 算子名（snake_case）。必须名实一致：描述真实数据域+变换；
+                    行情列用 return/price/vol/momentum 等词根，财务列才可用
+                    roe/margin/earnings 等。禁止 roe_quality（实为价格）这类误导名。
+                intent: 研发意图——写清真实输入列与计算公式，禁止用基本面叙事包装价格因子。
                 category: 算子类别
             """
             with monitoring.track("research.develop_operator"):

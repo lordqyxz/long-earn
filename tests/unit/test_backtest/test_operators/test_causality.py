@@ -28,13 +28,13 @@ from long_earn.backtest.operators.compose.quality_momentum import QualityMomentu
 from long_earn.backtest.operators.factor.e2e_volatility import (
     P as E2EVolatilityParams,
 )
+from long_earn.backtest.operators.factor.log_return import LogReturnParams
 from long_earn.backtest.operators.factor.price_stability import (
     PriceStabilityParams,
 )
-from long_earn.backtest.operators.factor.log_return import LogReturnParams
 from long_earn.backtest.operators.factor.realized_vol import RealizedVolParams
-from long_earn.backtest.operators.factor.returns import ReturnsParams
 from long_earn.backtest.operators.factor.return_quality import ReturnQualityParams
+from long_earn.backtest.operators.factor.returns import ReturnsParams
 from long_earn.backtest.operators.factor.shift import ShiftParams
 from long_earn.backtest.operators.factor.windowed import WindowedParams
 from long_earn.backtest.operators.filter.threshold import FilterThresholdParams
