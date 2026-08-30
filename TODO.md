@@ -1,4 +1,4 @@
-# TODO — 待办清单
+﻿# TODO — 待办清单
 
 > 最后更新：2026-08-30
 >
@@ -12,7 +12,7 @@
 > **修复进度追踪约定**：`[ ]` 未开始、`[~]` 部分完成、`[x]` 已完成（完成即从本文件移除）。所有修复必须配套回归测试。
 > 当前系统**不具备直接进入实盘交易的合规条件**，Q2 信任项闭环后需重新审计方可进入模拟盘验证。
 >
-> **架构现状（ADR-018 + ADR-019）**：策略研发控制面为 ToG `ResearchAgent`；HTR 降为脚手架；事件 `prepare_context` 与显式多源数据层已落地；**统一存储已全量迁移 PostgreSQL（ADR-019）**，DuckDB 三库与 `backup/` 归档已删除。总览见 [docs/architecture.md](docs/architecture.md)。
+> **架构现状（ADR-018 → ADR-022）**：策略研发控制面为 ToG `ResearchAgent`（ADR-018）；**ADR-010 HTR 编排已 Deprecated**，清退为当前冲刺项；事件 `prepare_context` 与显式多源数据层已落地；**统一存储 PostgreSQL（ADR-019）**；**宽表 `panel_daily` + ADBC（ADR-020）**；**LLM 分层（ADR-021）**；**统计验证门控用法 + 进化分期（ADR-022）**——WF 硬闸、DSR/PBO 诊断、进化 L0–L3。总览见 [docs/architecture.md](docs/architecture.md)。
 
 ---
 
@@ -30,6 +30,13 @@
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
 - [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（股票腿动量因子 OOS 反号，非门控问题）。下一轮方向：重设计股票腿（动量→基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
+- [ ] **ADR-022 §A 实施（统计验证门控）** — 实施前评审见 canvas `adr-022-preimpl-review`。建议波次：
+  - **P0** 契约对齐：`run_oos_gates` 输出 `dsr`/`pbo` 的 `passed|skipped|reason`（+ `simplified`）；写回层 DSR **降为诊断**（不得因 DSR 单独硬拒）；修 PBO&lt;2 静默 `passed=True`
+  - **P1** PBO 迁入 ToG：维护候选 IS/OOS sharpe 配对；缺矩阵 → `skipped`；**须先于 HTR 清退**
+  - **P2** ToG 合并阈值：相对 current best（落点待定：StrategyExperience 最佳 vs `best_strategy.yaml`）+ S1 串联
+  - **P3** DSR 完整输入：真日收益（修正 equity 误写入 `daily_returns`）+ trial registry + \(N_{\mathrm{eff}}\)
+  - **P4** 测试债：mock 改为 `run_oos`；补 skipped / 诊断契约测
+- [ ] **HTR 遗留线清退（ADR-010 Deprecated / ADR-021 / ADR-022）**：依赖 ADR-022 **P1 完成**；`cli`/`app` 迁 ResearchAgent 后删编排；白名单收紧。**迁移前冻结**
 - [~] **Web 前端开发**（`web/`）— 次线，按需继续开发
 
 ---
@@ -39,7 +46,6 @@
 - [~] **后台测试/冒烟 run 持续堆积**：持续有进程向共享 PG 写测试/冒烟回测 run（曾观测 dry-run 187 个无效 run 堆积），现均带 `test` 标签可被清理接口清除；建议排查写入源头进程，或定期使用看板清理按钮。
 - [ ] **启动同步重复劳动（轻微）**：`_enrich_sectors_from_xtquant` 每次同步全量拉 THY1/DY1 板块映射（只回填空行，首轮后为 2 次 API 调用 + 空转）；`_is_price_stale`（`get_price_panel` 路径）被 ~12 只永久 stale 标的拖累反复进刷新分支（刷新增量，浪费有界）。均自限、非死循环。（2026-08-30 评估：行情路径不引入水位，见冲刺记录；板块回填空转留待后续）
 - [ ] **并行 run_candidates 偶发 worker 失败**：哑铃网格阶段 2 中第 9/10 号任务（W250_511260 / W250_CASH）ERR——worker 内失败、无 RUN_START，疑似 worker 复用时环境性失败；单进程复现可跑通。影响面小（同窗结论不受影响），但动摇并行结果可信度，下轮大网格前值得排查。（2026-08-23：并行数据底座已从 SharedMemory 换为 mmap IPC 文件，Windows 句柄类环境性失败可能同源消除，待大网格复验；2026-08-30 大网格 19 任务两阶段未复现）
-- [ ] **HTR 遗留线清退（ADR-021 联动）**（2026-08-30 立项）：`strategy_rd/htr_subgraph.py` + `strategy_rd/agents/`（约 9 处 LLM 调用点，含 `_should_retrieve` 检索路由、`decide` 循环控制流等 LLM 干确定性活的违例，及 `strategy_rd_supervisor.py` 死代码）+ `skills/personas/` 大师库，仍被 `cli.py` 与 `app/app.py` 的 research 端点使用。清退方案：调用方迁移至 ToG `ResearchAgent` 后整体删除遗留线，LLM 控制流决策按 ADR-021 规则化；`check_llm_call_sites.py` 白名单中遗留线条目随清退移除。迁移前冻结：不得新增调用方或在遗留线内扩展功能。
 
 ---
 
@@ -49,15 +55,16 @@
 
 ### 能力扩展（门控）
 
-- [ ] **AUDIT-P1-04** 行业集中度风控 — **暂缓**（缺回测路径 `industry` 数据源）
-- [ ] **行业对比视角**（`stock_analysis`；依赖行业数据时可联动）
+- [ ] **AUDIT-P1-04** 行业集中度风控（ADR-013 P2）— **暂缓**（`instrument_details.industry` 已有板块回填，但引擎风控未贯通持仓行业暴露；覆盖率/质量门未建）
+- [ ] **行业对比视角**（`stock_analysis`；可与 AUDIT-P1-04 同批联动）
 - [ ] **多策略组合**
 - [ ] **近实盘**：实时行情喂入引擎 `on_bar`
-- [ ] **ADR-017 自我进化** — Deferred；前置：统计门端到端验证 + 稳健策略验证集基线 + ResearchAgent 飞轮稳定
+- [ ] **ADR-017 自我进化** — Deferred；技能规格见 ADR-017，**解锁节奏见 ADR-022 L0–L3**（当前至多 L0：S1 已多次拦截；尚无 ToG 路径测试集合并 → 未达 L1）
 
 ### 工程化与纵深防御
 
-- [ ] **数据库引擎层第二阶段迁移**（SQLAlchemy Core）：审计 `PostgresAuditProvider` / 记忆库 `substance.persistence` / 分析器 `app.analyzer`（+ `tools/backtest_analyzer.py`）迁移到 `core/db.py` 统一引擎层（第一阶段 DataCache 已完成，79142ba）；迁移时复用 read/write 上下文与 COPY 逃生舱模式，消解三处手工连接管理分叉
+- [ ] **数据库引擎层第二阶段迁移**（SQLAlchemy Core，承接 ADR-019）：审计 `PostgresAuditProvider` / 记忆库 `substance.persistence` / 分析器 `app.analyzer` 迁移到 `core/db.py` 统一引擎层（第一阶段 DataCache 已完成，79142ba）；迁移时复用 read/write 上下文与 COPY 逃生舱模式，消解三处手工连接管理分叉
+- [ ] **ADR-022 §A DSR 完整版 / 试验登记**（波次 P3）：引擎/OOS 真日收益 + skew/kurt；trial registry 与 \(N_{\mathrm{eff}}\)；契约齐备后再议升硬性门控
 - [ ] **性能监控**：LLM Token + 回测耗时（`MonitoringService`）
 - [ ] **配置中心化**：多环境 `config.yaml`
 - [ ] **AUDIT-P3-01** `@pytest.mark.regression` 集中回归套件

@@ -1,44 +1,34 @@
-# ADR-002: functools.partial 替代闭包进行节点注入
+---
+id: 2
+title: functools.partial 节点依赖注入
+status: Accepted
+date: 2024-05
+summary: 以 functools.partial 显式注入替代闭包，便于 LangGraph 节点独立导入与单测。
+---
 
-日期: 2024-05
-状态: 已采纳
+# ADR-002: 以 functools.partial 进行节点依赖注入
+
 
 ## 背景
 
-策略研发子图 (`strategy_rd/subgraph.py`) 原本使用闭包模式定义 LangGraph 节点：
-
-```python
-def create_strategy_rd_subgraph(context):
-    agent = StrategyResearchAgent(context=context)
-    def research_node(state):
-        return agent.research(state["query"])
-    workflow.add_node("research", research_node)
-```
-
-问题：
-- 节点函数定义在闭包内部，无法单独测试
-- 闭包捕获的变量隐式、不可见
-- 代码可读性差
+策略研发子图曾以闭包定义 LangGraph 节点：节点函数嵌套在工厂函数内，捕获外部 `context` / agent。由此导致：节点无法独立导入与测试；依赖隐式不可见；可读性差。
 
 ## 决策
 
-使用 `functools.partial` 显式注入依赖到模块级节点函数。
+我们将模块级节点函数与 `functools.partial` 结合，显式注入依赖：
 
 ```python
 def _research_node(state, research_agent, logger):
     ...
 
-workflow.add_node("research", partial(_research_node, research_agent=agent, logger=logger))
+workflow.add_node(
+    "research",
+    partial(_research_node, research_agent=agent, logger=logger),
+)
 ```
-
-## 理由
-
-1. **可测试性**: 节点函数可独立导入和测试
-2. **显式依赖**: 每个节点函数签名清晰声明其依赖
-3. **可复用性**: 模块级函数可被多个图复用
 
 ## 后果
 
-- 节点函数签名变长（State + 各依赖参数）
-- 需要在 `create_strategy_rd_subgraph` 中显式创建 partial
-- 所有新子图应遵循此模式
+- **正面**：节点可独立测试；签名声明全部依赖；模块级函数可被多个图复用。
+- **负面**：节点签名变长；构图处须显式构造 partial。
+- **中性**：新建子图应遵循同一模式。

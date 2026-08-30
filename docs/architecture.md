@@ -25,7 +25,7 @@ flowchart TB
   Mem[Substance_Memory]
   Onto[Ontology_Connector]
   BT[backtest_engine]
-  Gates[OOS_DSR_PBO]
+  Gates[OOS_WF_hard_DSR_PBO_diag]
   Data[DataConnector_Cache_plus_miniqmt]
   Intel[MarketIntelligence_ciccwm]
   RT[RealtimeProvider]
@@ -63,7 +63,7 @@ flowchart TB
 | 层 | 职责 | 代表模块 |
 |----|------|----------|
 | L0 智能体 | 任务分解 / ToG 探索 | `master_agent` · `strategy_rd/research_agent` |
-| L1 领域子图工具 | 深度能力，非编排中枢 | `stock_analysis` · `event_inference` · `operator_dev` · `htr_subgraph`（脚手架） |
+| L1 领域子图工具 | 深度能力，非编排中枢 | `stock_analysis` · `event_inference` · `operator_dev` · `htr_subgraph`（**Deprecated，清退中**） |
 | L2 服务与技能 | DI、Persona、监控、LLM | `RuntimeContext` · `services/*` · `skills/personas` |
 | L3 领域内核 | 证据机与知识图 | `backtest` · `substance` · `ontology` · 算子目录 |
 | L4 数据与存储 | 显式多源 + Cache | PostgreSQL Cache · miniqmt · ciccwm 情报 · `LONG_EARN_DATA_DIR` |
@@ -94,11 +94,11 @@ flowchart LR
 | 算子上线 | — | `prove_causality` |
 | 数据分割 | — | `AppConfig` 三段式铁律 |
 
-HTR 假设树：保留为 **beam 谱系 / 状态存储**；`create_htr_subgraph` 为兼容入口，不是默认控制器。
+假设树：保留为 **beam 谱系 / 状态存储**。合并硬闸与 DSR/PBO 诊断用法见 **ADR-022（统计验证门控）**（ADR-015 仅保留失败反馈 / 探索修复）。`create_htr_subgraph` **已 Deprecated**（ADR-010），不得作为新入口；清退后删除。
 
 ---
 
-## 5. 数据层（取消降级叙事）
+## 5. 数据层（禁止跨源静默换源）
 
 | 能力组 | 接口 | 源选择 |
 |--------|------|--------|
@@ -116,7 +116,7 @@ HTR 假设树：保留为 **beam 谱系 / 状态存储**；`create_htr_subgraph`
 |------|------|
 | CLI / 对话 | `MasterAgent(context).invoke(...)` |
 | 直入策略飞轮 | `ResearchAgent(context).invoke(idea, constraints)` |
-| 兼容 HTR | `create_htr_subgraph(context)` |
-| 上下文激活 | `context.prepare_context(query)` |
+| ~~兼容 HTR~~ | ~~`create_htr_subgraph(context)`~~（Deprecated，清退中；勿新增调用） |
+| 上下文激活 | `context.prepare_context(query)`（确定性；miss 采集由 agent 显式触发，ADR-021） |
 
 DI：一律 `create_runtime_context()` / `initialize_context()`，禁止无 context 构造 Agent。

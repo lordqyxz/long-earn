@@ -82,13 +82,13 @@ uv run python scripts/download_data.py               # 全量下载行情/财务
 
 ## 架构
 
-运行时总览与调用图见 [docs/architecture.md](docs/architecture.md)；架构决策索引见 [docs/adr/README.md](docs/adr/README.md)。
+运行时总览与调用图见 [docs/architecture.md](docs/architecture.md)；ADR 见同目录 `docs/adr/*.md`（编写规范 [docs/adr/AGENTS.md](docs/adr/AGENTS.md)）；开发规范见 [AGENTS.md](AGENTS.md)；实现约束见 [docs/gotchas.md](docs/gotchas.md)。
 
 **依赖注入**：所有 Agent 与子图通过 `RuntimeContext` 初始化（`create_runtime_context()` / `initialize_context()`），禁止无 context 构造。服务接口定义为 `Protocol`，测试中用 Mock 替换。
 
-**ToG 飞轮（ADR-018）**：ResearchAgent 在 Ontology/Substance 上 expand→prune→算子开发→YAML 编译→训练集回测→OOS 统计门→写回经验；回测与 `prove_causality` 因果证明为不可跳过的硬约束。
+**ToG 正反馈闭环（ADR-018）**：ResearchAgent 在 Ontology/Substance 上 expand→prune→算子开发→YAML 编译→训练集回测→OOS 统计验证门控（ADR-022）→写回经验；回测与 `prove_causality` 为不可跳过的硬性约束。
 
-**数据层三组接口（ADR-018，无静默降级）**：
+**数据层三组接口（ADR-018，禁止静默跨源回退）**：
 
 | 能力 | 接口 | 数据源 |
 |------|------|--------|
