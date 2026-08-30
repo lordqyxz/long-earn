@@ -56,6 +56,7 @@
 
 ### 工程化与纵深防御
 
+- [ ] **数据库引擎层第二阶段迁移**（SQLAlchemy Core）：审计 `PostgresAuditProvider` / 记忆库 `substance.persistence` / 分析器 `app.analyzer`（+ `tools/backtest_analyzer.py`）迁移到 `core/db.py` 统一引擎层（第一阶段 DataCache 已完成，79142ba）；迁移时复用 read/write 上下文与 COPY 逃生舱模式，消解三处手工连接管理分叉
 - [ ] **性能监控**：LLM Token + 回测耗时（`MonitoringService`）
 - [ ] **配置中心化**：多环境 `config.yaml`
 - [ ] **AUDIT-P3-01** `@pytest.mark.regression` 集中回归套件
