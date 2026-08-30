@@ -92,7 +92,7 @@ def _populate_store(store: SubstanceStore) -> dict[str, str]:
     )
     e2 = _make_event(
         "白酒行业整体承压",
-        keys=["白酒", "行业"],
+        keys=["白酒", "行业", "600519"],
         symbols=["600519.SH"],
         sentiment="negative",
         category="行业",
@@ -161,17 +161,16 @@ class TestActivateEvents:
         assert result == []
 
     def test_conflict_group_mutually_exclusive(self, tmp_path):
-        """同 conflict_group 取 insertion_order 最高者（e1 胜 e2）。"""
+        """同 conflict_group 双方保留（ADR-023，不再互斥丢弃）。"""
         svc = _make_memory_service()
         _populate_store(svc._store)
 
-        # 触发 600519，应同时命中 e1（order=2）和 e2（order=1），但 conflict_group 互斥
+        # 触发 600519，应同时命中 e1 与 e2（矛盾双方保留）
         result = svc.activate_events("600519", k=5, include_relations=False)
         contents = "\n".join(result)
-        # e1 内容应存在（insertion_order 高）
         assert "净利润同比增长15%" in contents
-        # e2 内容应被互斥掉
-        assert "白酒行业整体承压" not in contents
+        assert "白酒行业整体承压" in contents
+        assert any("存在矛盾" in r for r in result)
 
     def test_include_relations_flag(self, tmp_path):
         """include_relations=True 时返回 RELATION 物质。"""

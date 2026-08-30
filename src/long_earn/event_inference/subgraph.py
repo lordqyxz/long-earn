@@ -36,7 +36,7 @@ from long_earn.event_inference.agents import (
     EventPropagator,
     create_default_extractors,
 )
-from long_earn.event_inference.collectors.base import CollectorRegistry
+from long_earn.event_inference.collectors.base import CollectedItem, CollectorRegistry
 from long_earn.event_inference.state import EventInferenceState
 
 if TYPE_CHECKING:
@@ -141,7 +141,12 @@ def _save_node(
         logger.info("[event_inference] save: 无事件可落库")
         return {"saved_sids": [], "summary": {"event_count": 0, "relation_count": 0}}
 
-    result = memory.save_events(events, relations, conflict_groups)
+    result = memory.save_events(
+        events,
+        relations,
+        conflict_groups,
+        collected_items=_collected_as_dicts(state.get("collected_items") or []),
+    )
     event_sids = [s for s in result.get("event_sids", []) if s]
     relation_sids = result.get("relation_sids", [])
     logger.info(
@@ -156,6 +161,20 @@ def _save_node(
             "collected_count": len(state.get("collected_items", [])),
         },
     }
+
+
+def _collected_as_dicts(items: list[CollectedItem]) -> list[dict[str, str]]:
+    """CollectedItem → 可跨服务边界传递的 dict（services 不依赖 event_inference）。"""
+    return [
+        {
+            "title": item.title,
+            "content": item.content,
+            "url": item.url,
+            "source": item.source,
+            "published_at": item.published_at,
+        }
+        for item in items
+    ]
 
 
 # ── 条件路由 ────────────────────────────────────────────────────────────

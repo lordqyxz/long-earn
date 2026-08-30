@@ -17,7 +17,7 @@ from loguru import logger
 
 from long_earn.substance.indices.graph import GraphIndex
 from long_earn.substance.indices.retrieval import RetrievalIndex
-from long_earn.substance.model import Substance, SubstanceForm
+from long_earn.substance.model import ReviewStatus, Substance, SubstanceForm
 from long_earn.substance.persistence import (
     delete_substance,
     load_all,
@@ -36,6 +36,8 @@ def _validate_chunk_params(chunk_size: int, chunk_overlap: int) -> None:
         raise ValueError(
             f"chunk_overlap ({chunk_overlap}) 必须小于 chunk_size ({chunk_size})"
         )
+
+
 DECAY_THRESHOLD = 0.3
 _MIN_CLUSTER_SIZE = 2
 
@@ -60,7 +62,10 @@ class SubstanceStore:
     # ── 物质管理 ──────────────────────────────────────────────
 
     def add(self, substance: Substance) -> str:
-        """添加物质，返回 sid。若已绑定持久化路径，原子追加到 DuckDB。"""
+        """添加物质，返回 sid。若已绑定持久化路径，原子追加到 PostgreSQL。"""
+        existing = self.get_by_sid(substance.sid)
+        if existing is not None and existing.review_status is ReviewStatus.RAW:
+            raise ValueError(f"RAW 证据不可覆盖: {substance.sid}")
         idx = len(self._substances)
         self._substances.append(substance)
         self._sid_to_index[substance.sid] = idx
@@ -365,6 +370,9 @@ class SubstanceStore:
         """
         if substance.sid not in self._sid_to_index:
             raise ValueError(f"物质不在存储中，无法同步变更: {substance.sid}")
+        existing = self._substances[self._sid_to_index[substance.sid]]
+        if existing.review_status is ReviewStatus.RAW:
+            raise ValueError(f"RAW 证据不可覆盖: {substance.sid}")
         self._dirty = True
         if self._persist_bound:
             save_substance(substance)

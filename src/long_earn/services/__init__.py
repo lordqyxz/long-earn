@@ -123,22 +123,21 @@ class MemoryService(Protocol):
         events: list[dict[str, Any]],
         relations: list[dict[str, Any]],
         conflict_groups: dict[int, str] | None = None,
+        collected_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """保存新闻事件与影响关系物质（ADR-007 Phase 2 事件推理引擎）。
+        """保存采集原文、候选断言与影响关系（ADR-023）。
 
-        将 extract 节点产出的事件 dict 列表落库为 ``form=EVENT`` 物质，
-        将 propagate 节点产出的关系 dict 列表落库为 ``form=RELATION`` 物质
-        （通过 ``event_index`` 解析到已保存事件的 sid）。
+        采集原文以 ``review_status=raw`` 落库，内容不可覆盖；抽取事件为
+        ``staging`` Claim；同标的相反情绪写 ``contradicts`` 边并保留双方。
 
         Args:
-            events: 事件 dict 列表（content/keys/symbols/sentiment/category/confidence）
-            relations: 关系 dict 列表（event_index/target/relation_type/confidence/
-                direction/rationale）
-            conflict_groups: 事件下标 → 冲突组 ID（conflict 节点产出，可空）
+            events: 事件 dict 列表
+            relations: 关系 dict 列表
+            conflict_groups: 事件下标 → 冲突组 ID
+            collected_items: 原始素材 dict（title/content/url/source/published_at）
 
         Returns:
-            ``{"event_sids": [...], "relation_sids": [...], "event_count": int,
-            "relation_count": int}``
+            event_sids / relation_sids / raw_sids / event_count / relation_count
         """
         ...
 
@@ -147,24 +146,21 @@ class MemoryService(Protocol):
         query: str,
         k: int = 5,
         include_relations: bool = True,
+        include_staging: bool = False,
     ) -> list[str]:
         """WorldInfo 激活引擎 — 关键词触发事件/关系物质（ADR-007 Phase 3）。
 
-        与 ``search`` 的区别：``search`` 走语义相似度（TF-IDF/embedding）单一通道；
-        ``activate_events`` 走 WorldInfo 关键词触发 + filter_logic + conflict_group
-        互斥 + 递归激活，专门召回 EVENT/RELATION 形态物质，适合把"相关市场事件"
-        注入策略研发/股票分析 prompt。
+        默认只注入 ``committed``；``include_staging=True`` 才纳入未过门断言。
+        RAW 证据永不进入激活列表。
 
         Args:
-            query: 触发文本（股票名/代码、策略主题、用户查询）
-            k: 返回物质数上限（token 预算）
-            include_relations: 是否同时返回 RELATION 形态物质（影响传播关系）
+            query: 触发文本
+            k: 返回物质数上限
+            include_relations: 是否同时返回 RELATION
+            include_staging: 是否注入暂存断言
 
         Returns:
-            可直接注入 prompt 的格式化字符串列表，每条形如::
-
-                【事件 | 标的: 600519 | 情绪: positive | 类别: 财报】
-                <事件内容>
+            可直接注入 prompt 的格式化字符串列表
         """
         ...
 

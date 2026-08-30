@@ -79,7 +79,8 @@ flowchart LR
   Q[研究意图] --> PC[prepare_context]
   PC --> Beam[expand_relations]
   Beam --> Prune[prune_paths]
-  Prune --> Ops[list_or_develop_operator]
+  Prune --> Gaps[list_gaps]
+  Gaps --> Ops[list_or_develop_operator]
   Ops --> YAML[compile_strategy_yaml]
   YAML --> BT[run_backtest_train]
   BT --> Gate[run_oos_gates]
@@ -89,12 +90,12 @@ flowchart LR
 
 | 角色 | 谁决定 | 谁强制 |
 |------|--------|--------|
-| 探索哪条假设 | ResearchAgent（LLM） | — |
+| 探索哪条假设 | ResearchAgent（LLM）选择；`list_gaps` 提供确定性缺口 | — |
 | 是否回测 / OOS | — | 工具契约 + AcceptanceGate / 统计门 |
 | 算子上线 | — | `prove_causality` |
 | 数据分割 | — | `AppConfig` 三段式铁律 |
 
-假设树：保留为 **beam 谱系 / 状态存储**。合并硬闸与 DSR/PBO 诊断用法见 **ADR-022（统计验证门控）**（ADR-015 仅保留失败反馈 / 探索修复）。`create_htr_subgraph` 与 HTR 编排实现已删除（ADR-010 Deprecated）；策略研发入口为 `ResearchAgent`。
+假设树：保留为 **beam 谱系 / 状态存储**。合并硬闸与 DSR/PBO 诊断用法见 **ADR-022**。断言 / 审核分层 / 缺口扫描见 **ADR-023**。`create_htr_subgraph` 与 HTR 编排实现已删除（ADR-010 Deprecated）；策略研发入口为 `ResearchAgent`。
 
 ---
 

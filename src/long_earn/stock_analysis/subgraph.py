@@ -228,7 +228,7 @@ def event_context_node(state, context: "RuntimeContext"):
     event_context = ""
     if hasattr(memory, "activate_events"):
         try:
-            events = memory.activate_events(trigger, k=5)
+            events = memory.activate_events(trigger, k=5, include_staging=True)
             if events:
                 event_context = "\n".join(events)
                 if logger:

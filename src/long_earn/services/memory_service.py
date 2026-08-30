@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from long_earn.ontology.model import RelationType
 from long_earn.services import LoggerService, MemoryService, StrategyExperience
-from long_earn.substance.model import Substance, SubstanceForm
+from long_earn.substance.model import Claim, ReviewStatus, Substance, SubstanceForm
 from long_earn.substance.motion import activate as activate_substances
 from long_earn.substance.store import SubstanceStore
 
@@ -96,10 +96,23 @@ class MemoryServiceImpl(MemoryService):
     def save_experience(self, experience: StrategyExperience) -> str:
         """保存策略经验 — 构造 STRATEGY 形态物质，字段存入结构化 metadata（无 markdown）。"""
         metrics = experience.metrics or {}
+        outcome = str(metrics.get("outcome") or "").lower()
+        review_status = (
+            ReviewStatus.COMMITTED
+            if outcome in {"success", "failure"}
+            else ReviewStatus.STAGING
+        )
+        claim = Claim(
+            subject=experience.name,
+            predicate="has_oos_alpha" if outcome == "success" else "proposes_strategy",
+            object="held_out_test" if outcome == "success" else "train_or_untested",
+            evidence_ref=str(metrics.get("run_id") or ""),
+        )
         s = Substance(
             form=SubstanceForm.STRATEGY,
             content=experience.rationale or experience.name,
             keys=[experience.name] if experience.name else [],
+            review_status=review_status,
             metadata={
                 "experience_type": "strategy",
                 "term": experience.name,
@@ -111,7 +124,8 @@ class MemoryServiceImpl(MemoryService):
                 "error_history": experience.error_history or [],
                 "sharpe_ratio": metrics.get("sharpe_ratio"),
                 "outcome": metrics.get("outcome"),
-                "backtest_success": metrics.get("outcome") == "success",
+                "backtest_success": outcome == "success",
+                "claim": claim.as_metadata(),
             },
         )
         sid = self._store.add(s)
@@ -174,11 +188,13 @@ class MemoryServiceImpl(MemoryService):
         query: str,
         k: int = 5,
         include_relations: bool = True,
+        include_staging: bool = False,
     ) -> list[str]:
         """WorldInfo 激活引擎 — 关键词触发事件/关系物质，返回 prompt 注入字符串。
 
         ADR-014 阶段 D：注入 OntologyGraph 时走图遍历激活（替代旧关键词递归），
         关系补充也用图遍历替代 O(N) store.get_all() 扫描。
+        ADR-023：默认只注入 committed；staging 须显式打开。
         """
         if not query.strip():
             return []
@@ -188,6 +204,7 @@ class MemoryServiceImpl(MemoryService):
             self._store,
             budget=k * 3 if include_relations else k,
             graph=self._ontology_graph,
+            include_staging=include_staging,
         )
 
         extra_relations = (
@@ -207,15 +224,19 @@ class MemoryServiceImpl(MemoryService):
         return output
 
     def _collect_extra_relations(self, substances: list[Substance]) -> list[Substance]:
-        """补充已激活事件的关系物质。
-
-        ADR-014 阶段 D：有 OntologyGraph 时用图遍历（O(图深度)），无则降级 O(N) 扫描。
-        """
+        """补充已激活事件的关系物质（影响边 + 矛盾边）。"""
         event_sids = {s.sid for s in substances if s.form == SubstanceForm.EVENT}
-        activated_sids = {s.sid for s in substances}
         if not event_sids:
             return []
+        seen = {s.sid for s in substances}
+        extra = self._impact_relations(event_sids, seen)
+        extra.extend(self._contradict_extras(event_sids, seen))
+        return extra
 
+    def _impact_relations(
+        self, event_sids: set[str], seen: set[str]
+    ) -> list[Substance]:
+        """IMPACTS / PROPAGATES_TO：有本体图则遍历，否则扫描 store。"""
         extra: list[Substance] = []
         if self._ontology_graph is not None:
             for event_sid in event_sids:
@@ -231,17 +252,35 @@ class MemoryServiceImpl(MemoryService):
                     if (
                         rel_sub is not None
                         and rel_sub.form is SubstanceForm.RELATION
-                        and rel_sub.sid not in activated_sids
+                        and rel_sub.sid not in seen
                     ):
                         extra.append(rel_sub)
-        else:
-            for s in self._store.get_all():
-                if (
-                    s.form is SubstanceForm.RELATION
-                    and s.sid not in activated_sids
-                    and s.source_id in event_sids
-                ):
-                    extra.append(s)
+                        seen.add(rel_sub.sid)
+            return extra
+        for s in self._store.get_all():
+            if (
+                s.form is SubstanceForm.RELATION
+                and s.sid not in seen
+                and s.source_id in event_sids
+            ):
+                extra.append(s)
+                seen.add(s.sid)
+        return extra
+
+    def _contradict_extras(
+        self, event_sids: set[str], seen: set[str]
+    ) -> list[Substance]:
+        """从 store 补 CONTRADICTS 边（本体图通常尚未登记这类边）。"""
+        extra: list[Substance] = []
+        for s in self._store.get_all():
+            if s.form is not SubstanceForm.RELATION:
+                continue
+            if (s.relation_type or "") != RelationType.CONTRADICTS.value:
+                continue
+            if s.sid in seen:
+                continue
+            if s.source_id in event_sids or s.target_id in event_sids:
+                extra.append(s)
         return extra
 
     @staticmethod
@@ -253,19 +292,32 @@ class MemoryServiceImpl(MemoryService):
             symbols = meta.get("symbols", []) or []
             category = meta.get("event_category", "")
             header = "【事件"
+            if s.review_status is not ReviewStatus.COMMITTED:
+                header += f" | 审核: {s.review_status.value}"
             if symbols:
-                header += f" | 标的: {','.join(symbols)}"
+                header += f" | 标的: {','.join(str(x) for x in symbols)}"
             if sentiment and sentiment != "neutral":
                 header += f" | 情绪: {sentiment}"
             if category:
                 header += f" | 类别: {category}"
+            claim = Claim.from_metadata(meta)
+            if claim is not None and claim.subject:
+                header += f" | 断言: {claim.subject} {claim.predicate} {claim.object}"
+            if meta.get("open_contradiction") or s.conflict_group:
+                header += " | 存在矛盾"
             header += f" | 置信度: {s.confidence:.2f}】"
             return f"{header}\n{s.content}\n"
         if s.form == SubstanceForm.RELATION and include_relations:
             meta = s.metadata
+            rel_type = s.relation_type or "impacts"
+            if rel_type == RelationType.CONTRADICTS.value:
+                header = (
+                    f"【矛盾 | {s.source_id} ⊥ {s.target_id}"
+                    f" | 置信度: {s.confidence:.2f}】"
+                )
+                return f"{header}\n{s.content}\n"
             target = meta.get("target", s.target_id or "")
             direction = meta.get("direction", "neutral")
-            rel_type = s.relation_type or "impacts"
             header = f"【影响关系 | {rel_type} → {target} | 方向: {direction}"
             header += f" | 置信度: {s.confidence:.2f}】"
             return f"{header}\n{s.content}\n"
@@ -336,14 +388,12 @@ class MemoryServiceImpl(MemoryService):
         events: list[dict[str, Any]],
         relations: list[dict[str, Any]],
         conflict_groups: dict[int, str] | None = None,
+        collected_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """保存新闻事件 + 影响关系物质。
-
-        events: [{content, keys, symbols, sentiment, category, confidence}, ...]
-        relations: [{event_index, target, relation_type, confidence, direction, rationale}, ...]
-        conflict_groups: {event_index: conflict_group_id}
-        """
+        """保存采集原文 + 候选事件断言 + 影响/矛盾关系。"""
         conflict_groups = conflict_groups or {}
+        raw_sids = self._persist_raw_items(collected_items or [])
+        evidence_ref = ",".join(raw_sids)
         event_sids: list[str] = []
 
         for idx, ev in enumerate(events):
@@ -352,6 +402,7 @@ class MemoryServiceImpl(MemoryService):
                 event_sids.append("")
                 continue
             symbols = ev.get("symbols") or []
+            claim = Claim.from_event_dict(ev, evidence_ref=evidence_ref)
             s = Substance(
                 form=SubstanceForm.EVENT,
                 content=content,
@@ -359,11 +410,14 @@ class MemoryServiceImpl(MemoryService):
                 source="event_inference",
                 confidence=float(ev.get("confidence", 1.0)),
                 conflict_group=conflict_groups.get(idx),
+                review_status=ReviewStatus.STAGING,
                 metadata={
                     "category": "新闻事件",
                     "event_category": ev.get("category", ""),
                     "sentiment": ev.get("sentiment", "neutral"),
                     "symbols": symbols,
+                    "claim": claim.as_metadata(),
+                    "evidence_sids": raw_sids,
                 },
             )
             event_sids.append(self._store.add(s))
@@ -386,6 +440,7 @@ class MemoryServiceImpl(MemoryService):
                 relation_type=str(rel.get("relation_type", "impacts")),
                 confidence=float(rel.get("confidence", 0.5)),
                 source="event_inference",
+                review_status=ReviewStatus.STAGING,
                 metadata={
                     "direction": rel.get("direction", "neutral"),
                     "target": target,
@@ -393,15 +448,86 @@ class MemoryServiceImpl(MemoryService):
             )
             relation_sids.append(self._store.add(s))
 
+        relation_sids.extend(
+            self._persist_contradict_relations(events, event_sids, conflict_groups)
+        )
+
         count = len([s for s in event_sids if s]) + len(relation_sids)
         self.logger.info(
-            f"事件推理落库: {len(event_sids)} 事件 + {len(relation_sids)} 关系 ({count} 物质)"
+            f"事件推理落库: {len(raw_sids)} 原文 + {len(event_sids)} 事件 + "
+            f"{len(relation_sids)} 关系 ({count} 物质)"
         )
         return {
             "event_sids": event_sids,
             "relation_sids": relation_sids,
+            "raw_sids": raw_sids,
             "event_count": len([s for s in event_sids if s]),
             "relation_count": len(relation_sids),
         }
 
-    # ── 内部 ───────────────────────────────────────────────────
+    def _persist_raw_items(self, items: list[dict[str, Any]]) -> list[str]:
+        """采集原文以 RAW 落库；无正文则跳过。"""
+        sids: list[str] = []
+        for item in items:
+            content = str(item.get("content") or item.get("title") or "").strip()
+            if not content:
+                continue
+            s = Substance(
+                form=SubstanceForm.KNOWLEDGE,
+                content=content,
+                keys=[],
+                source=str(item.get("source") or "collector"),
+                review_status=ReviewStatus.RAW,
+                metadata={
+                    "category": "采集原文",
+                    "title": str(item.get("title") or ""),
+                    "url": str(item.get("url") or ""),
+                    "published_at": str(item.get("published_at") or ""),
+                },
+            )
+            sids.append(self._store.add(s))
+        return sids
+
+    def _persist_contradict_relations(
+        self,
+        events: list[dict[str, Any]],
+        event_sids: list[str],
+        conflict_groups: dict[int, str],
+    ) -> list[str]:
+        """同冲突组正负情绪之间写 CONTRADICTS 边，双方事件均保留。"""
+        by_group: dict[str, list[int]] = {}
+        for idx, group_id in conflict_groups.items():
+            if 0 <= idx < len(event_sids) and event_sids[idx]:
+                by_group.setdefault(group_id, []).append(idx)
+        sids: list[str] = []
+        for indices in by_group.values():
+            positives = [
+                i
+                for i in indices
+                if str(events[i].get("sentiment") or "") == "positive"
+            ]
+            negatives = [
+                i
+                for i in indices
+                if str(events[i].get("sentiment") or "") == "negative"
+            ]
+            for p_idx in positives:
+                for n_idx in negatives:
+                    left = str(events[p_idx].get("content") or "")
+                    right = str(events[n_idx].get("content") or "")
+                    rel = Substance(
+                        form=SubstanceForm.RELATION,
+                        content=f"矛盾: {left} ⊥ {right}",
+                        source_id=event_sids[p_idx],
+                        target_id=event_sids[n_idx],
+                        relation_type=RelationType.CONTRADICTS.value,
+                        confidence=min(
+                            float(events[p_idx].get("confidence", 0.5)),
+                            float(events[n_idx].get("confidence", 0.5)),
+                        ),
+                        source="event_inference",
+                        review_status=ReviewStatus.STAGING,
+                        metadata={"adjudicated": False},
+                    )
+                    sids.append(self._store.add(rel))
+        return sids

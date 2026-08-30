@@ -37,7 +37,7 @@ Think-on-Graph（ToG, ICLR 2024）与 ToG-2 提供可迁移范式：语言模型
 
 | 类别 | 工具 | 职责 |
 |------|------|------|
-| 图 | `prepare_context` / `activate_subgraph` / `expand_relations` / `prune_paths` | 锚定实体、激活子图、扩展邻居、剪枝 beam |
+| 图 | `prepare_context` / `activate_subgraph` / `expand_relations` / `prune_paths` / `list_gaps` | 锚定、激活、扩展、剪枝、确定性缺口扫描（ADR-023） |
 | 研发 | `list_operators` / `develop_operator` / `compile_strategy_yaml` | 算子目录与策略 YAML |
 | 证据（不可跳过） | `run_backtest` / `run_oos_gates` / `prove_causality` | 训练集回测、OOS/统计门、因果性 |
 | 写回 | `record_path_outcome` | 路径结果写回 Substance |

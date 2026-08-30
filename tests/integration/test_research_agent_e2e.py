@@ -68,6 +68,7 @@ class TestResearchAgentE2E:
             "compile_strategy_yaml",
             "develop_operator",
             "prove_causality",
+            "list_gaps",
         }
         missing = expected - names
         assert not missing, f"缺少核心工具: {missing}"

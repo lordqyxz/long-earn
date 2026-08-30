@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from long_earn.substance.model import Substance, SubstanceForm
+from long_earn.substance.model import ReviewStatus, Substance, SubstanceForm
 from long_earn.substance.store import SubstanceStore
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ DEFAULT_CONFLICT_WORDS: dict[str, set[str]] = {
 }
 
 _CONTRADICT_THRESHOLD = 3
+_MIN_CONFLICT_SIDES = 2
 DECAY_THRESHOLD = 0.3
 COMPRESS_SIMILARITY_THRESHOLD = 0.6
 _MIN_CLUSTER_SIZE = 2
@@ -66,13 +67,29 @@ def _passes_filter_logic(substance: Substance, text: str) -> bool:
     return True
 
 
+def _eligible(
+    substance: Substance,
+    when: datetime,
+    *,
+    include_staging: bool,
+) -> bool:
+    """PIT 可见且通过审核分层。"""
+    return substance.is_visible_at(when) and substance.is_activatable(
+        include_staging=include_staging
+    )
+
+
 def _activate_first_round(
-    store: SubstanceStore, text: str, when: datetime
+    store: SubstanceStore,
+    text: str,
+    when: datetime,
+    *,
+    include_staging: bool,
 ) -> dict[str, Substance]:
     """第一轮激活：关键词直接命中。"""
     activated: dict[str, Substance] = {}
     for s in store.get_all():
-        if not s.is_visible_at(when) or not s.keys:
+        if not _eligible(s, when, include_staging=include_staging) or not s.keys:
             continue
         if not _keyword_hit(s, text):
             continue
@@ -87,6 +104,8 @@ def _activate_recursive(
     store: SubstanceStore,
     max_recursion: int,
     when: datetime,
+    *,
+    include_staging: bool,
 ) -> dict[str, Substance]:
     """递归激活：已激活物质的内容再激活其他物质。"""
     for _ in range(max_recursion):
@@ -95,7 +114,10 @@ def _activate_recursive(
             for candidate in store.get_all():
                 if candidate.sid in activated or candidate.sid in newly:
                     continue
-                if not candidate.is_visible_at(when) or not candidate.keys:
+                if (
+                    not _eligible(candidate, when, include_staging=include_staging)
+                    or not candidate.keys
+                ):
                     continue
                 if _keyword_hit(candidate, s.content):
                     newly[candidate.sid] = candidate
@@ -105,23 +127,20 @@ def _activate_recursive(
     return activated
 
 
-def _resolve_conflict_groups(activated: dict[str, Substance]) -> dict[str, Substance]:
-    """conflict_group 互斥：同组取 insertion_order 最高者。"""
-    groups: dict[str, Substance] = {}
-    to_remove: set[str] = set()
-    for sid, s in activated.items():
-        if not s.conflict_group:
+def _keep_conflict_sides(activated: dict[str, Substance]) -> dict[str, Substance]:
+    """同 conflict_group 双方保留，仅标注存在未裁决矛盾。
+
+    旧实现按 insertion_order 丢弃反面；ADR-023 改为 CONTRADICTS 边 + 双方可见。
+    """
+    groups: dict[str, list[Substance]] = {}
+    for s in activated.values():
+        if s.conflict_group:
+            groups.setdefault(s.conflict_group, []).append(s)
+    for members in groups.values():
+        if len(members) < _MIN_CONFLICT_SIDES:
             continue
-        existing = groups.get(s.conflict_group)
-        if existing is None:
-            groups[s.conflict_group] = s
-        elif s.insertion_order > existing.insertion_order:
-            to_remove.add(existing.sid)
-            groups[s.conflict_group] = s
-        else:
-            to_remove.add(sid)
-    for sid in to_remove:
-        activated.pop(sid, None)
+        for s in members:
+            s.metadata["open_contradiction"] = True
     return activated
 
 
@@ -133,19 +152,16 @@ def activate(  # noqa: PLR0913
     visible_at: datetime | None = None,
     graph: OntologyGraph | None = None,
     graph_max_depth: int = 3,
+    include_staging: bool = False,
 ) -> list[Substance]:
     """WorldInfo 激活引擎 — ADR-014 阶段 D：图遍历优先。
 
     流程（graph 非 None 时）：
     1. 关键词首轮命中（入图种子，保留 _activate_first_round）
     2. 从首轮命中物质 sid 出发，OntologyGraph.traverse 沿边扩展跨域关联物质
-    3. 对新加入物质检查 PIT 可见性（is_visible_at）
-    4. conflict_group 互斥
+    3. 对新加入物质检查 PIT 可见性（is_visible_at）与审核分层
+    4. 同组矛盾双方保留（不再按 insertion_order 丢弃）
     5. 衰减排序 + 预算截断
-
-    流程（graph 为 None 时，向后兼容）：
-    1. 关键词首轮 + 关键词递归（旧 _activate_recursive）
-    2. conflict_group 互斥 + 预算截断
 
     Args:
         text: 输入文本（如用户查询或新闻事件）
@@ -155,6 +171,7 @@ def activate(  # noqa: PLR0913
         visible_at: 时间过滤时刻
         graph: OntologyGraph（可选，有则图遍历扩展替代关键词递归）
         graph_max_depth: 图遍历深度（仅 graph 路径用）
+        include_staging: 是否注入 STAGING 物质；RAW 始终排除
 
     Returns:
         激活的物质列表（按 insertion_order × decay_factor 降序）
@@ -162,14 +179,25 @@ def activate(  # noqa: PLR0913
     when = visible_at or datetime.now()
     store._ensure_index()
 
-    activated = _activate_first_round(store, text, when)
+    activated = _activate_first_round(
+        store, text, when, include_staging=include_staging
+    )
 
     if graph is not None:
-        activated = _activate_via_graph(activated, store, graph, graph_max_depth, when)
+        activated = _activate_via_graph(
+            activated,
+            store,
+            graph,
+            graph_max_depth,
+            when,
+            include_staging=include_staging,
+        )
     else:
-        activated = _activate_recursive(activated, store, max_recursion, when)
+        activated = _activate_recursive(
+            activated, store, max_recursion, when, include_staging=include_staging
+        )
 
-    activated = _resolve_conflict_groups(activated)
+    activated = _keep_conflict_sides(activated)
 
     # 图遍历路径用：按 insertion_order × decay_factor 排序（图路径权重反映关联强度）
     sorted_substances = sorted(
@@ -185,12 +213,14 @@ def activate(  # noqa: PLR0913
     return result
 
 
-def _activate_via_graph(
+def _activate_via_graph(  # noqa: PLR0913
     activated: dict[str, Substance],
     store: SubstanceStore,
     graph: OntologyGraph,
     max_depth: int,
     when: datetime,
+    *,
+    include_staging: bool,
 ) -> dict[str, Substance]:
     """图遍历扩展：从首轮命中物质 sid 出发，沿 OntologyGraph 边扩展跨域关联物质。
 
@@ -209,7 +239,7 @@ def _activate_via_graph(
             if p.sid in activated:
                 continue
             sub = store.get_by_sid(p.sid)
-            if sub is None or not sub.is_visible_at(when):
+            if sub is None or not _eligible(sub, when, include_staging=include_staging):
                 continue
             activated[p.sid] = sub
     return activated
@@ -344,9 +374,13 @@ def compress(
     for i in range(n):
         if i in merged:
             continue
+        if substances[i].review_status is ReviewStatus.RAW:
+            continue
         cluster = [i]
         for j in range(i + 1, n):
             if j in merged:
+                continue
+            if substances[j].review_status is ReviewStatus.RAW:
                 continue
             if sim_matrix[i, j] >= min_similarity:
                 cluster.append(j)
@@ -382,6 +416,8 @@ def _merge_cluster(
 
     keep_idx = indices[0]
     keep = substances[keep_idx]
+    if keep.review_status is ReviewStatus.RAW:
+        return 0
 
     merged_content = [keep.content]
     for idx in indices[1:]:

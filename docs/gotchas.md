@@ -23,7 +23,7 @@
 
 ## 3. 记忆系统
 
-- 物质-运动统一架构（ADR-007）；`substances` 表 PG 持久化；旧 `memory/` 已删。
+- 物质-运动统一架构（ADR-007）；`substances` 表 PG 持久化；旧 `memory/` 已删。审核分层 `review_status`：raw 不可覆盖、staging 默认不激活、committed 默认可注入（ADR-023）。
 - `prepare_context` 为纯确定性激活（ADR-021），返回 `ContextActivation`；miss 时由 agent 层显式触发事件推理。`Connector` 注入 `memory_provider`。
 
 ## 4. 集成测试

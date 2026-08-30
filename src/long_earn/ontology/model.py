@@ -39,6 +39,9 @@ class RelationType(StrEnum):
 
     IMPACTS = "impacts"  # 事件 → 标的 / 行业
     PROPAGATES_TO = "propagates_to"  # 事件 → 传导目标（多跳链）
+    CONTRADICTS = "contradicts"  # 断言 ↔ 相反断言（双方保留）
+    SUPPORTED_BY = "supported_by"  # 断言 → 证据物质
+    TESTS = "tests"  # 假设 / 断言 → 回测或实验 run
     BELONGS_TO = "belongs_to"  # 公司 → 行业 / 板块
     MEMBER_OF = "member_of"  # 标的 → Universe
     REPORTS_INDICATOR = "reports_indicator"  # 公司 → 指标（某期财报）

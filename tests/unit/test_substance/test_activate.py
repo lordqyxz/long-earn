@@ -75,14 +75,15 @@ def test_recursive_activation_chain():
 # ── activate：conflict_group 互斥 ─────────────────────────────
 
 
-def test_conflict_group_keeps_highest_order():
-    """同 conflict_group 取 insertion_order 最高者。"""
+def test_conflict_group_keeps_both_sides():
+    """同 conflict_group 双方保留，不再按 insertion_order 丢弃。"""
     store = SubstanceStore()
     store.add(_sub("旧观点", keys=["市场"], conflict_group="g", insertion_order=1))
     store.add(_sub("新观点", keys=["市场"], conflict_group="g", insertion_order=5))
     result = activate("市场", store, budget=10)
-    assert len(result) == 1
-    assert "新观点" in result[0].content
+    contents = {s.content for s in result}
+    assert contents == {"旧观点", "新观点"}
+    assert all(s.metadata.get("open_contradiction") for s in result)
 
 
 # ── activate：预算截断 + 排序 ─────────────────────────────────

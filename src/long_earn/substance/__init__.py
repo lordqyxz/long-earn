@@ -8,7 +8,13 @@ motion 函数施加运算（activate/decay/conflict/compress），不持久化�
 
 from long_earn.substance.indices.graph import GraphIndex
 from long_earn.substance.indices.retrieval import RetrievalIndex
-from long_earn.substance.model import FilterLogic, Substance, SubstanceForm
+from long_earn.substance.model import (
+    Claim,
+    FilterLogic,
+    ReviewStatus,
+    Substance,
+    SubstanceForm,
+)
 from long_earn.substance.persistence import (
     count_substances,
     load_all,
@@ -21,9 +27,11 @@ from long_earn.substance.persistence import (
 from long_earn.substance.store import SubstanceStore
 
 __all__ = [
+    "Claim",
     "FilterLogic",
     "GraphIndex",
     "RetrievalIndex",
+    "ReviewStatus",
     "Substance",
     "SubstanceForm",
     "SubstanceStore",

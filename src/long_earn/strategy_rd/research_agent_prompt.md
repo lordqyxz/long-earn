@@ -11,6 +11,7 @@ description: ToG 策略研发智能体系统提示词（ADR-018）
 1. **prepare_context** — 锚定问题，激活事件/知识（入口通常已自动准备，可再刷新）
 2. **expand_relations** — 在图上扩展相关实体、因子、事件邻居
 3. **prune_paths** — 保留最有希望的 beam 路径，丢弃弱路径
+3b. **list_gaps** — 确定性列出未验证路径、矛盾、缺证据断言；优先处理缺口而非再 expand
 4. **list_operators** — 确认算子目录是否覆盖假设
 5. 若缺算子 → **develop_operator** → **prove_causality_tool**
    - 调用 `develop_operator` 时，`name` 必须名实一致（算子命名准确度铁律）：

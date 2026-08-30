@@ -22,9 +22,9 @@ import psycopg
 from loguru import logger
 
 from long_earn.core.pg import pg_connect
-from long_earn.substance.model import FilterLogic, Substance
+from long_earn.substance.model import FilterLogic, ReviewStatus, Substance
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ── DDL ────────────────────────────────────────────────────────────
 # 列式存储结构化字段，keys/filter_keys/metadata 用 JSONB 列承载任意结构。
@@ -48,11 +48,14 @@ CREATE TABLE IF NOT EXISTS substances (
     conflict_group   VARCHAR,
     insertion_order  INTEGER,
     decay_half_life_days DOUBLE PRECISION,
+    review_status    VARCHAR,
     metadata         JSONB
 );
 """
 
-# 时间过滤索引：visible_from 防未来函数的高频谓词
+_ALTER_REVIEW_STATUS = (
+    "ALTER TABLE substances ADD COLUMN IF NOT EXISTS review_status VARCHAR;"
+)
 _INDEX_VISIBLE = (
     "CREATE INDEX IF NOT EXISTS idx_substances_visible_from "
     "ON substances(visible_from);"
@@ -67,9 +70,10 @@ _UPSERT_SQL = """
 INSERT INTO substances (
     sid, form, content, keys, filter_keys, filter_logic, created_at,
     visible_from, expires_at, source, confidence, source_id, target_id,
-    relation_type, conflict_group, insertion_order, decay_half_life_days, metadata
+    relation_type, conflict_group, insertion_order, decay_half_life_days,
+    review_status, metadata
 ) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 )
 ON CONFLICT (sid) DO UPDATE SET
     form = EXCLUDED.form,
@@ -88,6 +92,7 @@ ON CONFLICT (sid) DO UPDATE SET
     conflict_group = EXCLUDED.conflict_group,
     insertion_order = EXCLUDED.insertion_order,
     decay_half_life_days = EXCLUDED.decay_half_life_days,
+    review_status = EXCLUDED.review_status,
     metadata = EXCLUDED.metadata
 """
 
@@ -95,6 +100,7 @@ ON CONFLICT (sid) DO UPDATE SET
 def _ensure_schema(conn: psycopg.Connection) -> None:
     """幂等建表与建索引（PostgreSQL 方言，可重复调用）。"""
     conn.execute(_DDL)
+    conn.execute(_ALTER_REVIEW_STATUS)
     conn.execute(_INDEX_VISIBLE)
     conn.execute(_INDEX_FORM)
     conn.execute(_INDEX_CREATED)
@@ -143,6 +149,16 @@ def _as_list(value: Any) -> list[str]:
     return []
 
 
+def _parse_review_status(value: Any) -> ReviewStatus:
+    """旧行无列或空值视为 committed，避免存量知识从激活中消失。"""
+    if value is None or value == "":
+        return ReviewStatus.COMMITTED
+    try:
+        return ReviewStatus(str(value))
+    except ValueError:
+        return ReviewStatus.COMMITTED
+
+
 def _row_to_substance(row: Any) -> Substance:
     """把 PostgreSQL 查询行转回 Substance（Pydantic 反序列化）。"""
     return Substance(
@@ -163,7 +179,8 @@ def _row_to_substance(row: Any) -> Substance:
         conflict_group=row[14],
         insertion_order=row[15] if row[15] is not None else 0,
         decay_half_life_days=row[16] if row[16] is not None else 90.0,
-        metadata=_as_dict(row[17]),
+        review_status=_parse_review_status(row[17]),
+        metadata=_as_dict(row[18]),
     )
 
 
@@ -228,6 +245,7 @@ def _substance_params(s: Substance) -> list[Any]:
         s.conflict_group,
         s.insertion_order,
         s.decay_half_life_days,
+        s.review_status.value,
         json.dumps(s.metadata, ensure_ascii=False),
     ]
 
@@ -240,7 +258,7 @@ def load_all() -> list[Substance]:
             "SELECT sid, form, content, keys, filter_keys, filter_logic, "
             "created_at, visible_from, expires_at, source, confidence, "
             "source_id, target_id, relation_type, conflict_group, "
-            "insertion_order, decay_half_life_days, metadata "
+            "insertion_order, decay_half_life_days, review_status, metadata "
             "FROM substances ORDER BY created_at;"
         ).fetchall()
         conn.commit()

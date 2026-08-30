@@ -9,6 +9,7 @@ messages:
 
     1. **每条事件**包含以下字段：
        - `content`: 事件一句话摘要（主语 + 谓语 + 宾语 + 数值/方向）
+       - `subject` / `predicate` / `object`: 断言三元组（可空；缺省时用 content 与 symbols）
        - `keys`: WorldInfo 触发词列表（公司名/股票代码/行业/人名/产品名，3-6 个）
        - `symbols`: 受影响标的列表（xtquant 格式如 `600519.SH`，无则空数组）
        - `sentiment`: 情绪方向，`positive` / `negative` / `neutral`

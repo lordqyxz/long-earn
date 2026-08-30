@@ -79,6 +79,19 @@ class TestResearchAgentTools:
         assert "run_oos_gates" in names
         assert "record_path_outcome" in names
         assert "list_operators_tool" in names
+        assert "list_gaps" in names
+
+    def test_list_gaps_reports_untested_beam(self, agent: ResearchAgent) -> None:
+        from long_earn.substance.store import SubstanceStore
+
+        agent.context.memory._store = SubstanceStore()
+        agent._beam_paths = [
+            {"id": "path_0", "entity": "动量", "status": "active"}
+        ]
+        tool = next(t for t in agent._build_tools() if t.name == "list_gaps")
+        out = tool.invoke({})
+        assert "untested_beam" in out
+        assert "path_0" in out
 
     def test_expand_relations_registers_beam(self, agent: ResearchAgent) -> None:
         tool = next(t for t in agent._build_tools() if t.name == "expand_relations")

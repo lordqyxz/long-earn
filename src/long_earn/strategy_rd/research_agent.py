@@ -336,6 +336,11 @@ class ResearchAgent:
                 return text
         self._logger.info(f"[ToG] 上下文未命中，显式触发事件采集: {query[:80]}")
         self._event_inference.invoke({"query": query})
+        memory = self.context.memory
+        if hasattr(memory, "activate_events"):
+            staged = memory.activate_events(query, k=8, include_staging=True)
+            if staged:
+                return "\n".join(str(item) for item in staged)
         return self.context.prepare_context(query)
 
     def _build_tools(self) -> list[Any]:
@@ -344,6 +349,7 @@ class ResearchAgent:
             self._make_activate_subgraph_tool(),
             self._make_expand_relations_tool(),
             self._make_prune_paths_tool(),
+            self._make_list_gaps_tool(),
             self._make_list_operators_tool(),
             self._make_develop_operator_tool(),
             self._make_compile_strategy_yaml_tool(),
@@ -389,18 +395,23 @@ class ResearchAgent:
         agent = self
 
         @tool
-        def activate_subgraph(query: str, k: int = 5) -> str:
+        def activate_subgraph(
+            query: str, k: int = 5, include_staging: bool = False
+        ) -> str:
             """仅激活已有 Substance 事件/关系（不触发采集）。
 
             Args:
                 query: 触发文本
                 k: 返回条数上限
+                include_staging: 是否纳入未过门的暂存断言
             """
             with monitoring.track("research.activate_subgraph"):
                 logger.info(f"[ToG] activate_subgraph: {query[:80]}")
                 if not hasattr(memory, "activate_events"):
                     return "记忆服务不支持 activate_events"
-                events = memory.activate_events(query, k=k)
+                events = memory.activate_events(
+                    query, k=k, include_staging=include_staging
+                )
                 text = "\n".join(events) if events else "（无命中）"
                 agent._last_context = text
                 return text
@@ -496,6 +507,51 @@ class ResearchAgent:
                 )
 
         return prune_paths
+
+    def _make_list_gaps_tool(self) -> Any:
+        logger = self._logger
+        monitoring = self._monitoring
+        memory = self.context.memory
+        agent = self
+
+        @tool
+        def list_gaps() -> str:
+            """确定性扫描知识缺口：未裁决矛盾、缺证据、未 OOS 路径、仅训练集候选。
+
+            不调用语言模型。优先处理本清单，而不是再次 expand_relations。
+            """
+            from long_earn.substance.gaps import (  # noqa: PLC0415
+                BeamPathSnapshot,
+                SessionExploreState,
+                collect_gaps,
+                format_gaps,
+            )
+
+            with monitoring.track("research.list_gaps"):
+                store = getattr(memory, "_store", None)
+                if store is None:
+                    return "记忆后端不支持缺口扫描"
+                train_only = tuple(
+                    fp
+                    for fp, ev in agent._evidence_cache.items()
+                    if ev.backtest_reliable and ev.oos_passed is not True
+                )
+                session = SessionExploreState(
+                    beams=tuple(
+                        BeamPathSnapshot(
+                            path_id=str(path.get("id") or ""),
+                            entity=str(path.get("entity") or ""),
+                            status=str(path.get("status") or ""),
+                        )
+                        for path in agent._beam_paths
+                    ),
+                    train_only_hashes=train_only,
+                )
+                text = format_gaps(collect_gaps(store, session))
+                logger.info(f"[ToG] list_gaps: {text[:80]}")
+                return text
+
+        return list_gaps
 
     # ── 研发工具 ───────────────────────────────────────────────
 

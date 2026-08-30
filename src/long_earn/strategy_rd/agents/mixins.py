@@ -68,8 +68,7 @@ class KnowledgeContextMixin:
     ) -> str:
         """获取相关市场事件上下文（WorldInfo 激活引擎）。
 
-        与 ``_get_knowledge_context`` 的区别：走关键词触发 + conflict_group 互斥，
-        专门召回 EVENT/RELATION 形态物质，把"相关市场事件"注入 prompt。
+        走关键词触发，专门召回 EVENT/RELATION；显式纳入暂存断言并在格式中标明审核状态。
 
         Args:
             query: 触发文本（股票名/代码、策略主题）
@@ -88,7 +87,7 @@ class KnowledgeContextMixin:
             return ""
 
         try:
-            events = self.memory.activate_events(query, k=k)
+            events = self.memory.activate_events(query, k=k, include_staging=True)
         except Exception:
             if self.logger:
                 self.logger.warning(f"激活事件上下文失败: {query}")

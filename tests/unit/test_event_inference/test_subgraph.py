@@ -29,12 +29,14 @@ class _FakeMemory:
         events: list[dict[str, Any]],
         relations: list[dict[str, Any]],
         conflict_groups: dict[int, str] | None = None,
+        collected_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.save_calls.append(
             {
                 "events": events,
                 "relations": relations,
                 "conflict_groups": conflict_groups or {},
+                "collected_items": collected_items or [],
             }
         )
         event_sids: list[str] = []
@@ -251,7 +253,6 @@ class TestMemoryServiceSaveEvents:
 
     def test_save_events_creates_event_and_relation_substances(self, tmp_path):
         from long_earn.services.memory_service import MemoryServiceImpl
-        from long_earn.substance.model import SubstanceForm
 
         config = MagicMock()
         config.init_dir = ""
@@ -278,20 +279,92 @@ class TestMemoryServiceSaveEvents:
                 "rationale": "利好估值",
             }
         ]
-        result = svc.save_events(events, relations)
+        result = svc.save_events(
+            events,
+            relations,
+            collected_items=[
+                {
+                    "title": "茅台财报",
+                    "content": "净利润增长15%原文",
+                    "url": "https://example.com/a",
+                    "source": "fake",
+                    "published_at": "2026-08-30",
+                }
+            ],
+        )
         assert result["event_count"] == 1
         assert result["relation_count"] == 1
+        assert len(result["raw_sids"]) == 1
 
-        # 校验 store 中物质形态
+        from long_earn.substance.model import ReviewStatus, SubstanceForm
+
         substances = svc._store.get_all()
         forms = {s.form for s in substances}
         assert SubstanceForm.EVENT in forms
         assert SubstanceForm.RELATION in forms
+        assert SubstanceForm.KNOWLEDGE in forms
 
-        # 关系的 source_id 指向事件 sid
-        relation = next(s for s in substances if s.form is SubstanceForm.RELATION)
         event = next(s for s in substances if s.form is SubstanceForm.EVENT)
+        relation = next(
+            s
+            for s in substances
+            if s.form is SubstanceForm.RELATION and s.relation_type == "impacts"
+        )
+        raw = next(s for s in substances if s.review_status is ReviewStatus.RAW)
+        assert event.review_status is ReviewStatus.STAGING
+        assert event.metadata["claim"]["evidence_ref"] == raw.sid
         assert relation.source_id == event.sid
+        assert activate_default_hides_staging(svc)
+
+    def test_save_events_writes_contradicts_and_keeps_both(self):
+        from long_earn.ontology.model import RelationType
+        from long_earn.services.memory_service import MemoryServiceImpl
+        from long_earn.substance.model import ReviewStatus, SubstanceForm
+
+        svc = MemoryServiceImpl(MagicMock(init_dir=""), MagicMock())
+        events = [
+            {
+                "content": "茅台利好",
+                "keys": ["茅台"],
+                "symbols": ["600519.SH"],
+                "sentiment": "positive",
+                "confidence": 0.9,
+            },
+            {
+                "content": "茅台利空",
+                "keys": ["茅台"],
+                "symbols": ["600519.SH"],
+                "sentiment": "negative",
+                "confidence": 0.8,
+            },
+        ]
+        result = svc.save_events(
+            events,
+            [],
+            conflict_groups={0: "conflict_600519.SH", 1: "conflict_600519.SH"},
+        )
+        assert result["event_count"] == 2
+        contradicts = [
+            s
+            for s in svc._store.get_all()
+            if s.form is SubstanceForm.RELATION
+            and s.relation_type == RelationType.CONTRADICTS.value
+        ]
+        assert len(contradicts) == 1
+        events_out = [
+            s for s in svc._store.get_all() if s.form is SubstanceForm.EVENT
+        ]
+        assert len(events_out) == 2
+        assert all(s.review_status is ReviewStatus.STAGING for s in events_out)
+
+
+def activate_default_hides_staging(svc) -> bool:
+    from long_earn.services.memory_service import MemoryServiceImpl
+
+    assert isinstance(svc, MemoryServiceImpl)
+    hidden = svc.activate_events("茅台", k=5)
+    shown = svc.activate_events("茅台", k=5, include_staging=True)
+    return hidden == [] and any("茅台" in item for item in shown)
 
 
 from unittest.mock import MagicMock  # noqa: E402

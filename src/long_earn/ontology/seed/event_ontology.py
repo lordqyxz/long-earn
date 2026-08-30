@@ -7,9 +7,8 @@
 → 图谱遍历找到 debt_to_assets 高的标的受影响更大。
 
 与 ``event_inference`` 子图的关系：``propagate`` 步骤产出的事件 RELATION 物质，
-其 ``relation_type`` 必须是 ``RelationType.IMPACTS`` / ``PROPAGATES_TO``，
-``target_id`` 改为 entity sid（先 upsert entity 物质），修复旧 ``target_id="600519.SH"``
-字符串导致的图谱断裂。
+其 ``relation_type`` 必须是 ``RelationType.IMPACTS`` / ``PROPAGATES_TO`` /
+``CONTRADICTS``，``target_id`` 改为 entity sid（先 upsert entity 物质）。
 """
 
 from __future__ import annotations
