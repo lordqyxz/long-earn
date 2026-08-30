@@ -37,7 +37,7 @@
   - **P3** 真日收益 + `_trial_fingerprints`/`N_eff` + DSR 用 `oos_mean` + MinTRL/haircut 诊断
   - **P4** 单测对齐；**写回**：success 强制 `oos_passed`；train-only → `candidate`
   - **P2′** OOS Walk-Forward 默认 `gap=5`（embargo 简化）
-- [ ] **HTR 遗留线清退（ADR-010 Deprecated / ADR-021 / ADR-022）**：PBO 已在 ToG；`cli`/`app` 迁 ResearchAgent 后删编排；白名单收紧。**迁移前冻结**
+- [x] **HTR 遗留线清退（ADR-010 Deprecated / ADR-021 / ADR-022）**：控制面已迁 ResearchAgent；已删 `htr_subgraph` / `escape_hatch` / HTR agents 编排；假设树状态与 `run_oos_gates` 保留；LLM 白名单已收紧。
 - [~] **Web 前端开发**（`web/`）— 次线，按需继续开发
 
 ---

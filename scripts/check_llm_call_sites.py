@@ -54,12 +54,10 @@ _ALLOWED: dict[str, str] = {
     "src/long_earn/operator_dev/agents.py": "算子研发 agent 节点",
     "src/long_earn/stock_analysis/subgraph.py": "子图节点（resolve_stock_ref LLM 兜底）",
     "src/long_earn/stock_analysis/agents/": "五视角分析师 agent 节点",
-    "src/long_earn/skills/personas/": "大师 persona LLM 节点（HTR 遗留，清退中）",
+    "src/long_earn/skills/personas/": "大师 persona LLM 节点（stock_analysis 等）",
     "src/long_earn/strategy_rd/research_agent.py": "ToG ResearchAgent（agent 层）",
-    "src/long_earn/strategy_rd/escape_hatch.py": "失败分类（规则先行、LLM 兜底）",
-    # ── HTR 遗留线（清退中，见 TODO；冻结新增，迁移后整体移除）──
-    "src/long_earn/strategy_rd/htr_subgraph.py": "HTR 遗留线",
-    "src/long_earn/strategy_rd/agents/": "HTR 遗留线",
+    "src/long_earn/strategy_rd/optimize_delegate.py": "策略优化委托（CLI optimize）",
+    "src/long_earn/strategy_rd/agents/strategy_develop_agent.py": "策略开发 agent 节点",
 }
 
 

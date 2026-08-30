@@ -660,19 +660,13 @@ class ResearchAgent:
         agent = self
 
         @tool
-        def run_backtest(strategy_yaml: str, use_train_split: bool = True) -> str:
+        def run_backtest(strategy_yaml: str) -> str:
             """在训练集上跑回测——证据工具，不可用直觉替代。
 
             Args:
                 strategy_yaml: 策略 YAML
-                use_train_split: 兼容旧调用；仅允许 True
             """
             with monitoring.track("research.run_backtest"):
-                if not use_train_split:
-                    return json.dumps(
-                        {"error": "开发回测仅允许使用训练集", "rejected": True},
-                        ensure_ascii=False,
-                    )
                 start = ctx.config.train_start_date
                 end = ctx.config.train_end_date
                 logger.info(f"[ToG] run_backtest: {start}~{end}")

@@ -1,7 +1,7 @@
-"""策略研究循环服务 — 多轮 Reflexion 研发的核心业务逻辑。
+"""策略研究循环服务 — 多轮 ToG 研发的核心业务逻辑（ADR-018）。
 
-从初始交易策略或交易思路出发，反复运行策略研发子图，评估近三个月收益率，
-直到收益率无法进一步提升。
+从初始交易策略或交易思路出发，每轮委托 ``ResearchAgent.invoke`` 探索并产出策略 YAML，
+再用训练集近窗与全窗回测评估收益率，直至无法进一步提升或家族池耗尽。
 
 本服务与 CLI / Web 等入口解耦：仅负责业务编排与结果落盘，
 参数解析、启动横幅、交互确认等表现层由入口（cli.py / scripts）负责。
@@ -10,18 +10,17 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from long_earn.strategy_rd.htr_subgraph import (
-    create_htr_subgraph as create_strategy_rd_subgraph,
-)
-from long_earn.strategy_rd.state import State
+from long_earn.strategy_rd.research_agent import ResearchAgent, _strategy_fingerprint
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
@@ -42,10 +41,21 @@ _IDEA_FAMILY_POOL = [
     "研究一个多因子复合选股策略，结合动量、低波动率、高ROE和成交量放大，用算子路径实现滚动窗口因子，要求近六个月收益率最大化",
 ]
 
+_STRATEGY_YAML_TOOLS = frozenset(
+    {
+        "run_backtest",
+        "run_oos_gates",
+        "compile_strategy_yaml",
+        "record_path_outcome",
+    }
+)
+
+_YAML_FENCE_RE = re.compile(r"```(?:yaml)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
 
 @dataclass
 class RoundResult:
-    """单轮子图执行结果。"""
+    """单轮 ResearchAgent 执行结果。"""
 
     strategy_yaml: str
     backtest_result: dict[str, Any]
@@ -96,8 +106,7 @@ class StrategyResearchService:
         config = ctx.config
         # 铁律 #1/#2/#3：开发阶段只允许使用训练集。
         # - history = 完整训练集（train_start ~ train_end）
-        # - recent = 训练集最后 6 个月（开发期不得触碰测试集/验证集；
-        #   测试集仅供 HTR _decide 节点合并门触碰，验证集仅最终评估一次）
+        # - recent = 训练集最后 6 个月（开发期不得触碰测试集/验证集）
         self.history_start = config.train_start_date
         self.history_end = config.train_end_date
         train_end_date = date.fromisoformat(config.train_end_date)
@@ -105,7 +114,7 @@ class StrategyResearchService:
         self.recent_start = recent_start_date.isoformat()
         self.recent_end = config.train_end_date
 
-    # ── 单轮子图执行 ──────────────────────────────────────────────
+    # ── 单轮 ResearchAgent 执行 ───────────────────────────────────
 
     def run_round(  # noqa: PLR0913
         self,
@@ -117,59 +126,67 @@ class StrategyResearchService:
         checkpointer: Any = None,
         thread_id: str | None = None,
     ) -> RoundResult:
-        """运行一轮策略研发子图。
+        """运行一轮 ResearchAgent ToG 探索。
 
         Args:
             idea: 策略思路
-            max_iterations: 子图内部最大迭代次数
-            history_return: 上一轮历史窗口收益率（家族失效检测信号）
-            round_history: 跨轮历史序列（recent_return/history_return 列表）
-            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``），
-                启用后子图状态会持久化，支持中断恢复。None 时不持久化。
-            thread_id: 当 ``checkpointer`` 非空时的研究线程 ID。同一
-                ``thread_id`` 可从中断处续跑；新一轮须用新 ID 避免状态污染。
+            max_iterations: 每轮探索深度提示（传入 constraints）
+            history_return: 保留参数（家族切换信号，当前仅作日志参考）
+            round_history: 保留参数（前序轮次收益，当前未传入 agent）
+            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``）
+            thread_id: checkpointer 启用时的研究线程 ID
         """
+        del round_history  # 不再依赖 HTR 树状态
         round_ctx = replace(
             self.ctx,
             config=replace(self.ctx.config, max_iterations=max_iterations),
         )
 
-        subgraph = create_strategy_rd_subgraph(round_ctx, checkpointer=checkpointer)
-        self.logger.info(f"[循环] 启动策略研发子图，idea='{idea}'")
+        agent = ResearchAgent(round_ctx, checkpointer=checkpointer)
+        self.logger.info(f"[循环] 启动 ResearchAgent，idea='{idea}'")
         if checkpointer is not None:
             self.logger.info(f"[循环] checkpoint 已启用，thread_id={thread_id}")
-        t0 = time.time()
-        invoke_input: State = {"query": idea}
         if history_return != 0.0:
-            invoke_input["history_return"] = history_return
-        if round_history:
-            invoke_input["round_history"] = round_history
+            self.logger.debug(
+                f"[循环] 上轮历史收益信号 history_return={history_return:.4f}"
+            )
 
+        constraints_parts: list[str] = []
+        if max_iterations > 0:
+            constraints_parts.append(f"探索深度约 {max_iterations} 轮迭代")
+        constraints = "；".join(constraints_parts)
+
+        thread_id_str = thread_id or ""
         invoke_config: RunnableConfig | None = None
-        if checkpointer is not None and thread_id:
-            invoke_config = {"configurable": {"thread_id": thread_id}}
+        if checkpointer is not None and thread_id_str:
+            invoke_config = {"configurable": {"thread_id": thread_id_str}}
 
-        # 启用 checkpointer 时，若该 thread 已有完成态则直接取最终状态；
-        # 否则正常 invoke（首跑或中断后续跑传 None 即可，但这里首跑必须传 input）
+        t0 = time.time()
         if (
             checkpointer is not None
             and invoke_config is not None
-            and self._thread_already_completed(subgraph, invoke_config)
+            and self._thread_already_completed(agent._agent, invoke_config)
         ):
-            self.logger.info(f"[循环] thread_id={thread_id} 已有完成态，直接复用结果")
-            result = subgraph.get_state(invoke_config).values
+            self.logger.info(
+                f"[循环] thread_id={thread_id_str} 已有完成态，直接复用结果"
+            )
+            snapshot = agent._agent.get_state(invoke_config)
+            messages = (snapshot.values or {}).get("messages", [])
+            result = self._messages_to_invoke_result(messages)
         else:
-            result = subgraph.invoke(invoke_input, config=invoke_config)
+            result = agent.invoke(
+                idea,
+                constraints=constraints,
+                thread_id=thread_id_str,
+            )
         elapsed = time.time() - t0
-        self.logger.info(f"[循环] 子图完成，耗时 {elapsed:.1f}s")
+        self.logger.info(f"[循环] ResearchAgent 完成，耗时 {elapsed:.1f}s")
 
-        backtest_result = result.get("backtest_result", {}) or {}
-        strategy_yaml = (
-            result.get("strategy_yaml", "")
-            or result.get("optimized_strategy_yaml", "")
-            or ""
+        strategy_yaml, reflection, backtest_result = self._extract_round_output(
+            agent, result
         )
-        reflection = result.get("reflection", "") or ""
+        if not strategy_yaml:
+            self.logger.warning("[循环] 未从 invoke 结果提取到策略 YAML")
 
         return RoundResult(
             strategy_yaml=strategy_yaml,
@@ -179,18 +196,72 @@ class StrategyResearchService:
         )
 
     @staticmethod
+    def _messages_to_invoke_result(messages: list[Any]) -> dict[str, Any]:
+        """将 checkpoint 中的 messages 转为 invoke 结果形状。"""
+        summary = ""
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+                summary = str(msg.content)
+                break
+        return {
+            "summary": summary or "策略研发完成（checkpoint 复用）",
+            "messages": messages,
+            "beam_paths": [],
+        }
+
+    @staticmethod
+    def _extract_strategy_yaml(messages: list[Any], summary: str) -> str:
+        """从 messages 或 summary 文本提取策略 YAML。"""
+        for msg in reversed(messages):
+            if not isinstance(msg, AIMessage):
+                continue
+            for tc in reversed(msg.tool_calls or []):
+                name = tc.get("name", "")
+                if name in _STRATEGY_YAML_TOOLS:
+                    yaml_text = (tc.get("args") or {}).get("strategy_yaml", "")
+                    if isinstance(yaml_text, str) and yaml_text.strip():
+                        return yaml_text.strip()
+            content = str(msg.content or "")
+            for match in reversed(list(_YAML_FENCE_RE.finditer(content))):
+                block = match.group(1).strip()
+                if block.startswith("name:") or "universe:" in block:
+                    return block
+
+        for match in reversed(list(_YAML_FENCE_RE.finditer(summary))):
+            block = match.group(1).strip()
+            if block.startswith("name:") or "universe:" in block:
+                return block
+        return ""
+
+    def _extract_round_output(
+        self, agent: ResearchAgent, result: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any]]:
+        """从 invoke 结果提取 YAML、反思摘要与 agent 内缓存回测证据。"""
+        summary = str(result.get("summary") or "")
+        messages = result.get("messages") or []
+        strategy_yaml = self._extract_strategy_yaml(messages, summary)
+        reflection = summary or "未生成策略摘要"
+
+        backtest_result: dict[str, Any] = {}
+        if strategy_yaml:
+            fp = _strategy_fingerprint(strategy_yaml)
+            ev = agent._evidence_cache.get(fp)
+            if ev and ev.backtest_metrics:
+                backtest_result = dict(ev.backtest_metrics)
+
+        return strategy_yaml, reflection, backtest_result
+
+    @staticmethod
     def _thread_already_completed(
-        subgraph: Any, invoke_config: RunnableConfig | None
+        graph: Any, invoke_config: RunnableConfig | None
     ) -> bool:
         """检查 thread 是否已存在完成态（避免重跑）。"""
         try:
-            snapshot = subgraph.get_state(invoke_config)
+            snapshot = graph.get_state(invoke_config)
         except Exception:
             return False
-        # next 为空元组/None 表示该线程已运行到 END
         next_nodes = getattr(snapshot, "next", None)
         if not next_nodes:
-            # 还需确认 values 非空，否则可能是首次创建空快照
             values = getattr(snapshot, "values", None) or {}
             return bool(values)
         return False
@@ -227,7 +298,7 @@ class StrategyResearchService:
         except (TypeError, ValueError):
             return -999.0
 
-    # ── 单轮编排（子图 + 双窗口评估 + 改善判定）──────────────────
+    # ── 单轮编排（ResearchAgent + 双窗口评估 + 改善判定）──────────
 
     def run_single_round(  # noqa: PLR0913
         self,
@@ -244,10 +315,7 @@ class StrategyResearchService:
         """运行单轮研究并返回 (metrics, best_return, best_yaml, best_round, should_stop)。
 
         metrics 为 None 表示该轮未生成策略（跳过）。
-        round_history 为前序轮次的 recent/history 收益序列，传给子图供家族失效检测。
         """
-        # 优先用上一轮的历史收益作为家族失效信号传给子图；
-        # 无历史时默认 0.0（不触发家族切换打分）
         prev_history_return = (
             round_history[-1].get("history_return", 0.0) if round_history else 0.0
         )
@@ -263,7 +331,14 @@ class StrategyResearchService:
         strategy_yaml = round_result.strategy_yaml
 
         if not strategy_yaml:
-            self.logger.warning(f"[第{round_num}轮] 未生成策略 YAML，跳过")
+            self.logger.warning(
+                f"[第{round_num}轮] 未生成策略 YAML，跳过"
+                + (
+                    f"（reflection: {round_result.reflection[:120]}）"
+                    if round_result.reflection
+                    else ""
+                )
+            )
             return None, best_recent_return, "", {}, False
 
         self.logger.info(
@@ -344,17 +419,14 @@ class StrategyResearchService:
         Args:
             idea: 初始交易策略或交易思路
             max_rounds: 最大研究轮次
-            max_iterations: 每轮子图内部最大迭代次数
+            max_iterations: 每轮 ResearchAgent 探索深度提示
             min_improvement: 近三个月收益率最小改善幅度
-            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``）。
-                启用后每轮状态持久化，重跑时已完成的轮次直接复用结果，
-                未完成的轮次可从中断处续跑。None 时不持久化。
+            checkpointer: LangGraph checkpointer（如 ``SqliteSaver``）
             thread_id_prefix: checkpointer 启用时，每轮 thread_id 为
                 ``"{prefix}-round{N}-family{F}"``。
 
-        家族切换机制：连续 ``_FAMILY_PIVOT_THRESHOLD`` 轮无改善时，
-        从 ``_IDEA_FAMILY_POOL`` 取下一个家族 idea 继续研发，
-        而非直接停止。池耗尽后才真正停止。
+        家族切换：连续 ``_FAMILY_PIVOT_THRESHOLD`` 轮无改善时，
+        从 ``_IDEA_FAMILY_POOL`` 取下一个家族 idea 继续研发。
         """
         best_recent_return = -999.0
         best_strategy_yaml = ""
@@ -450,8 +522,8 @@ class StrategyResearchService:
                     }
                 )
 
-            # 家族切换判定：连续无改善达阈值 → 换家族 idea 继续
             if should_stop or stagnation_count >= _FAMILY_PIVOT_THRESHOLD:
+                pivot_streak = stagnation_count
                 if family_idx + 1 < len(_IDEA_FAMILY_POOL):
                     family_idx += 1
                     current_idea = _IDEA_FAMILY_POOL[family_idx]
@@ -459,7 +531,7 @@ class StrategyResearchService:
                     self.logger.info("")
                     self.logger.info("=" * 60)
                     self.logger.info(
-                        f"[家族切换] 连续 {stagnation_count} 轮无改善，"
+                        f"[家族切换] 连续 {pivot_streak} 轮无改善，"
                         f"切换到策略家族 #{family_idx}: {current_idea[:60]}..."
                     )
                     self.logger.info("=" * 60)
@@ -473,9 +545,8 @@ class StrategyResearchService:
                             }
                         )
                     continue
-                else:
-                    self.logger.info("[循环] 策略家族池已耗尽，停止迭代")
-                    break
+                self.logger.info("[循环] 策略家族池已耗尽，停止迭代")
+                break
 
         if progress_callback:
             progress_callback(

@@ -64,7 +64,7 @@ line-length = 88
 target-version = "py313"
 src = ["src", "tests"]
 # scripts/ 为一次性研究脚本，不纳入质量门槛（AGENTS.md 卡口为 src/）
-# archive/ 为归档死代码（如 archive/strategy_rd_subgraph/），保留供回滚参考，不纳入质量门槛
+# archive/ 为归档死代码目录（如 strategy_rd_subgraph 已删除），不纳入质量门槛
 exclude = [".venv", "build", "dist", "scripts", "archive"]
 
 [tool.ruff.lint]

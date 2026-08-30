@@ -177,8 +177,6 @@ class AppConfig:
     | VALIDATION_START | 2026-03-25 | 验证集起始（前瞻验证） |
     | VALIDATION_END | 2026-06-25 | 验证集结束 |
     | MAX_ITERATIONS | 3 | 策略研发最大迭代次数 |
-    | HTR_MAX_SELECT | 1 | HTR 每轮选择的最大假设数（1=串行，>1 激活 LangGraph Send 并行 fan-out） |
-    | HTR_MAX_CYCLES | 10 | HTR 六步循环最大周期数（达到时强制停止） |
     | LONG_EARN_MAX_WORKERS | 0 | 回测并行 worker 数（0=自动 cpu_count，1=串行，>1=指定核数） |
     | PG_HOST | 127.0.0.1 | PostgreSQL 主机地址 |
     | PG_PORT | 5432 | PostgreSQL 端口 |
@@ -233,10 +231,6 @@ class AppConfig:
     best_strategy_path: str = str(_storage.DEFAULT_DATA_DIR / "best_strategy.yaml")
     init_dir: str = "./init"
     max_iterations: int = 3
-    # HTR 每轮选择的最大假设数（htr_subgraph._select_node 读取，>1 激活 fan-out）
-    htr_max_select: int = 1
-    # HTR 六步循环最大周期数（htr_subgraph._decide_node 读取，达到强制停止）
-    htr_max_cycles: int = 10
     # 回测并行 worker 数（0=自动使用 os.cpu_count()，1=串行，>1=指定核数）
     # 控制 ParallelRunner / Walk-Forward fold 级并行的并发度
     max_workers: int = 0
@@ -295,8 +289,6 @@ class AppConfig:
             best_strategy_path=str(paths["best_strategy_path"]),
             init_dir=os.getenv("INIT_DIR", "./init"),
             max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
-            htr_max_select=int(os.getenv("HTR_MAX_SELECT", "1")),
-            htr_max_cycles=int(os.getenv("HTR_MAX_CYCLES", "10")),
             max_workers=int(os.getenv("LONG_EARN_MAX_WORKERS", "0")),
             pg_host=pg_params["host"],
             pg_port=int(pg_params["port"]),

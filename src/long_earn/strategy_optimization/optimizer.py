@@ -2,7 +2,7 @@
 
 :class:`StrategyOptimizer` 把"基线策略 + 改进建议 → 优化策略"抽成可注入接口：
 - 生产用 :class:`LLMStrategyOptimizer`（委托由调用方注入的策略研究委托，
-  如 ``strategy_rd`` 的 ``StrategyResearchAgent.optimize_strategy``）；
+  如 ``strategy_rd`` 的 ``OptimizeDelegate.optimize_strategy``）；
 - 测试用 :class:`FakeStrategyOptimizer`（确定性改写，不依赖真实 LLM）。
 
 优化器只负责"产出优化策略"，不判业绩——验收由 :class:`AcceptanceGate` 负责。
@@ -41,7 +41,7 @@ class StrategyResearchDelegate(Protocol):
     """策略研究委托协议。
 
     :class:`LLMStrategyOptimizer` 依赖的最小优化契约：由调用方注入具体实现
-    （如 ``strategy_rd`` 的 ``StrategyResearchAgent``）。策略优化上下文只面向
+    （如 ``strategy_rd`` 的 ``OptimizeDelegate``）。策略优化上下文只面向
     本协议编程，不直接依赖策略研发上下文，从而消除上下文循环依赖。
     """
 
@@ -68,7 +68,7 @@ class LLMStrategyOptimizer:
     """生产优化器：委托调用方注入的策略研究委托。
 
     构造时由调用方传入满足 :class:`StrategyResearchDelegate` 协议的委托
-    （生产环境为 ``strategy_rd`` 的 ``StrategyResearchAgent``）。本类不直接
+    （生产环境为 ``strategy_rd`` 的 ``OptimizeDelegate``）。本类不直接
     导入 ``strategy_rd``，从而保持 ``strategy_rd -> strategy_optimization``
     的单向依赖方向（消除上下文循环依赖）。
     """

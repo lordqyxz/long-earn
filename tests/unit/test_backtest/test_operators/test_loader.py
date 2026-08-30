@@ -36,7 +36,7 @@ EXPECTED_OPS = {
     "rsi",
     "macd",
     "bollinger",
-    # operator_dev 自主研发写盘算子（htr_subgraph 接入后由 LLM 生成）
+    # operator_dev / ResearchAgent 接入后由 LLM 生成
     "log_return",
     "realized_vol",
     # operator_dev 新增算子

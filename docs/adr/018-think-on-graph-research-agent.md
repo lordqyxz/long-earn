@@ -46,7 +46,7 @@ Agent 可决定探索哪条假设路径；不可跳过回测、OOS/DSR/PBO、三
 
 ### B. MasterAgent 委托
 
-`MasterAgent.research_strategy` 改为委托 `ResearchAgent.invoke`，不再直接 `create_htr_subgraph().invoke`。HTR 子图曾降为兼容脚手架（内部节点 develop、AcceptanceGate 可被工具复用）。ADR-010 已 Deprecated（2026-08-30）：该兼容面冻结，CLI 与 app 调用方迁出后删除编排实现；不得再新增依赖。
+`MasterAgent.research_strategy` 改为委托 `ResearchAgent.invoke`，不再直接 `create_htr_subgraph().invoke`。HTR 子图曾降为兼容脚手架（内部节点 develop、AcceptanceGate 可被工具复用）。ADR-010 已 Deprecated（2026-08-30）：HTR 编排已删除；入口为 ResearchAgent；不得再新增对遗留编排路径的依赖。
 
 ### C. 事件图谱基础设施化（已由 ADR-021 修订）
 
@@ -73,7 +73,7 @@ Agent 可决定探索哪条假设路径；不可跳过回测、OOS/DSR/PBO、三
 ### F. 对关联 ADR 的影响
 
 - Supersedes ADR-016 §C「策略研发不做全量 ReAct 化」——算子工具归 ResearchAgent，MasterAgent 仍只暴露 `research_strategy`；
-- ADR-010：Deprecated——假设树状态与合并门思想保留（门由 ADR-015 / ResearchAgent 消费）；六步编排实现待删；
+- ADR-010：Deprecated——假设树状态与合并门思想保留（门由 ADR-015 / ResearchAgent 消费）；六步编排实现已删除；
 - ADR-015、三段式、`prove_causality`：反馈闭环（015 Tier A/B）与三段式、因果证明不变；统计门用法见 ADR-022；
 - ADR-017：技能规格仍 Deferred；解锁节奏改由 ADR-022；策略基线改由 ResearchAgent 迭代产出。
 
@@ -89,7 +89,7 @@ Agent 可决定探索哪条假设路径；不可跳过回测、OOS/DSR/PBO、三
 **负面**
 
 - ResearchAgent 工具数多于旧 `research_strategy` 单次 invoke，弱模型可能工具选择次优，须配合 ToG 风格系统提示与 beam 宽度上界；
-- HTR 兼容路径与 ResearchAgent 短期双轨已收束为退役专项（ADR-010 Deprecated）：迁 CLI/API 至 ResearchAgent 后删除遗留线；
+- HTR 兼容路径已删除（ADR-010 Deprecated）；CLI / API 已迁至 ResearchAgent；
 - 默认注册 collectors 可能引入外部 API 失败噪声，须 `is_available` 守卫与测试 skip。
 
 **中性**

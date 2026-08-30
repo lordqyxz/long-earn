@@ -1,7 +1,7 @@
 """统一命令行入口 — 基于 typer 的多入口架构。
 
 子命令:
-    research   策略研究循环（ResearchAgent ToG / 兼容 HTR）
+    research   策略研究循环（ResearchAgent ToG，ADR-018）
     optimize   离线策略优化（AcceptanceGate 验收，ADR-009）
     sync       从 miniQMT 增量同步行情与财务到 PostgreSQL 缓存
     agent      主 Agent 调用（MasterAgent ReAct 编排）
@@ -186,7 +186,7 @@ def optimize(
     """离线策略优化 —— 对已有策略跑 optimize→backtest→AcceptanceGate 验收循环。
 
     ADR-009 收尾：暴露 OptimizationPipeline 给研究员手动驱动，
-    无需走完整 HTR 循环。AcceptanceGate 严格校验 sharpe 提升，未通过则保留原策略。
+    无需走完整 ResearchAgent 循环。AcceptanceGate 严格校验 sharpe 提升，未通过则保留原策略。
 
     ADR-018：策略研发主入口已迁移至 ResearchAgent（ToG），
     推荐使用 ``python -m long_earn research`` 或直接调用 ResearchAgent.invoke()。
@@ -204,9 +204,7 @@ def optimize(
     from long_earn.strategy_rd.agents.strategy_develop_agent import (
         StrategyDevelopAgent,
     )
-    from long_earn.strategy_rd.agents.strategy_research_agent import (
-        StrategyResearchAgent,
-    )
+    from long_earn.strategy_rd.optimize_delegate import OptimizeDelegate
 
     yaml_path = Path(strategy_yaml)
     if not yaml_path.exists():
@@ -237,7 +235,7 @@ def optimize(
     config.backtest_end_date = config.train_end_date
     ctx = initialize_context(config)
 
-    optimizer = LLMStrategyOptimizer(StrategyResearchAgent(context=ctx))
+    optimizer = LLMStrategyOptimizer(OptimizeDelegate(context=ctx))
     pipeline = OptimizationPipeline(
         optimizer=optimizer,
         backtest_service=ctx.backtest_service,

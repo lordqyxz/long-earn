@@ -370,11 +370,9 @@ def main() -> None:  # noqa: PLR0912
     if "-y" in sys.argv or "--yes" in sys.argv:
         yes = True
 
-    # CLI --max-iterations 同时覆盖 config.max_iterations 和 config.htr_max_cycles
-    # （前置约束 #4：HTR 迭代上限必须通过 CLI --max-iterations 配置，禁止硬编码）
+    # CLI --max-iterations 覆盖 config.max_iterations
     if cli_max_iterations is not None:
         config.max_iterations = cli_max_iterations
-        config.htr_max_cycles = cli_max_iterations
     max_iterations = config.max_iterations
 
     ckpt_path = checkpoint_db_path()
@@ -383,12 +381,10 @@ def main() -> None:  # noqa: PLR0912
         ckpt_path.unlink()
 
     print()
-    print("HTR 与 checkpoint 配置")
+    print("ResearchAgent 与 checkpoint 配置")
     print("-" * 64)
     print(f"  max_rounds       : {max_rounds}")
-    print(f"  max_iterations   : {max_iterations}（子图 supervisor 迭代）")
-    print(f"  htr_max_cycles   : {config.htr_max_cycles}（HTR 六步循环上限）")
-    print(f"  htr_max_select   : {config.htr_max_select}（并行 fan-out）")
+    print(f"  max_iterations   : {max_iterations}（ResearchAgent 迭代）")
     print(f"  max_workers      : {config.max_workers}（并行回测 worker 数）")
     print(f"  checkpoint 启用  : {use_checkpoint}")
     print(f"  checkpoint 路径  : {ckpt_path}")

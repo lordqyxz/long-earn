@@ -4,7 +4,7 @@ title: 假设树精炼（Hypothesis Tree Refinement）
 status: Deprecated
 date: 2026-06
 summary: 以持久化假设树组织六步 HTR 研究循环；编排控制器已由 ADR-018 取代。
-deprecated_note: 编排实现待删；假设树状态与合并及统计验证见 ADR-022。
+deprecated_note: 编排已删（2026-08-31）；假设树状态与合并及统计验证见 ADR-022。
 related: ["ADR-018", "ADR-022", "ADR-015"]
 ---
 
@@ -17,7 +17,7 @@ related: ["ADR-018", "ADR-022", "ADR-015"]
 
 线性进化循环（15 节点 4 层循环）存在六项结构性局限：无持久化研究状态（每轮覆盖前轮）；无分支探索（竞争假设被丢弃）；无洞察累积（反思独立进行）；无 dev/test 分离（单回测区间易过拟合）；无基于证据的剪枝；反思为单次 Tree-of-Thought。借鉴 Arbor（[arXiv:2606.11926](https://arxiv.org/abs/2606.11926)）的 Hypothesis Tree Refinement 框架。
 
-**废弃说明（2026-08-30）**：六步 HTR **编排实现**待删除（见优先事项「HTR 遗留实现退役」）。**仍生效、不随本 ADR 废弃的部分**：假设树 JSON 状态（可视化 / 探索路径）与 held-out 合并及统计验证门（ADR-022；失败反馈见 ADR-015 Tier A/B），由 ResearchAgent `run_oos_gates` 等消费。编排控制器已由 ADR-018 移交；LLM 控制流违例由 ADR-021 要求随退役消除。
+**废弃说明（2026-08-30）**：六步 HTR **编排实现**已于 2026-08-31 删除。**仍生效、不随本 ADR 废弃的部分**：假设树 JSON 状态（可视化 / 探索路径）与 held-out 合并及统计验证门（ADR-022；失败反馈见 ADR-015 Tier A/B），由 ResearchAgent `run_oos_gates` 等消费。编排控制器已由 ADR-018 移交；LLM 控制流违例由 ADR-021 要求随退役消除。
 
 ## 决策
 
@@ -40,13 +40,13 @@ related: ["ADR-018", "ADR-022", "ADR-015"]
 **负面**
 
 - 状态管理复杂度与 LLM 调用成本增加。
-- `htr_subgraph` / `strategy_rd/agents/` 等遗留线不再是合法扩展面——冻结新增调用方与功能；CLI / app research 端点迁至 ResearchAgent 后删除编排实现。
+- `htr_subgraph` / `strategy_rd/agents/` 等 HTR 编排实现已删除；CLI / app research 端点已迁至 ResearchAgent，不得再新增对遗留编排路径的依赖。
 - `HTR_*` / `HYPOTHESIS_TREE_PATH` 可配项随编排退役一并评估去留。
 
 **中性**
 
 - PBO 须按 ADR-022 迁入 ToG 路径或显式降级，不得随 HTR 无声消失。
-- 编排控制器由 ADR-018 取代；具体退役进度以源码为准。
+- 编排控制器由 ADR-018 取代；HTR 编排实现已删除，假设树状态与合并门仍由 ResearchAgent 消费。
 
 ## 关联
 

@@ -62,7 +62,7 @@ PARAM_CASES = [
     # operator_dev 自主研发写盘算子
     ("log_return", LogReturnParams(field="close", period=5)),
     ("realized_vol", RealizedVolParams(field="close", window=10)),
-    # operator_dev 新增算子（htr_subgraph 接入后由 LLM 生成）
+    # operator_dev / ResearchAgent 接入后由 LLM 生成
     (
         "price_stability",
         PriceStabilityParams(field="close", window=60, min_samples=30, eps=1e-10),

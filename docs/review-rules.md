@@ -26,7 +26,7 @@
 
 - 三段式数据分割铁律：训练集自由用；测试集仅在合并门触碰；验证集研发全程禁用（AGENTS.md §五）
 - 合并决策/success 写回必须过 held-out OOS 硬门（`_validate_success_writeback` 要求 `oos_passed=True`）；train-only 仅可 `outcome=candidate`
-- HTR 遗留线（`htr_subgraph.py` + `agents/`）冻结：不新增调用方、不加功能，待清退专项（TODO）
+- HTR 编排已清退；假设树 JSON 状态（`hypothesis_tree.py` / `tree_store.py`）与 ResearchAgent 证据路径保留
 
 ## src/long_earn/services/** 与 src/long_earn/tools/**
 
