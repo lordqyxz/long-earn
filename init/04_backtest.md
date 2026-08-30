@@ -19,10 +19,10 @@ EventEngine → DataHandler → Strategy → Portfolio → Broker
 
 1. 解析 YAML DSL 策略描述
 2. 获取股票池成分股
-3. 获取行情和财务数据（DuckDB 缓存 → miniqmt → akshare 降级链路）
+3. 获取行情和财务数据（PostgreSQL Cache + 显式主源 miniqmt；失败即失败，禁止静默降级）
 4. 事件驱动回测循环：
    - 每个交易日触发 on_bar 事件
-   - 执行信号生成步骤（filter → rank → expression）
+   - 执行信号生成（算子目录路径 `operators`，ADR-009）
    - 计算目标权重
    - 模拟撮合（考虑滑点、佣金、印花税）
    - 更新投资组合

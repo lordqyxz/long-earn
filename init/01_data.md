@@ -2,10 +2,10 @@
 
 ## 数据源架构
 
-系统使用 miniqmt (xtquant) 作为主数据源，DuckDB 作为本地缓存。
-财务数据已统一到 miniqmt（ADR-007 Phase 3），akshare/ciccwm 降级分支已屏蔽。
+系统使用 PostgreSQL（`long_earn` 库 / `DataCache`）作为本地缓存，miniqmt (xtquant) 作为显式主源。
+财务数据已统一到 miniqmt（ADR-007 Phase 3）；主源失败即失败并打日志，不做静默跨源降级（ADR-018）。
 
-数据获取优先级：DuckDB 缓存 → miniqmt
+数据获取优先级：PostgreSQL Cache → 显式主源 miniqmt
 
 ## 股票池类型
 
@@ -66,7 +66,7 @@
 1. 使用 csi300 或 csi500 等指数成分股作为股票池，避免全市场扫描
 2. 财务数据为季度频率，已前向填充到日级别，可直接在日频策略中使用
 3. 数据缺失或 NaN 时，过滤条件自动返回 False（该股票被排除）
-4. 数据通过 DuckDB 缓存，首次获取后自动缓存到本地
+4. 数据通过 PostgreSQL Cache 缓存，首次获取后自动写入 `long_earn` 库
 
 ---
 
@@ -83,7 +83,7 @@
 - **主要指标表 (Pershareindex)**：交易所预计算的每股指标与衍生指标
 - **股本变动表 (Capital)**（ADR-014 任务7）：反映股本结构变化
 
-字段统一存入 DuckDB 缓存 8 张细表（6 标量 + 2 长表 Top10），并基于真实公告日
+字段统一存入 PostgreSQL Cache 8 张细表（6 标量 + 2 长表 Top10），并基于真实公告日
 （announce_date，来自 miniqmt 的 m_anntime 字段）做 PIT 对齐后前向填充到日频，
 杜绝未来函数（详见 ADR-007）。
 

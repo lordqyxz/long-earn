@@ -36,7 +36,7 @@ npm install
 npm run dev        # 启动 Vite dev server（端口 5173，代理到后端 8090）
 ```
 
-后端 FastAPI 服务（`uv run python -m long_earn --fastapi`，默认端口 8090）需先行启动，
+后端 FastAPI 服务（`uv run python -m long_earn web`，默认端口 8090）需先行启动，
 前端通过 Vite 代理访问 `/api` 与 `/ws`。
 
 ## API 客户端（自动生成）

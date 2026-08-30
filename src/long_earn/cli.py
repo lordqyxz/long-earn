@@ -1,11 +1,11 @@
 """统一命令行入口 — 基于 typer 的多入口架构。
 
 子命令:
-    research   策略研究循环（多轮 Reflexion 研发）
-    optimize   离线策略优化（AcceptanceGate 验收，ADR-009 收尾）
-    sync       从 miniQMT 增量同步行情与财务到 DuckDB 主数据层
-    agent      主 Agent 调用（意图路由到子图）
-    web        启动回测可视化 Web 服务
+    research   策略研究循环（ResearchAgent ToG / 兼容 HTR）
+    optimize   离线策略优化（AcceptanceGate 验收，ADR-009）
+    sync       从 miniQMT 增量同步行情与财务到 PostgreSQL 缓存
+    agent      主 Agent 调用（MasterAgent ReAct 编排）
+    web        启动回测可视化 Web 服务（FastAPI，默认 8090）
 
 用法:
     long-earn research "基于净利润增长和ROE的选股策略"
@@ -307,7 +307,7 @@ def _run_sync(
         help="强制全量重下（默认智能增量：只下载缺失/过期的数据）",
     ),
 ) -> None:
-    """从 miniQMT 同步行情与财务到 DuckDB 主数据层。"""
+    """从 miniQMT 同步行情与财务到 PostgreSQL 缓存。"""
     from long_earn.services.incremental_sync import IncrementalSyncService
     from long_earn.services.logger_service import LoggerServiceImpl
 
