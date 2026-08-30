@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from long_earn.backtest.engine.broker import (
     TradingCostConfig as BrokerTradingCostConfig,
 )
+from long_earn.backtest.operators.causality import TEMPORAL_PARAMETER_NAMES
 
 
 class TradingCostConfig(BaseModel):
@@ -293,13 +294,15 @@ def lookback_profile(dsl: StrategyDSL) -> tuple[int, int]:
     """扫描 DSL 算子参数，返回 (最大有限回溯窗口 bars, 最大 ewm span)。
 
     供两处消费：compute_warmup_days（转日历日）与 DSLStrategy 历史
-    截断窗口（有限窗口 + 4×span ewm 收敛余量）。扫描口径与
-    compute_warmup_days 历史修复（ADR-013 T6）保持一致：覆盖
-    ``operator_factors`` + ``signals``(type=operator) 全部算子步骤的
-    回溯参数键（``period``/``periods``/``window``/``span``/``fast``/
-    ``slow``/``signal``）+ 牛熊门控窗口。
+    截断窗口（有限窗口 + 4×span ewm 收敛余量）。回溯参数键与注册因果
+    证明共用单一事实源
+    :data:`operators.causality.TEMPORAL_PARAMETER_NAMES`（含 compose
+    算子的 ``low_vol_lookback``/``momentum_lookback``/``momentum_window``/
+    ``quality_window``/``min_obs`` 等）——此前本函数私有清单落后于该表，
+    compose 算子 warmup 被低估为 0（ADR-013 T6 同族缺陷复发）。
+    扫描覆盖 ``operator_factors`` + ``signals``(type=operator) 全部算子
+    步骤 + 牛熊门控窗口。
     """
-    lookback_keys = ("period", "periods", "window", "span", "fast", "slow", "signal")
     span_keys = ("span", "fast", "slow", "signal")
     max_window = 0
     max_span = 0
@@ -309,12 +312,15 @@ def lookback_profile(dsl: StrategyDSL) -> tuple[int, int]:
             operator_steps.append(step)
     for step in operator_steps:
         params = step.get("params") or {}
-        for key in lookback_keys:
-            val = params.get(key, 0) or 0
-            max_window = max(max_window, val)
+        for key in TEMPORAL_PARAMETER_NAMES:
+            val = params.get(key) or 0
+            # 防御非数值参数值（如列表形态的 periods）：仅数值参与窗口推断
+            if isinstance(val, bool) or not isinstance(val, int | float):
+                continue
+            max_window = max(max_window, int(val))
         for key in span_keys:
             val = params.get(key, 0) or 0
-            max_span = max(max_span, val)
+            max_span = max(max_span, int(val))
     max_window = max(max_window, max_span)
     # 牛熊门控窗口同样需要回溯（数据不足时门控退化为牛市，熊市不触发）
     if dsl.regime is not None:
@@ -328,15 +334,16 @@ def compute_warmup_days(dsl: StrategyDSL) -> int:
     """从 DSL 算子参数推断所需预热期（日历日）。
 
     扫描 ``operator_factors`` 与 ``signals``（type=operator）全部算子步骤，
-    取最大回溯窗口（``period`` / ``periods`` / ``window`` / ``span`` /
-    ``fast`` / ``slow`` / ``signal``），转换为日历日（交易日 × 1.5 + 30 天 buffer）。
-    0 表示无时序算子，不需要 warmup。
+    取最大回溯窗口（时序参数键全集见
+    :data:`operators.causality.TEMPORAL_PARAMETER_NAMES`），转换为日历日
+    （交易日 × 1.5 + 30 天 buffer）。0 表示无时序算子，不需要 warmup。
 
     关键 bug 修复背景（ADR-013 T6，2026-08）：原实现只扫 ``operator_factors``
     的 ``period``/``window``/``span`` 三键，遗漏 ``shift.periods``（复数）、
     ``macd.fast``/``slow``/``signal``，且不扫 ``signals`` 里的算子步骤。结果
     预取区间短于真实回溯需求，因子前若干 bar 全 NaN，``rank_top`` 选不出股票，
-    整轮回测 ``trade_count=0``。修复后覆盖全部算子参数键 + signal 步骤。
+    整轮回测 ``trade_count=0``。修复后与因果证明共用时序参数键单一事实源 +
+    signal 步骤。
 
     来源：自 ``services/backtest_service.py`` 迁入（``_compute_warmup_days``
     改名公开函数），以恢复依赖方向。

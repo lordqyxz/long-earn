@@ -411,7 +411,11 @@ def _merge_cluster(store: SubstanceStore, indices: list[int]) -> int:
     keep.metadata["merged_count"] = len(indices)
     keep.metadata.pop("decayed", None)
 
-    # 移除其余物质（通过公共 remove API 同步 DuckDB 删除）
+    # 先落盘 keep 的合并内容（与 remove 的即时删除对称）——若先删后存，
+    # 持久化失败时被合并内容将随 PG 行删除而永久丢失
+    store.update(keep)
+
+    # 移除其余物质（通过公共 remove API 同步 PostgreSQL 删除）
     removed = 0
     for idx in sorted(indices[1:], reverse=True):
         s = substances[idx]

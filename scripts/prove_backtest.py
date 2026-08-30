@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -29,17 +29,32 @@ import numpy as np  # noqa: E402
 from long_earn.config import AppConfig  # noqa: E402
 from long_earn.context_init import initialize_context  # noqa: E402
 from long_earn.core.pg import pg_connect  # noqa: E402
+from long_earn.core.storage import best_strategy_path  # noqa: E402
 from long_earn.services.backtest_service import BacktestServiceImpl  # noqa: E402
 
-STRATEGY_YAML = Path("best_strategy.yaml").read_text(encoding="utf-8")
-RECENT_START = "2026-01-06"
-RECENT_END = "2026-07-08"
+# 训练集尾部 "recent" 窗口长度（自然日）；对账验证在训练集内完成，
+# 不触碰测试集/验证集（铁律）
+RECENT_WINDOW_DAYS = 183
 
 
 def main() -> None:  # noqa: C901, PLR0912
     config = AppConfig.from_env()
-    config.backtest_start_date = RECENT_START
-    config.backtest_end_date = RECENT_END
+    # "recent" 窗口 = 训练集尾部（train_end - 183 天 ~ train_end）
+    recent_end = config.train_end_date
+    recent_start = (
+        date.fromisoformat(recent_end) - timedelta(days=RECENT_WINDOW_DAYS)
+    ).isoformat()
+    config.backtest_start_date = recent_start
+    config.backtest_end_date = recent_end
+
+    # 策略源：数据目录权威副本（core.storage 裁决），缺失即报错退出
+    yaml_path = best_strategy_path()
+    if not yaml_path.exists():
+        print(f"[错误] 最佳策略文件不存在: {yaml_path}")
+        print("请先运行 scripts/find_best_strategy.py 产出最佳策略。")
+        sys.exit(1)
+    strategy_yaml = yaml_path.read_text(encoding="utf-8")
+
     ctx = initialize_context(config)
 
     # 直接构造引擎以捕获 run_id（BacktestServiceImpl.run 内部构造引擎，不暴露 run_id）
@@ -51,13 +66,13 @@ def main() -> None:  # noqa: C901, PLR0912
     print("=" * 70)
     print("数学证明级对账验证：从审计日志重建收益")
     print("=" * 70)
-    print(f"回测窗口: {RECENT_START} ~ {RECENT_END}")
+    print(f"回测窗口: {recent_start} ~ {recent_end}（训练集尾部）")
 
     t0 = datetime.now()
     result = bs.run(
-        strategy_yaml=STRATEGY_YAML,
-        start_date=RECENT_START,
-        end_date=RECENT_END,
+        strategy_yaml=strategy_yaml,
+        start_date=recent_start,
+        end_date=recent_end,
     )
     t1 = datetime.now()
     print(f"回测耗时: {(t1 - t0).total_seconds():.1f}s\n")
@@ -270,7 +285,7 @@ def main() -> None:  # noqa: C901, PLR0912
         all_ok = all(checks) and (eq_match if "eq_match" in dir() else False)
         if all_ok:
             print("  ✅ 收益数字可从审计日志唯一重建，数学上可信")
-            print(f"  ✅ 最近6个月总收益率 = {recon_m['total_return']*100:.2f}%（日志重建值）")
+            print(f"  ✅ 训练集尾部窗口总收益率 = {recon_m['total_return']*100:.2f}%（日志重建值）")
             print(f"  ✅ 与引擎报告值 {eng_total_return*100:.2f}% 在 1e-4 相对容差内一致")
             print(f"  ✅ 夏普比率 = {recon_m['sharpe']:.4f}（日志重建）")
             print(f"  ✅ 最大回撤 = {recon_m['max_drawdown']*100:.2f}%（日志重建）")

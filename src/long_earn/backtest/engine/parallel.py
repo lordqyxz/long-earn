@@ -123,7 +123,9 @@ def _disable_xtquant_env():
         yield
     finally:
         if had_key:
-            os.environ[key] = old_val  # type: ignore[assignment]
+            # had_key 分支 old_val 必为 str（可能为空串，or "" 语义不变），
+            # 以收窄 get() 的 str | None 返回类型
+            os.environ[key] = old_val or ""
         else:
             os.environ.pop(key, None)
 
@@ -494,7 +496,14 @@ class ParallelRunner:
         )
 
         engine = EventDrivenBacktestEngine()
-        timestamps = engine._get_timestamps(full_data)
+        # 交易时间轴按 [start_date, end_date] 过滤（与 core.walk_forward_run
+        # 一致）：prefetch 面板含 warmup 期数据，若用全量时间轴切 fold，
+        # 所有 fold 边界整体前移 warmup 期——fold1 训练起点落在 warmup 内
+        # （时序因子全 NaN 也产生交易），末 fold test 提前 warmup 个交易日
+        # 结束，且与单进程版结果系统性不可比。
+        timestamps = engine._get_timestamps(
+            full_data, start_date=start_date, end_date=end_date
+        )
         splitter = TimeSeriesSplit(n_splits=n_splits)
         splits = splitter.split(timestamps)
 

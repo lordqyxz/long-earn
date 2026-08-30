@@ -24,8 +24,13 @@ ensure_utf8_stdio()
 import numpy as np  # noqa: E402
 
 from long_earn.core.pg import pg_connect  # noqa: E402
+from long_earn.core.storage import get_data_dir  # noqa: E402
 
 # 上一次成功回测的引擎报告值（来自 backtest_recent.py 输出，2026-01-06~2026-07-08）
+# 注意：这是硬编码对照基准，run 选择时会按策略名过滤并打印元数据供人工核对
+ENG_REPORT_WINDOW = ("2026-01-06", "2026-07-08")
+ENG_REPORT_STRATEGY_KEYWORD = "momentum20"
+
 ENG_REPORT = {
     "total_return": 0.2897,
     "annual_return": 0.5693,
@@ -91,7 +96,10 @@ def main() -> None:  # noqa: C901, PLR0912
     print("数学证明级对账：从审计日志独立重建收益指标")
     print("=" * 72)
     print("审计库: PostgreSQL backtest_audit.logs（连接参数由 core.pg 裁决）")
-    print("目标回测: Momentum20Strategy, 2026-01-06 ~ 2026-07-08")
+    print(
+        f"对照基准（ENG_REPORT 硬编码）: Momentum20Strategy, "
+        f"{ENG_REPORT_WINDOW[0]} ~ {ENG_REPORT_WINDOW[1]}"
+    )
 
     conn = pg_connect(read_only=True, row_factory=None)
     try:
@@ -106,9 +114,36 @@ def main() -> None:  # noqa: C901, PLR0912
             """
         ).fetchall()
 
+        # 读取各 run 的 RUN_START 元数据（策略名/回测窗口），供过滤与人工确认
+        meta_by_run: dict[str, dict] = {}
+        for rid, _t0, _t1, _n in runs:
+            row = conn.execute(
+                """
+                SELECT payload
+                FROM "backtest_audit".logs
+                WHERE run_id = %s AND event_type = 'RUN_START'
+                ORDER BY seq ASC
+                LIMIT 1
+                """,
+                [rid],
+            ).fetchone()
+            if not row or row[0] is None:
+                continue
+            p = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            meta_by_run[rid] = {
+                "strategy_id": str(p.get("strategy_id", "")),
+                "start_date": str(p.get("start_date", "")),
+                "end_date": str(p.get("end_date", "")),
+            }
+
         print(f"\n审计库中最近 {len(runs)} 次回测 run_id:")
         for rid, t0, t1, n in runs:
-            print(f"  {rid[:8]}...  {t0} ~ {t1}  events={n}")
+            meta = meta_by_run.get(rid, {})
+            print(
+                f"  {rid[:8]}...  {t0} ~ {t1}  events={n}  "
+                f"策略={meta.get('strategy_id', '?')}  "
+                f"窗口={meta.get('start_date', '?')}~{meta.get('end_date', '?')}"
+            )
 
         if not runs:
             print("[错误] 审计库为空")
@@ -119,8 +154,37 @@ def main() -> None:  # noqa: C901, PLR0912
         if not valid_runs:
             print("[错误] 审计库中无完整回测（events > 100）的 run_id")
             return
-        run_id = valid_runs[0][0]
-        print(f"\n选用 run_id: {run_id[:8]}... (events={valid_runs[0][3]}, 最新完整回测)")
+
+        # 优先按策略名 Momentum20 过滤（ENG_REPORT 硬编码值来自 Momentum20 回测）；
+        # 无元数据或无匹配时回退最新完整 run，并提示人工核对元数据
+        momentum_runs = [
+            r
+            for r in valid_runs
+            if ENG_REPORT_STRATEGY_KEYWORD
+            in meta_by_run.get(r[0], {}).get("strategy_id", "").lower()
+        ]
+        if momentum_runs:
+            selected = momentum_runs[0]
+            print("\n按策略名含 Momentum20 过滤，选用最新匹配 run")
+        else:
+            selected = valid_runs[0]
+            print(
+                "\n[警告] 未找到策略名含 Momentum20 的完整 run，"
+                "回退为最新完整 run——ENG_REPORT 可能与所选 run 不匹配，"
+                "请人工核对上方元数据"
+            )
+        run_id = selected[0]
+        meta = meta_by_run.get(run_id, {})
+        print(f"\n选用 run_id: {run_id[:8]}... (events={selected[3]})")
+        print(f"  策略名: {meta.get('strategy_id', '<无 RUN_START 元数据>')}")
+        print(
+            f"  回测窗口: {meta.get('start_date', '?')} ~ "
+            f"{meta.get('end_date', '?')}"
+        )
+        print(
+            f"  对照基准: Momentum20Strategy, "
+            f"{ENG_REPORT_WINDOW[0]} ~ {ENG_REPORT_WINDOW[1]}（硬编码）"
+        )
 
         # ── 读取 MARKET_DATA 事件 → 重建 equity_curve ──────────────
         md_rows = conn.execute(
@@ -345,12 +409,17 @@ def main() -> None:  # noqa: C901, PLR0912
                          = {ENG_REPORT['total_return']*100:.4f}%（引擎报告）
 """)
 
-        # 输出重建的 equity_curve 供进一步验证
-        out = Path("reconstructed_equity.json")
+        # 输出重建的 equity_curve 供进一步验证（落盘路径由 core.storage 统一裁决）
+        out = get_data_dir() / "reconstructed_equity.json"
         out.write_text(
             json.dumps(
                 {
                     "run_id": run_id,
+                    "strategy_id": meta.get("strategy_id", ""),
+                    "backtest_window": {
+                        "start": meta.get("start_date", ""),
+                        "end": meta.get("end_date", ""),
+                    },
                     "equity_curve": reconstructed_equity,
                     "metrics_reconstructed": recon_m,
                     "metrics_engine_report": ENG_REPORT,

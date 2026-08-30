@@ -1,7 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { ResearchState, ResearchEvent, RoundMetrics } from '@/types/research'
 
-const WS_URL = `ws://${window.location.host}/ws/research`
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/research`
+
+const RECONNECT_BASE_DELAY_MS = 3000
+const RECONNECT_MAX_DELAY_MS = 30000
 
 const INITIAL_STATE: ResearchState = {
   connected: false,
@@ -22,15 +26,20 @@ export function useResearchWebSocket() {
   const [state, setState] = useState<ResearchState>(INITIAL_STATE)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>()
+  const manualCloseRef = useRef(false)
+  const reconnectDelayRef = useRef(RECONNECT_BASE_DELAY_MS)
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
+    manualCloseRef.current = false
 
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
     ws.onopen = () => {
       setState((s) => ({ ...s, connected: true, error: null }))
+      // 成功连接后重置重连退避间隔
+      reconnectDelayRef.current = RECONNECT_BASE_DELAY_MS
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = undefined
@@ -47,8 +56,15 @@ export function useResearchWebSocket() {
     }
 
     ws.onclose = () => {
+      // 主动关闭或已被新连接替换的过期连接：短路，不再排定重连
+      if (manualCloseRef.current || wsRef.current !== ws) return
       setState((s) => ({ ...s, connected: false }))
-      reconnectTimer.current = setTimeout(connect, 3000)
+      const delay = reconnectDelayRef.current
+      reconnectTimer.current = setTimeout(() => {
+        // 指数退避：每次翻倍，上限 30 秒
+        reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_DELAY_MS)
+        connect()
+      }, delay)
     }
 
     ws.onerror = () => {
@@ -57,11 +73,14 @@ export function useResearchWebSocket() {
   }, [])
 
   const disconnect = useCallback(() => {
+    manualCloseRef.current = true
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = undefined
     }
-    wsRef.current?.close()
+    const ws = wsRef.current
     wsRef.current = null
+    ws?.close()
   }, [])
 
   const startResearch = useCallback((idea: string, maxRounds = 3, maxIterations = 2, minImprovement = 0.005) => {

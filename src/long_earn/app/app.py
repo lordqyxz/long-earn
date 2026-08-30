@@ -60,6 +60,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from starlette.background import BackgroundTask
 
 from long_earn.app import schemas
 from long_earn.app.analyzer import BacktestAnalyzer
@@ -134,21 +135,42 @@ def _register_run_routes(  # noqa: C901
         operation_id="clean_empty_runs",
     )
     async def clean_empty_runs():
-        """删除无效回测运行（带 test 标签/空跑/错误/无 RUN_END 孤儿）的审计数据。"""
+        """删除无效回测运行（带 test 标签/空跑/错误/沉寂孤儿）的审计数据。
+
+        孤儿口径带 30 分钟新鲜度护栏（见 analyzer.get_empty_or_error_runs），
+        正在运行的回测不会被误删。响应按实际成功删除数统计（个别 run 可能
+        在列出后被并发删除，delete_run 返回 0 不计入）。
+        """
         bad_ids = analyzer.get_empty_or_error_runs()
-        deleted = 0
+        deleted_runs = 0
+        deleted_records = 0
         for rid in bad_ids:
-            deleted += analyzer.delete_run(rid)
-        logger.info(f"清理完成: 删除 {len(bad_ids)} 个无效 run, {deleted} 条记录")
-        return {"deleted_runs": len(bad_ids), "deleted_records": deleted}
+            n = analyzer.delete_run(rid)
+            if n:
+                deleted_runs += 1
+                deleted_records += n
+        logger.info(
+            f"清理完成: 实删 {deleted_runs}/{len(bad_ids)} 个无效 run, "
+            f"{deleted_records} 条记录"
+        )
+        return {"deleted_runs": deleted_runs, "deleted_records": deleted_records}
 
     @app.delete(
         "/api/runs/{run_id}",
         response_model=schemas.DeleteRunResponse,
         operation_id="delete_run",
     )
-    async def delete_run(run_id: str):
-        """删除指定回测运行的所有审计日志。"""
+    async def delete_run(run_id: str, force: bool = Query(False)):
+        """删除指定回测运行的所有审计日志。
+
+        带生产标签（RUN_START payload.tags 含 'prod'）的 run 默认拒绝删除
+        （409），须显式 ``force=true`` 才允许删除，保护 ADR-005 可追溯链。
+        """
+        if not force and analyzer.has_prod_tag(run_id):
+            raise HTTPException(
+                409,
+                f"Run {run_id} 带生产标签（prod），确认删除请传 force=true",
+            )
         deleted = analyzer.delete_run(run_id)
         if not deleted:
             raise HTTPException(404, f"Run {run_id} not found")
@@ -283,8 +305,9 @@ def _register_chart_export_routes(app: FastAPI, analyzer: BacktestAnalyzer) -> N
     async def export_trades(run_id: str, format: str = Query("csv")):
         if format not in {"csv", "json"}:
             raise HTTPException(400, "format 仅支持 csv / json")
+        # mkdtemp 置于 try 之前：创建失败时无临时目录需要清理，异常直接冒泡
+        tmp_dir = Path(tempfile.mkdtemp())
         try:
-            tmp_dir = Path(tempfile.mkdtemp())
             base_name = f"trades_{run_id[:8]}"
             out_path = analyzer.export_trade_traces_to_file(
                 run_id, tmp_dir / base_name, fmt=format
@@ -294,12 +317,20 @@ def _register_chart_export_routes(app: FastAPI, analyzer: BacktestAnalyzer) -> N
                 if format == "csv"
                 else "application/json; charset=utf-8"
             )
-            return FileResponse(out_path, media_type=media_type, filename=out_path.name)
+            # FileResponse 在响应体实际发送时才打开文件：不能在本请求栈内
+            # 同步删除临时目录（starlette 发送阶段才读文件），改用
+            # BackgroundTask 在响应发送完成后延迟删除。
+            return FileResponse(
+                out_path,
+                media_type=media_type,
+                filename=out_path.name,
+                background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+            )
         except Exception as e:
+            # 导出失败路径：响应不会发送，BackgroundTask 不会执行，手动清理
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.exception("导出交易日志失败")
             raise HTTPException(500, str(e)) from e
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @app.post(
         "/api/compare",
@@ -523,7 +554,7 @@ def _register_event_routes(app: FastAPI, event_analyzer: EventAnalyzer) -> None:
         operation_id="list_events",
     )
     async def list_events(
-        limit: int = Query(50),
+        limit: int = Query(50, ge=1, le=500),
         symbol: str | None = Query(None),
         sentiment: str | None = Query(None),
         category: str | None = Query(None),
@@ -546,7 +577,7 @@ def _register_event_routes(app: FastAPI, event_analyzer: EventAnalyzer) -> None:
         response_model=schemas.TimelineResponse,
         operation_id="event_timeline",
     )
-    async def event_timeline(days: int = Query(30)):
+    async def event_timeline(days: int = Query(30, ge=1, le=365)):
         timeline = event_analyzer.event_timeline(days=days)
         return {"timeline": timeline}
 
@@ -556,7 +587,7 @@ def _register_event_routes(app: FastAPI, event_analyzer: EventAnalyzer) -> None:
         operation_id="list_relations",
     )
     async def list_relations(
-        limit: int = Query(50),
+        limit: int = Query(50, ge=1, le=500),
         target: str | None = Query(None),
         direction: str | None = Query(None),
     ):
@@ -663,6 +694,32 @@ async def _broadcast_event(active_ws: set[WebSocket], data: dict[str, Any]) -> N
     active_ws.difference_update(disconnected)
 
 
+def _run_event_pipeline_sync(query: str, ea: EventAnalyzer) -> None:
+    """在线程池内同步执行事件推理管线（LLM 分钟级调用，禁止阻塞事件循环）。
+
+    步骤：构造运行时上下文 → 事件采集推理子图（ADR-021：LLM 推理步骤
+    显式触发，不再隐藏在 prepare_context 内）→ 确定性激活一次完成上下文
+    落位 → 重载事件物质供看板查询。
+    """
+    from long_earn.context_init import create_runtime_context  # noqa: PLC0415
+    from long_earn.event_inference import (  # noqa: PLC0415
+        create_event_inference_subgraph,
+    )
+
+    ctx = create_runtime_context()
+    create_event_inference_subgraph(ctx).invoke({"query": query})
+    ctx.prepare_context(query)
+    # PG 全量迁移后：物质存储位于 PostgreSQL，直接重载（路径参数兼容）
+    ea.load()
+
+
+# 事件推理管线专用线程池：子图 invoke 为分钟级同步 LLM 调用，单 worker
+# 串行化并发触发（与 research 路径线程池同策略），防止负载叠加。
+_PIPELINE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="event-pipeline"
+)
+
+
 async def _run_pipeline_and_broadcast(
     query: str,
     ea: EventAnalyzer,
@@ -682,10 +739,6 @@ async def _run_pipeline_and_broadcast(
             },
         )
 
-        from long_earn.context_init import create_runtime_context  # noqa: PLC0415
-
-        ctx = create_runtime_context()
-
         for i, stage in enumerate(_STAGES):
             await asyncio.sleep(0.5)
             progress = int((i + 1) / len(_STAGES) * 100)
@@ -701,17 +754,13 @@ async def _run_pipeline_and_broadcast(
                 },
             )
 
-        # ADR-021：事件采集推理是 LLM 步骤，此处显式触发（不再隐藏在
-        # prepare_context 内）；随后确定性激活一次完成上下文落位。
-        from long_earn.event_inference import (  # noqa: PLC0415
-            create_event_inference_subgraph,
+        # 同步管线（事件子图 invoke + prepare_context + ea.load，分钟级 LLM
+        # 调用）放线程池执行，事件循环只负责广播进度——直接在事件循环内
+        # invoke 会冻结全部 REST/WS 服务。异常经 await 透出由下方统一广播。
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            _PIPELINE_EXECUTOR, _run_event_pipeline_sync, query, ea
         )
-
-        create_event_inference_subgraph(ctx).invoke({"query": query})
-        ctx.prepare_context(query)
-
-        # PG 全量迁移后：物质存储位于 PostgreSQL，直接重载（路径参数兼容）
-        ea.load()
 
         stats = ea.event_stats()
         await _broadcast_event(
@@ -792,11 +841,16 @@ def _register_research_routes(  # noqa: C901, PLR0915
                         }
                     )
 
+                    # 事件循环引用必须在 async 侧捕获：工作线程内
+                    # asyncio.get_event_loop() 在 Python 3.13 必抛 RuntimeError
+                    loop = asyncio.get_running_loop()
+
                     def _run_in_thread(
                         _idea: str = idea,
                         _max_rounds: int = max_rounds,
                         _max_iterations: int = max_iterations,
                         _min_improvement: float = min_improvement,
+                        _loop: asyncio.AbstractEventLoop = loop,
                     ) -> None:
                         from long_earn.config import AppConfig  # noqa: PLC0415
                         from long_earn.context_init import (  # noqa: PLC0415
@@ -813,12 +867,12 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
                         def _send_progress(data: dict[str, Any]) -> None:
                             try:
-                                loop = asyncio.get_event_loop()
                                 asyncio.run_coroutine_threadsafe(
-                                    _broadcast_event(active_ws, data), loop
+                                    _broadcast_event(active_ws, data), _loop
                                 )
                             except Exception:
-                                pass
+                                # 广播失败不中断研究主流程，但必须留痕排查
+                                logger.warning("研究进度广播失败（事件循环不可用）")
 
                         service = StrategyResearchService(ctx)
                         try:
@@ -864,11 +918,16 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
         active_ws: set[WebSocket] = app.state.active_ws
 
+        # 事件循环引用必须在 async 侧捕获：工作线程内
+        # asyncio.get_event_loop() 在 Python 3.13 必抛 RuntimeError
+        loop = asyncio.get_running_loop()
+
         def _run_in_thread(
             _idea: str = idea,
             _max_rounds: int = max_rounds,
             _max_iterations: int = max_iterations,
             _min_improvement: float = min_improvement,
+            _loop: asyncio.AbstractEventLoop = loop,
         ) -> None:
             from long_earn.config import AppConfig  # noqa: PLC0415
             from long_earn.context_init import initialize_context  # noqa: PLC0415
@@ -883,12 +942,12 @@ def _register_research_routes(  # noqa: C901, PLR0915
 
             def _send_progress(data: dict[str, Any]) -> None:
                 try:
-                    loop = asyncio.get_event_loop()
                     asyncio.run_coroutine_threadsafe(
-                        _broadcast_event(active_ws, data), loop
+                        _broadcast_event(active_ws, data), _loop
                     )
                 except Exception:
-                    pass
+                    # 广播失败不中断研究主流程，但必须留痕排查
+                    logger.warning("研究进度广播失败（事件循环不可用）")
 
             service = StrategyResearchService(ctx)
             try:

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Send, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -22,14 +22,19 @@ export function EventFlowPage() {
   const [running, setRunning] = useState(false)
   const logEndRef = useRef<HTMLDivElement>(null)
 
+  // 管线终态由 WebSocket 推送的 pipelineStage 驱动（pipeline_complete → 'done'、pipeline_error → 'error'），
+  // 进入终态时刷新数据并复位运行态，替代原固定 4 秒定时器。
+  useEffect(() => {
+    if (pipelineStage === 'done' || pipelineStage === 'error') {
+      setRunning(false)
+      reload()
+    }
+  }, [pipelineStage, reload])
+
   const handleTrigger = () => {
     if (!query.trim()) return
     setRunning(true)
     triggerPipeline(query.trim())
-    setTimeout(() => {
-      reload()
-      setRunning(false)
-    }, 4000)
   }
 
   const handleReload = () => {

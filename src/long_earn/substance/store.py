@@ -117,7 +117,7 @@ class SubstanceStore:
         self._retrieval.rebuild(self._substances)
         self._dirty = False
 
-    def search(  # noqa: PLR0913, PLR0912
+    def search(  # noqa: PLR0913
         self,
         query: str,
         k: int = 3,
@@ -178,14 +178,19 @@ class SubstanceStore:
 
             # 时间衰减
             if apply_decay:
-                decay = s.decay_factor(now)
-                # 使用物质自身半衰期或传入参数
-                if s.decay_half_life_days != half_life_days:
-                    age_days = (now - s.created_at).total_seconds() / 86400.0
-                    if age_days > 0:
-                        decay = math.exp(
-                            -0.6931471805599453 * age_days / half_life_days
-                        )
+                # 物质自身半衰期优先（已设置且 >0），否则回退传入参数
+                # （>0 守卫同时杜绝半衰期为 0 的除零风险）
+                half_life = (
+                    s.decay_half_life_days
+                    if s.decay_half_life_days > 0
+                    else half_life_days
+                )
+                age_days = (now - s.created_at).total_seconds() / 86400.0
+                decay = (
+                    1.0
+                    if age_days <= 0
+                    else math.exp(-0.6931471805599453 * age_days / half_life)
+                )
                 score *= decay
                 if not include_decayed and decay < DECAY_THRESHOLD:
                     continue
@@ -293,8 +298,31 @@ class SubstanceStore:
         """绑定持久化 — 之后每次 ``add`` 自动原子追加到 PostgreSQL。"""
         self._persist_bound = True
 
+    def update(self, substance: Substance) -> None:
+        """同步单条物质的内存变更到 PostgreSQL（UPSERT 整行覆盖）。
+
+        物质对象与内存热存储共享引用，content/metadata 变更即时生效；
+        本方法负责把变更落盘，与 ``add`` 的原子追加、``remove`` 的即时
+        删除对称（如 compress 合并后的聚合内容）。未绑定持久化时仅
+        失效检索索引，不写库。
+
+        Args:
+            substance: 已存在于本存储中的物质（须与内存对象同一实例）
+
+        Raises:
+            ValueError: 物质不在本存储中（防止 UPSERT 出内存不感知的行）
+        """
+        if substance.sid not in self._sid_to_index:
+            raise ValueError(f"物质不在存储中，无法同步变更: {substance.sid}")
+        self._dirty = True
+        if self._persist_bound:
+            save_substance(substance)
+
     def remove(self, sid: str) -> bool:
         """删除物质（motion.compress 压缩后调用）。
+
+        先删除 PostgreSQL 行，成功后才移除内存与索引，保证两层状态一致；
+        持久层删除失败时内存保持不动并告警。
 
         Returns:
             是否删除成功
@@ -302,13 +330,14 @@ class SubstanceStore:
         idx = self._sid_to_index.get(sid)
         if idx is None:
             return False
+        # 先删持久层，成功才动内存（避免 PG 删除失败后内存与 PG 不一致）
+        if self._persist_bound and not delete_substance(sid):
+            logger.warning(f"物质删除失败（PostgreSQL 删除未成功）: {sid}")
+            return False
         self._substances.pop(idx)
         # 重建索引映射（pop 后下标偏移）
         self._sid_to_index = {sub.sid: i for i, sub in enumerate(self._substances)}
         self._dirty = True
-        # 同步删除 PostgreSQL 行
-        if self._persist_bound:
-            return delete_substance(sid)
         return True
 
     # ── 文档加载（Markdown 标题感知切分）───────────────────────

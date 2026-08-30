@@ -89,15 +89,17 @@ def check_python_files() -> list[str]:
 
 
 def check_prompt_files() -> list[str]:
-    """检查 prompt .md 文件中的退役语法。
+    """检查 src 下全部 .md 文件（递归）中的退役语法。
 
-    .md 文件中允许在"退役警告"上下文（如"旧式 type: filter 已退役"）中提及退役语法，
+    扫描范围不限于 prompt 目录：任何 .md（prompt、说明文档、内嵌指南）
+    都不得使用 ${var} 占位符。.md 文件中允许在"退役警告"上下文
+    （如"旧式 type: filter 已退役"）中提及退役语法，
     但不允许将其作为有效选项推荐（如"路径 2：表达式路径"）。
     """
     violations: list[str] = []
 
-    prompt_dir = _ROOT / "src" / "long_earn" / "strategy_rd" / "agents"
-    for md_file in prompt_dir.glob("*.md"):
+    # src 全目录递归扫描所有 .md（含全部 agent prompt 与文档）
+    for md_file in sorted((_ROOT / "src").rglob("*.md")):
         if md_file in _WHITELIST_FILES:
             continue
 

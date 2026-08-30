@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 miniQMT 增量同步数据到 DuckDB 主数据层（薄入口）。
+"""从 miniQMT 增量同步数据到 PostgreSQL 缓存主数据层（薄入口）。
 
 核心逻辑位于 long_earn.services.data_ingestion_service，
 本脚本以子进程方式运行 typer CLI 的 download 子命令，并加守护重启：

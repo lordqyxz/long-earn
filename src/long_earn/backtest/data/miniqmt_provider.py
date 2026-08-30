@@ -126,16 +126,28 @@ class MiniQmtClient:
 
     @staticmethod
     def _run_with_timeout(fn: Any, timeout: int, *args: Any, **kwargs: Any) -> Any:
-        """在子线程中执行 fn，超时则抛出 TimeoutError。"""
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(fn, *args, **kwargs)
-            try:
-                return future.result(timeout=timeout)
-            except FuturesTimeoutError:
-                logger.warning(f"xtdata 调用超时 ({timeout}s): {fn.__name__}")
-                raise TimeoutError(
-                    f"xtdata 调用超时 ({timeout}s): {fn.__name__}"
-                ) from None
+        """在子线程中执行 fn，超时则抛出 TimeoutError。
+
+        手动管理线程池生命周期，而非 ``with`` 上下文：``__exit__`` 隐式
+        ``shutdown(wait=True)`` 会阻塞等待挂死的 xtdata C++ 调用，使超时
+        保护失效。超时路径改用 ``shutdown(wait=False, cancel_futures=True)``
+        立即返回；挂起的 worker 线程随 C++ 调用结束后自行消亡，不阻塞调用方。
+        """
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(fn, *args, **kwargs)
+        try:
+            result = future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            logger.warning(f"xtdata 调用超时 ({timeout}s): {fn.__name__}")
+            # 不等待挂死的 worker（wait=True 会阻塞到 C++ 调用结束），
+            # 仅取消尚未开始的任务后立即放弃
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise TimeoutError(
+                f"xtdata 调用超时 ({timeout}s): {fn.__name__}"
+            ) from None
+        # 正常路径：worker 已结束，等待线程池完全退出（立即返回）
+        pool.shutdown(wait=True)
+        return result
 
     @classmethod
     def get(cls) -> MiniQmtClient:

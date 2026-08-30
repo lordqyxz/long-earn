@@ -401,8 +401,14 @@ class Portfolio:
 
         return orders
 
-    def update_from_fill(self, fill: FillEvent) -> None:
-        """根据成交记录更新持仓和现金"""
+    def update_from_fill(self, fill: FillEvent) -> bool:
+        """根据成交记录更新持仓和现金。
+
+        Returns:
+            True 表示成交已应用；False 表示被拒绝（买入现金不足 /
+            卖出超持仓或无持仓），调用方应记 ORDER_SKIPPED 审计而非
+            FILL——否则审计记录了未生效的成交，重放与持仓状态背离。
+        """
         symbol = fill.symbol
         cost = (
             fill.fill_price * fill.fill_quantity
@@ -415,12 +421,12 @@ class Portfolio:
         if fill.order_type == "BUY":
             if cost > self.cash + 1e-6:
                 # P2-02 + P0-04：现金不足时跳过该笔交易而非抛异常终止回测。
-                # 记录跳过并返回，引擎会记 ORDER_SKIPPED 审计事件。
+                # 记录跳过并返回 False，引擎据此记 ORDER_SKIPPED 审计事件。
                 logger.warning(
                     f"现金不足跳过买入 {symbol}: 需要 {cost:.2f}，可用 {self.cash:.2f}"
                 )
                 self.trade_count -= 1  # 回滚 trade_count 递增
-                return
+                return False
             self.cash -= cost
             pos = self.positions.setdefault(symbol, Position(symbol=symbol))
             total_cost = (
@@ -434,7 +440,26 @@ class Portfolio:
 
                 pos.available_date = fill.timestamp + timedelta(days=1)
         else:
-            proceeds = fill.fill_price * fill.fill_quantity
+            # 仅多头约束：卖出不得超过实际持仓。Broker 产生的卖出成交
+            # 理论上不超过持仓，但 direct_orders 绕过权重系统、以及
+            # rebalancing 与挂单触发的竞态都可能造出超卖成交——凭空
+            # 增资等价于隐性做空，这里按持仓数截断/拒绝。
+            pos = self.positions.get(symbol)
+            held = pos.shares if pos is not None else 0
+            sell_qty = min(fill.fill_quantity, held)
+            if sell_qty <= 0:
+                logger.warning(
+                    f"拒绝卖出 {symbol}: 无持仓却收到卖出成交 "
+                    f"{fill.fill_quantity} 股（仅多头约束，拒绝凭空增资）"
+                )
+                self.trade_count -= 1
+                return False
+            if sell_qty < fill.fill_quantity:
+                logger.warning(
+                    f"卖出超持仓截断 {symbol}: 请求 {fill.fill_quantity} 股，"
+                    f"实际持有 {held} 股，按 {sell_qty} 股成交"
+                )
+            proceeds = fill.fill_price * sell_qty
             net_proceeds = (
                 proceeds
                 - fill.commission
@@ -442,16 +467,16 @@ class Portfolio:
                 - getattr(fill, "transfer_fee", 0.0)
             )
             self.cash += net_proceeds
-            if symbol in self.positions:
-                pos = self.positions[symbol]
+            if pos is not None:
                 # 计算已实现 P&L
-                realized = proceeds - (pos.avg_cost * fill.fill_quantity)
+                realized = proceeds - (pos.avg_cost * sell_qty)
                 self.realized_pnl[symbol] = (
                     self.realized_pnl.get(symbol, 0.0) + realized
                 )
-                pos.shares -= fill.fill_quantity
+                pos.shares -= sell_qty
                 if pos.shares <= 0:
                     del self.positions[symbol]
+        return True
 
     def update_market_values(self, current_prices: pl.DataFrame) -> None:
         """根据当前价格更新所有持仓市值"""

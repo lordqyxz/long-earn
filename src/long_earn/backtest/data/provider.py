@@ -49,8 +49,9 @@ class MarketIntelligenceProvider(Protocol):
     """市场情报能力接口（第二组接口，与 :class:`DataConnector` 分离）。
 
     定位差异：
-      - ``DataConnector``（行情/财务/行业/板块/日历/...）：有降级链兜底
-        （DuckDB→miniqmt），失败静默降级到下一源。
+      - ``DataConnector``（行情/财务/行业/板块/日历/...）：PostgreSQL 缓存
+        （ADR-019）+ 显式主源 miniqmt（ADR-018），主源失败即失败并打日志，
+        不做静默跨源降级。
       - ``MarketIntelligenceProvider``（资金流向/排行/板块/资讯）：ciccwm 独占，
         **无降级链**，失败显式报错或返回空（ADR-006 约定）。
 

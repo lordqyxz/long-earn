@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """HTR 合并门 OOS 验证（ADR-010 Phase 3，多核并行版）。
 
-对基准策略与候选 B 策略在测试集（2025-01-01 ~ 2026-03-24）上并行跑
-单段回测，按 HTR 合并门规则决策：
+对基准策略与候选 B 策略在测试集（config.test_start_date ~ test_end_date，
+默认 2025-01-01 ~ 2026-03-24）上并行跑单段回测，按 HTR 合并门规则决策：
     oos_sharpe(候选) > oos_sharpe(基准) + 0.05  →  merge（替换基准）
     否则                                          →  continue
 
@@ -12,8 +12,10 @@
 （单段对整段测试集，比 3 折平均更严格，不易过拟合到某一段）。
 
 严格遵守量化数据分割规范：
-- 测试集仅用于 HTR 合并门决策，不用于参数调优
-- 验证集（2026-03-25 ~ 2026-06-25）开发阶段绝对禁止使用
+- 测试集仅用于 HTR 合并门决策，不用于参数调优（窗口从 config 派生，不硬编码）
+- 验证集（config.validation_*）开发阶段绝对禁止使用
+- 风控参数按每个 YAML 自带的 risk_control 独立提取（经 ParallelRunner
+  run_candidates），候选自带风控不再被基准参数覆盖
 
 用法:
     uv run python scripts/oos_validate.py
@@ -44,20 +46,12 @@ from long_earn.backtest.data.cache import DataCache  # noqa: E402
 from long_earn.backtest.data.polars_adapter import (  # noqa: E402
     PandasToPolarsProvider,
 )
-from long_earn.backtest.engine.dsl import parse_strategy_yaml  # noqa: E402
-from long_earn.backtest.engine.parallel import (  # noqa: E402
-    BacktestTask,
-    ParallelRunner,
-    _run_one_backtest,
-)
-from long_earn.backtest.engine.shared_data import SharedDataContext  # noqa: E402
+from long_earn.backtest.engine.parallel import ParallelRunner  # noqa: E402
 from long_earn.config import AppConfig  # noqa: E402
 from long_earn.context_init import initialize_context  # noqa: E402
 from long_earn.core.storage import best_strategy_path  # noqa: E402
 
-# 测试集区间（HTR held-out，仅合并门触碰）
-TEST_START = "2025-01-01"
-TEST_END = "2026-03-24"
+# HTR 合并门阈值：候选 oos_sharpe 需超过基准 + 阈值才 merge
 HTR_MERGE_THRESHOLD = 0.05
 
 # ── 候选策略 B：短期反转+中期动量+低波+EP+ROE+净利润同比 + 风控 ──────
@@ -222,16 +216,8 @@ def fmt_f(x: float | None) -> str:
     return f"{x:.4f}"
 
 
-def _worker_init() -> None:
-    """worker 进程初始化：日志降噪到 ERROR 级别。"""
-    from loguru import logger
-
-    logger.remove()
-    logger.add(sys.stderr, level="ERROR")
-
-
 def get_csi500_symbols() -> list[str]:
-    """从 DuckDB 缓存获取 csi500 成分股。"""
+    """从 PostgreSQL 缓存获取 csi500 成分股。"""
     cache = DataCache()
     symbols = cache.get_universe("中证500", "")
     if not symbols:
@@ -239,71 +225,6 @@ def get_csi500_symbols() -> list[str]:
     if not symbols:
         raise RuntimeError("缓存中无 csi500/中证500 成分股数据")
     return symbols
-
-
-def run_parallel_backtest(
-    yamls: list[tuple[str, str]],
-    symbols: list[str],
-    start_date: str,
-    end_date: str,
-    max_workers: int,
-    data_provider: object,
-) -> list:
-    """并行回测多个策略 YAML。"""
-    from concurrent.futures import ProcessPoolExecutor
-
-    runner = ParallelRunner(max_workers=max_workers, data_provider=data_provider)
-
-    print(f"  预取数据: {len(symbols)} 只股票, {start_date} ~ {end_date}")
-    full_data = runner._prepare_data(symbols, start_date, end_date)
-    if full_data.is_empty():
-        from long_earn.backtest.engine.parallel import BacktestOutcome
-
-        return [
-            BacktestOutcome(
-                task_id=str(i),
-                success=False,
-                error="数据预取为空",
-                error_category="insufficient_data",
-            )
-            for i in range(len(yamls))
-        ]
-
-    first_dsl = parse_strategy_yaml(yamls[0][0])
-    stop_loss = first_dsl.risk_control.stop_loss
-    max_dd_limit = first_dsl.risk_control.max_drawdown_limit
-    max_pos_pct = first_dsl.risk_control.max_position_per_stock
-
-    outcomes: list = []
-    with SharedDataContext(full_data) as sctx:
-        panel_path = sctx.get_worker_args()
-        tasks = [
-            BacktestTask(
-                strategy_yaml=yaml_str,
-                start_date=start_date,
-                end_date=end_date,
-                symbols=symbols,
-                benchmark_symbol="000300.SH",
-                panel_path=panel_path,
-                stop_loss=stop_loss,
-                max_drawdown_limit=max_dd_limit,
-                max_position_pct=max_pos_pct,
-                task_id=str(idx),
-                param_desc=label,
-            )
-            for idx, (yaml_str, label) in enumerate(yamls)
-        ]
-
-        if max_workers <= 1:
-            print("  串行模式（max_workers=1）")
-            outcomes = [_run_one_backtest(t) for t in tasks]
-        else:
-            print(f"  并行模式（{max_workers} workers, {len(tasks)} 任务）")
-            with ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init
-            ) as ex:
-                outcomes = list(ex.map(_run_one_backtest, tasks))
-    return outcomes
 
 
 def print_outcome(o, label: str) -> None:
@@ -333,14 +254,17 @@ def main() -> None:
     max_workers = min(max_workers, 2)  # 2 策略
 
     config = AppConfig.from_env()
-    config.backtest_start_date = TEST_START
-    config.backtest_end_date = TEST_END
+    # 测试集区间（HTR held-out，仅合并门触碰）——从 config 派生，不硬编码
+    test_start = config.test_start_date
+    test_end = config.test_end_date
+    config.backtest_start_date = test_start
+    config.backtest_end_date = test_end
     ctx = initialize_context(config)
 
     print("=" * 80)
     print("HTR 合并门 OOS 验证（多核并行，单段测试集回测）")
     print("=" * 80)
-    print(f"测试集区间: {TEST_START} ~ {TEST_END}")
+    print(f"测试集区间: {test_start} ~ {test_end}")
     print(f"合并门阈值: oos_sharpe(候选) > oos_sharpe(基准) + {HTR_MERGE_THRESHOLD}")
     print(f"并发 worker 数: {max_workers}")
 
@@ -362,16 +286,17 @@ def main() -> None:
         (CANDIDATE_B, "候选B: ReversalMomentumHybrid+风控"),
     ]
 
-    # 3. 并行回测
-    print(f"\n开始 OOS 并行回测（{len(yamls)} 策略, {max_workers} workers）...")
+    # 3. 并行回测（run_candidates：每个 YAML 独立解析风控参数与 warmup，
+    #    基准与候选各用各的 risk_control，杜绝风控参数交叉污染）
+    runner = ParallelRunner(max_workers=max_workers, data_provider=ctx.data_provider)
+    print(f"\n开始 OOS 并行回测（{len(yamls)} 策略, max_workers={max_workers}）...")
     t0 = time.time()
-    outcomes = run_parallel_backtest(
-        yamls=yamls,
+    outcomes = runner.run_candidates(
+        strategy_yamls=[yaml_str for yaml_str, _ in yamls],
+        start_date=test_start,
+        end_date=test_end,
         symbols=formatted_symbols,
-        start_date=TEST_START,
-        end_date=TEST_END,
-        max_workers=max_workers,
-        data_provider=ctx.data_provider,
+        benchmark_symbol="000300.SH",
     )
     t1 = time.time()
     print(f"OOS 回测完成: {t1 - t0:.1f}s")

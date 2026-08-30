@@ -372,15 +372,44 @@ class TestEvidenceGatePipeline:
         assert parsed["passed"] is False
 
     def test_evidence_cleared_between_invocations(self, agent: ResearchAgent) -> None:
-        """每次 invoke 重置证据缓存和 trial count"""
+        """invoke 必须清空上一轮证据缓存，防止证据跨 invoke 泄漏绕过证据门
+
+        评审 H17 修复：旧实现测试自己给 ``_evidence_cache`` 赋空后断言为空，
+        生产清空逻辑从未被调用（构造性恒真）。此处用文件既有 mock 模式
+        （mock 底层 ReAct agent，不跑真实 LLM）真实调用生产 ``invoke()``：
+        - ``_evidence_cache`` / ``_beam_paths`` 由生产代码重置；
+        - 重置后 ``record_path_outcome`` 无法再复用上一轮证据写回 success；
+        - ``_strategy_trial_count`` 是 DSR 跨 invoke 的 session 级计数
+          （见 research_agent.py「本 session 已探索策略数」声明），invoke
+          不重置——每 invoke 重置会低估 trial 数、放水统计门。
+        """
         strategy_yaml = self._valid_strategy()
         bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
         bt.invoke({"strategy_yaml": strategy_yaml})
         assert len(agent._evidence_cache) == 1
         assert agent._strategy_trial_count == 1
 
-        # 模拟 invoke 重置
-        agent._evidence_cache = {}
-        agent._strategy_trial_count = 0
-        assert len(agent._evidence_cache) == 0
-        assert agent._strategy_trial_count == 0
+        # 真实调用生产 invoke()（底层 ReAct agent mock 返回空消息，无 LLM 调用）
+        agent._agent.invoke.return_value = {"messages": []}
+        agent.invoke("研发动量策略")
+
+        # 生产重置逻辑生效：证据缓存与 beam 路径被清空
+        assert agent._evidence_cache == {}, "invoke 应清空上一轮证据缓存"
+        assert agent._beam_paths == [], "invoke 应清空上一轮 beam 路径"
+        # session 级 DSR 计数跨 invoke 保留（生产声明的语义）
+        assert agent._strategy_trial_count == 1, (
+            "_strategy_trial_count 为 session 级 DSR 计数，invoke 不应重置"
+        )
+
+        # 行为后果：上一轮的证据不能再为 success 写回背书（证据门未被绕过）
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
+        out = rec.invoke(
+            {
+                "path_summary": "上一轮已取证策略",
+                "strategy_yaml": strategy_yaml,
+                "metrics_json": '{"sharpe_ratio": 1.0}',
+            }
+        )
+        assert "拒绝写回成功" in out, (
+            "invoke 清空证据后，上一轮证据不应再支持 success 写回"
+        )

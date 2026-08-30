@@ -1,13 +1,15 @@
-"""对当前最佳策略做双季度前瞻验证。
+"""对当前最佳策略做双段前瞻验证（最终评估场景）。
 
-Q1 2026 (2026-01-01 ~ 2026-03-31) + Q2 2026 (2026-04-01 ~ 2026-06-30)。
-两个窗口收益都需 > 0 才算通过。
+验证集区间（config.validation_start_date ~ validation_end_date）对半拆分
+为前后两段，两段收益都需 > 0 才算通过。
+铁律 #3：验证集整个研发过程仅最终评估时触碰一次，本脚本即该唯一触碰点。
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -19,7 +21,29 @@ load_dotenv()
 
 from long_earn.config import AppConfig  # noqa: E402
 from long_earn.context_init import initialize_context  # noqa: E402
-from long_earn.core.storage import best_strategy_path  # noqa: E402
+from long_earn.core.storage import best_strategy_path, get_data_dir  # noqa: E402
+
+
+def split_validation_halves(
+    validation_start: str, validation_end: str
+) -> list[tuple[str, str, str]]:
+    """将验证集区间对半拆分为前后两段。
+
+    Args:
+        validation_start: 验证集起始日（ISO 格式）
+        validation_end: 验证集结束日（ISO 格式）
+
+    Returns:
+        [(段名, start, end), ...] 共两项；段名用于展示与结果键
+    """
+    start = date.fromisoformat(validation_start)
+    end = date.fromisoformat(validation_end)
+    half_days = ((end - start).days + 1) // 2
+    mid = start + timedelta(days=half_days)
+    return [
+        ("验证前半段", validation_start, (mid - timedelta(days=1)).isoformat()),
+        ("验证后半段", mid.isoformat(), validation_end),
+    ]
 
 
 def main() -> None:
@@ -41,13 +65,13 @@ def main() -> None:
     print(strategy_yaml)
     print("=" * 64)
 
-    quarters = [
-        ("Q1 2026", "2026-01-01", "2026-03-31"),
-        ("Q2 2026", "2026-04-01", "2026-06-30"),
-    ]
+    # 验证集区间对半拆分（铁律 #3：仅最终评估触碰一次）
+    halves = split_validation_halves(
+        config.validation_start_date, config.validation_end_date
+    )
 
     results: dict[str, dict] = {}
-    for name, start, end in quarters:
+    for name, start, end in halves:
         print()
         print(f"正在回测 {name} ({start} ~ {end})...")
         report = backtest.run(
@@ -76,49 +100,58 @@ def main() -> None:
             "trading_days": trading_days,
         }
 
+    half1 = results.get(halves[0][0], {})
+    half2 = results.get(halves[1][0], {})
+    h1_ret = half1.get("return", -999.0)
+    h2_ret = half2.get("return", -999.0)
+    threshold = 0.0
+    h1_pass = h1_ret > threshold
+    h2_pass = h2_ret > threshold
+    passed = h1_pass and h2_pass
+
     print()
     print("=" * 64)
-    print("双季度前瞻验证结果")
+    print("验证集双段前瞻验证结果")
     print("=" * 64)
-    q1 = results.get("Q1 2026", {})
-    q2 = results.get("Q2 2026", {})
-    q1_ret = q1.get("return", -999.0)
-    q2_ret = q2.get("return", -999.0)
-    threshold = 0.0
-    q1_pass = q1_ret > threshold
-    q2_pass = q2_ret > threshold
-    passed = q1_pass and q2_pass
-
-    print(f"  Q1 2026: return={q1_ret:.4f}, sharpe={q1.get('sharpe', 0):.2f}")
-    print(f"  Q2 2026: return={q2_ret:.4f}, sharpe={q2.get('sharpe', 0):.2f}")
+    print(
+        f"  {halves[0][0]}: return={h1_ret:.4f}, "
+        f"sharpe={half1.get('sharpe', 0):.2f}"
+    )
+    print(
+        f"  {halves[1][0]}: return={h2_ret:.4f}, "
+        f"sharpe={half2.get('sharpe', 0):.2f}"
+    )
     print(f"  收益阈值: {threshold:.4f}")
     print("-" * 64)
     if passed:
         print(
-            f"  ✅ 双季度验证通过：Q1={q1_ret:.4f}, Q2={q2_ret:.4f} "
+            f"  ✅ 双段验证通过：前半段={h1_ret:.4f}, 后半段={h2_ret:.4f} "
             f"均 > {threshold:.4f}"
         )
     else:
         failed = []
-        if not q1_pass:
-            failed.append(f"Q1={q1_ret:.4f}")
-        if not q2_pass:
-            failed.append(f"Q2={q2_ret:.4f}")
+        if not h1_pass:
+            failed.append(f"前半段={h1_ret:.4f}")
+        if not h2_pass:
+            failed.append(f"后半段={h2_ret:.4f}")
         print(
-            f"  ❌ 双季度验证未通过：{', '.join(failed)} 未达阈值 "
+            f"  ❌ 双段验证未通过：{', '.join(failed)} 未达阈值 "
             f"{threshold:.4f}"
         )
     print("=" * 64)
 
-    # 保存结果
+    # 保存结果（落盘路径由 core.storage 统一裁决）
     output = {
         "strategy_yaml": strategy_yaml,
-        "q1_2026": q1,
-        "q2_2026": q2,
+        "validation_start": config.validation_start_date,
+        "validation_end": config.validation_end_date,
+        "halves": {
+            name: results.get(name, {}) for name, _s, _e in halves
+        },
         "threshold": threshold,
         "passed": passed,
     }
-    out_path = Path("D:/dev/long-earn-data/dual_quarter_validation.json")
+    out_path = get_data_dir() / "dual_quarter_validation.json"
     out_path.write_text(
         json.dumps(output, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",

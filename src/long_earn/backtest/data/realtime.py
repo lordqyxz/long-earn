@@ -84,6 +84,7 @@ class MiniQmtRealtimeProvider:
     def __init__(self) -> None:
         self._client = MiniQmtClient.get()
         self._subscriptions: dict[str, dict[str, Any]] = {}
+        self._next_sub_seq: int = 0  # 订阅 ID 自增序号（防碰撞）
 
     @property
     def is_available(self) -> bool:
@@ -118,16 +119,25 @@ class MiniQmtRealtimeProvider:
         symbols: list[str],
         callback: Callable[[dict[str, Any]], None],
     ) -> str:
-        """通过 xtdata.subscribe_quote 订阅推送。"""
+        """通过 xtdata.subscribe_quote 订阅推送。
+
+        返回内部管理的订阅 ID（``miniqmt_<自增序号>``）；xtdata 返回的真实
+        订阅句柄保存于 ``_subscriptions``，供 :meth:`unsubscribe` 使用。
+        """
         if not self.is_available:
+            logger.warning("miniqmt 不可用，无法订阅实时行情")
             return ""
         try:
             xtdata = self._client._ensure_xtdata()
             if xtdata is None:
+                logger.warning("miniqmt xtdata 未就绪，无法订阅实时行情")
                 return ""
-            sub_id = f"miniqmt_{abs(hash(tuple(symbols)))}"
-            xtdata.subscribe_quote(symbols, callback=callback)
-            self._subscriptions[sub_id] = {"symbols": symbols, "active": True}
+            # 保存 subscribe_quote 返回的真实句柄（取消订阅时必需）；
+            # 对外暴露自增序号 ID（hash 不保证唯一且跨进程不稳定）
+            handle = xtdata.subscribe_quote(symbols, callback=callback)
+            self._next_sub_seq += 1
+            sub_id = f"miniqmt_{self._next_sub_seq}"
+            self._subscriptions[sub_id] = {"handle": handle, "symbols": symbols}
             logger.info(f"miniqmt 订阅 {len(symbols)} 只股票: {sub_id}")
             return sub_id
         except Exception as e:
@@ -135,19 +145,20 @@ class MiniQmtRealtimeProvider:
             return ""
 
     def unsubscribe(self, subscription_id: str) -> None:
-        """通过 xtdata.unsubscribe_quote 取消订阅。"""
-        if not self.is_available or subscription_id not in self._subscriptions:
+        """通过 xtdata.unsubscribe_quote 取消订阅（传入订阅句柄）。"""
+        sub = self._subscriptions.pop(subscription_id, None)
+        if sub is None:
+            logger.warning(f"miniqmt unsubscribe 未知订阅 ID: {subscription_id}")
             return
         try:
             xtdata = self._client._ensure_xtdata()
             if xtdata is not None:
-                xtdata.unsubscribe_quote(
-                    self._subscriptions[subscription_id]["symbols"]
-                )
-            self._subscriptions[subscription_id]["active"] = False
+                # xtdata.unsubscribe_quote 期望 subscribe_quote 返回的
+                # 真实句柄，传入股票列表会失败
+                xtdata.unsubscribe_quote(sub["handle"])
             logger.info(f"miniqmt 取消订阅: {subscription_id}")
         except Exception as e:
-            logger.warning(f"miniqmt unsubscribe 失败: {e}")
+            logger.warning(f"miniqmt unsubscribe 失败: {subscription_id}: {e}")
 
 
 # ── Ciccwm 轮询实现 ──────────────────────────────────────────────────

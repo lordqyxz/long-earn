@@ -3,12 +3,18 @@ import { eventStats, eventTimeline, listEvents, listRelations } from '@/api'
 import type { EventStats, EventItem, RelationItem, TimelinePoint } from '@/api'
 import type { PipelineMessage } from '@/types'
 
+const RECONNECT_BASE_DELAY_MS = 5000
+const RECONNECT_MAX_DELAY_MS = 30000
+
 export function useWebSocket() {
   const [connected, setConnected] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [pipelineStage, setPipelineStage] = useState<string>('idle')
   const [pipelineProgress, setPipelineProgress] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
+  const manualCloseRef = useRef(false)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const reconnectDelayRef = useRef(RECONNECT_BASE_DELAY_MS)
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -16,6 +22,7 @@ export function useWebSocket() {
   }, [])
 
   const connect = useCallback(() => {
+    manualCloseRef.current = false
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/events`
     const ws = new WebSocket(wsUrl)
@@ -23,12 +30,20 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setConnected(true)
+      // 成功连接后重置重连退避间隔
+      reconnectDelayRef.current = RECONNECT_BASE_DELAY_MS
       addLog('[WebSocket 已连接]')
       ws.send(JSON.stringify({ action: 'subscribe' }))
     }
 
     ws.onmessage = (event) => {
-      const msg: PipelineMessage = JSON.parse(event.data)
+      let msg: PipelineMessage
+      try {
+        msg = JSON.parse(event.data)
+      } catch {
+        addLog('[收到无法解析的消息，已忽略]')
+        return
+      }
       switch (msg.type) {
         case 'subscribed':
           addLog('[已订阅事件流]')
@@ -58,9 +73,16 @@ export function useWebSocket() {
     }
 
     ws.onclose = () => {
+      // 主动关闭或已被新连接替换的过期连接：短路，不再排定重连
+      if (manualCloseRef.current || wsRef.current !== ws) return
       setConnected(false)
-      addLog('[WebSocket 已断开，5秒后重连...]')
-      setTimeout(connect, 5000)
+      const delay = reconnectDelayRef.current
+      addLog(`[WebSocket 已断开，${Math.round(delay / 1000)}秒后重连...]`)
+      reconnectTimerRef.current = setTimeout(() => {
+        // 指数退避：每次翻倍，上限 30 秒
+        reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_DELAY_MS)
+        connect()
+      }, delay)
     }
 
     ws.onerror = () => {
@@ -70,15 +92,25 @@ export function useWebSocket() {
 
   useEffect(() => {
     connect()
-    return () => wsRef.current?.close()
+    return () => {
+      manualCloseRef.current = true
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = undefined
+      }
+      wsRef.current?.close()
+      wsRef.current = null
+    }
   }, [connect])
 
   const triggerPipeline = useCallback((query: string) => {
-    wsRef.current?.send(JSON.stringify({ action: 'trigger', query }))
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(JSON.stringify({ action: 'trigger', query }))
   }, [])
 
   const reloadData = useCallback(() => {
-    wsRef.current?.send(JSON.stringify({ action: 'reload' }))
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(JSON.stringify({ action: 'reload' }))
   }, [])
 
   return { connected, log, pipelineStage, pipelineProgress, triggerPipeline, reloadData }

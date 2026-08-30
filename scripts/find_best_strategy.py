@@ -2,7 +2,7 @@
 """寻找最近6个月收益率最佳的策略 — 尊重 config 三段式数据分割规范。
 
 流程：
-1. 查询 DuckDB 缓存数据实际覆盖范围（仅作日志展示，不覆盖 config 日期）。
+1. 查询 PostgreSQL 缓存数据实际覆盖范围（仅作日志展示，不覆盖 config 日期）。
 2. 使用 AppConfig.from_env() 默认值（或环境变量 TRAIN_START/TEST_END/VALIDATION_*
    等）作为三段式数据分割窗口，**严格遵守量化数据分割规范**，不得交叉使用。
 3. 根据财务表是否非空，自动选择 idea（纯量价 vs 量价+基本面）。
@@ -23,12 +23,18 @@ checkpoint 机制（默认启用）：
     uv run python scripts/find_best_strategy.py --max-iterations 8 -y  # HTR 循环上限=8
     uv run python scripts/find_best_strategy.py --auto-window -y  # 动态窗口（覆盖 config）
     uv run python scripts/find_best_strategy.py --reset-checkpoint -y  # 清旧 checkpoint 重跑
+    uv run python scripts/find_best_strategy.py --final-validation -y
+    # ↑ 仅限最终评估场景：显式消耗验证集的唯一一次触碰（铁律 #3），默认关闭
+
+验证集触碰纪律（铁律 #3）：研发循环默认**不触碰**验证集。双段前瞻验证仅在
+显式传入 ``--final-validation`` 旗标时执行一次；开发阶段严禁使用该旗标，
+否则验证集业绩失去对外报告效力。
 """
 
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -102,8 +108,6 @@ def derive_windows(coverage: dict) -> dict:
     - train_end = recent_start 向前推 1 个交易日留 gap（防止边界泄漏），简化为向前 1 天
     - train_start = train_end 向前 3 年
     """
-    from datetime import timedelta
-
     latest = date.fromisoformat(coverage["price_max"])
     recent_end = latest
     recent_start = recent_end - timedelta(days=183)
@@ -121,23 +125,24 @@ def derive_windows(coverage: dict) -> dict:
 def validate_best_strategy_dual_quarter(
     strategy_yaml: str,
     ctx: RuntimeContext,
-    q1_start: str = "2026-01-01",
-    q1_end: str = "2026-03-31",
-    q2_start: str = "2026-04-01",
-    q2_end: str = "2026-06-30",
+    q1_start: str | None = None,
+    q1_end: str | None = None,
+    q2_start: str | None = None,
+    q2_end: str | None = None,
     min_return_threshold: float = 0.0,
 ) -> dict:
-    """对最佳策略做双季度前瞻验证。
+    """对最佳策略做双段前瞻验证（验证集触碰，仅限最终评估场景调用）。
 
-    铁律 #3：验证集仅最终评估时触碰一次。本函数在 HTR 研发循环完成后调用，
-    分别对 Q1 2026 和 Q2 2026 两个独立窗口跑前瞻回测。
-    两个窗口的 total_return 都需 > min_return_threshold 才算通过。
+    铁律 #3：验证集仅最终评估时触碰一次。本函数默认不再随研发循环自动执行，
+    仅当调用方显式要求（CLI ``--final-validation`` 旗标）时调用。
+    窗口默认从 config.validation_start_date / validation_end_date 对半拆分
+    为前后两段；两个窗口的 total_return 都需 > min_return_threshold 才算通过。
 
     Args:
         strategy_yaml: 最佳策略 YAML
-        ctx: RuntimeContext（提供 backtest_service）
-        q1_start/q1_end: Q1 2026 窗口
-        q2_start/q2_end: Q2 2026 窗口
+        ctx: RuntimeContext（提供 backtest_service 与 config）
+        q1_start/q1_end: 前半验证窗口；None 时从 config 验证集区间对半派生
+        q2_start/q2_end: 后半验证窗口；None 时从 config 验证集区间对半派生
         min_return_threshold: 收益阈值（默认 0.0，即不亏损）
 
     Returns:
@@ -147,19 +152,30 @@ def validate_best_strategy_dual_quarter(
             "passed": bool,  # 两个窗口都达标才 True
             "reason": str,
         }
+        其中 q1_* 为前半段结果、q2_* 为后半段结果（键名保留历史兼容）。
     """
+    # 窗口派生：默认从 config 验证集区间对半拆分（不硬编码日历季度）
+    config = ctx.config
+    val_start = date.fromisoformat(config.validation_start_date)
+    val_end = date.fromisoformat(config.validation_end_date)
+    half_days = ((val_end - val_start).days + 1) // 2
+    q1_start = q1_start or config.validation_start_date
+    q1_end = q1_end or (val_start + timedelta(days=half_days - 1)).isoformat()
+    q2_start = q2_start or (val_start + timedelta(days=half_days)).isoformat()
+    q2_end = q2_end or config.validation_end_date
+
     backtest = ctx.require_backtest()
 
     print()
     print("=" * 64)
-    print("双季度前瞻验证（Q1 2026 + Q2 2026）")
+    print("双段前瞻验证（验证集对半拆分：前半段 + 后半段）")
     print("=" * 64)
-    print(f"  Q1 窗口: {q1_start} ~ {q1_end}")
-    print(f"  Q2 窗口: {q2_start} ~ {q2_end}")
+    print(f"  前半段窗口: {q1_start} ~ {q1_end}")
+    print(f"  后半段窗口: {q2_start} ~ {q2_end}")
     print(f"  收益阈值: {min_return_threshold:.4f}")
     print("-" * 64)
 
-    def _run_quarter(name: str, start: str, end: str) -> dict:
+    def _run_half(name: str, start: str, end: str) -> dict:
         print(f"  正在回测 {name} ({start} ~ {end})...")
         report = backtest.run(
             strategy_yaml=strategy_yaml,
@@ -178,8 +194,8 @@ def validate_best_strategy_dual_quarter(
         )
         return {"return": ret, "sharpe": sharpe, "drawdown": drawdown}
 
-    q1 = _run_quarter("Q1 2026", q1_start, q1_end)
-    q2 = _run_quarter("Q2 2026", q2_start, q2_end)
+    q1 = _run_half("前半段", q1_start, q1_end)
+    q2 = _run_half("后半段", q2_start, q2_end)
 
     q1_pass = q1["return"] > min_return_threshold
     q2_pass = q2["return"] > min_return_threshold
@@ -188,16 +204,16 @@ def validate_best_strategy_dual_quarter(
     print("-" * 64)
     if passed:
         print(
-            f"  ✅ 双季度验证通过：Q1={q1['return']:.4f}, Q2={q2['return']:.4f} "
-            f"均 > {min_return_threshold:.4f}"
+            f"  ✅ 双段验证通过：前半段={q1['return']:.4f}, "
+            f"后半段={q2['return']:.4f} 均 > {min_return_threshold:.4f}"
         )
-        reason = "两个季度收益均达标"
+        reason = "两个窗口收益均达标"
     else:
         failed = []
         if not q1_pass:
-            failed.append(f"Q1={q1['return']:.4f}")
+            failed.append(f"前半段={q1['return']:.4f}")
         if not q2_pass:
-            failed.append(f"Q2={q2['return']:.4f}")
+            failed.append(f"后半段={q2['return']:.4f}")
         print(
             f"  ❌ 双季度验证未通过：{', '.join(failed)} 未达阈值 "
             f"{min_return_threshold:.4f}"
@@ -400,28 +416,36 @@ def main() -> None:  # noqa: PLR0912
         if len(summary.best_strategy_yaml) > 800:
             print(f"... ({len(summary.best_strategy_yaml)} 字符总计)")
 
-        # 双季度前瞻验证（铁律 #3：验证集仅最终评估时触碰一次）
-        # 分别对 Q1 2026 和 Q2 2026 跑前瞻回测，两个窗口收益都需达标才算通过
-        validation = validate_best_strategy_dual_quarter(
-            strategy_yaml=summary.best_strategy_yaml,
-            ctx=ctx,
-        )
-        # 将验证结果追加到 strategy_research_results.json
-        import json
-
-        results_path = strategy_results_path()
-        if results_path.exists():
-            payload = json.loads(
-                results_path.read_text(encoding="utf-8")
+        # 双段前瞻验证（铁律 #3：验证集仅最终评估时触碰一次）
+        # 默认不执行；仅当显式传入 --final-validation 旗标（默认 False）
+        # 才运行，防止研发循环反复触碰验证集构成对验证集的调优反馈通道
+        if "--final-validation" in sys.argv:
+            print()
+            print("!" * 64)
+            print("!! 醒目警告：本次运行将消耗验证集的唯一一次触碰（铁律 #3）")
+            print("!! 仅限最终评估场景执行；开发阶段严禁使用该旗标")
+            print("!! 此前若已触碰过验证集，请勿再次运行本验证")
+            print("!" * 64)
+            validation = validate_best_strategy_dual_quarter(
+                strategy_yaml=summary.best_strategy_yaml,
+                ctx=ctx,
             )
-        else:
-            payload = {}
-        payload["dual_quarter_validation"] = validation
-        results_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-        print(f"  双季度验证结果已写入: {results_path}")
+            # 将验证结果追加到 strategy_research_results.json
+            import json
+
+            results_path = strategy_results_path()
+            if results_path.exists():
+                payload = json.loads(
+                    results_path.read_text(encoding="utf-8")
+                )
+            else:
+                payload = {}
+            payload["dual_quarter_validation"] = validation
+            results_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            print(f"  验证结果已写入: {results_path}")
 
 
 if __name__ == "__main__":

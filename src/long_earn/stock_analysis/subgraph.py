@@ -241,52 +241,82 @@ def event_context_node(state, context: "RuntimeContext"):
 
 
 def petter_analysis_node(state, context: "RuntimeContext"):
-    """彼得林奇视角分析"""
-    petter_analyst = PetterAnalyst(context=context)
-    analysis = petter_analyst.analyze(
-        state.get("stock_data", {}),
-        event_context=state.get("event_context", ""),
-    )
+    """彼得林奇视角分析（异常隔离：单视角失败降级为占位文案）"""
+    logger = context.logger
+    try:
+        petter_analyst = PetterAnalyst(context=context)
+        analysis = petter_analyst.analyze(
+            state.get("stock_data", {}),
+            event_context=state.get("event_context", ""),
+        )
+    except Exception as e:
+        # LLM 瞬时失败只影响本视角，保证其余视角与汇总聚合继续执行
+        logger.exception(f"[彼得林奇视角] 分析失败: {e}")
+        analysis = f"该视角分析暂不可用（{type(e).__name__}: {e}）"
     return {"petter_analysis": analysis}
 
 
 def charles_munger_analysis_node(state, context: "RuntimeContext"):
-    """查理芒格视角分析"""
-    charles_munger_analyst = CharlesMungerAnalyst(context=context)
-    analysis = charles_munger_analyst.analyze(
-        state.get("stock_data", {}),
-        event_context=state.get("event_context", ""),
-    )
+    """查理芒格视角分析（异常隔离：单视角失败降级为占位文案）"""
+    logger = context.logger
+    try:
+        charles_munger_analyst = CharlesMungerAnalyst(context=context)
+        analysis = charles_munger_analyst.analyze(
+            state.get("stock_data", {}),
+            event_context=state.get("event_context", ""),
+        )
+    except Exception as e:
+        # LLM 瞬时失败只影响本视角，保证其余视角与汇总聚合继续执行
+        logger.exception(f"[查理芒格视角] 分析失败: {e}")
+        analysis = f"该视角分析暂不可用（{type(e).__name__}: {e}）"
     return {"charles_munger_analysis": analysis}
 
 
 def buffett_analysis_node(state, context: "RuntimeContext"):
-    """巴菲特视角分析"""
-    buffett_analyst = BuffettAnalyst(context=context)
-    analysis = buffett_analyst.analyze(
-        state.get("stock_data", {}),
-        event_context=state.get("event_context", ""),
-    )
+    """巴菲特视角分析（异常隔离：单视角失败降级为占位文案）"""
+    logger = context.logger
+    try:
+        buffett_analyst = BuffettAnalyst(context=context)
+        analysis = buffett_analyst.analyze(
+            state.get("stock_data", {}),
+            event_context=state.get("event_context", ""),
+        )
+    except Exception as e:
+        # LLM 瞬时失败只影响本视角，保证其余视角与汇总聚合继续执行
+        logger.exception(f"[巴菲特视角] 分析失败: {e}")
+        analysis = f"该视角分析暂不可用（{type(e).__name__}: {e}）"
     return {"buffett_analysis": analysis}
 
 
 def fiske_analysis_node(state, context: "RuntimeContext"):
-    """费雪视角分析"""
-    fiske_analyst = FiskeAnalyst(context=context)
-    analysis = fiske_analyst.analyze(
-        state.get("stock_data", {}),
-        event_context=state.get("event_context", ""),
-    )
+    """费雪视角分析（异常隔离：单视角失败降级为占位文案）"""
+    logger = context.logger
+    try:
+        fiske_analyst = FiskeAnalyst(context=context)
+        analysis = fiske_analyst.analyze(
+            state.get("stock_data", {}),
+            event_context=state.get("event_context", ""),
+        )
+    except Exception as e:
+        # LLM 瞬时失败只影响本视角，保证其余视角与汇总聚合继续执行
+        logger.exception(f"[费雪视角] 分析失败: {e}")
+        analysis = f"该视角分析暂不可用（{type(e).__name__}: {e}）"
     return {"fiske_analysis": analysis}
 
 
 def fund_flow_analysis_node(state, context: "RuntimeContext"):
-    """资金流向视角分析（ADR-011 第 5 视角）"""
-    fund_flow_analyst = FundFlowAnalyst(context=context)
-    analysis = fund_flow_analyst.analyze(
-        state.get("stock_data", {}),
-        event_context=state.get("event_context", ""),
-    )
+    """资金流向视角分析（ADR-011 第 5 视角，异常隔离：失败降级为占位文案）"""
+    logger = context.logger
+    try:
+        fund_flow_analyst = FundFlowAnalyst(context=context)
+        analysis = fund_flow_analyst.analyze(
+            state.get("stock_data", {}),
+            event_context=state.get("event_context", ""),
+        )
+    except Exception as e:
+        # LLM 瞬时失败只影响本视角，保证其余视角与汇总聚合继续执行
+        logger.exception(f"[资金流向视角] 分析失败: {e}")
+        analysis = f"该视角分析暂不可用（{type(e).__name__}: {e}）"
     return {"fund_flow_analysis": analysis}
 
 

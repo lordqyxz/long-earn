@@ -77,6 +77,12 @@ class OrderSkipReason(StrEnum):
     INVALID_QUANTITY = "INVALID_QUANTITY"
     """订单数量无效：NaN / Inf / 非正数（0 及负数，P3-02）"""
 
+    CASH_INSUFFICIENT = "CASH_INSUFFICIENT"
+    """买入现金不足：成交时点组合校验失败，跳过该笔交易（P2-02）"""
+
+    POSITION_INSUFFICIENT = "POSITION_INSUFFICIENT"
+    """卖出超持仓/无持仓：仅多头约束下拒绝凭空增资的卖出成交"""
+
 
 def _sanitize_json_value(obj: Any) -> Any:
     """递归把 NaN/±Inf 转为 None。
