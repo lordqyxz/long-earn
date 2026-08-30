@@ -24,7 +24,7 @@ import os
 from typing import Any
 
 import psycopg
-from psycopg import sql
+from psycopg import conninfo as pg_conninfo_module, sql
 from psycopg.rows import dict_row
 
 # 默认连接参数 — 唯一真相源（AppConfig 从本模块派生，不重复定义）
@@ -78,7 +78,7 @@ def pg_conninfo(
             空值忽略；不传则全用 resolve_pg_params 的 env/默认值）
     """
     params = _apply_overrides(resolve_pg_params(), overrides)
-    return " ".join(f"{k}={v}" for k, v in params.items())
+    return pg_conninfo_module.make_conninfo(**params)
 
 
 def pg_connect(

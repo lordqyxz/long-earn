@@ -14,6 +14,12 @@ class GrossMarginStabilityParams(OperatorParams):
 
 @operator
 class GrossMarginStability(Operator):
+    """价格稳定性代理（**非基本面毛利率**）。
+
+    名称保留 ``gross_margin_stability`` 以兼容既有策略 YAML；实际用
+    ``params.field`` 价格滚动均值/波动与短期偏离，不读取 ``gross_margin`` 列。
+    """
+
     name: ClassVar[str] = "gross_margin_stability"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = ["close"]
@@ -68,4 +74,4 @@ class GrossMarginStability(Operator):
         )
         # 恢复原始行序
         out = out.sort("__gms_row_id")
-        return out["_gms_score"].fill_null(0.0)
+        return out["_gms_score"]

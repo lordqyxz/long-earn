@@ -35,20 +35,6 @@ from long_earn.backtest.data.financial.schemas import (
 )
 from long_earn.backtest.data.wide_panel import read_wide_panel
 
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时 PG-backed 测试跳过）。"""
-    from long_earn.core.pg import pg_version
-
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-_PG_SKIP = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
-
 # 共享库脏标记积压阈值：超过则说明下载脚本运行中，单测触发全库重建
 # 不可接受，跳过宽表测试
 _DIRTY_BACKLOG_SKIP = 50
@@ -183,7 +169,7 @@ def seeded() -> Iterator[SeededPanel]:
 # ── PIT 等价性：宽表 vs 旧路径 ────────────────────────────────────────
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_wide_panel_pit_equivalence(seeded: SeededPanel) -> None:
     """宽表财务列与旧路径（UNION + merge_asof backward）逐位一致。
 
@@ -250,7 +236,7 @@ def test_wide_panel_pit_equivalence(seeded: SeededPanel) -> None:
     assert by_date["2024-09-30"] == 130.0
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_wide_panel_output_contract(seeded: SeededPanel) -> None:
     """宽表输出契约：列集 / dtype / 排序与旧路径（to_polars_panel）对齐。"""
     from long_earn.backtest.data.cache import PANEL_PRICE_FIELDS
@@ -274,7 +260,7 @@ def test_wide_panel_output_contract(seeded: SeededPanel) -> None:
     assert wide.equals(wide.sort("timestamp", "symbol"))
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_wide_panel_price_columns_passthrough(seeded: SeededPanel) -> None:
     """行情列物化自 price_daily：逐位等于种子值。"""
     wide = read_wide_panel(seeded.cache, seeded.symbols, seeded.start, seeded.end)
@@ -292,7 +278,7 @@ def test_wide_panel_price_columns_passthrough(seeded: SeededPanel) -> None:
 # ── 脏标记 + 惰性重建 ────────────────────────────────────────────────
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_dirty_flag_and_lazy_rebuild(seeded: SeededPanel) -> None:
     """save_prices 写事务内原子打脏标记 → ensure_panel_fresh 增量重建。"""
     cache = seeded.cache
@@ -340,7 +326,7 @@ def test_dirty_flag_and_lazy_rebuild(seeded: SeededPanel) -> None:
 # ── 覆盖引导（bootstrap）与降级门控 ──────────────────────────────────
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_coverage_bootstrap_rebuild(seeded: SeededPanel) -> None:
     """panel_daily 存在缺口 → read_wide_panel 覆盖引导自动重建。"""
     conn = seeded.cache._get_conn()
@@ -360,14 +346,14 @@ def test_coverage_bootstrap_rebuild(seeded: SeededPanel) -> None:
     assert rev_a.filter(~rev_a.is_nan()).len() == 5  # 04-19 起五日有值
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_wide_panel_fallback_on_cache_miss(seeded: SeededPanel) -> None:
     """price_daily 无该 symbol（缓存 miss）→ None（回退旧路径触发下载）。"""
     missing = [f"WP-NONE-{uuid4().hex[:8]}.SH"]
     assert read_wide_panel(seeded.cache, missing, seeded.start, seeded.end) is None
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_wide_panel_fallback_on_stale_price(seeded: SeededPanel) -> None:
     """price 末端距请求 end_date 超容忍阈值 → None（回退旧路径增量补数）。"""
     # 种子末端 2024-09-30，请求 end 2030 年 → 缓存明显不足

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -129,10 +129,12 @@ class StrategyResearchService:
             thread_id: 当 ``checkpointer`` 非空时的研究线程 ID。同一
                 ``thread_id`` 可从中断处续跑；新一轮须用新 ID 避免状态污染。
         """
-        config = self.ctx.config
-        config.max_iterations = max_iterations
+        round_ctx = replace(
+            self.ctx,
+            config=replace(self.ctx.config, max_iterations=max_iterations),
+        )
 
-        subgraph = create_strategy_rd_subgraph(self.ctx, checkpointer=checkpointer)
+        subgraph = create_strategy_rd_subgraph(round_ctx, checkpointer=checkpointer)
         self.logger.info(f"[循环] 启动策略研发子图，idea='{idea}'")
         if checkpointer is not None:
             self.logger.info(f"[循环] checkpoint 已启用，thread_id={thread_id}")

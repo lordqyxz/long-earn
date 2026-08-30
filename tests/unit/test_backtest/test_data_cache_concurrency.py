@@ -1,6 +1,6 @@
 """DataCache 进程内单写者与事务边界测试（PostgreSQL 版）。
 
-PG 不可达时整组跳过（Docker 启动后自动恢复运行）。
+PG 不可达时由 tests/unit/conftest 对 integration 标记 fail（禁止 skip 假绿）。
 """
 
 from __future__ import annotations
@@ -12,19 +12,8 @@ import pandas as pd
 import pytest
 
 from long_earn.backtest.data.cache import DataCache
-from long_earn.core.pg import pg_version
 
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
+pytestmark = pytest.mark.integration
 
 
 def _price_frame(symbol: str, day: int) -> pd.DataFrame:

@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langgraph.graph import END, START, StateGraph
 
@@ -293,7 +293,7 @@ def create_operator_dev_subgraph(
     if backlog is None:
         backlog = OperatorBacklog()
 
-    log: LoggerService = context.logger if context is not None else _SILENT_LOGGER  # type: ignore[assignment]
+    log = context.logger if context is not None else cast("LoggerService", _SILENT_LOGGER)
     workflow = StateGraph(OperatorDevState)
 
     workflow.add_node(

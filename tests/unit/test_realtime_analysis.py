@@ -184,6 +184,21 @@ class TestPriceAlertMonitor:
         assert "600519.SH" in symbols
         assert "000001.SZ" in symbols
 
+    def test_add_alert_after_start_resubscribes(self) -> None:
+        """start() 后 add_alert 应扩展订阅标的。"""
+        provider = self._make_mock_provider()
+        monitor = PriceAlertMonitor(provider)
+        monitor.add_alert("600519.SH", 1800.0)
+        monitor.start()
+        provider.subscribe_quote.reset_mock()
+        provider.unsubscribe.reset_mock()
+        monitor.add_alert("000001.SZ", 15.0)
+        provider.unsubscribe.assert_called_once()
+        call_args = provider.subscribe_quote.call_args
+        symbols = call_args[0][0]
+        assert "600519.SH" in symbols
+        assert "000001.SZ" in symbols
+
 
 # ── 资金流向分析师 ─────────────────────────────────────────────────────
 

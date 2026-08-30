@@ -68,10 +68,12 @@ def resolve_paths(data_dir: str | Path | None = None) -> dict[str, Path]:
 
 
 def hypothesis_tree_dir() -> Path:
-    """假设树 JSON 存储目录（ADR-010 HTR）。"""
-    d = get_data_dir() / "hypothesis_trees"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """假设树 JSON 存储目录（ADR-010 HTR）。
+
+    不在此处 mkdir；由 :class:`strategy_rd.tree_store.HypothesisTreeStore.save`
+    等写入方按需创建。
+    """
+    return get_data_dir() / "hypothesis_trees"
 
 
 def strategy_results_path() -> Path:

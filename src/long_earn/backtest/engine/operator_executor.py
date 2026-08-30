@@ -319,9 +319,22 @@ def _merge_factor_result(
     """把算子输出并回面板，返回 (新面板, 新增列名列表)（新增列名供归因取值）。"""
     if isinstance(result, pl.Series):
         return panel.with_columns(result.alias(alias)), [alias]
-    # DataFrame（如 macd/bollinger 多列）：追加其全部列
-    cols = {c: result[c] for c in result.columns}
-    return panel.with_columns(**cols), list(result.columns)
+
+    added: list[str] = []
+    exprs: dict[str, pl.Series] = {}
+    for col in result.columns:
+        namespaced = f"{alias}_{col}" if alias else col
+        if namespaced not in panel.columns and namespaced not in exprs:
+            exprs[namespaced] = result[col]
+            added.append(namespaced)
+        # 向后兼容：首个多列算子仍暴露原始列名（如 macd/signal/histogram），
+        # 后续同名步骤只写入 alias 前缀列，避免两步 macd 静默互盖。
+        if alias and col not in panel.columns and col not in exprs:
+            exprs[col] = result[col]
+            added.append(col)
+    if not exprs:
+        return panel, added
+    return panel.with_columns(**exprs), added
 
 
 def _describe_step(spec: Any, is_factor: bool) -> dict[str, Any]:

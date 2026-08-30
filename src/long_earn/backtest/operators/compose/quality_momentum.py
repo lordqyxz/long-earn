@@ -45,11 +45,7 @@ class QualityMomentum(Operator):
                 roe_vol = roe_vol.over("symbol")
                 gm_vol = gm_vol.over("symbol")
             qual_expr = (
-                (
-                    1.0 / (1.0 + roe_vol.fill_null(0.0))
-                    + 1.0 / (1.0 + gm_vol.fill_null(0.0))
-                )
-                / 2.0
+                (1.0 / (1.0 + roe_vol) + 1.0 / (1.0 + gm_vol)) / 2.0
             ).alias("__qual")
         else:
             ret_expr = fld.pct_change().alias("__ret")
@@ -59,10 +55,10 @@ class QualityMomentum(Operator):
             vol_expr = pl.col("__ret").rolling_std(p.quality_window)
             if has_symbol:
                 vol_expr = vol_expr.over("symbol")
-            qual_expr = (1.0 / (1.0 + vol_expr.fill_null(0.0))).alias("__qual")
+            qual_expr = (1.0 / (1.0 + vol_expr)).alias("__qual")
 
         panel = panel.with_columns([mom_expr, qual_expr])
-        score = (pl.col("__mom") * pl.col("__qual")).fill_null(0.0).alias(p.field)
+        score = (pl.col("__mom") * pl.col("__qual")).alias(p.field)
         panel = panel.with_columns(score)
 
         # 恢复原始行序

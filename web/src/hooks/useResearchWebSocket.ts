@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { ResearchState, ResearchEvent, RoundMetrics } from '@/types/research'
+import { NO_BEST_RETURN_SENTINEL } from '@/lib/constants'
 
 const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/research`
@@ -15,7 +16,7 @@ const INITIAL_STATE: ResearchState = {
   currentRound: 0,
   events: [],
   rounds: [],
-  bestRecentReturn: -999,
+  bestRecentReturn: NO_BEST_RETURN_SENTINEL,
   stagnationCount: 0,
   familyIdx: 0,
   completed: false,

@@ -37,7 +37,7 @@ class BacktestServiceImpl(BacktestService):
     特性：
     - 直接调用 EventDrivenBacktestEngine，零网络开销
     - 支持 YAML DSL 策略描述
-    - 自动数据缓存（DuckDB）
+    - 自动数据缓存（PostgreSQL）
     """
 
     def __init__(
@@ -53,6 +53,23 @@ class BacktestServiceImpl(BacktestService):
         # 并行 worker 数：0=自动（os.cpu_count()），1=串行，>1=指定核数
         # 控制 Walk-Forward fold 级并行（run_oos / run_walk_forward_parallel）
         self.max_workers = max_workers or getattr(config, "max_workers", 0)
+        self._owned_cache: DataCache | None = None
+
+    def _resolve_cache(self) -> DataCache:
+        """复用 context 注入的 DataCache，仅在无注入时惰性创建兜底实例。"""
+        if self.data_provider is not None:
+            cache = getattr(self.data_provider, "cache", None)
+            if cache is not None:
+                return cache
+        if self._owned_cache is None:
+            self._owned_cache = DataCache()
+        return self._owned_cache
+
+    def close(self) -> None:
+        """关闭本服务创建的兜底 DataCache（注入的 context 缓存不归本服务管理）。"""
+        if self._owned_cache is not None:
+            self._owned_cache.close()
+            self._owned_cache = None
 
     def _build_strategy_diagnostics(
         self,
@@ -161,7 +178,7 @@ class BacktestServiceImpl(BacktestService):
         返回 True 表示存在幸存者偏差风险（快照日期与回测起始日期偏差 > 30 天）。
         """
         try:
-            cache = DataCache()
+            cache = self._resolve_cache()
             # 复合板类型映射到第一个子板
             if universe_type in COMPOSITE_BOARD_MAP:
                 index_code = COMPOSITE_BOARD_MAP[universe_type][0]
@@ -341,6 +358,30 @@ class BacktestServiceImpl(BacktestService):
                 "universe_pit_warning": True,
             }
 
+    @staticmethod
+    def _validate_train_window(
+        start_date: str,
+        end_date: str,
+        train_start: str,
+        train_end: str,
+    ) -> str:
+        """验证网格寻优请求严格位于配置的训练集内。"""
+        try:
+            requested_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+            requested_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+            allowed_start = datetime.strptime(train_start, "%Y-%m-%d").date()
+            allowed_end = datetime.strptime(train_end, "%Y-%m-%d").date()
+        except ValueError as exc:
+            return f"训练集日期格式无效: {exc}"
+        if requested_start >= requested_end:
+            return "训练集日期倒序"
+        if requested_start < allowed_start or requested_end > allowed_end:
+            return (
+                f"参数网格回测区间必须位于训练集 "
+                f"{train_start}~{train_end} 内"
+            )
+        return ""
+
     def run_grid(  # noqa: PLR0913
         self,
         strategy_template: str,
@@ -356,6 +397,24 @@ class BacktestServiceImpl(BacktestService):
 
         start_date = start_date or self.config.backtest_start_date
         end_date = end_date or self.config.backtest_end_date
+
+        boundary_error = self._validate_train_window(
+            start_date,
+            end_date,
+            self.config.train_start_date,
+            self.config.train_end_date,
+        )
+        if boundary_error:
+            return {
+                "error": boundary_error,
+                "total": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "best_sharpe": None,
+                "best_return": None,
+                "best_param_desc": "",
+                "outcomes": [],
+            }
 
         symbols = self._get_universe_symbols(universe_type, end_date.replace("-", ""))
         formatted_symbols = PandasToPolarsProvider.format_symbols(symbols)

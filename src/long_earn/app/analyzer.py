@@ -30,6 +30,11 @@ _MIN_VALID_FILLS = 5
 # RUN_START、未写 RUN_END 的正常中间态）的审计行当场误删。
 _ORPHAN_FRESHNESS_MINUTES = 30
 
+
+class AuditDeleteError(Exception):
+    """审计库删除失败（区别于 run 不存在返回 0）。"""
+
+
 # 审计日志表名（PG schema 与 DuckDB 时代一致）
 _AUDIT_TABLE = '"backtest_audit".logs'
 
@@ -202,7 +207,7 @@ class BacktestAnalyzer:
         except Exception as e:
             logger.error(f"删除回测运行 {run_id} 失败: {e}")
             conn.close()
-            return 0
+            raise AuditDeleteError(str(e)) from e
 
     def get_empty_or_error_runs(self) -> list[str]:
         """获取无效回测运行的 run_id 列表。

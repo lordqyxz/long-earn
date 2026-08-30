@@ -1611,6 +1611,33 @@ class DataCache:
             ).fetchall()
         return {r[0]: r[1] for r in rows if r[1]}
 
+    def get_instrument_sector_stats(self) -> dict[str, int]:
+        """统计 instrument_details 表中行业/地区填充情况。
+
+        Returns:
+            total / with_industry / with_region 计数
+        """
+        ic = instrument_details_t.c
+        with self._read() as conn:
+            total = conn.execute(
+                select(func.count()).select_from(instrument_details_t)
+            ).scalar_one()
+            with_industry = conn.execute(
+                select(func.count())
+                .select_from(instrument_details_t)
+                .where(ic.industry != "")
+            ).scalar_one()
+            with_region = conn.execute(
+                select(func.count())
+                .select_from(instrument_details_t)
+                .where(ic.region != "")
+            ).scalar_one()
+        return {
+            "total": int(total),
+            "with_industry": int(with_industry),
+            "with_region": int(with_region),
+        }
+
     def update_instrument_industry(
         self, symbol: str, industry: str, region: str
     ) -> None:

@@ -269,25 +269,19 @@ def detect_conflicts(
         可能冲突的物质列表（含 conflict_reason）
     """
     words = conflict_words or DEFAULT_CONFLICT_WORDS
-    results = store.search(substance.content, k=10, min_similarity=min_similarity)
+    results = store.search_substances(
+        substance.content, k=10, min_similarity=min_similarity
+    )
 
     conflicts: list[dict[str, Any]] = []
-    for r in results:
-        existing = None
-        for s in store.get_all():
-            if s.content == r["content"]:
-                existing = s
-                break
-        if existing is None:
-            continue
-
+    for existing, similarity in results:
         # 显式冲突组
         if existing.conflict_group:
             conflicts.append(
                 {
                     "content": existing.content,
                     "metadata": existing.metadata,
-                    "similarity": r["similarity"],
+                    "similarity": similarity,
                     "conflict_reason": f"与冲突组 [{existing.conflict_group}] 中的物质相似",
                 }
             )
@@ -299,7 +293,7 @@ def detect_conflicts(
                 {
                     "content": existing.content,
                     "metadata": existing.metadata,
-                    "similarity": r["similarity"],
+                    "similarity": similarity,
                     "conflict_reason": "观点可能存在矛盾",
                 }
             )
@@ -334,20 +328,13 @@ def compress(
         合并后减少的物质数
     """
     store._ensure_index()
-    substances = store.get_all()
+    matrix_result = store.document_similarity_matrix()
+    if matrix_result is None:
+        return 0
+
+    substances, sim_matrix = matrix_result
     if len(substances) < _MIN_CLUSTER_SIZE:
         return 0
-
-    # 用 TF-IDF 矩阵计算相似度
-    retrieval = store._retrieval
-    if (
-        retrieval._semantic._doc_matrix is None
-        or retrieval._semantic._doc_matrix.size == 0
-    ):
-        return 0
-
-    doc_matrix = retrieval._semantic._doc_matrix
-    sim_matrix = doc_matrix @ doc_matrix.T
 
     # 贪心聚类
     n = len(substances)
@@ -369,7 +356,7 @@ def compress(
 
     total_removed = 0
     for cluster in clusters:
-        total_removed += _merge_cluster(store, cluster)
+        total_removed += _merge_cluster(store, substances, cluster)
 
     if total_removed > 0:
         logger.info(f"记忆压缩完成: {len(clusters)} 组, 减少 {total_removed} 条物质")
@@ -377,11 +364,14 @@ def compress(
     return total_removed
 
 
-def _merge_cluster(store: SubstanceStore, indices: list[int]) -> int:
+def _merge_cluster(
+    store: SubstanceStore, substances: list[Substance], indices: list[int]
+) -> int:
     """合并一组相似物质，保留第一条，其余内容追加。
 
     Args:
         store: 物质存储
+        substances: 与相似度矩阵行序一致的物质列表
         indices: 相似物质的列表索引
 
     Returns:
@@ -390,7 +380,6 @@ def _merge_cluster(store: SubstanceStore, indices: list[int]) -> int:
     if len(indices) <= 1:
         return 0
 
-    substances = store.get_all()
     keep_idx = indices[0]
     keep = substances[keep_idx]
 

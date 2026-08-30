@@ -1,6 +1,6 @@
 """事件流分析器 — 消费 SubstanceStore 中的 EVENT/RELATION 物质（ADR-007 Phase 3）。
 
-与 ``BacktestAnalyzer``（消费 DuckDB 审计日志）并列，本模块消费物质-运动架构
+与 ``BacktestAnalyzer``（消费 PostgreSQL 审计日志）并列，本模块消费物质-运动架构
 中的事件物质，为 Dashboard 提供 REST API 查询能力。
 
 设计原则：

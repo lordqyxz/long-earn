@@ -16,17 +16,9 @@ export function formatNumber(value: number, decimals = 2): string {
   })
 }
 
-export function formatCurrency(value: number): string {
-  return value.toLocaleString('zh-CN', {
-    style: 'currency',
-    currency: 'CNY',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  })
-}
-
 export function formatDate(dateStr: string): string {
   const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -36,6 +28,7 @@ export function formatDate(dateStr: string): string {
 
 export function formatDateTime(dateStr: string): string {
   const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return dateStr
   return d.toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -43,10 +36,6 @@ export function formatDateTime(dateStr: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-export function truncateRunId(runId: string): string {
-  return runId.length > 12 ? `${runId.slice(0, 12)}...` : runId
 }
 
 export function formatShortDateTime(dateStr: string): string {

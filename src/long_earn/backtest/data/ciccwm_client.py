@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import socket
 import ssl
@@ -174,11 +175,30 @@ def is_credential_available(config_path: Path | None = None) -> bool:
 # ── HTTP 基础设施 ────────────────────────────────────────────────────────
 
 
+def ciccwm_ssl_verify_enabled() -> bool:
+    """是否校验 CICCWM HTTPS 证书（``CICCWM_SSL_VERIFY``，默认 true）。"""
+    raw = os.getenv("CICCWM_SSL_VERIFY", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def create_ssl_context() -> ssl.SSLContext:
-    """创建兼容旧服务器的 SSL 上下文（ciccwm 服务端 TLS 配置较旧）。"""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    """创建 CICCWM HTTPS 客户端 SSL 上下文。
+
+    默认 ``CERT_REQUIRED`` 并校验主机名；仅当 ``CICCWM_SSL_VERIFY=false``
+    时降级为 ``CERT_NONE``（打 warning，仅限调试/内网抓包）。
+    保留 legacy cipher / OP_LEGACY_SERVER_CONNECT 以兼容 ciccwm 旧 TLS 栈。
+    """
+    if ciccwm_ssl_verify_enabled():
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+    else:
+        logger.warning(
+            "CICCWM_SSL_VERIFY=false：已禁用 TLS 证书校验（仅限调试，生产环境勿用）"
+        )
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
         ctx.set_ciphers("ALL:@SECLEVEL=0")
         ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT

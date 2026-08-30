@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from loguru import logger
 
 from long_earn.substance.indices.graph import GraphIndex
@@ -27,6 +28,14 @@ from long_earn.substance.persistence import (
 # ── 默认参数 ─────────────────────────────────────────────────────
 DEFAULT_DECAY_HALF_LIFE = 90.0
 COMPRESS_SIMILARITY_THRESHOLD = 0.6
+
+
+def _validate_chunk_params(chunk_size: int, chunk_overlap: int) -> None:
+    """防止 chunk_overlap >= chunk_size 时步进为零导致死循环。"""
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            f"chunk_overlap ({chunk_overlap}) 必须小于 chunk_size ({chunk_size})"
+        )
 DECAY_THRESHOLD = 0.3
 _MIN_CLUSTER_SIZE = 2
 
@@ -210,6 +219,48 @@ class SubstanceStore:
 
         return results
 
+    def search_substances(
+        self,
+        query: str,
+        k: int = 3,
+        min_similarity: float = 0.0,
+        visible_at: datetime | None = None,
+    ) -> list[tuple[Substance, float]]:
+        """搜索物质库并返回 (Substance, similarity) 对（按 sid 解析，避免 content 反查）。"""
+        self._ensure_index()
+        raw = self._retrieval.search(query, k=k * 3, visible_at=visible_at)
+        hits: list[tuple[Substance, float]] = []
+        for r in raw:
+            sid = r["sid"]
+            substance = self.get_by_sid(sid)
+            if substance is None:
+                continue
+            score = float(r["similarity"])
+            if score < min_similarity:
+                continue
+            hits.append((substance, score))
+            if len(hits) >= k:
+                break
+        return hits
+
+    def document_similarity_matrix(
+        self,
+    ) -> tuple[list[Substance], np.ndarray] | None:
+        """返回物质列表与对应的文档余弦相似度矩阵（行序与列表一致）。"""
+        self._ensure_index()
+        pairwise = self._retrieval.pairwise_cosine_similarity()
+        if pairwise is None:
+            return None
+        sid_order, sim_matrix = pairwise
+        substances: list[Substance] = []
+        for sid in sid_order:
+            substance = self.get_by_sid(sid)
+            if substance is not None:
+                substances.append(substance)
+        if len(substances) != sim_matrix.shape[0]:
+            return None
+        return substances, sim_matrix
+
     def search_as_strings(
         self,
         query: str,
@@ -349,6 +400,7 @@ class SubstanceStore:
         chunk_overlap: int = 200,
     ) -> int:
         """加载 Markdown 文件并按标题切分存入物质库。"""
+        _validate_chunk_params(chunk_size, chunk_overlap)
         file_path = Path(file_path)
         try:
             content = file_path.read_text(encoding="utf-8")
@@ -370,6 +422,7 @@ class SubstanceStore:
         chunk_overlap: int = 200,
     ) -> int:
         """加载纯文本文件并切分。"""
+        _validate_chunk_params(chunk_size, chunk_overlap)
         file_path = Path(file_path)
         try:
             content = file_path.read_text(encoding="utf-8")
@@ -432,6 +485,7 @@ def _chunk_long_text(
     base_meta: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
     """将长文本切分为重叠的固定大小片段。"""
+    _validate_chunk_params(chunk_size, chunk_overlap)
     chunks: list[tuple[str, dict[str, Any]]] = []
     start = 0
     while start < len(text):
@@ -452,6 +506,7 @@ def _split_markdown(
     chunk_overlap: int = 200,
 ) -> list[tuple[str, dict[str, Any]]]:
     """按标题层级切分 Markdown。"""
+    _validate_chunk_params(chunk_size, chunk_overlap)
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
     sections: list[dict[str, Any]] = []

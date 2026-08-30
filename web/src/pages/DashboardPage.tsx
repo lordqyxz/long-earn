@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { BarChart3, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { cleanEmptyRuns, deleteRun } from '@/api'
 import { RunList } from '@/components/dashboard/RunList'
 import { BacktestDetail } from '@/components/dashboard/BacktestDetail'
 import { useRuns } from '@/hooks/useRuns'
 import { formatPercent } from '@/lib/utils'
+
+type Notice = { type: 'success' | 'error'; message: string }
 
 export function DashboardPage() {
   const { runs, loading, reload } = useRuns()
@@ -13,6 +15,13 @@ export function DashboardPage() {
   const [openTabs, setOpenTabs] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState<string>('')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [notice, setNotice] = useState<Notice | null>(null)
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   const openRun = (runId: string) => {
     if (!openTabs.includes(runId)) {
@@ -41,7 +50,7 @@ export function DashboardPage() {
       const { error } = await deleteRun({ path: { run_id: runId } })
       if (error) {
         const detail = (error as { detail?: string })?.detail
-        alert(detail || '删除失败')
+        setNotice({ type: 'error', message: detail || '删除失败' })
         return
       }
       // 关闭已打开的 tab
@@ -52,7 +61,7 @@ export function DashboardPage() {
       // 刷新列表
       reload()
     } catch {
-      alert('网络错误，删除失败')
+      setNotice({ type: 'error', message: '网络错误，删除失败' })
     }
   }
 
@@ -61,23 +70,38 @@ export function DashboardPage() {
       const { error, data } = await cleanEmptyRuns()
       if (error) {
         const detail = (error as { detail?: string })?.detail
-        alert(detail || '清理失败')
+        setNotice({ type: 'error', message: detail || '清理失败' })
         return
       }
       // 清理后刷新列表，并给出结果反馈
       reload()
       if (data && data.deleted_runs > 0) {
-        alert(`已清理 ${data.deleted_runs} 个无效回测记录（${data.deleted_records} 条日志）`)
+        setNotice({
+          type: 'success',
+          message: `已清理 ${data.deleted_runs} 个无效回测记录（${data.deleted_records} 条日志）`,
+        })
       } else {
-        alert('没有需要清理的无效回测记录')
+        setNotice({ type: 'success', message: '没有需要清理的无效回测记录' })
       }
     } catch {
-      alert('网络错误，清理失败')
+      setNotice({ type: 'error', message: '网络错误，清理失败' })
     }
   }
 
   return (
     <div className="flex h-full overflow-hidden">
+      {notice && (
+        <div
+          role="status"
+          className={`fixed top-3 right-3 z-[60] max-w-sm rounded-md border px-4 py-2 text-sm shadow-lg ${
+            notice.type === 'error'
+              ? 'border-destructive/30 bg-destructive/10 text-destructive'
+              : 'border-success/30 bg-success/10 text-success'
+          }`}
+        >
+          {notice.message}
+        </div>
+      )}
       {/* Left: Run list sidebar — collapsible */}
       <div
         className={`shrink-0 overflow-hidden border-r border-border transition-all duration-200 ${
@@ -128,7 +152,16 @@ export function DashboardPage() {
                 return (
                   <div
                     key={runId}
+                    role="tab"
+                    tabIndex={0}
+                    aria-selected={isActive}
                     onClick={() => setActiveTab(runId)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setActiveTab(runId)
+                      }
+                    }}
                     className={`group flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-colors whitespace-nowrap ${
                       isActive
                         ? 'bg-background text-foreground'

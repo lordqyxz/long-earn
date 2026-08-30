@@ -13,6 +13,12 @@ class RoeQualityParams(OperatorParams):
 
 @operator
 class RoeQuality(Operator):
+    """价格动量质量代理（**非基本面 ROE**）。
+
+    名称保留 ``roe_quality`` 以兼容既有策略 YAML；实际仅用 ``params.field``
+    价格序列的滚动收益均值/波动比（类 Sharpe），不读取财务 ``roe`` 列。
+    """
+
     name: ClassVar[str] = "roe_quality"
     category: ClassVar[str] = "factor"
     inputs: ClassVar[list[str]] = ["close"]

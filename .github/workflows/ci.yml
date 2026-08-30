@@ -23,6 +23,8 @@ jobs:
           fi
       - name: ADR-021 卡口 — LLM 调用点分层检查
         run: uv run python scripts/check_llm_call_sites.py
+      - name: ADR-008 卡口 — 禁止退役语法（${var} / 路径 2 回退）
+        run: uv run python scripts/check_deprecated_syntax.py
       # 质量门槛对齐 AGENTS.md：ruff 卡 src/；类型检查以 Serena LSP 为准，不跑 mypy
       - run: uv run ruff check src/
       - run: uv run ruff format --check src/

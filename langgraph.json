@@ -3,7 +3,7 @@
   "description": "证券交易顾问智能体",
   "version": "0.6",
   "graphs": {
-    "agent": "src/long_earn/agent.py:main_agent"
+    "master_agent": "src/long_earn/master_agent.py:create_master_agent_graph"
   },
   "dependencies": {
     "langgraph": "^0.2.0",

@@ -1,4 +1,4 @@
-"""财务日频面板组装 — 与数据源解耦，只消费 DuckDB 季频缓存。
+"""财务日频面板组装 — 与数据源解耦，只消费 PostgreSQL 季频缓存。
 
 对外契约：返回 ``(date, symbol)`` MultiIndex 日频视图；
 底层用 ``announce_date`` asof 对齐，不依赖 miniqmt / xtquant。
@@ -22,7 +22,7 @@ def _get_xshg_trading_dates(
     start_date: str,
     end_date: str,
 ) -> pd.DatetimeIndex:
-    """从 DuckDB 缓存获取 XSHG 真实交易日历，回退到 freq="B"（AUDIT-P2-15）。
+    """从 PostgreSQL 缓存获取 XSHG 真实交易日历，回退到 freq="B"（AUDIT-P2-15）。
 
     优先从 price_daily 表查询实际交易日，避免 US 工作日历与中国节假日
     （春节、国庆等）不匹配的问题。
@@ -134,7 +134,7 @@ def build_daily_financial_panel(
     end_date: str,
     fields: list[str],
 ) -> pd.DataFrame:
-    """从 DuckDB 季频缓存组装日频财务面板（引擎消费契约）。"""
+    """从 PostgreSQL 季频缓存组装日频财务面板（引擎消费契约）。"""
     if not symbols:
         return pd.DataFrame()
 

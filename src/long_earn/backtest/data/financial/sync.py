@@ -1,4 +1,4 @@
-"""财务缓存同步 — 检测缺失/过期并委托数据源写回 DuckDB。
+"""财务缓存同步 — 检测缺失/过期并委托数据源写回 PostgreSQL。
 
 面板读路径见 :mod:`financial.panel`；本模块只管「缓存是否够用」。
 """
@@ -112,7 +112,7 @@ def ensure_financial_cache(
     end_date: str,
     ingestor: FinancialCacheIngestor | None,
 ) -> None:
-    """若缓存缺报告期或过期，从 ingestor 增量拉取并写回 DuckDB。"""
+    """若缓存缺报告期或过期，从 ingestor 增量拉取并写回 PostgreSQL。"""
     if not symbols or ingestor is None:
         return
     if not getattr(ingestor, "is_available", False):

@@ -19,21 +19,7 @@ from long_earn.backtest.data.miniqmt_provider import MiniQmtDataProvider
 from long_earn.backtest.data.provider import CompositeDataProvider
 
 # 复权一致性测试依赖真实 PostgreSQL 存储；其余测试用 _StubCache 不连库。
-# 用函数级 skipif（模块级会误跳过纯逻辑测试）。
-
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时复权测试跳过）。"""
-    from long_earn.core.pg import pg_version
-
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-_PG_SKIP = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
+# PG 依赖用例单独标记 integration（模块级会误标纯逻辑测试）。
 
 # ── 测试桩 ───────────────────────────────────────────────────────────────
 
@@ -266,7 +252,7 @@ class TestMergedPanelFfillSorted:
 # ── AUDIT-P2-07: 复权一致性 ─────────────────────────────────────
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_adjustment_consistency_no_false_positive():
     """正常复权数据不应产生可疑跳跃（AUDIT-P2-07）。"""
     import uuid
@@ -312,7 +298,7 @@ def test_adjustment_consistency_no_false_positive():
             cache.close()
 
 
-@_PG_SKIP
+@pytest.mark.integration
 def test_adjustment_consistency_detects_jump():
     """复权异常（单日暴跌 60%）应被检测到（AUDIT-P2-07）。"""
     import uuid

@@ -1,11 +1,11 @@
 """基于 miniqmt (xtquant.xtdata) 的本地数据提供者。
 
-数据获取策略：DuckDB 缓存优先，miniqmt 增量补充。
+数据获取策略：PostgreSQL 缓存优先，miniqmt 增量补充（ADR-018）。
 
-1. 优先从 DuckDB 缓存读取数据
+1. 优先从 PostgreSQL 缓存读取数据
 2. 检测缓存数据的新鲜度（最后日期是否接近今天）
 3. 若 miniqmt 可用且数据过期，自动从 miniqmt 增量获取最新数据并更新缓存
-4. 若 miniqmt 不可用，静默降级到 DuckDB 缓存数据
+4. 若 miniqmt 不可用，返回空/缓存已有数据并打日志，**不做静默跨源降级**
 
 xtquant 数据格式说明：
   - get_market_data_ex(): 返回 {symbol: DataFrame}，含 'time' 列（毫秒时间戳）
@@ -619,18 +619,18 @@ def _is_price_stale(cache: DataCache, symbols: list[str], end_date: str) -> bool
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 缓存层：DuckDB 优先 + miniqmt 增量更新
+# 缓存层：PostgreSQL 优先 + miniqmt 增量更新
 # ─────────────────────────────────────────────────────────────────────────
 
 
 class MiniQmtDataProvider:
-    """基于 DuckDB 缓存 + miniqmt 增量更新的数据提供者。
+    """基于 PostgreSQL 缓存 + miniqmt 增量更新的数据提供者。
 
     数据获取策略：
-    1. 优先从 DuckDB 缓存读取
+    1. 优先从 PostgreSQL 缓存读取
     2. 检测缓存数据新鲜度
     3. 若 miniqmt 可用且数据过期，增量获取最新数据并更新缓存
-    4. 若 miniqmt 不可用，静默使用缓存数据
+    4. 若 miniqmt 不可用，返回空/已有缓存并打日志（失败即失败，不跨源降级）
     """
 
     def __init__(self, cache: DataCache | None = None) -> None:
@@ -925,86 +925,6 @@ class MiniQmtDataProvider:
         )
         result = result.dropna(subset=["symbol", "report_date", "announce_date"])
         return result
-
-    @staticmethod
-    def _merge_by_symbol_date(
-        base_df: pd.DataFrame, extra_df: pd.DataFrame, xt_col: str
-    ) -> pd.Series:
-        """按 (symbol, report_date) 对齐，从 extra_df 取一列回 base_df 行顺序。
-
-        用于把 Balance/CashFlow/Pershareindex 的字段对齐到 Income 表的行顺序。
-        """
-        if xt_col not in extra_df.columns:
-            return pd.Series([float("nan")] * len(base_df))
-        key_cols = ["symbol", "report_date"]
-        if not all(c in extra_df.columns for c in key_cols):
-            return pd.Series([float("nan")] * len(base_df))
-        extra = extra_df[[*key_cols, xt_col]].copy()
-        extra["report_date"] = pd.to_datetime(extra["report_date"], errors="coerce")
-        base = base_df[["symbol", "report_date"]].copy()
-        base["report_date"] = pd.to_datetime(base["report_date"], errors="coerce")
-        merged = base.merge(extra, on=key_cols, how="left")
-        return merged[xt_col]
-
-    def _extract_income_fields(
-        self, result_df: pd.DataFrame, income_df: pd.DataFrame
-    ) -> None:
-        """从 Income 表提取字段（行对齐，直接取值）。"""
-        if income_df.empty:
-            return
-        income_field_map = {
-            "revenue_inc": "revenue",
-            "revenue": "revenue",
-            "net_profit_incl_min_int_inc": "net_profit",
-            "s_fa_eps_basic": "eps",
-            "research_expenses": "research_expenses",
-            "total_operating_cost": "total_operating_cost",
-        }
-        for xt_col, std_col in income_field_map.items():
-            if xt_col in income_df.columns and std_col not in result_df.columns:
-                result_df[std_col] = income_df[xt_col].values
-
-    def _extract_balance_fields(
-        self, result_df: pd.DataFrame, balance_df: pd.DataFrame
-    ) -> None:
-        """从 Balance 表提取字段（含多字段兜底映射，按 symbol+date 对齐）。"""
-        if balance_df.empty or "symbol" not in balance_df.columns:
-            return
-        balance_extract = {
-            "total_equity": [
-                "total_equity",
-                "tot_shrhldr_eqy_excl_min_int",
-                "total_hldr_eqy_exc_min_int",
-                "total_hldr_eqy_incl_min_int",
-                "s_fa_total_hldr_eqy_exc_min_int",
-            ],
-            "total_assets": ["tot_assets"],
-            "total_liabilities": ["tot_liab"],
-        }
-        for std_col, xt_candidates in balance_extract.items():
-            if std_col in result_df.columns:
-                continue
-            for xt_col in xt_candidates:
-                if xt_col in balance_df.columns:
-                    result_df[std_col] = self._merge_by_symbol_date(
-                        result_df, balance_df, xt_col
-                    )
-                    break
-
-    def _extract_table_fields(
-        self,
-        result_df: pd.DataFrame,
-        table_df: pd.DataFrame,
-        field_map: dict[str, str],
-    ) -> None:
-        """通用表字段提取（按 symbol+date 对齐，xt_col → std_col 一对一映射）。"""
-        if table_df.empty or "symbol" not in table_df.columns:
-            return
-        for xt_col, std_col in field_map.items():
-            if xt_col in table_df.columns and std_col not in result_df.columns:
-                result_df[std_col] = self._merge_by_symbol_date(
-                    result_df, table_df, xt_col
-                )
 
     def _compute_derived_financials(self, df: pd.DataFrame) -> pd.DataFrame:
         """衍生指标手算兜底（Pershareindex 预计算值缺失时才计算）。

@@ -6,7 +6,10 @@ JSON 文件持久化，每次研究 run 一棵树。
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from loguru import logger
@@ -31,10 +34,18 @@ class HypothesisTreeStore:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         path = self._base_dir / f"{tree.run_id}.json"
         data = tree.serialize()
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
+        payload = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self._base_dir, prefix=f".{tree.run_id}.", suffix=".tmp"
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_path, path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
         logger.info(f"假设树已保存: {path} ({tree.node_count} 节点)")
         return path
 

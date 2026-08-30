@@ -866,15 +866,11 @@ class ResearchAgent:
                 )
                 try:
                     params = op.params_cls()
-                except Exception:
-                    params = op.params_cls  # type: ignore[assignment]
-                    try:
-                        params = op.params_cls()  # retry
-                    except Exception as exc:
-                        return json.dumps(
-                            {"passed": False, "error": f"params: {exc}"},
-                            ensure_ascii=False,
-                        )
+                except Exception as exc:
+                    return json.dumps(
+                        {"passed": False, "error": f"params: {exc}"},
+                        ensure_ascii=False,
+                    )
 
                 try:
                     reports = prove_causality(op, params, panel)

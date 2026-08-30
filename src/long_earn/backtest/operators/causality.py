@@ -100,14 +100,15 @@ TEMPORAL_PARAMETER_NAMES: frozenset[str] = frozenset(
 
 
 def operator_implementation_hash(op: Operator) -> str:
-    """计算实现指纹；代码或参数 schema 改变后旧证明立即失效。"""
+    """计算实现指纹；代码、类文档或参数 schema 改变后旧证明立即失效。"""
 
     code = type(op).apply.__code__
     apply_code = repr((code.co_code, code.co_consts, code.co_names)).encode()
+    doc = (type(op).__doc__ or "").encode()
     schema = json.dumps(
         type(op).params_cls.model_json_schema(), sort_keys=True, ensure_ascii=True
     ).encode()
-    return hashlib.sha256(apply_code + schema).hexdigest()
+    return hashlib.sha256(apply_code + doc + schema).hexdigest()
 
 
 def _parameter_hash(params: OperatorParams) -> str:

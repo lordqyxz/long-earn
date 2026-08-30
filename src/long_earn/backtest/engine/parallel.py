@@ -307,8 +307,8 @@ class ParallelRunner:
     Args:
         max_workers: 进程池大小，默认 ``os.cpu_count()``。
         data_provider: 可选的数据提供者（面向 :class:`DataProvider` 业务接口）。
-            注入时主进程预取走降级链（DuckDB→miniqmt→ciccwm→akshare）；
-            未注入时退回本地 :class:`MiniQmtDataProvider`（向后兼容）。
+            注入时主进程预取走注入链；未注入时退回本地
+            :class:`MiniQmtDataProvider`（向后兼容，用毕关闭）。
     """
 
     def __init__(
@@ -322,7 +322,7 @@ class ParallelRunner:
     def _prepare_data(self, symbols: list[str], start_date: str, end_date: str) -> Any:
         """预取合并面板为 polars DataFrame（主进程执行，worker 通过 mmap IPC 文件共享）。
 
-        优先用注入的 ``data_provider``（走降级链），未注入时退回 ``MiniQmtDataProvider``。
+        优先用注入的 ``data_provider``；未注入时退回 ``MiniQmtDataProvider`` 并关闭。
         返回前按 timestamp 排序一次：主进程单次复制换取全部 worker 的
         VisibilityGuard 跳过排序（否则每个 worker 各复制一整块面板）。
         """
@@ -342,16 +342,25 @@ class ParallelRunner:
                 panel = PandasToPolarsProvider(provider).get_merged_panel_as_polars(
                     symbols, start_date, end_date
                 )
-        else:
-            # 向后兼容：未注入时退回本地 MiniQmtDataProvider
-            from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
-                MiniQmtDataProvider,
-            )
+            return panel.sort("timestamp")
 
-            panel = PandasToPolarsProvider(
-                MiniQmtDataProvider()
-            ).get_merged_panel_as_polars(symbols, start_date, end_date)
-        return panel.sort("timestamp")
+        # 向后兼容：未注入时退回本地 MiniQmtDataProvider（用毕 close，防连接泄漏）
+        from long_earn.backtest.data.miniqmt_provider import (  # noqa: PLC0415
+            MiniQmtDataProvider,
+        )
+
+        fallback = MiniQmtDataProvider()
+        try:
+            panel = PandasToPolarsProvider(fallback).get_merged_panel_as_polars(
+                symbols, start_date, end_date
+            )
+            return panel.sort("timestamp")
+        finally:
+            # MiniQmtDataProvider 自建 DataCache 时需关闭，避免连接泄漏
+            cache = getattr(fallback, "cache", None)
+            close = getattr(cache, "close", None)
+            if callable(close):
+                close()
 
     def run_grid(  # noqa: PLR0913
         self,

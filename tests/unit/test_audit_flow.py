@@ -26,22 +26,9 @@ from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.parallel import ParallelRunner
 from long_earn.backtest.engine.param_grid import ParamGrid
 from long_earn.backtest.engine.strategy import BaseStrategy
-from long_earn.core.pg import pg_connect, pg_version
+from long_earn.core.pg import pg_connect
 
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(),
-    reason="PostgreSQL 服务不可用",
-)
+pytestmark = pytest.mark.integration
 
 
 def _query_audit_rows(

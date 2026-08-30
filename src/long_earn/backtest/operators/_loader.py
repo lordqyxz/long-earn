@@ -26,6 +26,7 @@
 保持极简（不链式 import 算子），避免循环依赖。
 """
 
+import hashlib
 import importlib
 from pathlib import Path
 from typing import Any
@@ -193,7 +194,19 @@ def register_operator(
                 f"算子 {cls.name} 源码已写盘: {target_file}（下次启动自动扫描注册）"
             )
         else:
-            logger.debug(f"算子 {cls.name} 源码文件已存在，跳过写盘: {target_file}")
+            existing = target_file.read_text(encoding="utf-8")
+            disk_hash = hashlib.sha256(existing.encode()).hexdigest()[:12]
+            new_hash = hashlib.sha256(source_code.encode()).hexdigest()[:12]
+            if existing != source_code:
+                logger.warning(
+                    f"算子 {cls.name} 源码文件已存在且内容不同，跳过写盘"
+                    f"（磁盘指纹 {disk_hash} ≠ 新源码 {new_hash}）；"
+                    "内存热注册与磁盘实现可能漂移，请人工合并或删除旧文件"
+                )
+            else:
+                logger.warning(
+                    f"算子 {cls.name} 源码文件已存在，跳过写盘: {target_file}"
+                )
 
     OPERATOR_REGISTRY[cls.name] = op
     PROOF_REGISTRY[cls.name] = proof

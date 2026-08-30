@@ -96,6 +96,49 @@
 
 ---
 
+## 五、第二轮修复（2026-08-30，Medium/Low 全量）
+
+> 主线：关闭第一轮暂缓的 Medium/Low；错误结论驳回；冲突项改为声明对齐/护栏硬化。
+
+### 5.1 驳回或冲突改判
+
+| 项 | 处置 |
+|----|------|
+| 文首「后端 High 21」 | 笔误 → 订正为 17（正文 H1–H17） |
+| H17「invoke 应重置 trial_count」 | 已驳回（DSR 跨 invoke 累计） |
+| `connector._parse_quarter` 抛 ValueError | 评审过时：实现返回 `("", "")` 与 docstring 一致 |
+| 算子 `roe_quality` / `gross_margin_stability` 改名 | 冲突 YAML → 只改 docstring，不改 ID |
+| remote 完整鉴权 | 无身份产品 → 只加固 Origin |
+| 因果性补全基本面形式化证明 | 收窄注册声明，不扩写证明管线 |
+| 热注册强制覆盖磁盘 | warning + 指纹漂移告警，不默认覆盖 |
+| acceptance 首轮负 sharpe | 设计意图（建基线）；只修 `primary_metric` 使用 |
+
+### 5.2 本轮已修
+
+| 主题 | 说明 |
+|------|------|
+| 止盈成交口径 | 触发用 high；成交 `min(止盈线, high)`，与止损对称；`TestTakeProfitConservativeFill` |
+| 风控贯通 `_pre_trade_check` | `_execute_risk_market_sell`；**跌停拒卖与信号单同口径**（持仓保留、次 bar 再试）；`test_max_drawdown_limit_down_retries` |
+| ciccwm TLS | 默认校验证书；`CICCWM_SSL_VERIFY=false` 逃生 |
+| pg conninfo | `psycopg.conninfo.make_conninfo` |
+| quality_momentum | 去掉 null→0→满分；null 自然传播 |
+| 算子声明 | roe_quality/gross_margin docstring；热注册 warning；alias 择列；指纹声明收窄 |
+| 服务层 | ingestion docstring；backtest_service 双轨/run_grid；stock_service revenue；config lazy mkdir；master_agent LLM |
+| 策略/记忆 | primary_metric；research_service 拷贝 config；HTR insight 优先；motion 反查；llm_factory |
+| App/tools | 删 `tools/backtest_analyzer`；sector stats 公有 API；Origin 硬化；realtime_alert 锁；tools/store |
+| 脚本 | `--auto-window` held-out；`langgraph.json`→master_agent；CI 接 check_deprecated |
+| 测试 | integration 标记 / conftest；PG 清理加固 |
+| 前端 | Blob 预览；abort/stale；error 态；Low（常量/Esc/主题/formatDate） |
+| Low | miniqmt 死代码、duckdb 依赖、md_splitter、tree_store、personas EXAMPLES 等 |
+| parallel 兜底 provider | `_prepare_data` 未注入时 MiniQmt+DataCache 用毕 close |
+| unit PG 假绿 | 剩余 skipif 全部改为 `pytest.mark.integration`（[PG假绿改integration标记](cf93f000-4476-4ea3-bcdd-3432d01b3ee7)） |
+
+### 5.3 第一节暂缓表状态
+
+第三节原暂缓项已由第二轮关闭或改判（见 5.1）；openapi 契约已在第一轮后 `ffaed4b` 同步。
+
+---
+
 ## 四、改动文件清单（43 个）
 
 - **scripts（10）**：backtest_recent / check_deprecated_syntax / compare_strategies / download_data / find_best_strategy / oos_validate / prove_backtest / prove_from_audit / test_cache_sync / validate_dual_quarter

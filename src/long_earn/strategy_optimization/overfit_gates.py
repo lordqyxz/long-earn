@@ -147,8 +147,6 @@ class WalkForwardStabilityGate:
 _DSR_THRESHOLD_DEFAULT = 1.96
 # DSR 所需最少回测天数
 _DSR_MIN_OBSERVATIONS = 2
-# PBO 劣于中位数判定阈值（rank < 0.5 视为劣于中位数）
-_PBO_BELOW_MEDIAN_THRESHOLD = 0.5
 # CSCV 枚举上限（n > 10 时 math.comb 过大，转纯 Monte Carlo）
 _CSCV_ENUM_LIMIT = 10
 

@@ -63,7 +63,7 @@ from loguru import logger
 from starlette.background import BackgroundTask
 
 from long_earn.app import schemas
-from long_earn.app.analyzer import BacktestAnalyzer
+from long_earn.app.analyzer import AuditDeleteError, BacktestAnalyzer
 from long_earn.app.event_analyzer import EventAnalyzer
 
 _HERE = Path(__file__).parent
@@ -95,6 +95,11 @@ def _validate_bind_host(host: str, allow_remote: bool) -> None:
         raise ValueError(msg)
 
 
+def _is_loopback_hostname(hostname: str) -> bool:
+    """判断 hostname 是否为本地回环地址。"""
+    return hostname.lower() in {"127.0.0.1", "localhost"}
+
+
 def _origin_matches_host(origin: str, host: str) -> bool:
     """Check a browser Origin against the HTTP Host header, ignoring the port."""
     origin_hostname = urlparse(origin).hostname
@@ -105,15 +110,20 @@ def _origin_matches_host(origin: str, host: str) -> bool:
 
 
 def _websocket_origin_allowed(websocket: WebSocket) -> bool:
-    """Require same-origin browser WebSocket connections in remote mode."""
-    if not websocket.app.state.remote_mode:
-        return True
+    """浏览器 WebSocket 须携带 Origin，且为 loopback 或与 Host 同主机。"""
     origin = websocket.headers.get("origin")
+    if origin is None:
+        return False
+    origin_hostname = urlparse(origin).hostname
+    if origin_hostname is None:
+        return False
+    if _is_loopback_hostname(origin_hostname):
+        return True
     host = websocket.headers.get("host", "")
-    return origin is not None and _origin_matches_host(origin, host)
+    return _origin_matches_host(origin, host)
 
 
-def _register_run_routes(  # noqa: C901
+def _register_run_routes(  # noqa: C901, PLR0915
     app: FastAPI, analyzer: BacktestAnalyzer
 ) -> None:
     """注册回测运行查询端点。"""
@@ -145,7 +155,11 @@ def _register_run_routes(  # noqa: C901
         deleted_runs = 0
         deleted_records = 0
         for rid in bad_ids:
-            n = analyzer.delete_run(rid)
+            try:
+                n = analyzer.delete_run(rid)
+            except AuditDeleteError as e:
+                logger.error(f"清理 run {rid} 失败: {e}")
+                continue
             if n:
                 deleted_runs += 1
                 deleted_records += n
@@ -171,7 +185,10 @@ def _register_run_routes(  # noqa: C901
                 409,
                 f"Run {run_id} 带生产标签（prod），确认删除请传 force=true",
             )
-        deleted = analyzer.delete_run(run_id)
+        try:
+            deleted = analyzer.delete_run(run_id)
+        except AuditDeleteError as e:
+            raise HTTPException(500, f"删除失败: {e}") from e
         if not deleted:
             raise HTTPException(404, f"Run {run_id} not found")
         logger.info(f"删除回测运行: {run_id}, {deleted} 条记录")
@@ -425,19 +442,7 @@ def _fetch_symbol_detail(cache: Any, symbol: str) -> dict[str, Any] | None:
 
 def _get_sector_stats(cache: Any) -> dict[str, int]:
     """统计 instrument_details 表中行业/地区填充情况。"""
-    conn = cache._get_conn()
-    total = conn.execute("SELECT COUNT(*) FROM instrument_details").fetchone()[0]
-    with_industry = conn.execute(
-        "SELECT COUNT(*) FROM instrument_details WHERE industry != ''"
-    ).fetchone()[0]
-    with_region = conn.execute(
-        "SELECT COUNT(*) FROM instrument_details WHERE region != ''"
-    ).fetchone()[0]
-    return {
-        "total": total,
-        "with_industry": with_industry,
-        "with_region": with_region,
-    }
+    return cache.get_instrument_sector_stats()
 
 
 def _register_symbol_routes(app: FastAPI) -> None:
@@ -451,7 +456,7 @@ def _register_symbol_routes(app: FastAPI) -> None:
     async def symbol_names(symbols: str = Query("")):
         """批量获取标的中文名。
 
-        优先从 DuckDB 缓存 instrument_details 表读取；
+        优先从 PostgreSQL 缓存 instrument_details 表读取；
         缓存未命中的标的回退到 xtquant get_instrument_detail 实时获取。
         """
         symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
@@ -1005,7 +1010,7 @@ def _create_app(remote_mode: bool = False) -> FastAPI:
         if remote_mode and request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             host = request.headers.get("host", "")
-            if origin is not None and not _origin_matches_host(origin, host):
+            if origin is None or not _origin_matches_host(origin, host):
                 return PlainTextResponse("Origin is not allowed", status_code=403)
         return await call_next(request)
 

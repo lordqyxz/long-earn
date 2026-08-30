@@ -58,7 +58,7 @@ class Substance(BaseModel):
     relation_type: str | None = None
     conflict_group: str | None = None
     insertion_order: int = 0
-    decay_half_life_days: float = 90.0
+    decay_half_life_days: float = Field(default=90.0, gt=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def is_visible_at(self, when: datetime) -> bool:

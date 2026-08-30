@@ -53,7 +53,7 @@ from long_earn.core.stdio import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 if TYPE_CHECKING:
-    from long_earn.config import RuntimeContext
+    from long_earn.config import AppConfig, RuntimeContext
 
 
 def probe_data_coverage() -> dict:
@@ -119,6 +119,36 @@ def derive_windows(coverage: dict) -> dict:
         "train_end": train_end.isoformat(),
         "recent_start": recent_start.isoformat(),
         "recent_end": recent_end.isoformat(),
+    }
+
+
+def derive_held_out_from_train_end(train_end: date, ref: AppConfig) -> dict[str, str]:
+    """根据 train_end 与 AppConfig 默认区间的相对偏移推导 test/validation 窗口。
+
+    禁止 test=train：test/validation 始终为 train_end 之后的 held-out 段，
+    偏移量复用 ref 配置中默认 train/test/validation 的相对间距。
+    """
+    ref_train_end = date.fromisoformat(ref.train_end_date)
+    ref_test_start = date.fromisoformat(ref.test_start_date)
+    ref_test_end = date.fromisoformat(ref.test_end_date)
+    ref_val_start = date.fromisoformat(ref.validation_start_date)
+    ref_val_end = date.fromisoformat(ref.validation_end_date)
+
+    test_start_offset = (ref_test_start - ref_train_end).days
+    test_duration = (ref_test_end - ref_test_start).days
+    val_gap_after_test = (ref_val_start - ref_test_end).days
+    val_duration = (ref_val_end - ref_val_start).days
+
+    test_start = train_end + timedelta(days=test_start_offset)
+    test_end = test_start + timedelta(days=test_duration)
+    validation_start = test_end + timedelta(days=val_gap_after_test)
+    validation_end = validation_start + timedelta(days=val_duration)
+
+    return {
+        "test_start": test_start.isoformat(),
+        "test_end": test_end.isoformat(),
+        "validation_start": validation_start.isoformat(),
+        "validation_end": validation_end.isoformat(),
     }
 
 
@@ -295,15 +325,21 @@ def main() -> None:  # noqa: PLR0912
     config = AppConfig.from_env()
 
     if auto_window:
-        # 仅在 --auto-window 时覆盖 config 日期（探索性分析用）
+        # 仅覆盖训练集；test/validation 为 train_end 之后的 held-out（禁止 test=train）
+        held_out = derive_held_out_from_train_end(
+            date.fromisoformat(w["train_end"]), config
+        )
         config.train_start_date = w["train_start"]
         config.train_end_date = w["train_end"]
-        config.test_start_date = w["train_start"]
-        config.test_end_date = w["train_end"]
-        config.validation_start_date = w["recent_start"]
-        config.validation_end_date = w["recent_end"]
+        config.test_start_date = held_out["test_start"]
+        config.test_end_date = held_out["test_end"]
+        config.validation_start_date = held_out["validation_start"]
+        config.validation_end_date = held_out["validation_end"]
         config.backtest_start_date = w["train_start"]
         config.backtest_end_date = w["train_end"]
+        print()
+        print("  ⚠ --auto-window：仅覆盖训练集日期；test/validation 为 train_end 后 held-out")
+        print("    （禁止 test=train；探索性分析用，默认应遵守 config 三段式分割）")
 
     # 始终确保 HTR dev 回测区间严格限定在训练集（铁律 #1/#2：dev/参数寻优只能用训练集，
     # 测试集仅供 _decide 节点合并门触碰，验证集仅最终评估一次）

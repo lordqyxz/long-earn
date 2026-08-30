@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -48,6 +49,8 @@ class PriceAlertMonitor:
         self._provider = provider
         self._alerts: list[PriceAlert] = []
         self._subscription_id: str = ""
+        self._started = False
+        self._lock = threading.Lock()
         self.on_trigger: Callable[[PriceAlert], None] | None = None
 
     def add_alert(
@@ -58,6 +61,8 @@ class PriceAlertMonitor:
     ) -> None:
         """添加一条价格告警规则。
 
+        start() 之后仍可追加；若监控已启动则自动扩展订阅标的。
+
         Args:
             symbol: 股票代码（xtquant 格式）
             threshold: 价格阈值
@@ -65,11 +70,25 @@ class PriceAlertMonitor:
         """
         if direction not in ("above", "below"):
             raise ValueError(f"direction 必须是 'above' 或 'below'， got: {direction}")
-        self._alerts.append(
-            PriceAlert(symbol=symbol, threshold=threshold, direction=direction)
-        )
+        with self._lock:
+            self._alerts.append(
+                PriceAlert(symbol=symbol, threshold=threshold, direction=direction)
+            )
+            if self._started and self._subscription_id:
+                self._resubscribe_locked()
         logger.info(
             f"[alert] 添加告警: {symbol} {'>' if direction == 'above' else '<'} {threshold}"
+        )
+
+    def _resubscribe_locked(self) -> None:
+        """在持锁状态下按当前告警列表重新订阅（调用方须已持有 _lock）。"""
+        symbols = list({a.symbol for a in self._alerts})
+        if not symbols:
+            return
+        if self._subscription_id:
+            self._provider.unsubscribe(self._subscription_id)
+        self._subscription_id = self._provider.subscribe_quote(
+            symbols, self._handle_tick
         )
 
     def _handle_tick(self, tick: dict[str, object]) -> None:
@@ -79,7 +98,9 @@ class PriceAlertMonitor:
         price = float(_price) if isinstance(_price, (int, float)) else 0.0
         if price <= 0 or not symbol:
             return
-        for alert in self._alerts:
+        with self._lock:
+            alerts = list(self._alerts)
+        for alert in alerts:
             if alert.triggered or alert.symbol != symbol:
                 continue
             triggered = (
@@ -105,31 +126,39 @@ class PriceAlertMonitor:
         Returns:
             订阅 ID；不支持订阅时返回空字符串（调用方改用轮询）。
         """
-        symbols = list({a.symbol for a in self._alerts})
-        if not symbols:
-            logger.warning("[alert] 无告警规则，不启动监控")
-            return ""
-        self._subscription_id = self._provider.subscribe_quote(
-            symbols, self._handle_tick
-        )
-        if self._subscription_id:
-            logger.info(f"[alert] 监控已启动，订阅 {len(symbols)} 只股票")
+        with self._lock:
+            symbols = list({a.symbol for a in self._alerts})
+            if not symbols:
+                logger.warning("[alert] 无告警规则，不启动监控")
+                return ""
+            self._subscription_id = self._provider.subscribe_quote(
+                symbols, self._handle_tick
+            )
+            self._started = bool(self._subscription_id)
+            sub_id = self._subscription_id
+            sym_count = len(symbols)
+        if sub_id:
+            logger.info(f"[alert] 监控已启动，订阅 {sym_count} 只股票")
         else:
             logger.info("[alert] 数据源不支持订阅，请使用轮询模式")
-        return self._subscription_id
+        return sub_id
 
     def stop(self) -> None:
         """取消订阅，停止监控。"""
-        if self._subscription_id:
-            self._provider.unsubscribe(self._subscription_id)
-            self._subscription_id = ""
+        with self._lock:
+            if self._subscription_id:
+                self._provider.unsubscribe(self._subscription_id)
+                self._subscription_id = ""
+            self._started = False
             logger.info("[alert] 监控已停止")
 
     @property
     def alerts(self) -> list[PriceAlert]:
         """当前所有告警规则（含已触发）。"""
-        return list(self._alerts)
+        with self._lock:
+            return list(self._alerts)
 
     def clear_triggered(self) -> None:
         """清除已触发的告警（允许重新触发）。"""
-        self._alerts = [a for a in self._alerts if not a.triggered]
+        with self._lock:
+            self._alerts = [a for a in self._alerts if not a.triggered]

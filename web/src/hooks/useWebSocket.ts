@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { eventStats, eventTimeline, listEvents, listRelations } from '@/api'
 import type { EventStats, EventItem, RelationItem, TimelinePoint } from '@/api'
 import type { PipelineMessage } from '@/types'
+import { EVENT_TIMELINE_DAYS } from '@/lib/constants'
 
 const RECONNECT_BASE_DELAY_MS = 5000
 const RECONNECT_MAX_DELAY_MS = 30000
@@ -122,22 +123,34 @@ export function useEventData() {
   const [events, setEvents] = useState<EventItem[]>([])
   const [relations, setRelations] = useState<RelationItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const [statsRes, timelineRes, eventsRes, relationsRes] = await Promise.all([
         eventStats(),
-        eventTimeline({ query: { days: 30 } }),
+        eventTimeline({ query: { days: EVENT_TIMELINE_DAYS } }),
         listEvents({ query: { limit: 100 } }),
         listRelations({ query: { limit: 50 } }),
       ])
-      if (statsRes.data) setStats(statsRes.data)
-      if (timelineRes.data?.timeline) setTimeline(timelineRes.data.timeline)
-      if (eventsRes.data?.events) setEvents(eventsRes.data.events)
-      if (relationsRes.data?.relations) setRelations(relationsRes.data.relations)
-    } catch {
-      // ignore
+
+      const failures: string[] = []
+      if (statsRes.error) failures.push('统计数据')
+      if (timelineRes.error) failures.push('时间线')
+      if (eventsRes.error) failures.push('事件列表')
+      if (relationsRes.error) failures.push('影响关系')
+      if (failures.length > 0) {
+        throw new Error(`${failures.join('、')}加载失败`)
+      }
+
+      setStats(statsRes.data ?? null)
+      setTimeline(timelineRes.data?.timeline ?? [])
+      setEvents(eventsRes.data?.events ?? [])
+      setRelations(relationsRes.data?.relations ?? [])
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -145,5 +158,5 @@ export function useEventData() {
 
   useEffect(() => { load() }, [load])
 
-  return { stats, timeline, events, relations, loading, reload: load }
+  return { stats, timeline, events, relations, loading, error, reload: load }
 }

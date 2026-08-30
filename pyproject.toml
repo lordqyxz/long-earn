@@ -24,7 +24,6 @@ dependencies = [
     "faiss-cpu>=1.13.0",
     "langgraph-cli[inmem]>=0.4.3",
     "langgraph-checkpoint-sqlite>=2.0.11",
-    "duckdb>=0.10.0",
     "psycopg[binary]>=3.1.0",
     "sqlalchemy>=2.0",
     "xtquant>=2024.01.01",
@@ -103,6 +102,7 @@ addopts = "--cov=long_earn --cov-report=term --cov-report=html"
 python_files = ["test_*.py"]
 markers = [
     "regression: 回归测试（防回退，验证已修复的缺陷不再复现）",
+    "integration: 需要 PostgreSQL 或外部服务的集成测试（unit 目录内 PG 不可达时 fail）",
 ]
 
 [tool.coverage.run]

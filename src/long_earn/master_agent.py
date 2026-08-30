@@ -385,3 +385,15 @@ def _format_event_result(result: dict[str, Any]) -> str:
         return "\n".join(parts) if parts else "未提取到事件"
 
     return json.dumps(result, ensure_ascii=False, default=str)[:2000]
+
+
+def create_master_agent_graph() -> Any:
+    """LangGraph CLI / langgraph.json 编译入口。
+
+    Returns:
+        已编译的 MasterAgent ReAct 图
+    """
+    from long_earn.context_init import initialize_context  # noqa: PLC0415
+
+    context = initialize_context()
+    return MasterAgent(context)._agent

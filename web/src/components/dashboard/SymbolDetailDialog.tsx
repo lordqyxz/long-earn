@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { X, Building2, Loader2 } from 'lucide-react'
 import { symbolDetail, symbolFinancials } from '@/api'
 import {
@@ -14,6 +14,7 @@ import {
   Legend,
   Cell,
 } from 'recharts'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 export interface SymbolDetail {
   symbol: string
@@ -57,21 +58,21 @@ interface Props {
 
 // ── 配色 ──
 const COLORS = {
-  revenue: '#3b82f6',
-  netProfit: '#16a34a',
-  netLoss: '#dc2626',
+  revenue: CHART_COLORS.up,
+  netProfit: CHART_COLORS.up,
+  netLoss: CHART_COLORS.down,
   roe: '#8b5cf6',
   margin: '#f59e0b',
-  grid: '#e2e8f0',
-  textMuted: '#64748b',
-  textBright: '#1e293b',
+  grid: CHART_COLORS.grid,
+  textMuted: CHART_COLORS.textMuted,
+  textBright: CHART_COLORS.textBright,
   // 现金流配色
-  ocf: '#16a34a',
+  ocf: CHART_COLORS.up,
   investingCf: '#3b82f6',
   financingCf: '#f59e0b',
   capex: '#94a3b8',
-  fcfPositive: '#16a34a',
-  fcfNegative: '#dc2626',
+  fcfPositive: CHART_COLORS.up,
+  fcfNegative: CHART_COLORS.down,
 }
 
 export function SymbolDetailDialog({ symbol, onClose }: Props) {
@@ -80,6 +81,9 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
   const [loading, setLoading] = useState(false)
   const [loadingFin, setLoadingFin] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [finError, setFinError] = useState<string | null>(null)
+
+  const handleClose = useCallback(() => onClose(), [onClose])
 
   useEffect(() => {
     if (!symbol) {
@@ -87,25 +91,56 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
       setFinancials([])
       return
     }
-    setLoading(true)
-    setError(null)
-    symbolDetail({ path: { symbol } })
-      .then(({ data, error }) => {
-        if (error || !data) throw new Error('获取详情失败')
-        setDetail(data as unknown as SymbolDetail)
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false))
 
-    // 并行获取财务数据
+    const controller = new AbortController()
+    setLoading(true)
     setLoadingFin(true)
-    symbolFinancials({ path: { symbol } })
-      .then(({ data }) =>
-        setFinancials((data?.financials as FinancialRecord[] | undefined) ?? []),
-      )
-      .catch(() => setFinancials([]))
-      .finally(() => setLoadingFin(false))
+    setError(null)
+    setFinError(null)
+    setDetail(null)
+    setFinancials([])
+
+    symbolDetail({ path: { symbol }, signal: controller.signal })
+      .then(({ data, error }) => {
+        if (controller.signal.aborted) return
+        if (error || !data) throw new Error('获取详情失败')
+        setDetail(parseSymbolDetail(data, symbol))
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+
+    symbolFinancials({ path: { symbol }, signal: controller.signal })
+      .then(({ data, error }) => {
+        if (controller.signal.aborted) return
+        if (error) throw new Error('获取财务数据失败')
+        setFinancials(parseFinancialRecords(data?.financials))
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setFinError(e instanceof Error ? e.message : String(e))
+        setFinancials([])
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingFin(false)
+      })
+
+    return () => controller.abort()
   }, [symbol])
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [handleClose])
 
   // 财务数据按时间升序排列（图表用）
   const sortedFinancials = useMemo(
@@ -129,15 +164,19 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onClick={onClose}
+      role="presentation"
+      onClick={handleClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="symbol-detail-title"
         className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-card p-0 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
-          <div className="flex items-center gap-2">
+          <div id="symbol-detail-title" className="flex items-center gap-2">
             <Building2 className="h-4 w-4 text-primary" />
             <span className="text-sm font-semibold">{detail?.name || symbol}</span>
             {detail?.name && (
@@ -145,8 +184,10 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
             )}
           </div>
           <button
-            onClick={onClose}
+            type="button"
+            onClick={handleClose}
             className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="关闭"
           >
             <X className="h-4 w-4" />
           </button>
@@ -206,7 +247,13 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
                 </div>
               )}
 
-              {!loadingFin && chartData.length === 0 && (
+              {!loadingFin && finError && (
+                <div className="py-4 text-center text-sm text-destructive">
+                  财务数据加载失败: {finError}
+                </div>
+              )}
+
+              {!loadingFin && !finError && chartData.length === 0 && (
                 <div className="py-6 text-center text-sm text-muted-foreground">
                   暂无财务数据
                 </div>
@@ -468,6 +515,61 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
       </div>
     </div>
   )
+}
+
+function parseSymbolDetail(
+  data: Record<string, unknown>,
+  fallbackSymbol: string,
+): SymbolDetail {
+  return {
+    symbol: toString(data.symbol, fallbackSymbol),
+    name: toString(data.name),
+    industry: toString(data.industry),
+    region: toString(data.region),
+    listing_date: toString(data.listing_date),
+    total_shares: toNumber(data.total_shares),
+    float_shares: toNumber(data.float_shares),
+    market_value: toNumber(data.market_value),
+    flow_market_value: toNumber(data.flow_market_value),
+  }
+}
+
+function parseFinancialRecords(
+  raw: Array<{ [key: string]: unknown }> | undefined,
+): FinancialRecord[] {
+  if (!raw) return []
+  return raw.map((item) => ({
+    report_date: toString(item.report_date),
+    announce_date: toString(item.announce_date),
+    revenue: toNumber(item.revenue),
+    net_profit: toNumber(item.net_profit),
+    research_expenses: toNumber(item.research_expenses),
+    eps: toNumber(item.eps),
+    bps: toNumber(item.bps),
+    roe: toNumber(item.roe),
+    roe_weighted: toNumber(item.roe_weighted),
+    gross_margin: toNumber(item.gross_margin),
+    net_profit_margin: toNumber(item.net_profit_margin),
+    net_profit_yoy: toNumber(item.net_profit_yoy),
+    revenue_yoy: toNumber(item.revenue_yoy),
+    debt_to_assets: toNumber(item.debt_to_assets),
+    ocf: toNumber(item.ocf),
+    capex: toNumber(item.capex),
+    investing_cf: toNumber(item.investing_cf),
+    financing_cf: toNumber(item.financing_cf),
+    net_cash_change: toNumber(item.net_cash_change),
+    cash_from_sales: toNumber(item.cash_from_sales),
+  }))
+}
+
+function toString(value: unknown, fallback = ''): string {
+  if (value == null) return fallback
+  return String(value)
+}
+
+function toNumber(value: unknown): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
 }
 
 // ── 子组件 ──

@@ -1085,32 +1085,17 @@ def _executor_node(  # noqa: PLR0913
     }
 
 
-def _backpropagate_node(
-    state: State,
-    research_agent: StrategyResearchAgent,
-    logger: LoggerService,
-) -> dict:
-    """反向传播 — 将实验结果抽象为洞察并传播到父节点。
-
-    ADR-012：对每个有回测结果的节点调用 4 大师 strategy_review mode 反思，
-    将大师视角注入 backpropagate_insights prompt，让反思融合量化数据与投资
-    大师视角。大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
-    """
-    tree_data = state.get("hypothesis_tree", {}) or {}
-    tree = HypothesisTree.deserialize(tree_data)
-    results = state.get("executor_results", []) or []
-    strategy = state.get("strategy", {}) or {}
-
+def _update_backpropagate_evidence(
+    tree: HypothesisTree,
+    results: list[dict[str, Any]],
+) -> None:
+    """Pass 1：确定性 evidence / insight 更新。"""
     for r in results:
         node_id = r.get("node_id", "")
         node = tree.get_node(node_id)
         if node is None:
             continue
 
-        # tree evidence/status 更新（从 _executor_node/_executor_single_node 迁移来）
-        # 并行 fan-out 时各 executor 不写 tree，此处单点更新避免 last_value 覆盖。
-        # ADR-015 A1: rejected 节点也保留 backtest_result + rejection_reason，
-        # 让下游 _collect_tried_directions 能把失败原因传给 ideate prompt
         if r.get("rejected") or r.get("error"):
             rejection_reason = r.get("rejection_reason", "") or r.get("error", "")
             tree.update_evidence(
@@ -1128,44 +1113,113 @@ def _backpropagate_node(
                 insight=f"dev sharpe={dev_score:.2f}",
             )
 
-        parent = tree.get_node(node.parent_id) if node.parent_id else None
-        if parent is None:
+
+def _child_results_for_parent(
+    tree: HypothesisTree,
+    results: list[dict[str, Any]],
+    parent_id: str,
+) -> list[dict[str, Any]]:
+    """收集指定父节点下的 executor 结果。"""
+    child_results: list[dict[str, Any]] = []
+    for cr in results:
+        child = tree.get_node(cr.get("node_id", ""))
+        if child is not None and child.parent_id == parent_id:
+            child_results.append(cr)
+    return child_results
+
+
+def _apply_llm_backpropagate_for_parent(  # noqa: PLR0913
+    tree: HypothesisTree,
+    parent_id: str,
+    child_results: list[dict[str, Any]],
+    strategy: dict[str, Any],
+    research_agent: StrategyResearchAgent,
+    logger: LoggerService,
+) -> None:
+    """Pass 2：对单个父节点执行一次 LLM backpropagate 并传播洞察。"""
+    parent = tree.get_node(parent_id)
+    if parent is None or not child_results:
+        return
+
+    representative = child_results[0]
+    backtest_result = representative.get("backtest_result", {}) or {}
+    master_perspectives = _invoke_personas(
+        research_agent,
+        PersonaContext(
+            mode="strategy_review",
+            target=strategy,
+            backtest_result=backtest_result,
+        ),
+        logger,
+        "[HTR-backpropagate]",
+    )
+
+    if logger and master_perspectives:
+        logger.info(
+            f"[HTR-backpropagate] 大师反思完成: "
+            f"{len(master_perspectives)} 位提供视角"
+        )
+
+    insight_result = research_agent.backpropagate_insights(
+        parent_hypothesis=parent.hypothesis,
+        child_results=child_results,
+        master_perspectives=master_perspectives if master_perspectives else None,
+    )
+
+    insight_text = (
+        insight_result.get("insight", "") if isinstance(insight_result, dict) else ""
+    )
+
+    for cr in child_results:
+        child_id = cr.get("node_id", "")
+        child_node = tree.get_node(child_id)
+        if child_node is None:
             continue
-
-        # ADR-012：调用 4 大师 strategy_review mode 反思失败假设
-        # 让大师针对该节点的具体回测结果从各自视角反思
-        backtest_result = r.get("backtest_result", {}) or {}
-        master_perspectives = _invoke_personas(
-            research_agent,
-            PersonaContext(
-                mode="strategy_review",
-                target=strategy,
-                backtest_result=backtest_result,
-            ),
-            logger,
-            "[HTR-backpropagate]",
-        )
-
-        if logger and master_perspectives:
-            logger.info(
-                f"[HTR-backpropagate] 大师反思完成: "
-                f"{len(master_perspectives)} 位提供视角"
-            )
-
-        insight_result = research_agent.backpropagate_insights(
-            parent_hypothesis=parent.hypothesis,
-            child_results=results,
-            master_perspectives=master_perspectives if master_perspectives else None,
-        )
-
-        insight_text = (
-            insight_result.get("insight", "")
-            if isinstance(insight_result, dict)
-            else ""
-        )
+        if cr.get("rejected") or cr.get("error"):
+            tree.backpropagate_insight(child_id)
+            continue
         if insight_text:
-            node.insight = insight_text
-            tree.backpropagate_insight(node_id)
+            child_node.insight = insight_text
+        tree.backpropagate_insight(child_id)
+
+
+def _backpropagate_node(
+    state: State,
+    research_agent: StrategyResearchAgent,
+    logger: LoggerService,
+) -> dict:
+    """反向传播 — 将实验结果抽象为洞察并传播到父节点。
+
+    ADR-012：对每个有回测结果的节点调用 4 大师 strategy_review mode 反思，
+    将大师视角注入 backpropagate_insights prompt，让反思融合量化数据与投资
+    大师视角。大师调用失败时降级为原行为（无大师视角），不阻塞反思流程。
+    """
+    tree_data = state.get("hypothesis_tree", {}) or {}
+    tree = HypothesisTree.deserialize(tree_data)
+    results = state.get("executor_results", []) or []
+    strategy = state.get("strategy", {}) or {}
+
+    _update_backpropagate_evidence(tree, results)
+
+    processed_parents: set[str] = set()
+    for r in results:
+        node = tree.get_node(r.get("node_id", ""))
+        if node is None or not node.parent_id:
+            continue
+        parent_id = node.parent_id
+        if parent_id in processed_parents:
+            continue
+        processed_parents.add(parent_id)
+
+        child_results = _child_results_for_parent(tree, results, parent_id)
+        _apply_llm_backpropagate_for_parent(
+            tree,
+            parent_id,
+            child_results,
+            strategy,
+            research_agent,
+            logger,
+        )
 
     if logger:
         logger.info("[HTR-反向传播] 洞察已传播")

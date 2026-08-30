@@ -3,6 +3,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, CheckCircle2, XCircle, AlertTriangle, TrendingUp, RotateCw, Layers } from 'lucide-react'
 import type { ResearchState } from '@/types/research'
+import { NO_BEST_RETURN_SENTINEL } from '@/lib/constants'
 
 interface Props {
   state: ResearchState
@@ -70,7 +71,7 @@ export function ResearchProgress({ state }: Props) {
                 停滞 {stagnationCount}
               </span>
             )}
-            {bestRecentReturn > -999 && (
+            {bestRecentReturn > NO_BEST_RETURN_SENTINEL && (
               <span className="flex items-center gap-1">
                 <TrendingUp className="h-3 w-3" />
                 最佳: {(bestRecentReturn * 100).toFixed(2)}%

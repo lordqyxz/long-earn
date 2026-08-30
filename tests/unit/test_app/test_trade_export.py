@@ -24,7 +24,7 @@ from long_earn.backtest.engine.audit import (
 from long_earn.backtest.engine.broker import TradingCostConfig
 from long_earn.backtest.engine.core import EventDrivenBacktestEngine
 from long_earn.backtest.engine.strategy import BaseStrategy
-from long_earn.core.pg import pg_connect, pg_version
+from long_earn.core.pg import pg_connect
 
 # 唯一测试标的：共享 PG 含真实历史行情，固定 symbol（如 600000.SH）会
 # 混入真实价格数据；用 UUID 前缀保证本文件写入的测试数据可精确隔离。
@@ -36,19 +36,7 @@ _OTHER_SYM = f"000001.{_UNIQ}"
 _CREATED_RUN_IDS: list[str] = []
 
 
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(),
-    reason="PostgreSQL 服务不可用",
-)
+pytestmark = pytest.mark.integration
 
 
 def _make_provider_and_logger(

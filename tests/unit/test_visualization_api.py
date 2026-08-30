@@ -6,21 +6,10 @@ import pytest
 
 from long_earn.app import serve_visualization_fastapi
 from long_earn.app.app import _create_app, _is_loopback_host
-from long_earn.core.pg import pg_version
-
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时 _create_app 相关测试跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
 
 # _create_app 构造会初始化 BacktestAnalyzer / EventAnalyzer（连 PG），
-# PG 不可达时这些测试无法运行。
-_PG_REQUIRED = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
+# PG 不可达时这些测试由 tests/unit/conftest 对 integration 标记 fail。
+_PG_REQUIRED = pytest.mark.integration
 
 
 def test_fastapi_visualization_entrypoint_is_callable() -> None:

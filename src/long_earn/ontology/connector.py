@@ -583,8 +583,11 @@ class Connector:
         """
         if "Q" not in q or len(q) != _QUARTER_TIME_LEN:
             return "", ""
-        year = int(q[:4])
-        quarter = int(q[5])
+        try:
+            year = int(q[:4])
+            quarter = int(q[5])
+        except ValueError:
+            return "", ""
         quarter_ranges = {
             1: (f"{year}-01-01", f"{year}-03-31"),
             2: (f"{year}-04-01", f"{year}-06-30"),

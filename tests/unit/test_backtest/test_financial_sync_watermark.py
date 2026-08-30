@@ -23,18 +23,8 @@ from long_earn.backtest.data.financial.sync import (
     FINANCIAL_RECHECK_DAYS,
     is_financial_stale,
 )
-from long_earn.core.pg import pg_version
 
-
-def _pg_available() -> bool:
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
+pytestmark = pytest.mark.integration
 
 _UNIQ = uuid4().hex[:10]
 

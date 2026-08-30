@@ -263,25 +263,25 @@ class TestRiskChecks(unittest.TestCase):
 
     @staticmethod
     def _steep_trough_panel(days: int = 12) -> pl.DataFrame:
-        """陡峭下跌面板：组合层面回撤 > 15%，用于触发 max_drawdown_limit=0.15。
+        """触发 max_drawdown_limit=0.15 且日跌幅 <10%（避免连板跌停卖不出）。
 
-        价格前 2 日平盘 8（100 万满仓买入 8 × 12.5 万股 ≈ 100 万，覆盖成本），
-        之后持续暴跌至 1，组合回撤 > 15%。
-        volume 设为 1e7 确保满仓买入不被成交量参与率限制。
-        open=close 避免开盘价触及涨跌停价导致买入被拒。
+        前 2 日平盘 10，之后约 5%/日下行至 ~7.0（相对峰值回撤 >15%），
+        保证风控可在非跌停日成交清仓。连板跌停场景见
+        ``test_max_drawdown_limit_down_retries``。
         """
         rows = []
-        for i in range(days):
-            price = 8.0 if i < 2 else max(8.0 - (i - 1) * 1.2, 1.0)
+        prices = [10.0, 10.0, 9.5, 9.0, 8.55, 8.1, 7.7, 7.3, 7.0, 7.0, 7.0, 7.0]
+        for i in range(min(days, len(prices))):
+            price = prices[i]
             rows.append(
                 {
                     "timestamp": datetime(2024, 1, i + 1),
                     "symbol": "000001",
                     "close": price,
-                    "open": price,  # open=close 避免涨跌停拒单
+                    "open": price,
                     "high": price * 1.01,
                     "low": price * 0.99,
-                    "volume": 10_000_000,  # 大成交量，避免部分成交
+                    "volume": 10_000_000,
                 }
             )
         return pl.DataFrame(rows)
@@ -339,14 +339,10 @@ class TestRiskChecks(unittest.TestCase):
         )
 
     def test_max_drawdown_trigger(self):
-        """最大回撤超标应触发全部清仓
+        """最大回撤超标应触发清仓（非连板跌停面板，可成交）。
 
-        加强断言（P1-3）：必须出现 RISK_TRIGGER(max_drawdown) 审计事件、
-        trade_count >= 2、风控清仓后持仓为空。
-
-        用 _steep_trough_panel + _BuyOnceStrategy(0.95) 构造组合层面回撤 > 15% 的场景：
-        策略仅在首 bar 买入 95% 仓位并持有（留 5% 现金缓冲避免 Broker
-        预估口径差异导致的"现金不足跳过"），之后暴跌触发回撤风控。
+        加强断言（P1-3）：必须出现 RISK_TRIGGER(max_drawdown)、
+        trade_count >= 2；清仓后空仓不再重复触发（P1-B）。
         """
         provider = MockDataProvider(self._steep_trough_panel())
         engine = EventDrivenBacktestEngine(
@@ -358,7 +354,6 @@ class TestRiskChecks(unittest.TestCase):
         result = engine.run(strategy, "2024-01-01", "2024-01-12", ["000001"])
 
         self.assertTrue(result.success)
-        # 最大回撤风控必须真正触发
         trail = engine.audit_logger.get_full_trail()
         dd_triggers = [
             e
@@ -369,13 +364,69 @@ class TestRiskChecks(unittest.TestCase):
         self.assertGreaterEqual(
             len(dd_triggers), 1, "回撤超限应产生 RISK_TRIGGER(max_drawdown) 审计事件"
         )
-        # P1-B 修复：清仓后无持仓时不再重复触发，故应仅 1 个 RISK_TRIGGER
+        # P1-B：成功清仓后无持仓 → 不再重复 RISK_TRIGGER
         self.assertEqual(
             len(dd_triggers), 1, "清仓后不应重复触发 RISK_TRIGGER(max_drawdown)"
         )
-        # 买入 + 风控清仓至少 2 笔成交
         self.assertGreaterEqual(
             result.trade_count or 0, 2, "回撤清仓场景 trade_count 应 >= 2"
+        )
+
+    def test_max_drawdown_limit_down_retries(self):
+        """连板跌停：风控触发但卖不出，持仓保留；非跌停日再成交。
+
+        Day1 买入；Day2 T+1 锁定；Day3 相对前收跌超 10% 且触及跌停拒卖；
+        Day4 跌幅收窄可卖出。期间可有多次 RISK_TRIGGER + LIMIT_DOWN SKIPPED。
+        """
+        from long_earn.backtest.engine.audit import OrderSkipReason
+
+        # 10 → 10 → 8.5（相对 10 跌 15%，跌停价 9.0，close 8.5 拒卖）
+        # → 8.2（相对 8.5 跌约 3.5%，可卖）
+        rows = []
+        for i, price in enumerate([10.0, 10.0, 8.5, 8.2, 8.2]):
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "close": price,
+                    "open": price,
+                    "high": price * 1.01,
+                    "low": price * 0.99,
+                    "volume": 10_000_000,
+                }
+            )
+        provider = MockDataProvider(pl.DataFrame(rows))
+        engine = EventDrivenBacktestEngine(
+            data_provider=provider,
+            max_drawdown_limit=0.12,
+        )
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
+        result = engine.run(strategy, "2024-01-01", "2024-01-05", ["000001"])
+        self.assertTrue(result.success)
+
+        trail = engine.audit_logger.get_full_trail()
+        dd_triggers = [
+            e
+            for e in trail
+            if e.get("event_type") == "RISK_TRIGGER"
+            and e.get("payload", {}).get("risk_type") == "max_drawdown"
+        ]
+        self.assertGreaterEqual(len(dd_triggers), 1, "应至少触发一次回撤风控")
+
+        limit_skips = [
+            e
+            for e in trail
+            if e.get("event_type") == "ORDER_SKIPPED"
+            and e.get("payload", {}).get("reason")
+            in (OrderSkipReason.LIMIT_DOWN_REJECT, "LIMIT_DOWN_REJECT")
+        ]
+        self.assertGreaterEqual(
+            len(limit_skips), 1, "跌停日风控卖出应记 ORDER_SKIPPED(LIMIT_DOWN)"
+        )
+
+        # 最终应在非跌停日成交退出（买入+卖出）
+        self.assertGreaterEqual(
+            result.trade_count or 0, 2, "非跌停日后应能完成风控卖出"
         )
 
     def test_risk_checks_disabled(self):
@@ -977,6 +1028,89 @@ class TestStopLossConservativeFill(unittest.TestCase):
             stop_line,
             f"止损成交价 {fill_price} 不得优于止损线 {stop_line}",
         )
+
+
+class TestTakeProfitConservativeFill(unittest.TestCase):
+    """take_profit 触发时保守成交价测试（与止损对称）。
+
+    触发判定用日内 high；成交基准 ref = min(止盈线, 日内 high)；
+    FILL 由 broker 在 ref 上再扣卖出滑点。禁止按日内最高价白送。
+    """
+
+    @staticmethod
+    def _tp_panel() -> pl.DataFrame:
+        """买入后冲高：Day3 high 远超止盈线。"""
+        closes = [10.0, 10.2, 11.5, 11.0]
+        highs = [10.1, 10.3, 12.5, 11.2]
+        rows = []
+        for i, close in enumerate(closes):
+            rows.append(
+                {
+                    "timestamp": datetime(2024, 1, i + 1),
+                    "symbol": "000001",
+                    "open": close,
+                    "high": highs[i],
+                    "low": close - 0.1,
+                    "close": close,
+                    "volume": 10_000_000,
+                }
+            )
+        return pl.DataFrame(rows)
+
+    def test_take_profit_fill_not_at_intraday_high(self):
+        provider = MockDataProvider(self._tp_panel())
+        engine = EventDrivenBacktestEngine(
+            data_provider=provider,
+            take_profit=0.10,  # 10% 止盈
+        )
+        strategy = _BuyOnceStrategy(weights={"000001": 0.95})
+        result = engine.run(strategy, "2024-01-01", "2024-01-04", ["000001"])
+        self.assertTrue(result.success)
+        self.assertGreaterEqual(result.trade_count or 0, 2)
+
+        trail = engine.audit_logger.get_full_trail()
+        tp_triggers = [
+            e
+            for e in trail
+            if e.get("event_type") == "RISK_TRIGGER"
+            and e.get("payload", {}).get("risk_type") == "take_profit"
+        ]
+        self.assertGreaterEqual(len(tp_triggers), 1, "止盈应触发")
+        risk_payload = tp_triggers[0].get("payload", {})
+        avg_cost = float(risk_payload["avg_cost"])
+        check_price = float(risk_payload["check_price"])
+        tp_line = avg_cost * (1 + engine.take_profit)
+
+        order_parent_by_trace = {
+            e.get("trace_id"): e.get("parent_id")
+            for e in trail
+            if e.get("event_type") == "ORDER"
+        }
+        risk_trace = tp_triggers[0].get("trace_id")
+        sell_fills = [
+            e
+            for e in trail
+            if e.get("event_type") == "FILL"
+            and e.get("payload", {}).get("type") == "SELL"
+            and order_parent_by_trace.get(e.get("parent_id")) == risk_trace
+        ]
+        self.assertGreaterEqual(len(sell_fills), 1, "应有止盈卖出 FILL")
+        fill_price = float(sell_fills[0].get("payload", {})["price"])
+
+        # 成交不得优于止盈线（卖方视角：更高价更优；滑点只会更低）
+        self.assertLessEqual(
+            fill_price,
+            tp_line,
+            f"止盈成交价 {fill_price} 不得优于止盈线 {tp_line}"
+            f"（禁止按日内最高价 {check_price} 白送）",
+        )
+        # 亦不得接近日内 high（若仍按 high 成交会失败）
+        if check_price > tp_line * 1.02:
+            self.assertLess(
+                fill_price,
+                check_price * 0.99,
+                f"止盈成交价不应贴近日内 high {check_price}",
+            )
 
 
 if __name__ == "__main__":

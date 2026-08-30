@@ -17,7 +17,7 @@ const SENTIMENT_MAP: Record<string, { label: string; variant: 'success' | 'destr
 
 export function EventFlowPage() {
   const { connected, log, pipelineStage, pipelineProgress, triggerPipeline, reloadData } = useWebSocket()
-  const { stats, events, loading, reload } = useEventData()
+  const { stats, events, loading, error, reload } = useEventData()
   const [query, setQuery] = useState('近期降息政策对A股的影响')
   const [running, setRunning] = useState(false)
   const logEndRef = useRef<HTMLDivElement>(null)
@@ -107,6 +107,11 @@ export function EventFlowPage() {
         </Card>
 
         {/* 统计卡片 */}
+        {error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+            数据加载失败: {error}
+          </div>
+        )}
         <div className="grid grid-cols-4 gap-3">
           <Card className="hover:border-primary/30 transition-colors">
             <CardContent className="p-3">

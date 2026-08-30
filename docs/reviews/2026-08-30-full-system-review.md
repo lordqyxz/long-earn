@@ -5,7 +5,7 @@
 > **复核口径**：全部 Critical 与 3 项关键 High 经主评审人源码级二次确认；两项发现（Py3.13 工作线程 `get_event_loop`、openapi 契约漂移）经项目 venv 实证复现。
 > **修复处置**：见 [2026-08-30-remediation.md](2026-08-30-remediation.md)。
 
-**统计**：后端 Critical 6 | High 21 | Medium 56 | Low 63（约 146 项）；前端 Critical 0 | High 3 | Medium 8 | Low 14。
+**统计**：后端 Critical 6 | High 17（正文枚举 H1–H17；文首曾误写 21）| Medium 56 | Low 63；前端 Critical 0 | High 3 | Medium 8 | Low 14。
 
 **总体结论**：核心链路质量高——引擎未来函数防御体系化（VisibilityGuard 时间轴截断 + T+1 撮合 + 算子因果证明 + DSL 白名单）、OOS 合并门在数据分割意义上真正 held-out、SQL 全面参数化、loguru/类型注解纪律良好。Critical 集中在旧脚本违反数据分割铁律、operator_dev 沙箱逃逸、算子参数缺口未来函数、合并门证据污染。
 

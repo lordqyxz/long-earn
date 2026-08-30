@@ -15,6 +15,11 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TrendingUp, Loader2, ArrowUp, ArrowDown } from 'lucide-react'
 import { formatNumber } from '@/lib/utils'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import {
+  CHART_TRADE_LOOKBACK_DAYS_AFTER,
+  CHART_TRADE_LOOKBACK_DAYS_BEFORE,
+} from '@/lib/constants'
 import type { SymbolChartData } from '@/api'
 
 // ── 数量格式化：万/亿 ──
@@ -33,21 +38,21 @@ interface Props {
 
 // ── 配色方案：亮色金融仪表盘 ──
 const COLORS = {
-  up: '#16a34a',
-  down: '#dc2626',
-  buy: '#16a34a',
-  sell: '#dc2626',
+  up: CHART_COLORS.up,
+  down: CHART_COLORS.down,
+  buy: CHART_COLORS.up,
+  sell: CHART_COLORS.down,
   wickUp: '#22c55e',
   wickDown: '#ef4444',
-  grid: '#e2e8f0',
-  tooltipBg: '#ffffff',
-  tooltipBorder: '#e2e8f0',
+  grid: CHART_COLORS.grid,
+  tooltipBg: CHART_COLORS.tooltipBg,
+  tooltipBorder: CHART_COLORS.tooltipBorder,
   brushFill: '#f1f5f9',
   brushStroke: '#94a3b8',
-  textMuted: '#64748b',
-  textBright: '#1e293b',
-  volUp: '#16a34a',
-  volDown: '#dc2626',
+  textMuted: CHART_COLORS.textMuted,
+  textBright: CHART_COLORS.textBright,
+  volUp: CHART_COLORS.up,
+  volDown: CHART_COLORS.down,
 }
 
 // ── K 线数据接口 ──
@@ -363,10 +368,10 @@ export function SymbolChart({ data, loading, symbolName }: Props) {
     let endDate = ''
     if (tradeDates.length > 0) {
       const minDate = new Date(tradeDates[0])
-      minDate.setDate(minDate.getDate() - 90)
+      minDate.setDate(minDate.getDate() - CHART_TRADE_LOOKBACK_DAYS_BEFORE)
       startDate = minDate.toISOString().slice(0, 10)
       const maxDate = new Date(tradeDates[tradeDates.length - 1])
-      maxDate.setDate(maxDate.getDate() + 30)
+      maxDate.setDate(maxDate.getDate() + CHART_TRADE_LOOKBACK_DAYS_AFTER)
       endDate = maxDate.toISOString().slice(0, 10)
     }
 

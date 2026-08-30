@@ -12,6 +12,7 @@ import {
 } from 'recharts'
 import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
 import { TrendingUp } from 'lucide-react'
+import { CHART_COLORS } from '@/lib/chart-colors'
 import type { EquityPoint } from '@/api'
 
 interface Props {
@@ -45,13 +46,13 @@ export function EquityChart({ equityCurve }: Props) {
     <CollapsibleSection title={<span className="flex items-center gap-2"><TrendingUp className="h-4 w-4" />权益曲线 & 日收益率</span>}>
       <ResponsiveContainer width="100%" height={300}>
         <ComposedChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => v?.slice(0, 10) || ''} />
-          <YAxis yAxisId="equity" orientation="left" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `¥${((v ?? 0) / 10000).toFixed(2)}万`} />
-          <YAxis yAxisId="return" orientation="right" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `${(v ?? 0).toFixed(2)}%`} />
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.grid} />
+          <XAxis dataKey="time" tick={{ fontSize: 11, fill: CHART_COLORS.textMuted }} tickFormatter={(v) => v?.slice(0, 10) || ''} />
+          <YAxis yAxisId="equity" orientation="left" tick={{ fontSize: 11, fill: CHART_COLORS.textMuted }} tickFormatter={(v) => `¥${((v ?? 0) / 10000).toFixed(2)}万`} />
+          <YAxis yAxisId="return" orientation="right" tick={{ fontSize: 11, fill: CHART_COLORS.textMuted }} tickFormatter={(v) => `${(v ?? 0).toFixed(2)}%`} />
           <Tooltip
-            contentStyle={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px', color: '#1e293b' }}
-            labelStyle={{ color: '#64748b' }}
+            contentStyle={{ background: CHART_COLORS.tooltipBg, border: `1px solid ${CHART_COLORS.tooltipBorder}`, borderRadius: '8px', fontSize: '12px', color: CHART_COLORS.textBright }}
+            labelStyle={{ color: CHART_COLORS.textMuted }}
             formatter={(value, name) => {
               if (name === '权益') return [formatEquity(Number(value)), name]
               if (name === '日收益%') return [formatReturn(Number(value)), name]

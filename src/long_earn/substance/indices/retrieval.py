@@ -14,17 +14,18 @@ import re
 from collections import defaultdict
 from typing import Any
 
-import numpy as np
+from long_earn.substance.model import FilterLogic, Substance
 
 try:
-    import jieba
+    import jieba as _jieba
 
+    jieba: Any = _jieba
     _HAS_JIEBA = True
 except ImportError:
-    jieba = None  # type: ignore[misc]
+    jieba = None
     _HAS_JIEBA = False
 
-from long_earn.substance.model import FilterLogic, Substance
+import numpy as np
 
 
 def _tokenize(text: str) -> list[str]:
@@ -124,6 +125,18 @@ class _TfidfChannel:
     @property
     def is_fitted(self) -> bool:
         return self._idf is not None and not self._dirty
+
+    def pairwise_cosine_similarity(self) -> tuple[list[str], np.ndarray] | None:
+        """返回已索引物质的 sid 顺序与余弦相似度矩阵（n×n）。
+
+        供 motion.compress 等批量聚类场景使用，避免访问私有 ``_doc_matrix``。
+        """
+        if self._doc_matrix is None or self._doc_matrix.size == 0:
+            return None
+        doc_norms = np.linalg.norm(self._doc_matrix, axis=1)
+        doc_norms[doc_norms == 0] = 1.0
+        normalized = self._doc_matrix / doc_norms[:, np.newaxis]
+        return self._sid_order, normalized @ normalized.T
 
     def mark_dirty(self) -> None:
         self._dirty = True
@@ -245,3 +258,7 @@ class RetrievalIndex:
     @property
     def substance_count(self) -> int:
         return len(self._substances_by_sid)
+
+    def pairwise_cosine_similarity(self) -> tuple[list[str], np.ndarray] | None:
+        """返回 sid 顺序与文档余弦相似度矩阵（供 SubstanceStore 批量聚类）。"""
+        return self._semantic.pairwise_cosine_similarity()

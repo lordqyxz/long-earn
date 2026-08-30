@@ -164,7 +164,8 @@ class EventDrivenBacktestEngine:
 
         在撮合前执行，返回 None 表示通过，返回 (OrderSkipReason, detail) 表示跳过。
         覆盖检查项：
-          - 涨跌停板（P0-07）：涨停拒买、跌停拒卖
+          - 涨跌停板（P0-07）：涨停拒买、跌停拒卖（信号单与风控单同一口径；
+            暴跌跌停日卖不出是实盘常态，持仓保留、次 bar 再试）
           - 价格有效性：NaN / Inf / 非正数
           - 停牌检查（P1-09）：is_tradable=False 禁止交易，旧数据回退 volume==0 启发式
 
@@ -211,6 +212,82 @@ class EventDrivenBacktestEngine:
                     )
 
         return None
+
+    def _execute_risk_market_sell(  # noqa: PLR0913
+        self,
+        *,
+        order: OrderEvent,
+        fill_price: float,
+        broker: Broker,
+        portfolio: Portfolio,
+        slab: pl.DataFrame,
+        price_dict: dict[str, dict[str, float]] | None,
+        risk_trace_id: str,
+        fill_reason: str,
+        ts: Any,
+    ) -> bool:
+        """风控市价卖出：pre_trade 拒单 → 量限撮合 → 组合更新 → FILL 审计。
+
+        与信号路径共用 ``_pre_trade_check``（涨跌停/停牌/价格合法性）。
+        跌停拒卖时返回 False、持仓保留，下一交易日条件仍满足则再试。
+        """
+        pre_trade_result = self._pre_trade_check(
+            order,
+            fill_price,
+            risk_trace_id,
+            self._db_audit,
+            slab=slab,
+            price_dict=price_dict,
+        )
+        if pre_trade_result is not None:
+            self._total_skipped += 1
+            reason, detail = pre_trade_result
+            self._log_audit(
+                "ORDER_SKIPPED",
+                str(uuid.uuid4()),
+                order.trace_id,
+                "RiskControl",
+                "SKIPPED",
+                {
+                    "symbol": order.symbol,
+                    "order_type": order.order_type,
+                    "quantity": order.quantity,
+                    "reason": reason,
+                    "detail": detail,
+                },
+                self._db_audit,
+            )
+            return False
+
+        daily_volume = (
+            self._lookup_price_fast(
+                slab, order.symbol, field="volume", price_dict=price_dict
+            )
+            or 0.0
+        )
+        fill = broker.execute_order(order, fill_price, daily_volume=daily_volume)
+        if not self._apply_fill_or_skip(
+            portfolio, fill, order.trace_id, self._db_audit
+        ):
+            return False
+        self._log_audit(
+            "FILL",
+            fill.trace_id,
+            order.trace_id,
+            "RiskControl",
+            "SUCCESS",
+            {
+                "symbol": fill.symbol,
+                "type": fill.order_type,
+                "price": fill.fill_price,
+                "quantity": fill.fill_quantity,
+                "reason": fill_reason,
+                "bar_date": str(ts),
+                "portfolio_value": portfolio.total_value,
+            },
+            self._db_audit,
+        )
+        return True
 
     def _check_limit_up_down(
         self,
@@ -870,7 +947,12 @@ class EventDrivenBacktestEngine:
         broker: Broker,
         price_dict: dict[str, dict[str, float]] | None = None,
     ) -> bool:
-        """止盈检查（P1-05）：持仓盈利超过 take_profit 阈值时强制卖出。"""
+        """止盈检查（P1-05）：持仓盈利超过 take_profit 阈值时强制卖出。
+
+        触发判定用日内 high（或 fallback close）；成交基准为
+        ``min(avg_cost*(1+take_profit), 日内 high)``，与止损保守口径对称，
+        禁止按日内最高价白送极值。撮合前走 ``_pre_trade_check``。
+        """
         assert self.take_profit is not None
         triggered = False
         for symbol, pos in list(portfolio.positions.items()):
@@ -922,6 +1004,14 @@ class EventDrivenBacktestEngine:
             qty = int(pos.shares / _BOARD_LOT) * _BOARD_LOT
             if qty < _BOARD_LOT:
                 continue
+            # 成交价：与止损对称——触发用日内 high，成交不优于止盈线
+            # ref = min(止盈线, 日内 high)；broker 再按卖出滑点扣减
+            tp_threshold = pos.avg_cost * (1 + self.take_profit)
+            ref_price = (
+                min(tp_threshold, check_price) if check_price else tp_threshold
+            )
+            if ref_price <= 0 or not math.isfinite(ref_price):
+                continue
             order = OrderEvent(
                 timestamp=ts,
                 trace_id=f"{bar_trace_id(ts)}_tp_{symbol}",
@@ -929,7 +1019,7 @@ class EventDrivenBacktestEngine:
                 symbol=symbol,
                 order_type="SELL",
                 quantity=qty,
-                price=check_price,
+                price=ref_price,
             )
             # 风控订单补记 ORDER 审计，parent=RISK_TRIGGER，保证归因链完整
             self._log_audit(
@@ -945,34 +1035,23 @@ class EventDrivenBacktestEngine:
                 },
                 self._db_audit,
             )
-            fill = broker.execute_order(order, check_price)
-            if not self._apply_fill_or_skip(
-                portfolio, fill, order.trace_id, self._db_audit
-            ):
-                continue
-            # 止盈卖出写入 FILL 审计（原因可追溯，含触发数值）
-            self._log_audit(
-                "FILL",
-                fill.trace_id,
-                order.trace_id,
-                "RiskControl",
-                "SUCCESS",
-                {
-                    "symbol": fill.symbol,
-                    "type": fill.order_type,
-                    "price": fill.fill_price,
-                    "quantity": fill.fill_quantity,
-                    "reason": (
-                        f"止盈卖出（涨幅{pnl_pct * 100:.1f}%，"
-                        f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
-                        f"止盈线+{self.take_profit * 100:.0f}%）"
-                    ),
-                    "bar_date": str(ts),
-                    "portfolio_value": portfolio.total_value,
-                },
-                self._db_audit,
+            fill_reason = (
+                f"止盈卖出（涨幅{pnl_pct * 100:.1f}%，"
+                f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
+                f"止盈线+{self.take_profit * 100:.0f}%）"
             )
-            triggered = True
+            if self._execute_risk_market_sell(
+                order=order,
+                fill_price=ref_price,
+                broker=broker,
+                portfolio=portfolio,
+                slab=slab,
+                price_dict=price_dict,
+                risk_trace_id=risk_trace_id,
+                fill_reason=fill_reason,
+                ts=ts,
+            ):
+                triggered = True
         return triggered
 
     def _check_stop_loss(
@@ -1069,35 +1148,24 @@ class EventDrivenBacktestEngine:
                     },
                     self._db_audit,
                 )
-                # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
-                fill = broker.execute_order(order, ref_price)
-                if not self._apply_fill_or_skip(
-                    portfolio, fill, order.trace_id, self._db_audit
-                ):
-                    continue
-                # 止损卖出写入 FILL 审计（原因可追溯，含触发数值）
-                self._log_audit(
-                    "FILL",
-                    fill.trace_id,
-                    order.trace_id,
-                    "RiskControl",
-                    "SUCCESS",
-                    {
-                        "symbol": fill.symbol,
-                        "type": fill.order_type,
-                        "price": fill.fill_price,
-                        "quantity": fill.fill_quantity,
-                        "reason": (
-                            f"止损卖出（跌幅{abs(pnl_pct) * 100:.1f}%，"
-                            f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
-                            f"止损线-{self.stop_loss * 100:.0f}%）"
-                        ),
-                        "bar_date": str(ts),
-                        "portfolio_value": portfolio.total_value,
-                    },
-                    self._db_audit,
+                fill_reason = (
+                    f"止损卖出（跌幅{abs(pnl_pct) * 100:.1f}%，"
+                    f"成本{pos.avg_cost:.2f}→触发{check_price:.2f}，"
+                    f"止损线-{self.stop_loss * 100:.0f}%）"
                 )
-            triggered = True
+                # broker.execute_order 内部 _fill_market 会按 (1 - slip) 进一步扣减
+                if self._execute_risk_market_sell(
+                    order=order,
+                    fill_price=ref_price,
+                    broker=broker,
+                    portfolio=portfolio,
+                    slab=slab,
+                    price_dict=price_dict,
+                    risk_trace_id=risk_trace_id,
+                    fill_reason=fill_reason,
+                    ts=ts,
+                ):
+                    triggered = True
         return triggered
 
     def _check_max_drawdown(
@@ -1163,6 +1231,7 @@ class EventDrivenBacktestEngine:
             f"限-{self.max_drawdown_limit * 100:.0f}%）"
         )
 
+        any_filled = False
         for symbol, pos in list(portfolio.positions.items()):
             # T+1 锁定：当日买入不可被风控卖出（P0-06）
             if pos.available_date is not None and ts < pos.available_date:
@@ -1197,30 +1266,21 @@ class EventDrivenBacktestEngine:
                     },
                     self._db_audit,
                 )
-                fill = broker.execute_order(order, price)
-                if not self._apply_fill_or_skip(
-                    portfolio, fill, order.trace_id, self._db_audit
-                ):
-                    continue
-                # 最大回撤清仓写入 FILL 审计（原因可追溯，含触发数值）
-                self._log_audit(
-                    "FILL",
-                    fill.trace_id,
-                    order.trace_id,
-                    "RiskControl",
-                    "SUCCESS",
-                    {
-                        "symbol": fill.symbol,
-                        "type": fill.order_type,
-                        "price": fill.fill_price,
-                        "quantity": fill.fill_quantity,
-                        "reason": dd_reason,
-                        "bar_date": str(ts),
-                        "portfolio_value": portfolio.total_value,
-                    },
-                    self._db_audit,
+                filled = self._execute_risk_market_sell(
+                    order=order,
+                    fill_price=price,
+                    broker=broker,
+                    portfolio=portfolio,
+                    slab=slab,
+                    price_dict=price_dict,
+                    risk_trace_id=risk_trace_id,
+                    fill_reason=dd_reason,
+                    ts=ts,
                 )
-        return True
+                if filled:
+                    any_filled = True
+        # 仅在实际成交时返回 True；跌停拒卖时 False，次 bar 条件仍满足会再试
+        return any_filled
 
     @staticmethod
     def _build_price_dict(slab: pl.DataFrame) -> dict[str, dict[str, float]]:

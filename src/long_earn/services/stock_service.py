@@ -181,14 +181,14 @@ class StockServiceImpl(StockService):
         stock_code: str,
         start_year: str,
     ) -> dict[str, Any]:
-        """旧路径：Balance 单表直连（降级兼容，字段名 operating_revenue 已知错误）。"""
+        """旧路径：Income 表直连（Balance 表无有效 operating_revenue）。"""
         try:
             end_date = datetime.now().strftime("%Y%m%d")
             df = self._client.get_financial(
                 stock_list=[stock_code],
                 start_time=start_year + "0101",
                 end_time=end_date,
-                table="Balance",
+                table="Income",
             )
 
             if df.empty:
@@ -200,15 +200,32 @@ class StockServiceImpl(StockService):
                 }
 
             latest = df.iloc[0] if len(df) > 0 else {}
+            revenue_raw = latest.get("operating_revenue", latest.get("revenue"))
+            revenue: float | None
+            if revenue_raw is None or (
+                isinstance(revenue_raw, (int, float)) and float(revenue_raw) == 0.0
+            ):
+                if self.logger:
+                    self.logger.warning(
+                        f"legacy 财务路径：{stock_code} Income 表无有效 revenue，"
+                        "返回 None（勿用 Balance.operating_revenue 恒 0 字段）"
+                    )
+                revenue = None
+            else:
+                revenue = float(revenue_raw)
+
+            metrics: dict[str, Any] = {
+                "eps": float(latest.get("eps", 0.0)),
+                "roe": float(latest.get("roe", 0.0)),
+                "net_profit": float(latest.get("net_profit", 0.0)),
+            }
+            if revenue is not None:
+                metrics["revenue"] = revenue
+
             return {
                 "code": stock_code,
                 "report_date": str(latest.get("report_date", "")),
-                "financial_metrics": {
-                    "eps": float(latest.get("eps", 0.0)),
-                    "roe": float(latest.get("roe", 0.0)),
-                    "revenue": float(latest.get("operating_revenue", 0.0)),
-                    "net_profit": float(latest.get("net_profit", 0.0)),
-                },
+                "financial_metrics": metrics,
                 "raw_data": df.to_dict(orient="records"),
             }
         except Exception as e:

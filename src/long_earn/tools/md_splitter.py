@@ -33,6 +33,10 @@ class MarkdownHeadingSplitter:
     ):
         self.source_file = source_file
         self.chunk_size = chunk_size
+        if chunk_overlap >= chunk_size:
+            raise ValueError(
+                f"chunk_overlap ({chunk_overlap}) 必须小于 chunk_size ({chunk_size})"
+            )
         self.chunk_overlap = chunk_overlap
         self.length_function = len
         self.heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -61,7 +65,9 @@ class MarkdownHeadingSplitter:
                 return
 
             term_title = (
-                current_h3 if current_h3 else (current_h2 if current_h2 else "")
+                current_h3
+                if current_h3
+                else (current_h2 if current_h2 else current_h1)
             )
             term_content = "\n".join(current_content).strip()
 
@@ -93,6 +99,7 @@ class MarkdownHeadingSplitter:
                 title = match.group(2).strip()
 
                 if level == 1:
+                    flush_term()
                     current_h1 = title
                     current_h2 = ""
                     current_h3 = ""

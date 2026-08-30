@@ -5,7 +5,7 @@
 - P2-14：单连接线程安全（并发写不崩溃）
 - P1-10：seq 自增序列号保证单调排序（墙钟回退不破坏因果链）
 
-PostgreSQL 不可达时整组跳过（Docker 启动后自动恢复运行）。
+PostgreSQL 不可达时由 tests/unit/conftest 对 integration 标记 fail（禁止 skip 假绿）。
 """
 
 import threading
@@ -18,22 +18,10 @@ import pytest
 
 from long_earn.backtest.domain.interfaces import AuditRecord
 from long_earn.backtest.engine.audit import RUN_TAG_TEST, PostgresAuditProvider
-from long_earn.core.pg import pg_version
+from long_earn.core.pg import pg_connect
 
+pytestmark = pytest.mark.integration
 
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(),
-    reason="PostgreSQL 服务不可用",
-)
 
 
 def _make_record(
@@ -84,7 +72,15 @@ def provider() -> Any:
     prov.log_event(_make_record(run_id=run_id))
     _log_run_start(prov, run_id)
     yield (prov, run_id)
-    prov.close()
+    try:
+        conn = pg_connect()
+        conn.execute('DELETE FROM "backtest_audit".logs WHERE run_id = %s', [run_id])
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    finally:
+        prov.close()
 
 
 class TestQueryEventsWhitelist:

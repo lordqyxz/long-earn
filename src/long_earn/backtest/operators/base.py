@@ -89,6 +89,7 @@ class Operator(ABC):
 
     # 算子所需的最小历史窗口长度（用于策略层判断数据是否充足），0 表示无要求。
     min_history: ClassVar[int] = 0
+    _is_operator: ClassVar[bool] = False
 
     @abstractmethod
     def apply(
@@ -153,7 +154,7 @@ def operator(cls: type[Operator]) -> type[Operator]:
 
     if not issubclass(cls, Operator):
         raise OperatorContractError(f"@operator 只能装饰 Operator 子类，得到 {cls!r}")
-    cls._is_operator = True  # type: ignore[attr-defined]
+    cls._is_operator = True
     return cls
 
 

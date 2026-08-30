@@ -25,24 +25,13 @@ import pandas as pd
 import pytest
 
 from long_earn.backtest.data.cache import DataCache
-from long_earn.core.pg import pg_version
 from long_earn.services.data_ingestion_service import (
     INDEX_QUOTES,
     INDEX_QUOTES_START,
     DataIngestionService,
 )
 
-
-def _pg_available() -> bool:
-    """探测 PostgreSQL 是否可连（不可达时测试组整体跳过）。"""
-    try:
-        pg_version()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL 服务不可用")
+pytestmark = pytest.mark.integration
 
 # 唯一前缀：同一 pytest 进程内隔离测试数据（不同 run 互不污染）
 _UNIQ = uuid4().hex[:10]

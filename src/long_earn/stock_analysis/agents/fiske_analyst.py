@@ -1,37 +1,10 @@
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, HumanMessage
-
 from long_earn.core.chat_prompt_loader import MarkdownChatPromptTemplate
+from long_earn.skills.personas.fiske import EXAMPLES
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-
-
-# Few-shot 示例（从原 fiske_prompt.md 抽离，转为 Q&A 对）
-EXAMPLES = [
-    HumanMessage(content="分析半导体公司的投资价值"),
-    AIMessage(
-        content=(
-            "对于半导体公司，我们重点考察其研发投入占营收比例、专利数量、"
-            "技术代差优势以及下游需求增长趋势。高研发投入通常预示着未来的竞争优势。"
-        )
-    ),
-    HumanMessage(content="分析生物制药公司的投资价值"),
-    AIMessage(
-        content=(
-            "对于生物制药公司，我们关注其在研管线丰富程度、临床试验进展、"
-            "监管审批预期以及专利保护期。创新药的成功率虽低，但一旦成功回报巨大。"
-        )
-    ),
-    HumanMessage(content="分析电动车制造商的投资价值"),
-    AIMessage(
-        content=(
-            "对于电动车制造商，我们评估其电池技术先进性、产能扩张计划、"
-            "品牌认知度以及充电网络布局。技术领先和规模效应是关键。"
-        )
-    ),
-]
 
 
 class FiskeAnalyst:

@@ -8,11 +8,10 @@ ADR-007 Phase 4：物质存储位于 PostgreSQL（core.pg 裁决连接参数）�
 
 from pathlib import Path
 
-from long_earn.config import AppConfig
-from long_earn.services.logger_service import LoggerServiceImpl
-from long_earn.substance.store import SubstanceStore
+from loguru import logger
 
-LOGGER = LoggerServiceImpl()
+from long_earn.config import AppConfig
+from long_earn.substance.store import SubstanceStore
 
 
 def init_system(config: AppConfig | None = None) -> None:
@@ -21,7 +20,7 @@ def init_system(config: AppConfig | None = None) -> None:
     Args:
         config: 应用配置，None 则从环境变量加载
     """
-    LOGGER.info("开始系统初始化...")
+    logger.info("开始系统初始化...")
     config = config or AppConfig.from_env()
     store = SubstanceStore()
 
@@ -29,7 +28,7 @@ def init_system(config: AppConfig | None = None) -> None:
     if init_dir.exists():
         count = store.load_directory(init_dir)
         if count > 0:
-            LOGGER.info(f"知识库加载完成，共 {count} 条事实")
+            logger.info(f"知识库加载完成，共 {count} 条事实")
             store.save()
 
-    LOGGER.info("系统初始化完成")
+    logger.info("系统初始化完成")

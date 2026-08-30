@@ -89,12 +89,7 @@ export function ResearchRounds({ rounds, running }: Props) {
                     {r.strategy_yaml ? (
                       <button
                         className="text-xs text-primary hover:underline flex items-center gap-1"
-                        onClick={() => {
-                          const w = window.open('', '_blank')
-                          if (w) {
-                            w.document.write(`<pre style="padding:16px;background:#f8fafc;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap">${escapeHtml(r.strategy_yaml)}</pre>`)
-                          }
-                        }}
+                        onClick={() => openTextPreview(r.strategy_yaml)}
                       >
                         <FileText className="h-3 w-3" />
                         查看
@@ -107,12 +102,7 @@ export function ResearchRounds({ rounds, running }: Props) {
                     {r.reflection ? (
                       <button
                         className="text-xs text-primary hover:underline flex items-center gap-1"
-                        onClick={() => {
-                          const w = window.open('', '_blank')
-                          if (w) {
-                            w.document.write(`<pre style="padding:16px;background:#f8fafc;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;max-width:600px">${escapeHtml(r.reflection)}</pre>`)
-                          }
-                        }}
+                        onClick={() => openTextPreview(r.reflection)}
                       >
                         <MessageSquare className="h-3 w-3" />
                         查看
@@ -140,10 +130,14 @@ export function ResearchRounds({ rounds, running }: Props) {
   )
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+/** 用 Blob URL 在新标签页打开纯文本预览，避免 document.write */
+function openTextPreview(content: string): void {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const tab = window.open(url, '_blank')
+  if (tab) {
+    tab.addEventListener('load', () => URL.revokeObjectURL(url), { once: true })
+  } else {
+    URL.revokeObjectURL(url)
+  }
 }

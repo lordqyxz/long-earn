@@ -88,39 +88,44 @@ class AcceptanceGate:
                 None,
             )
 
-        b_sharpe = _metric(baseline_backtest, "sharpe_ratio")
-        o_sharpe = _metric(optimized_backtest, "sharpe_ratio")
+        metric_key = self.primary_metric
+        b_primary = _metric(baseline_backtest, metric_key)
+        o_primary = _metric(optimized_backtest, metric_key)
         b_ret = _metric(baseline_backtest, "total_return")
         o_ret = _metric(optimized_backtest, "total_return")
 
-        # 3) 主指标严格优于（双 sharpe 存在时走严格提升门）
-        if b_sharpe is not None and o_sharpe is not None:
-            accepted = o_sharpe > b_sharpe + self.eps
+        # 3) 主指标严格优于（双主指标存在时走严格提升门）
+        if b_primary is not None and o_primary is not None:
+            accepted = o_primary > b_primary + self.eps
             reason = (
-                "sharpe 严格提升"
+                f"{metric_key} 严格提升"
                 if accepted
-                else f"sharpe 未提升（{b_sharpe} -> {o_sharpe}）"
+                else f"{metric_key} 未提升（{b_primary} -> {o_primary}）"
             )
-            return AcceptanceResult(accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret)
+            return AcceptanceResult(
+                accepted, reason, b_primary, o_primary, b_ret, o_ret
+            )
 
-        # 基线 sharpe 缺失（HTR 首次循环 previous_backtest 为空）：
-        # 接受任何有有效 sharpe 的策略作为初始基线（即使为负 sharpe）。
-        # 否则弱势市场下所有策略都是负 sharpe，HTR 永远无法建立基线，
+        # 基线主指标缺失（HTR 首次循环 previous_backtest 为空）：
+        # 接受任何有有效主指标的策略作为初始基线（即使为负值）。
+        # 否则弱势市场下所有策略主指标都为负，HTR 永远无法建立基线，
         # 整个研发循环空转（如 2026-07-26 run_20260726_174857 中 6 个节点
         # 全部因此被拒绝）。
-        if o_sharpe is not None:
+        if o_primary is not None:
             accepted = b_ret is None or (o_ret is not None and o_ret > b_ret + self.eps)
             reason = (
-                "基线无 sharpe，优化版作为初始基线接受（有有效回测指标）"
+                f"基线无 {metric_key}，优化版作为初始基线接受（有有效回测指标）"
                 if accepted
-                else "基线无 sharpe 且优化版收益未优于基线"
+                else f"基线无 {metric_key} 且优化版收益未优于基线"
             )
-            return AcceptanceResult(accepted, reason, b_sharpe, o_sharpe, b_ret, o_ret)
+            return AcceptanceResult(
+                accepted, reason, b_primary, o_primary, b_ret, o_ret
+            )
         return AcceptanceResult(
             False,
-            "基线无 sharpe 且优化版无有效 sharpe",
-            b_sharpe,
-            o_sharpe,
+            f"基线无 {metric_key} 且优化版无有效 {metric_key}",
+            b_primary,
+            o_primary,
             b_ret,
             o_ret,
         )

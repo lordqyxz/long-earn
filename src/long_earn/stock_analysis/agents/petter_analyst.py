@@ -1,37 +1,10 @@
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, HumanMessage
-
 from long_earn.core.chat_prompt_loader import MarkdownChatPromptTemplate
+from long_earn.skills.personas.petter import EXAMPLES
 
 if TYPE_CHECKING:
     from long_earn.config import RuntimeContext
-
-
-# Few-shot 示例（从原 petter_prompt.md 抽离，转为 Q&A 对）
-EXAMPLES = [
-    HumanMessage(content="分析沃尔玛的投资价值"),
-    AIMessage(
-        content=(
-            "对于沃尔玛这类稳定增长型股票，我们关注其同店销售额增长、门店扩张计划和成本控制能力。"
-            "PEG 比率适中，适合长期持有。"
-        )
-    ),
-    HumanMessage(content="分析高通的投资价值"),
-    AIMessage(
-        content=(
-            "对于高通这类快速成长型股票，我们评估其在 5G、芯片设计领域的技术领先地位，"
-            "以及研发投入与收入比。虽然估值较高，但增长潜力巨大。"
-        )
-    ),
-    HumanMessage(content="分析房地产信托基金的投资价值"),
-    AIMessage(
-        content=(
-            "对于房地产信托基金 (REITs)，我们将其归类为缓慢增长型，"
-            "重点关注租金收益率、物业组合质量和债务结构。适合追求稳定分红的投资者。"
-        )
-    ),
-]
 
 
 class PetterAnalyst:

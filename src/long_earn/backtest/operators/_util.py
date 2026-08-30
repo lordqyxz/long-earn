@@ -45,22 +45,3 @@ def temporal_series(
     series = back[name]
     # 去掉可能的索引列污染，返回纯 Series
     return series.rename(name) if name else series
-
-
-def cross_section(panel: pl.DataFrame, expr: pl.Expr) -> pl.Series:
-    """横截面计算（每个 timestamp 内独立排序/排名），对齐回原始行序。
-
-    用于 rank 算子：在同一时刻的 symbol 截面内排名，不跨时刻、不窥未来。
-    """
-
-    import polars as pl  # noqa: PLC0415
-
-    if panel.height == 0:
-        return pl.Series(name=expr.meta.output_name() or "_", values=[])
-
-    indexed = panel.with_row_index("_op_row_idx")
-    # 按 timestamp 分组即可，组内保持 symbol 顺序；over("timestamp") 不重排输出
-    computed = indexed.with_columns(expr)
-    back = computed.sort("_op_row_idx")
-    name = expr.meta.output_name()
-    return back[name]

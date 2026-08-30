@@ -196,6 +196,7 @@ class AppConfig:
     | LONG_EARN_SKIP_CACHE_SYNC | context_init.py | =1 跳过启动时批量增量同步（CI/加速启动；读路径仍可按需从 miniqmt 补洞） |
     | LONG_EARN_CACHE_ONLY | cache_sync.py / miniqmt_provider.py | =1 显式强制纯缓存（禁止按需拉 miniqmt；默认不在启动同步后自动设置） |
     | LONG_EARN_DISABLE_XTQUANT | parallel.py / miniqmt_provider.py | =1 禁用 xtquant（CI/无 QMT；并行 worker 内临时设置，避免 C++ 崩溃） |
+    | CICCWM_SSL_VERIFY | backtest/data/ciccwm_client.py | =false 禁用 CICCWM HTTPS 证书校验（默认 true；仅限调试） |
 
     ── 第三方 API Key 环境变量 ────────────────────────────────────────
 
@@ -225,11 +226,11 @@ class AppConfig:
     llm_base_url: str = "https://api.deepseek.com/v1"
     # 统一数据根目录（LONG_EARN_DATA_DIR → repo 同级 long-earn-data）
     data_dir: str = str(_storage.DEFAULT_DATA_DIR)
-    # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；每轮 save_tree 写 JSON）
-    hypothesis_tree_dir: str = str(_storage.hypothesis_tree_dir())
+    # 假设树存储目录（由 data_dir 派生，ADR-010 HTR；写入时由 tree_store 建目录）
+    hypothesis_tree_dir: str = str(_storage.DEFAULT_DATA_DIR / "hypothesis_trees")
     # 策略研发产物路径（由 data_dir 派生）
-    strategy_results_path: str = str(_storage.strategy_results_path())
-    best_strategy_path: str = str(_storage.best_strategy_path())
+    strategy_results_path: str = str(_storage.DEFAULT_DATA_DIR / "strategy_research_results.json")
+    best_strategy_path: str = str(_storage.DEFAULT_DATA_DIR / "best_strategy.yaml")
     init_dir: str = "./init"
     max_iterations: int = 3
     # HTR 每轮选择的最大假设数（htr_subgraph._select_node 读取，>1 激活 fan-out）
