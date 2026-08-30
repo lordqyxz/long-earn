@@ -214,7 +214,7 @@ def test_audit_equity_curve_alignment():
     )
     audit_values = [_payload_of(r)["portfolio_value"] for r in mkt_rows]
 
-    equity_curve = [d["value"] for d in (result.daily_returns or [])]
+    equity_curve = list(result.equity_curve or [])
 
     assert len(audit_values) == len(equity_curve), (
         f"审计事件数({len(audit_values)}) != 净值曲线点数({len(equity_curve)})"

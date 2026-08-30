@@ -184,7 +184,7 @@ def test_sharpe_matches_numpy_formula(mock_data_provider):
     result = engine.run(_SimpleBuyStrategy(), "2024-01-01", "2024-01-22", ["A.SZ"])
     assert result.success
 
-    daily_values = [d["value"] for d in (result.daily_returns or [])]
+    daily_values = list(result.equity_curve or [])
     numpy_sharpe = _numpy_sharpe(daily_values)
 
     assert result.sharpe_ratio is not None
@@ -217,7 +217,7 @@ def test_total_return_matches_numpy(mock_data_provider):
     result = engine.run(_SimpleBuyStrategy(), "2024-01-01", "2024-01-17", ["A.SZ"])
     assert result.success
 
-    daily_values = [d["value"] for d in (result.daily_returns or [])]
+    daily_values = list(result.equity_curve or [])
     numpy_ret = _numpy_total_return(daily_values)
 
     assert result.total_return is not None
@@ -371,7 +371,7 @@ def test_alpha_beta_ir_matches_numpy(mock_data_provider):
     assert result.success
 
     # 提取权益曲线和基准价格
-    daily_values = [d["value"] for d in (result.daily_returns or [])]
+    daily_values = list(result.equity_curve or [])
     bm_prices = (
         panel.filter(pl.col("symbol") == "000300.SH")
         .sort("timestamp")["close"]

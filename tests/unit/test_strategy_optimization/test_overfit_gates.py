@@ -17,7 +17,11 @@ import pytest
 from long_earn.strategy_optimization.overfit_gates import (
     BacktestOverfitGate,
     DeflatedSharpeGate,
+    MERGE_THRESHOLD_DEFAULT,
     WalkForwardStabilityGate,
+    daily_return_moments,
+    diagnostic_to_dict,
+    evaluate_merge_gate,
 )
 
 
@@ -95,12 +99,28 @@ class TestDeflatedSharpeGate:
         assert result.expected_max_noise == 0.0
         assert result.passed
 
-    def test_insufficient_observations_rejected(self) -> None:
-        """回测天数 < 2 应拒绝。"""
+    def test_insufficient_observations_skipped(self) -> None:
+        """回测天数 < 2 应跳过（诊断门控，非 failed）。"""
         gate = DeflatedSharpeGate()
         result = gate.evaluate(observed_sharpe=2.0, n_trials=1, n_observations=1)
+        assert result.skipped
         assert not result.passed
+        assert result.status == "skipped"
         assert "不足" in result.reason
+
+    def test_full_dsr_with_skew_kurtosis(self) -> None:
+        """提供 skew/kurt 时走完整非简化 DSR。"""
+        gate = DeflatedSharpeGate()
+        result = gate.evaluate(
+            observed_sharpe=2.0,
+            n_trials=1,
+            n_observations=252,
+            skew=0.1,
+            kurtosis=3.2,
+        )
+        assert not result.simplified
+        assert result.status in ("passed", "failed")
+        assert result.t_statistic > 0
 
     def test_threshold_increases_with_n(self) -> None:
         """N 增大时，相同 sharpe 更难通过（selection bias 收紧）。"""
@@ -117,11 +137,13 @@ class TestDeflatedSharpeGate:
 class TestBacktestOverfitGate:
     """S3: PBO 概率门（CSCV）。"""
 
-    def test_insufficient_strategies_passes(self) -> None:
-        """策略数 < 2 时跳过检验（返回 passed=True）。"""
+    def test_insufficient_strategies_skipped(self) -> None:
+        """策略数 < 2 时跳过检验（status=skipped，不得视为通过）。"""
         gate = BacktestOverfitGate()
         result = gate.evaluate([1.0], [0.5])
-        assert result.passed
+        assert result.skipped
+        assert not result.passed
+        assert result.status == "skipped"
         assert "不足" in result.reason
 
     def test_consistent_strategies_pass(self) -> None:
@@ -136,20 +158,24 @@ class TestBacktestOverfitGate:
 
     def test_inverted_strategies_rejected(self) -> None:
         """IS 最优 = OOS 最差 → PBO 应较高，拒绝。"""
-        gate = BacktestOverfitGate(n_samples=200)
+        # threshold=0.49 避免 CSCV 采样恰为 0.5 时边界通过
+        gate = BacktestOverfitGate(threshold=0.49, n_samples=200)
         # IS 排序: [2.0, 1.0, 0.5, 0.0]
         # OOS 排序反转: [0.0, 0.5, 1.0, 2.0] → IS 最优在 OOS 最差
         is_sharpes = [2.0, 1.0, 0.5, 0.0]
         oos_sharpes = [0.0, 0.5, 1.0, 2.0]
         result = gate.evaluate(is_sharpes, oos_sharpes)
         assert not result.passed
-        assert result.pbo_probability > 0.5
+        assert result.status == "failed"
+        assert result.pbo_probability >= 0.49
 
-    def test_length_mismatch_passes(self) -> None:
+    def test_length_mismatch_skipped(self) -> None:
         """is_sharpes 与 oos_sharpes 长度不一致时跳过。"""
         gate = BacktestOverfitGate()
         result = gate.evaluate([1.0, 0.5], [0.3])
-        assert result.passed
+        assert result.skipped
+        assert not result.passed
+        assert result.status == "skipped"
 
     def test_reproducible_with_fixed_seed(self) -> None:
         """相同输入两次运行结果一致（固定种子）。"""
@@ -159,3 +185,58 @@ class TestBacktestOverfitGate:
         result1 = gate.evaluate(is_sharpes, oos_sharpes)
         result2 = gate.evaluate(is_sharpes, oos_sharpes)
         assert result1.pbo_probability == result2.pbo_probability
+
+
+class TestMergeAndDiagnostics:
+    """ADR-022 辅助函数：合并门 / 日收益矩 / diagnostic_to_dict。"""
+
+    def test_evaluate_merge_gate_first_candidate(self) -> None:
+        """尚无 current best 时合并门放行并建立基线。"""
+        result = evaluate_merge_gate(0.6, None)
+        assert result["passed"] is True
+        assert result["current_best"] is None
+        assert result["threshold"] == MERGE_THRESHOLD_DEFAULT
+        assert "建立基线" in result["reason"]
+
+    def test_evaluate_merge_gate_beats_current_best(self) -> None:
+        """OOS mean 超过 best+threshold 时通过。"""
+        result = evaluate_merge_gate(
+            0.70,
+            0.50,
+            threshold=MERGE_THRESHOLD_DEFAULT,
+        )
+        assert result["passed"] is True
+        assert ">" in result["reason"]
+
+    def test_evaluate_merge_gate_below_threshold(self) -> None:
+        """OOS mean 未超过 best+threshold 时拒绝。"""
+        result = evaluate_merge_gate(0.52, 0.50, threshold=MERGE_THRESHOLD_DEFAULT)
+        assert result["passed"] is False
+
+    def test_daily_return_moments_from_floats(self) -> None:
+        """足够样本的日收益序列应返回 (skew, kurtosis)。"""
+        returns = [0.01, -0.005, 0.002, 0.003, -0.001, 0.004, 0.0, -0.002]
+        moments = daily_return_moments(returns)
+        assert moments is not None
+        skew, kurt = moments
+        assert isinstance(skew, float)
+        assert isinstance(kurt, float)
+
+    def test_daily_return_moments_insufficient_sample(self) -> None:
+        """样本不足时返回 None。"""
+        assert daily_return_moments([0.01, 0.02]) is None
+        assert daily_return_moments(None) is None
+
+    def test_diagnostic_to_dict_shape(self) -> None:
+        """diagnostic_to_dict 统一 status/passed/skipped 字段。"""
+        payload = diagnostic_to_dict(
+            status="failed",
+            reason="test",
+            simplified=True,
+            t_statistic=1.0,
+        )
+        assert payload["status"] == "failed"
+        assert payload["passed"] is False
+        assert payload["skipped"] is False
+        assert payload["simplified"] is True
+        assert payload["t_statistic"] == 1.0

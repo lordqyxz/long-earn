@@ -32,8 +32,12 @@ class BacktestResult(BaseModel):
     benchmark_return: float | None = Field(default=None, description="基准收益率")
 
     # 详细数据
+    equity_curve: list[float] | None = Field(
+        default=None, description="净值曲线（各 bar 终值，与审计 MARKET_DATA 对齐）"
+    )
     daily_returns: list[dict[str, Any]] | None = Field(
-        default=None, description="每日收益率序列"
+        default=None,
+        description="日简单收益率序列（相邻净值相对变化，供 DSR 等诊断门）",
     )
     positions_history: list[dict[str, Any]] | None = Field(
         default=None, description="每日持仓权重历史"

@@ -517,7 +517,7 @@ class TestBacktestFidelity(unittest.TestCase):
     确保引擎不会编造结果：
     - 数据不足时拒绝输出绩效指标（success=False）
     - 数学公式与 numpy 直接计算一致
-    - daily_returns 长度等于 trading_days
+    - daily_returns 长度等于 trading_days；equity_curve 比 trading_days 多 1 点
     """
 
     def test_insufficient_data_rejected(self):
@@ -547,8 +547,9 @@ class TestBacktestFidelity(unittest.TestCase):
         result = engine.run(strategy, "2024-01-01", "2024-01-10", ["000001"])
 
         self.assertTrue(result.success)
-        equity = [d["value"] for d in (result.daily_returns or [])]
-        self.assertEqual(len(equity), result.trading_days)
+        assert result.equity_curve
+        equity = list(result.equity_curve)
+        self.assertEqual(len(result.daily_returns or []), len(equity) - 1)
         self.assertGreaterEqual(len(equity), 2)
 
         equity_arr = np.array(equity)

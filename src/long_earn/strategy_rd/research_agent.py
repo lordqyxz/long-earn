@@ -1,9 +1,10 @@
-"""ToG 策略研发智能体（ADR-018）
+"""ToG 策略研发智能体（ADR-018 / ADR-022）
 
 LLM ⊗ Graph：在 Substance / Ontology 上 explore + prune，
-用回测与统计门作不可跳过的证据工具，写回路径结果形成飞轮。
+用回测与统计验证门控作不可跳过的证据工具，写回路径结果形成飞轮。
 
-假设树与 ADR-015 门保留为状态/硬约束；本模块替代 HTR 固定六步作为探索控制器。
+硬性门控：Walk-Forward 稳定性 + held-out 相对 current best。
+诊断门控：DSR / PBO（缺料 skipped）。HTR 编排已 Deprecated。
 """
 
 from __future__ import annotations
@@ -57,8 +58,8 @@ class _StrategyEvidence:
     backtest_reliable: bool = False
     oos_passed: bool | None = None
     oos_metrics: dict[str, Any] = field(default_factory=dict)
-    # DSR 多重检验校正是否通过（仅 OOS 路径有效）
-    oos_dsr_passed: bool | None = None
+    # DSR 诊断状态：passed / failed / skipped（ADR-022；不再作写回硬闸）
+    oos_dsr_status: str | None = None
 
 
 class ResearchAgent:
@@ -86,8 +87,13 @@ class ResearchAgent:
         self._last_context: str = ""
         # 证据门：strategy_hash -> 回测/OOS 缓存（同一次 invoke 内有效）
         self._evidence_cache: dict[str, _StrategyEvidence] = {}
-        # DSR 多重检验校正：本 session 已探索策略数（run_backtest 调用次数）
+        # 试验登记（ADR-022）：调用次数 + 唯一指纹 → N_eff
         self._strategy_trial_count: int = 0
+        self._trial_fingerprints: set[str] = set()
+        # PBO 候选矩阵：session 内 (IS sharpe, OOS mean sharpe)
+        self._oos_candidate_pairs: list[tuple[float, float]] = []
+        # held-out 合并基线（session 内 current best OOS mean sharpe）
+        self._current_best_oos: float | None = None
         # 事件采集推理子图（ADR-021：miss/强制刷新时在 agent 层显式触发）
         self._event_inference = create_event_inference_subgraph(context)
 
@@ -105,6 +111,16 @@ class ResearchAgent:
         if checkpointer is not None:
             agent_kwargs["checkpointer"] = checkpointer
         self._agent = create_react_agent(**agent_kwargs)
+
+    def _register_trial(self, strategy_yaml: str, *, count: int = 1) -> int:
+        """登记试验；返回当前有效试验数 N_eff（唯一指纹数）。"""
+        self._strategy_trial_count += max(count, 1)
+        self._trial_fingerprints.add(_strategy_fingerprint(strategy_yaml))
+        return max(len(self._trial_fingerprints), 1)
+
+    @property
+    def _n_eff_trials(self) -> int:
+        return max(len(self._trial_fingerprints), 1)
 
     def _cache_backtest_evidence(
         self, strategy_yaml: str, metrics: dict[str, Any]
@@ -124,9 +140,9 @@ class ResearchAgent:
         *,
         passed: bool,
         metrics: dict[str, Any],
-        dsr_passed: bool | None = None,
+        dsr_status: str | None = None,
     ) -> None:
-        """缓存 OOS 门结果。"""
+        """缓存 OOS 门结果（``passed`` 仅反映硬性门控）。"""
         fp = _strategy_fingerprint(strategy_yaml)
         ev = self._evidence_cache.get(fp)
         if ev is None:
@@ -134,8 +150,8 @@ class ResearchAgent:
             self._evidence_cache[fp] = ev
         ev.oos_passed = passed
         ev.oos_metrics = dict(metrics)
-        if dsr_passed is not None:
-            ev.oos_dsr_passed = dsr_passed
+        if dsr_status is not None:
+            ev.oos_dsr_status = dsr_status
 
     def _validate_success_writeback(
         self,
@@ -144,10 +160,10 @@ class ResearchAgent:
     ) -> tuple[bool, str, dict[str, Any]]:
         """校验 success 写回是否满足证据门契约。
 
-        三道证据门：
-        1. 证据存在门：必须有 run_backtest 或 run_oos_gates 证据
-        2. 指标可信门：回测指标不可信（degenerate/step_failures）直接拒绝
-        3. 统计显著门（OOS 路径）：DSR 多重检验校正
+        证据门（ADR-022）：
+        1. 证据存在：必须有 run_backtest 或 run_oos_gates 证据
+        2. 指标可信：回测指标不可信直接拒绝
+        3. OOS 硬性门控：稳定性 + 合并阈值（DSR/PBO 仅为诊断，不硬拒）
 
         Returns:
             (allowed, error_message, merged_metrics)
@@ -165,7 +181,6 @@ class ResearchAgent:
                 metrics,
             )
 
-        # 门 1: 证据存在 + 指标可信
         has_reliable_backtest = (
             evidence.backtest_reliable
             and evidence.backtest_metrics is not None
@@ -175,11 +190,10 @@ class ResearchAgent:
         if not has_reliable_backtest and not has_oos_pass:
             return (
                 False,
-                "拒绝写回成功：证据不足（需可靠训练集回测或 OOS 通过）",
+                "拒绝写回成功：证据不足（需可靠训练集回测或 OOS 硬性门控通过）",
                 metrics,
             )
 
-        # 门 2: 合并指标后再次校验 AcceptanceGate
         merged = dict(metrics)
         if not merged and evidence.backtest_metrics:
             merged = dict(evidence.backtest_metrics)
@@ -190,13 +204,9 @@ class ResearchAgent:
         if block is not None:
             return False, f"拒绝写回成功：{block}", merged
 
-        # 门 3: 若走 OOS 路径，检查 DSR 是否已通过
-        if has_oos_pass and evidence.oos_dsr_passed is False:
-            return (
-                False,
-                "拒绝写回成功：OOS 通过稳定性门但未通过 DSR 多重检验校正",
-                merged,
-            )
+        # ADR-022：DSR/PBO 诊断结果仅写入 metrics，不硬拒写回
+        if evidence.oos_dsr_status is not None:
+            merged["dsr_status"] = evidence.oos_dsr_status
 
         merged["outcome"] = "success"
         return True, "", merged
@@ -553,8 +563,7 @@ class ResearchAgent:
                 start = ctx.config.train_start_date
                 end = ctx.config.train_end_date
                 logger.info(f"[ToG] run_backtest: {start}~{end}")
-                # DSR 多重检验校正：每调用一次 run_backtest 递增探索计数
-                agent._strategy_trial_count += 1
+                agent._register_trial(strategy_yaml)
                 result = ctx.backtest_service.run(
                     strategy_yaml=strategy_yaml,
                     start_date=start,
@@ -595,119 +604,201 @@ class ResearchAgent:
     def _make_run_oos_gates_tool(self) -> Any:
         logger = self._logger
         monitoring = self._monitoring
-        ctx = self.context
         agent = self
 
         @tool
         def run_oos_gates(strategy_yaml: str) -> str:
-            """Walk-Forward OOS + 统计门（稳定性）——合并前必须通过。
+            """Walk-Forward OOS 硬性门控 + DSR/PBO 诊断（ADR-022）。
+
+            硬性：稳定性 + 相对 current best 合并阈值。
+            诊断：DSR / PBO（缺料 skipped，不静默当通过）。
 
             Args:
                 strategy_yaml: 策略 YAML
             """
             with monitoring.track("research.run_oos_gates"):
                 logger.info("[ToG] run_oos_gates")
-                bt = ctx.backtest_service
-
-                from long_earn.strategy_optimization.acceptance import (  # noqa: PLC0415
-                    is_metrics_unreliable,
+                return json.dumps(
+                    agent._run_oos_gates_impl(strategy_yaml),
+                    ensure_ascii=False,
+                    default=str,
                 )
-
-                train_bt = bt.run(
-                    strategy_yaml=strategy_yaml,
-                    start_date=ctx.config.train_start_date,
-                    end_date=ctx.config.train_end_date,
-                )
-                if isinstance(train_bt, dict) and is_metrics_unreliable(train_bt):
-                    diag = train_bt.get("strategy_diagnostics") or {}
-                    return json.dumps(
-                        {
-                            "passed": False,
-                            "reason": (
-                                "训练集回测指标不可信"
-                                f"（degenerate={diag.get('degenerate')}, "
-                                f"factor_failures={diag.get('failed_factor_aliases')}, "
-                                f"step_failures={diag.get('failed_step_labels')}）"
-                                "，禁止进入 OOS 门"
-                            ),
-                            "metrics_unreliable": True,
-                        },
-                        ensure_ascii=False,
-                    )
-
-                try:
-                    oos = bt.run_oos(
-                        strategy_yaml=strategy_yaml,
-                        start_date=ctx.config.test_start_date,
-                        end_date=ctx.config.test_end_date,
-                    )
-                except Exception as exc:
-                    return json.dumps(
-                        {"passed": False, "error": f"OOS 执行失败: {exc}"},
-                        ensure_ascii=False,
-                    )
-
-                fold_results = []
-                if isinstance(oos, dict):
-                    fold_results = oos.get("fold_results") or oos.get("folds") or []
-                    if not fold_results and "metrics" in oos:
-                        fold_results = [oos]
-
-                from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
-                    DeflatedSharpeGate,
-                    WalkForwardStabilityGate,
-                )
-
-                stability = WalkForwardStabilityGate().evaluate(fold_results)
-                oos_payload = {
-                    "passed": stability.passed,
-                    "reason": stability.reason,
-                    "worst_fold_sharpe": stability.worst_fold_sharpe,
-                    "fold_sharpe_std": stability.fold_sharpe_std,
-                    "consistency_ratio": stability.consistency_ratio,
-                }
-
-                # S2: DSR 多重检验校正门
-                dsr_passed: bool | None = None
-                if stability.passed and fold_results:
-                    oos_sharpe = oos_payload.get("worst_fold_sharpe")
-                    if oos_sharpe is not None:
-                        n_trials = max(agent._strategy_trial_count, 1)
-                        # 从 fold_results 估算观测数（取 folds 平均交易日）
-                        n_obs = 252
-                        if fold_results:
-                            avg_days = sum(
-                                int(f.get("trading_days", 0) or 0) for f in fold_results
-                            ) / max(len(fold_results), 1)
-                            n_obs = max(int(avg_days), 63)
-                        dsr = DeflatedSharpeGate().evaluate(
-                            observed_sharpe=oos_sharpe,
-                            n_trials=n_trials,
-                            n_observations=n_obs,
-                        )
-                        dsr_passed = dsr.passed
-                        if not dsr.passed:
-                            oos_payload["passed"] = False
-                            oos_payload["reason"] = (
-                                f"{stability.reason}；但 DSR 门拒绝: {dsr.reason}"
-                            )
-                            logger.warning(
-                                f"[ToG] OOS 稳定性通过但 DSR 拒绝: {dsr.reason}"
-                            )
-                        else:
-                            oos_payload["dsr_t_stat"] = dsr.t_statistic
-                            oos_payload["dsr_n_trials"] = n_trials
-
-                agent._cache_oos_evidence(
-                    strategy_yaml,
-                    passed=oos_payload["passed"],
-                    metrics=oos_payload,
-                    dsr_passed=dsr_passed,
-                )
-                return json.dumps(oos_payload, ensure_ascii=False)
 
         return run_oos_gates
 
+    def _run_oos_gates_impl(self, strategy_yaml: str) -> dict[str, Any]:
+        """``run_oos_gates`` 确定性实现（ADR-022 §A）。"""
+        from long_earn.strategy_optimization.acceptance import (  # noqa: PLC0415
+            is_metrics_unreliable,
+        )
+        from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+            BacktestOverfitGate,
+            WalkForwardStabilityGate,
+            diagnostic_to_dict,
+            evaluate_merge_gate,
+            mean_fold_sharpe,
+        )
+
+        bt = self.context.backtest_service
+        train_bt = bt.run(
+            strategy_yaml=strategy_yaml,
+            start_date=self.context.config.train_start_date,
+            end_date=self.context.config.train_end_date,
+        )
+        if isinstance(train_bt, dict) and is_metrics_unreliable(train_bt):
+            diag = train_bt.get("strategy_diagnostics") or {}
+            return {
+                "passed": False,
+                "reason": (
+                    "训练集回测指标不可信"
+                    f"（degenerate={diag.get('degenerate')}, "
+                    f"factor_failures={diag.get('failed_factor_aliases')}, "
+                    f"step_failures={diag.get('failed_step_labels')}）"
+                    "，禁止进入 OOS 门"
+                ),
+                "metrics_unreliable": True,
+            }
+
+        try:
+            oos = bt.run_oos(
+                strategy_yaml=strategy_yaml,
+                start_date=self.context.config.test_start_date,
+                end_date=self.context.config.test_end_date,
+            )
+        except Exception as exc:
+            return {"passed": False, "error": f"OOS 执行失败: {exc}"}
+
+        fold_results: list[Any] = []
+        if isinstance(oos, dict):
+            fold_results = oos.get("fold_results") or oos.get("folds") or []
+            if not fold_results and "metrics" in oos:
+                fold_results = [oos]
+
+        stability = WalkForwardStabilityGate().evaluate(fold_results)
+        oos_mean = mean_fold_sharpe(fold_results)
+        merge: dict[str, Any]
+        if oos_mean is None:
+            merge = {
+                "passed": False,
+                "reason": "无有效 OOS mean sharpe，无法评估合并门",
+                "oos_mean_sharpe": None,
+                "current_best": self._current_best_oos,
+                "threshold": 0.05,
+            }
+        else:
+            merge = evaluate_merge_gate(oos_mean, self._current_best_oos)
+
+        hard_passed = bool(stability.passed and merge.get("passed"))
+        reason_parts = [f"稳定性: {stability.reason}", f"合并: {merge['reason']}"]
+
+        # —— DSR 诊断 ——
+        dsr_payload = self._evaluate_dsr_diagnostic(
+            train_bt=train_bt if isinstance(train_bt, dict) else {},
+            fold_results=fold_results,
+            observed_sharpe=(
+                float(stability.worst_fold_sharpe)
+                if stability.fold_sharpes
+                else (oos_mean or 0.0)
+            ),
+        )
+
+        # —— PBO 诊断（登记本候选后评估） ——
+        is_sharpe = 0.0
+        if isinstance(train_bt, dict):
+            raw_is = train_bt.get("sharpe_ratio")
+            if isinstance(raw_is, (int, float)):
+                is_sharpe = float(raw_is)
+        if oos_mean is not None:
+            self._oos_candidate_pairs.append((is_sharpe, float(oos_mean)))
+        is_list = [p[0] for p in self._oos_candidate_pairs]
+        oos_list = [p[1] for p in self._oos_candidate_pairs]
+        pbo = BacktestOverfitGate().evaluate(is_list, oos_list)
+        pbo_payload = diagnostic_to_dict(
+            status=pbo.status,
+            reason=pbo.reason,
+            pbo_probability=pbo.pbo_probability,
+            n_strategies=pbo.n_strategies,
+            n_samples=pbo.n_samples,
+        )
+
+        if hard_passed and oos_mean is not None:
+            prev = self._current_best_oos
+            if prev is None or oos_mean > prev:
+                self._current_best_oos = oos_mean
+                self._logger.info(
+                    f"[ToG] 更新 current best OOS mean sharpe={oos_mean:.4f}"
+                )
+
+        payload: dict[str, Any] = {
+            "passed": hard_passed,
+            "reason": "；".join(reason_parts),
+            "worst_fold_sharpe": stability.worst_fold_sharpe,
+            "fold_sharpe_std": stability.fold_sharpe_std,
+            "consistency_ratio": stability.consistency_ratio,
+            "stability": {
+                "passed": stability.passed,
+                "reason": stability.reason,
+            },
+            "merge": merge,
+            "dsr": dsr_payload,
+            "pbo": pbo_payload,
+            "n_eff_trials": self._n_eff_trials,
+        }
+        self._cache_oos_evidence(
+            strategy_yaml,
+            passed=hard_passed,
+            metrics=payload,
+            dsr_status=str(dsr_payload.get("status")),
+        )
+        return payload
+
+    def _evaluate_dsr_diagnostic(
+        self,
+        *,
+        train_bt: dict[str, Any],
+        fold_results: list[Any],
+        observed_sharpe: float,
+    ) -> dict[str, Any]:
+        """构造 DSR 诊断片段（可含完整 skew/kurt）。"""
+        from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+            DeflatedSharpeGate,
+            daily_return_moments,
+            diagnostic_to_dict,
+        )
+
+        n_obs = 252
+        if fold_results:
+            day_vals = [
+                int(f.get("trading_days", 0) or 0)
+                for f in fold_results
+                if isinstance(f, dict)
+            ]
+            avg_days = sum(day_vals) / max(len(fold_results), 1)
+            if avg_days > 0:
+                n_obs = max(int(avg_days), 63)
+            else:
+                td = train_bt.get("trading_days")
+                if isinstance(td, int) and td > 0:
+                    n_obs = max(td, 63)
+
+        moments = daily_return_moments(train_bt.get("daily_returns"))
+        skew = moments[0] if moments else None
+        kurt = moments[1] if moments else None
+        dsr = DeflatedSharpeGate().evaluate(
+            observed_sharpe=observed_sharpe,
+            n_trials=self._n_eff_trials,
+            n_observations=n_obs,
+            skew=skew,
+            kurtosis=kurt,
+        )
+        return diagnostic_to_dict(
+            status=dsr.status,
+            reason=dsr.reason,
+            simplified=dsr.simplified,
+            t_statistic=dsr.t_statistic,
+            n_trials=self._n_eff_trials,
+            n_observations=n_obs,
+        )
     def _make_run_param_search_tool(self) -> Any:
         """参数网格搜索工具 — 在训练集上暴力搜索最优参数组合。
 
@@ -768,6 +859,9 @@ class ResearchAgent:
                     )
 
                 agent._strategy_trial_count += total
+                base_fp = _strategy_fingerprint(strategy_template)
+                for i in range(total):
+                    agent._trial_fingerprints.add(f"{base_fp}:grid:{i}")
                 logger.info(
                     f"[ToG] run_param_search: {total} 组合，"
                     f"训练集 {ctx.config.train_start_date}~{ctx.config.train_end_date}"

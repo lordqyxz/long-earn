@@ -30,13 +30,13 @@
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
 - [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（股票腿动量因子 OOS 反号，非门控问题）。下一轮方向：重设计股票腿（动量→基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
-- [ ] **ADR-022 §A 实施（统计验证门控）** — 实施前评审见 canvas `adr-022-preimpl-review`。建议波次：
-  - **P0** 契约对齐：`run_oos_gates` 输出 `dsr`/`pbo` 的 `passed|skipped|reason`（+ `simplified`）；写回层 DSR **降为诊断**（不得因 DSR 单独硬拒）；修 PBO&lt;2 静默 `passed=True`
-  - **P1** PBO 迁入 ToG：维护候选 IS/OOS sharpe 配对；缺矩阵 → `skipped`；**须先于 HTR 清退**
-  - **P2** ToG 合并阈值：相对 current best（落点待定：StrategyExperience 最佳 vs `best_strategy.yaml`）+ S1 串联
-  - **P3** DSR 完整输入：真日收益（修正 equity 误写入 `daily_returns`）+ trial registry + \(N_{\mathrm{eff}}\)
-  - **P4** 测试债：mock 改为 `run_oos`；补 skipped / 诊断契约测
-- [ ] **HTR 遗留线清退（ADR-010 Deprecated / ADR-021 / ADR-022）**：依赖 ADR-022 **P1 完成**；`cli`/`app` 迁 ResearchAgent 后删编排；白名单收紧。**迁移前冻结**
+- [x] **ADR-022 §A 实施（统计验证门控）** — P0–P4 已落地（2026-08-30）：
+  - **P0** 诊断契约：`dsr`/`pbo` 含 `status|passed|skipped|reason`；写回不再因 DSR 硬拒；PBO 缺料 `skipped`
+  - **P1** PBO 迁入 ToG：`_oos_candidate_pairs` + `run_oos_gates`
+  - **P2** 合并阈值：session `_current_best_oos` + `evaluate_merge_gate`（与 S1 串联为硬闸 `passed`）
+  - **P3** 真日收益（equity→return）+ `_trial_fingerprints`/`N_eff` + DSR 可选 skew/kurt
+  - **P4** 单测对齐（45 passed）；HTR 清退仍依赖本项且不得先于 P1（已满足）
+- [ ] **HTR 遗留线清退（ADR-010 Deprecated / ADR-021 / ADR-022）**：PBO 已在 ToG；`cli`/`app` 迁 ResearchAgent 后删编排；白名单收紧。**迁移前冻结**
 - [~] **Web 前端开发**（`web/`）— 次线，按需继续开发
 
 ---
@@ -64,7 +64,7 @@
 ### 工程化与纵深防御
 
 - [ ] **数据库引擎层第二阶段迁移**（SQLAlchemy Core，承接 ADR-019）：审计 `PostgresAuditProvider` / 记忆库 `substance.persistence` / 分析器 `app.analyzer` 迁移到 `core/db.py` 统一引擎层（第一阶段 DataCache 已完成，79142ba）；迁移时复用 read/write 上下文与 COPY 逃生舱模式，消解三处手工连接管理分叉
-- [ ] **ADR-022 §A DSR 完整版 / 试验登记**（波次 P3）：引擎/OOS 真日收益 + skew/kurt；trial registry 与 \(N_{\mathrm{eff}}\)；契约齐备后再议升硬性门控
+- [ ] **ADR-022 §A 残余（可选 hardening）**：跨 invoke 持久化 current best / 候选矩阵到盘；DSR 升硬性门控需单独 ADR 变更；网格指纹用真实渲染 YAML 替代 `grid:i` 近似
 - [ ] **性能监控**：LLM Token + 回测耗时（`MonitoringService`）
 - [ ] **配置中心化**：多环境 `config.yaml`
 - [ ] **AUDIT-P3-01** `@pytest.mark.regression` 集中回归套件

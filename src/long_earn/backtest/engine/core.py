@@ -49,6 +49,21 @@ def _empty_bm() -> dict[str, float]:
     }
 
 
+def _equity_to_daily_returns(equity_curve: list[float]) -> list[dict[str, Any]]:
+    """净值曲线 → 日简单收益率序列（ADR-022 DSR skew/kurt 输入）。
+
+    历史上 ``daily_returns`` 误写入净值水平；现改为相邻净值相对变化。
+    """
+    out: list[dict[str, Any]] = []
+    for i in range(1, len(equity_curve)):
+        prev = float(equity_curve[i - 1])
+        cur = float(equity_curve[i])
+        if prev == 0.0:
+            continue
+        out.append({"day": i, "value": (cur - prev) / prev})
+    return out
+
+
 # 交易日数少于此值时不打进度心跳（短回测日志已够用）
 _PROGRESS_LOG_MIN_BARS = 50
 
@@ -1844,9 +1859,8 @@ class EventDrivenBacktestEngine:
             information_ratio=bm["information_ratio"],
             tracking_error=bm["tracking_error"],
             benchmark_return=bm["benchmark_return"],
-            daily_returns=[
-                {"day": i, "value": v} for i, v in enumerate(portfolio.equity_curve)
-            ],
+            equity_curve=list(portfolio.equity_curve),
+            daily_returns=_equity_to_daily_returns(portfolio.equity_curve),
             trade_count=portfolio.trade_count,
             attribution=dict(portfolio.pnl_by_symbol),
             metrics_unreliable=metrics_unreliable,

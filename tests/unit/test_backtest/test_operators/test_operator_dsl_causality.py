@@ -74,7 +74,7 @@ def _equity_curve(panel: pl.DataFrame, mock_data_provider) -> list:
         DSLStrategy(strategy_id=dsl.name, dsl_strategy=dsl), START, END, SYMBOLS
     )
     assert result.success, result.message
-    return list(result.daily_returns or [])
+    return list(result.equity_curve or [])
 
 
 class TestOperatorDslCausality:

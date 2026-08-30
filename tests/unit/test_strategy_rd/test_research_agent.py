@@ -189,16 +189,23 @@ class TestResearchAgentTools:
         strategy_yaml = "name: oos_test\n"
         agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
-                {"sharpe_ratio": 0.8},
-                {"sharpe_ratio": 0.6},
+                {"test": {"sharpe_ratio": 0.8}},
+                {"test": {"sharpe_ratio": 0.6}},
             ],
         }
         tool = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
         out = tool.invoke({"strategy_yaml": strategy_yaml})
-        assert "passed" in out
+        parsed = json.loads(out)
+        assert "passed" in parsed
+        assert "stability" in parsed
+        assert "merge" in parsed
+        assert "dsr" in parsed
+        assert "pbo" in parsed
         assert len(agent._evidence_cache) == 1
         ev = next(iter(agent._evidence_cache.values()))
         assert ev.oos_passed is not None
+        agent.context.backtest_service.run.assert_called()
+        agent.context.backtest_service.run_oos.assert_called()
 
     def test_invoke_calls_prepare_context(self, agent: ResearchAgent) -> None:
         agent._agent.invoke.return_value = {
@@ -301,16 +308,18 @@ class TestEvidenceGatePipeline:
         bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
         bt.invoke({"strategy_yaml": strategy_yaml})
 
-        # Step 2: run_oos_gates（稳定性 + DSR）
-        agent.context.backtest_service.run_walk_forward_parallel.return_value = {
+        # Step 2: run_oos_gates（稳定性 + 合并 + DSR/PBO 诊断）
+        agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
-                {"sharpe_ratio": 0.7, "trading_days": 63},
-                {"sharpe_ratio": 0.5, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.7}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
             ],
         }
         oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
         oos_result = oos.invoke({"strategy_yaml": strategy_yaml})
-        assert "passed" in oos_result
+        parsed_oos = json.loads(oos_result)
+        assert "passed" in parsed_oos
+        assert parsed_oos["stability"]["passed"] is True
 
         # Step 3: record_path_outcome（训练集 + OOS 证据）
         rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
@@ -352,24 +361,38 @@ class TestEvidenceGatePipeline:
         bt.invoke({"strategy_yaml": strategy_yaml})
         assert agent._strategy_trial_count == 2
 
-    def test_oos_dsr_gate_rejects_low_sharpe(self, agent: ResearchAgent) -> None:
-        """DSR 门拒绝低 sharpe（多 trial 校正后不显著）"""
+    def test_oos_dsr_diagnostic_fails_without_blocking_hard_gate(
+        self, agent: ResearchAgent
+    ) -> None:
+        """DSR 诊断失败不翻转硬性门 passed（稳定性/合并仍可通过）。"""
         strategy_yaml = self._valid_strategy()
-        # 多 trial 时 DSR 要求更高
-        for _ in range(10):
-            agent._strategy_trial_count += 1
+        for i in range(10):
+            agent._trial_fingerprints.add(f"fp_{i}")
 
-        agent.context.backtest_service.run_walk_forward_parallel.return_value = {
+        agent.context.backtest_service.run_oos.return_value = {
             "fold_results": [
-                {"sharpe_ratio": 0.2, "trading_days": 63},
-                {"sharpe_ratio": 0.1, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.2}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.1}, "trading_days": 63},
             ],
         }
         oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
-        oos_result = oos.invoke({"strategy_yaml": strategy_yaml})
-        parsed = json.loads(oos_result)
-        # 低 sharpe + 多 trial → DSR 应拒绝
-        assert parsed["passed"] is False
+        parsed = json.loads(oos.invoke({"strategy_yaml": strategy_yaml}))
+        assert parsed["stability"]["passed"] is True
+        assert parsed["merge"]["passed"] is True
+        assert parsed["passed"] is True
+        assert parsed["dsr"]["status"] == "failed"
+        assert parsed["dsr"]["passed"] is False
+
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
+        out = rec.invoke(
+            {
+                "path_summary": "DSR 诊断失败但仍可写回",
+                "strategy_yaml": strategy_yaml,
+                "metrics_json": '{"sharpe_ratio": 0.5}',
+            }
+        )
+        assert "sid_exp_1" in out
+        agent.context.memory.save_experience.assert_called_once()
 
     def test_evidence_cleared_between_invocations(self, agent: ResearchAgent) -> None:
         """invoke 必须清空上一轮证据缓存，防止证据跨 invoke 泄漏绕过证据门
@@ -413,3 +436,43 @@ class TestEvidenceGatePipeline:
         assert "拒绝写回成功" in out, (
             "invoke 清空证据后，上一轮证据不应再支持 success 写回"
         )
+
+    def test_current_best_oos_updates_and_pbo_runs(
+        self, agent: ResearchAgent
+    ) -> None:
+        """第二次更高 OOS mean 更新 _current_best_oos；候选≥2 时 PBO 非 skipped。"""
+        strategy_yaml_a = self._valid_strategy()
+        strategy_yaml_b = (
+            "name: quality_momentum_v2\n"
+            "universe:\n"
+            "  type: main_board+gem\n"
+            "signals:\n"
+            "  - type: operator\n"
+            "    op: rank_top\n"
+            "    params:\n"
+            "      n: 20\n"
+        )
+        oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.4}, "trading_days": 63},
+            ],
+        }
+        first = json.loads(oos.invoke({"strategy_yaml": strategy_yaml_a}))
+        assert first["passed"] is True
+        assert agent._current_best_oos == pytest.approx(0.45)
+        assert first["pbo"]["status"] == "skipped"
+
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.8}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.7}, "trading_days": 63},
+            ],
+        }
+        second = json.loads(oos.invoke({"strategy_yaml": strategy_yaml_b}))
+        assert second["passed"] is True
+        assert agent._current_best_oos == pytest.approx(0.75)
+        assert second["pbo"]["status"] != "skipped"
+        assert second["pbo"]["skipped"] is False

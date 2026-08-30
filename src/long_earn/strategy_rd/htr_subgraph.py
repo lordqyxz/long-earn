@@ -1388,6 +1388,10 @@ def _check_pbo_gate(
     if len(is_sharpes) < _MIN_STRATEGIES_FOR_PBO_CHECK:
         return True  # 样本不足时跳过
     pbo_result = gate.evaluate(is_sharpes, oos_sharpes)
+    if pbo_result.skipped:
+        if logger:
+            logger.info(f"[HTR-OOS] S3 PBO 诊断跳过: {pbo_result.reason}")
+        return True
     if not pbo_result.passed:
         if logger:
             logger.warning(
