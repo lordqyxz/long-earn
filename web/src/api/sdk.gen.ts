@@ -31,7 +31,11 @@ export const listRuns = <ThrowOnError extends boolean = false>(options?: Options
 /**
  * Clean Empty Runs
  *
- * 删除无效回测运行（带 test 标签/空跑/错误/无 RUN_END 孤儿）的审计数据。
+ * 删除无效回测运行（带 test 标签/空跑/错误/沉寂孤儿）的审计数据。
+ *
+ * 孤儿口径带 30 分钟新鲜度护栏（见 analyzer.get_empty_or_error_runs），
+ * 正在运行的回测不会被误删。响应按实际成功删除数统计（个别 run 可能
+ * 在列出后被并发删除，delete_run 返回 0 不计入）。
  */
 export const cleanEmptyRuns = <ThrowOnError extends boolean = false>(options?: Options<CleanEmptyRunsData, ThrowOnError>): RequestResult<CleanEmptyRunsResponses, unknown, ThrowOnError> => (options?.client ?? client).delete<CleanEmptyRunsResponses, unknown, ThrowOnError>({ url: '/api/runs/clean', ...options });
 
@@ -39,6 +43,9 @@ export const cleanEmptyRuns = <ThrowOnError extends boolean = false>(options?: O
  * Delete Run
  *
  * 删除指定回测运行的所有审计日志。
+ *
+ * 带生产标签（RUN_START payload.tags 含 'prod'）的 run 默认拒绝删除
+ * （409），须显式 ``force=true`` 才允许删除，保护 ADR-005 可追溯链。
  */
 export const deleteRun = <ThrowOnError extends boolean = false>(options: Options<DeleteRunData, ThrowOnError>): RequestResult<DeleteRunResponses, DeleteRunErrors, ThrowOnError> => (options.client ?? client).delete<DeleteRunResponses, DeleteRunErrors, ThrowOnError>({ url: '/api/runs/{run_id}', ...options });
 

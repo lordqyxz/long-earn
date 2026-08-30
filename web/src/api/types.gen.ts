@@ -1402,7 +1402,12 @@ export type DeleteRunData = {
          */
         run_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Force
+         */
+        force?: boolean;
+    };
     url: '/api/runs/{run_id}';
 };
 
