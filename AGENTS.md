@@ -71,6 +71,12 @@ agent = ResearchAgent(context=context)  # 禁止无 context 构造
 - LangGraph 节点只返回待更新的 key。
 - Prompt：`MarkdownPromptTemplate` + jinja2 `{{ var }}`（ADR-011）；禁止 `${var}` / 自研 `core/render.py`。`.md` 与对应 Agent `.py` 同目录。
 
+### 3.1 领域用语（硬性约束）
+
+注释、文档字符串、Prompt、Markdown、提交说明与对话回复使用量化与架构领域用语；以 ADR 标题与源码字段名为准。禁止把增长产品隐喻或期权「多腿」口径套到本域结构。因子与仓位不得压成一词（动量因子 ≠ 选股端）。
+
+既成缩写（DSR、PBO、OOS、PIT、ToG 等）可直接使用。
+
 ---
 
 ## 四、质量门槛与测试
