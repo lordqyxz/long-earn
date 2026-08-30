@@ -18,4 +18,5 @@
 
 | 日期 | 范围 | 记录 | 修复记录 |
 |------|------|------|----------|
+| 2026-08-31 | 统计门控加固（`789c5aa`） | [2026-08-31-gates-hardening-review.md](2026-08-31-gates-hardening-review.md) | （待开） |
 | 2026-08-30 | 全系统（后端 src+scripts+tests / 前端 web） | [2026-08-30-full-system-review.md](2026-08-30-full-system-review.md) | [2026-08-30-remediation.md](2026-08-30-remediation.md) |
