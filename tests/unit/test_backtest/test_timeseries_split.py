@@ -21,3 +21,10 @@ class TestTimeSeriesSplitGap:
                 continue
             assert test[0] - train[-1] > 1
             assert test[0] - train[-1] == gap + 1
+
+    def test_gap_large_can_yield_empty_test_fold(self) -> None:
+        """gap 过大时末折 test 可为空（下游稳定性门应判有效折数不足）。"""
+        timestamps = list(range(12))
+        splits = TimeSeriesSplit(n_splits=3, gap=5).split(timestamps)
+        assert len(splits) == 3
+        assert splits[-1][1] == []

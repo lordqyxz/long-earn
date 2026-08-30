@@ -55,7 +55,20 @@ class WalkForwardStabilityGate:
 
     def evaluate(self, fold_results: list[dict[str, Any]]) -> StabilityResult:
         """评估 Walk-Forward 折间稳定性。"""
+        n_folds = len(fold_results)
         sharpes = _extract_fold_sharpes(fold_results)
+
+        if n_folds > 0 and len(sharpes) < n_folds:
+            return StabilityResult(
+                passed=False,
+                reason=(f"有效折数不足（{len(sharpes)}/{n_folds} 折有 test sharpe）"),
+                worst_fold_sharpe=min(sharpes) if sharpes else 0.0,
+                fold_sharpe_std=float(_safe_std(sharpes)),
+                consistency_ratio=(
+                    sum(1 for s in sharpes if s > 0) / len(sharpes) if sharpes else 0.0
+                ),
+                fold_sharpes=sharpes,
+            )
 
         if not sharpes:
             return StabilityResult(

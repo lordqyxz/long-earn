@@ -76,3 +76,20 @@ pair_legacy 非标准 CSCV；`run_walk_forward_parallel` 默认 gap=0 与 `run_o
 
 - preview：`--from 789c5aa^ --to 789c5aa`，9 files（引擎 gap + gates + RA + 三测）
 - 临时背景：`.ocr-gate-r2-bg.md`（可删）
+
+---
+
+## 修复处置（2026-08-31 测试加固）
+
+| 评审项 | 处置 | 回归测 |
+|--------|------|--------|
+| **H1** candidate 污染飞轮读路径 | `search_experience(required_outcome="success")`；develop `_get_experience_context` 同步过滤 | `TestSearchExperienceRequiredOutcome`、`TestDevelopAgentRequiredOutcome`、`TestMemorySaveExperience.test_candidate_outcome_not_marked_success` |
+| **H2** DSR 观测夏普与矩来源错配 | OOS mean + OOS 日收益矩（实现已合入） | `test_run_oos_gates_caches_evidence` 断言 `observed_sharpe_source==oos_mean` |
+| **H3** success 写回 metrics 污染 | 证据字段覆盖 LLM `sharpe_ratio` 等受保护键 | `test_success_writeback_evidence_overrides_inflated_sharpe`、`test_full_pipeline_with_oos`（`outcome==success` + sharpe 来自 OOS mean） |
+| **H4** PBO 矩阵按最短列截断 | 列长不一致 → `pair_legacy` | `test_pbo_mismatched_column_lengths_use_pair_legacy` |
+| **M1** 矩阵 skipped 不回退 | `status==skipped` 时回退 `pair_legacy` | 同上 + `test_current_best_oos_updates_and_pbo_runs` |
+| **M2** gap 空 test 折稳定性放水 | `len(sharpes) < n_folds` 硬拒 | `test_gap_large_can_yield_empty_test_fold`、`test_gap_empty_test_fold_fails_stability` |
+| **M3** invoke 不清 PBO session | `invoke` 重置 `_oos_return_columns` 等 | `test_invoke_clears_oos_session_state` |
+| **M6** 缺 OOS 失败拒写 / pipeline 弱断言 | 补拒写与全流程 outcome/sharpe | `test_record_path_outcome_rejects_when_oos_failed`、`test_full_pipeline_with_oos` |
+
+**未在本轮闭合（仍登记）**：M4 `run_oos_gates` 内 `bt.run` 不 `_register_trial`；M5 不强制 `backtest_reliable`；M7 outcome 枚举；M8 DSR `n_observations` 默认 252。

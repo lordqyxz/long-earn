@@ -110,7 +110,8 @@ class MemoryServiceImpl(MemoryService):
                 "reflection": experience.reflection,
                 "error_history": experience.error_history or [],
                 "sharpe_ratio": metrics.get("sharpe_ratio"),
-                "backtest_success": not metrics.get("error"),
+                "outcome": metrics.get("outcome"),
+                "backtest_success": metrics.get("outcome") == "success",
             },
         )
         sid = self._store.add(s)
@@ -122,6 +123,7 @@ class MemoryServiceImpl(MemoryService):
         query: str,
         k: int = 3,
         min_sharpe: float | None = None,
+        required_outcome: str | None = None,
     ) -> list[StrategyExperience]:
         """搜索历史策略经验 — 从结构化 metadata 重建 StrategyExperience（无 regex）。"""
         try:
@@ -143,6 +145,12 @@ class MemoryServiceImpl(MemoryService):
                 if s is None:
                     s = (meta.get("backtest_metrics", {}) or {}).get("sharpe_ratio")
                 if s is None or s < min_sharpe:
+                    continue
+
+            if required_outcome is not None:
+                backtest_metrics = meta.get("backtest_metrics", {}) or {}
+                outcome = backtest_metrics.get("outcome") or meta.get("outcome")
+                if outcome is None or str(outcome).lower() != required_outcome.lower():
                     continue
 
             experiences.append(

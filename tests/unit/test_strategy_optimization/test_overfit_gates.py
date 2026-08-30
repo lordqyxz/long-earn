@@ -74,6 +74,38 @@ class TestWalkForwardStabilityGate:
         assert result.consistency_ratio == pytest.approx(1.0)
         assert len(result.fold_sharpes) == 2
 
+    def test_partial_fold_sharpes_rejected(self) -> None:
+        """3 个 fold 仅 1 个有 sharpe → 不通过。"""
+        gate = WalkForwardStabilityGate()
+        fold_results = [
+            _fold(0.5),
+            {"fold_id": 1, "train": {}, "test": {}},
+            {"fold_id": 2, "train": {}, "test": {}},
+        ]
+        result = gate.evaluate(fold_results)
+        assert not result.passed
+        assert "有效折数不足" in result.reason
+        assert len(result.fold_sharpes) == 1
+
+    def test_single_fold_with_sharpe_passes(self) -> None:
+        """单折且完整仍可通过。"""
+        gate = WalkForwardStabilityGate()
+        result = gate.evaluate([_fold(0.5)])
+        assert result.passed
+
+    def test_gap_empty_test_fold_fails_stability(self) -> None:
+        """gap 致空 test 折时，fold 占位但无 sharpe → 有效折数不足。"""
+        gate = WalkForwardStabilityGate()
+        fold_results = [
+            _fold(0.5),
+            {"fold_id": 1, "train": {}, "test": {}},
+            _fold(0.4),
+        ]
+        result = gate.evaluate(fold_results)
+        assert not result.passed
+        assert "有效折数不足" in result.reason
+        assert len(result.fold_sharpes) == 2
+
 
 class TestDeflatedSharpeGate:
     """S2: Deflated Sharpe Ratio 门。"""
@@ -206,8 +238,7 @@ def _build_correlated_returns_matrix(
     rng = random.Random(seed)
     base = [rng.gauss(0.001, 0.01) for _ in range(t_rows)]
     return [
-        [base[t] + rng.gauss(0.0, 0.0005) for _ in range(n_cols)]
-        for t in range(t_rows)
+        [base[t] + rng.gauss(0.0, 0.0005) for _ in range(n_cols)] for t in range(t_rows)
     ]
 
 

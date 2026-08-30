@@ -189,7 +189,10 @@ class StrategyDevelopAgent(KnowledgeContextMixin):
         """获取成功案例参考"""
         try:
             results = self.memory.search_experience(
-                query=strategy_info, k=_MAX_EXPERIENCES, min_sharpe=0.5
+                query=strategy_info,
+                k=_MAX_EXPERIENCES,
+                min_sharpe=0.5,
+                required_outcome="success",
             )
         except Exception:
             if self.logger:

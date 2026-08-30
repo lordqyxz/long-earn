@@ -62,6 +62,7 @@ class MemoryService(Protocol):
         query: str,
         k: int = 3,
         min_sharpe: float | None = None,
+        required_outcome: str | None = None,
     ) -> list[StrategyExperience]:
         """按语义检索同类历史策略经验。
 
@@ -69,6 +70,8 @@ class MemoryService(Protocol):
             query: 查询文本
             k: 返回结果数
             min_sharpe: 最低夏普比率过滤（None 表示不过滤）
+            required_outcome: 若给定，只返回 ``metrics.outcome == required_outcome``
+                的经验（大小写不敏感）
 
         Returns:
             匹配的策略经验列表

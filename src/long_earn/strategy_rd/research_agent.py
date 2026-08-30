@@ -30,6 +30,31 @@ if TYPE_CHECKING:
 _DEFAULT_RECURSION_LIMIT = 50
 _BEAM_WIDTH = 3
 
+# success 写回时由证据覆盖、禁止 LLM metrics 篡改的键
+_PROTECTED_WRITEBACK_KEYS = frozenset(
+    {
+        "sharpe_ratio",
+        "total_return",
+        "max_drawdown",
+        "metrics_unreliable",
+        "degenerate",
+        "trade_count",
+        "worst_fold_sharpe",
+        "fold_sharpe_std",
+        "consistency_ratio",
+        "stability",
+        "merge",
+        "dsr",
+        "pbo",
+        "n_eff_trials",
+        "passed",
+        "reason",
+        "dsr_status",
+        "outcome",
+        "error",
+    }
+)
+
 
 def _daily_returns_as_floats(
     daily_returns: list[dict[str, Any]] | list[float] | None,
@@ -228,11 +253,19 @@ class ResearchAgent:
                 metrics,
             )
 
-        merged = dict(metrics)
-        if not merged and evidence.backtest_metrics:
-            merged = dict(evidence.backtest_metrics)
+        merged: dict[str, Any] = {}
+        if evidence.backtest_metrics:
+            merged.update(evidence.backtest_metrics)
         if evidence.oos_metrics:
             merged.update(evidence.oos_metrics)
+            merge_block = evidence.oos_metrics.get("merge")
+            if isinstance(merge_block, dict):
+                oos_mean = merge_block.get("oos_mean_sharpe")
+                if isinstance(oos_mean, (int, float)):
+                    merged["sharpe_ratio"] = float(oos_mean)
+        for key, value in metrics.items():
+            if key not in _PROTECTED_WRITEBACK_KEYS:
+                merged[key] = value
 
         block = _evidence_metrics_block_reason(merged)
         if block is not None:
@@ -755,17 +788,23 @@ class ResearchAgent:
             self._oos_candidate_pairs.append((is_sharpe, float(oos_mean)))
 
         pbo_gate = BacktestOverfitGate()
+        is_list = [p[0] for p in self._oos_candidate_pairs]
+        oos_list = [p[1] for p in self._oos_candidate_pairs]
         n_cols = len(self._oos_return_columns)
         if n_cols >= _MIN_STRATEGIES_FOR_PBO:
-            t_len = min(len(col) for col in self._oos_return_columns)
-            matrix = [
-                [self._oos_return_columns[j][i] for j in range(n_cols)]
-                for i in range(t_len)
-            ]
-            pbo = pbo_gate.evaluate_returns_matrix(matrix, n_blocks=8)
+            col_lens = [len(col) for col in self._oos_return_columns]
+            if max(col_lens) - min(col_lens) > 0:
+                pbo = pbo_gate.evaluate(is_list, oos_list)
+            else:
+                t_len = col_lens[0]
+                matrix = [
+                    [self._oos_return_columns[j][i] for j in range(n_cols)]
+                    for i in range(t_len)
+                ]
+                pbo = pbo_gate.evaluate_returns_matrix(matrix, n_blocks=8)
+                if pbo.status == "skipped":
+                    pbo = pbo_gate.evaluate(is_list, oos_list)
         else:
-            is_list = [p[0] for p in self._oos_candidate_pairs]
-            oos_list = [p[1] for p in self._oos_candidate_pairs]
             pbo = pbo_gate.evaluate(is_list, oos_list)
 
         return diagnostic_to_dict(
@@ -789,6 +828,7 @@ class ResearchAgent:
             start_date=self.context.config.train_start_date,
             end_date=self.context.config.train_end_date,
         )
+        self._register_trial(strategy_yaml)
         if isinstance(train_bt, dict) and is_metrics_unreliable(train_bt):
             diag = train_bt.get("strategy_diagnostics") or {}
             return {
@@ -875,6 +915,7 @@ class ResearchAgent:
     ) -> dict[str, Any]:
         """构造 DSR 诊断片段（可含完整 skew/kurt、MinTRL、haircut）。"""
         from long_earn.strategy_optimization.overfit_gates import (  # noqa: PLC0415
+            _MIN_RETURNS_FOR_MOMENTS,
             DeflatedSharpeGate,
             daily_return_moments,
             diagnostic_to_dict,
@@ -893,6 +934,7 @@ class ResearchAgent:
             observed_sharpe_source = "worst_fold"
 
         n_obs = 252
+        fold_days_resolved = False
         if fold_results:
             day_vals = [
                 int(f.get("trading_days", 0) or 0)
@@ -902,12 +944,18 @@ class ResearchAgent:
             avg_days = sum(day_vals) / max(len(fold_results), 1)
             if avg_days > 0:
                 n_obs = max(int(avg_days), 63)
+                fold_days_resolved = True
             else:
                 td = train_bt.get("trading_days")
                 if isinstance(td, int) and td > 0:
                     n_obs = max(td, 63)
+                    fold_days_resolved = True
 
         train_returns = train_bt.get("daily_returns")
+        if not fold_days_resolved:
+            train_values = _daily_returns_as_floats(train_returns)
+            if len(train_values) >= _MIN_RETURNS_FOR_MOMENTS:
+                n_obs = max(len(train_values), 63)
         moments = daily_return_moments(train_returns)
         moments_source = "train_daily_returns" if moments else "none"
         skew = moments[0] if moments else None
@@ -1221,6 +1269,9 @@ class ResearchAgent:
         """
         self._beam_paths = []
         self._evidence_cache = {}
+        self._oos_return_columns = []
+        self._oos_candidate_pairs = []
+        self._current_best_oos = None
         query = idea if not constraints else f"{idea} (约束: {constraints})"
         # 入口自动准备上下文（miss 时显式触发事件采集，见 _prepare_event_context）
         try:

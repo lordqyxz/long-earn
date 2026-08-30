@@ -358,6 +358,7 @@ class TestEvidenceGatePipeline:
         assert "passed" in parsed_oos
         assert parsed_oos["passed"] is True
         assert parsed_oos["stability"]["passed"] is True
+        assert parsed_oos["merge"]["oos_mean_sharpe"] == pytest.approx(0.6)
 
         # Step 3: record_path_outcome（训练集 + OOS 证据）
         rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
@@ -369,6 +370,11 @@ class TestEvidenceGatePipeline:
             }
         )
         assert "sid_exp_1" in out
+        agent.context.memory.save_experience.assert_called_once()
+        call_args = agent.context.memory.save_experience.call_args[0][0]
+        assert call_args.metrics.get("outcome") == "success"
+        assert call_args.metrics.get("sharpe_ratio") == pytest.approx(0.6)
+        assert call_args.metrics.get("sharpe_ratio") != 0.5
 
     def test_pipeline_rejects_degenerate(self, agent: ResearchAgent) -> None:
         """退化策略 → 拒绝写回"""
@@ -477,9 +483,7 @@ class TestEvidenceGatePipeline:
             "invoke 清空证据后，上一轮证据不应再支持 success 写回"
         )
 
-    def test_current_best_oos_updates_and_pbo_runs(
-        self, agent: ResearchAgent
-    ) -> None:
+    def test_current_best_oos_updates_and_pbo_runs(self, agent: ResearchAgent) -> None:
         """第二次更高 OOS mean 更新 _current_best_oos；候选≥2 时 PBO 非 skipped。"""
         strategy_yaml_a = self._valid_strategy()
         strategy_yaml_b = (
@@ -539,3 +543,128 @@ class TestEvidenceGatePipeline:
         agent.context.backtest_service.run_oos.assert_called()
         oos_call_kwargs = agent.context.backtest_service.run_oos.call_args.kwargs
         assert oos_call_kwargs.get("gap") == 5
+
+    def test_record_path_outcome_rejects_when_oos_failed(
+        self, agent: ResearchAgent
+    ) -> None:
+        """OOS passed=False 时 record success 被拒。"""
+        strategy_yaml = self._valid_strategy()
+        bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
+        bt.invoke({"strategy_yaml": strategy_yaml})
+
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": -0.5}, "trading_days": 63},
+                {"test": {"sharpe_ratio": -0.3}, "trading_days": 63},
+            ],
+        }
+        oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+        parsed = json.loads(oos.invoke({"strategy_yaml": strategy_yaml}))
+        assert parsed["passed"] is False
+
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
+        out = rec.invoke(
+            {
+                "path_summary": "OOS 未通过",
+                "strategy_yaml": strategy_yaml,
+                "metrics_json": '{"sharpe_ratio": 1.0}',
+            }
+        )
+        assert "拒绝写回成功" in out
+        agent.context.memory.save_experience.assert_not_called()
+
+    def test_success_writeback_evidence_overrides_inflated_sharpe(
+        self, agent: ResearchAgent
+    ) -> None:
+        """success 写回：LLM 虚高 sharpe 被 OOS 证据覆盖。"""
+        strategy_yaml = self._valid_strategy()
+        bt = next(t for t in agent._build_tools() if t.name == "run_backtest")
+        bt.invoke({"strategy_yaml": strategy_yaml})
+
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.6}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
+            ],
+        }
+        oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+        parsed = json.loads(oos.invoke({"strategy_yaml": strategy_yaml}))
+        assert parsed["passed"] is True
+        assert parsed["merge"]["oos_mean_sharpe"] == pytest.approx(0.55)
+
+        rec = next(t for t in agent._build_tools() if t.name == "record_path_outcome")
+        out = rec.invoke(
+            {
+                "path_summary": "证据覆盖 sharpe",
+                "strategy_yaml": strategy_yaml,
+                "metrics_json": '{"sharpe_ratio": 9.9}',
+            }
+        )
+        assert "sid_exp_1" in out
+        call_args = agent.context.memory.save_experience.call_args[0][0]
+        assert call_args.metrics.get("outcome") == "success"
+        assert call_args.metrics.get("sharpe_ratio") == pytest.approx(0.55)
+
+    def test_invoke_clears_oos_session_state(self, agent: ResearchAgent) -> None:
+        """invoke 后 _oos_return_columns 等 session 状态被清空。"""
+        agent._oos_return_columns = [[0.01, 0.02]]
+        agent._oos_candidate_pairs = [(0.5, 0.4)]
+        agent._current_best_oos = 0.45
+
+        agent._agent.invoke.return_value = {"messages": []}
+        agent.invoke("研发动量策略")
+
+        assert agent._oos_return_columns == []
+        assert agent._oos_candidate_pairs == []
+        assert agent._current_best_oos is None
+
+    def test_pbo_mismatched_column_lengths_use_pair_legacy(
+        self, agent: ResearchAgent
+    ) -> None:
+        """两列长度不同时不走截断矩阵，回退 pair_legacy。"""
+        yaml_a = self._valid_strategy()
+        yaml_b = (
+            "name: quality_momentum_v2\n"
+            "universe:\n"
+            "  type: main_board+gem\n"
+            "signals:\n"
+            "  - type: operator\n"
+            "    op: rank_top\n"
+            "    params:\n"
+            "      n: 20\n"
+        )
+        oos = next(t for t in agent._build_tools() if t.name == "run_oos_gates")
+        daily_short = [0.001 * (i % 5 - 2) for i in range(10)]
+        daily_long = [0.001 * (i % 5 - 2) for i in range(20)]
+
+        agent.context.backtest_service.run.return_value = {
+            "sharpe_ratio": 0.5,
+            "total_return": 0.1,
+            "trade_count": 42,
+            "strategy_diagnostics": {"degenerate": False, "trade_count": 42},
+            "daily_returns": daily_short,
+        }
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.5}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.4}, "trading_days": 63},
+            ],
+        }
+        json.loads(oos.invoke({"strategy_yaml": yaml_a}))
+
+        agent.context.backtest_service.run.return_value = {
+            "sharpe_ratio": 0.6,
+            "total_return": 0.12,
+            "trade_count": 42,
+            "strategy_diagnostics": {"degenerate": False, "trade_count": 42},
+            "daily_returns": daily_long,
+        }
+        agent.context.backtest_service.run_oos.return_value = {
+            "fold_results": [
+                {"test": {"sharpe_ratio": 0.8}, "trading_days": 63},
+                {"test": {"sharpe_ratio": 0.7}, "trading_days": 63},
+            ],
+        }
+        second = json.loads(oos.invoke({"strategy_yaml": yaml_b}))
+        assert second["pbo"]["method"] == "pair_legacy"
+        assert "method=pair_legacy" in second["pbo"]["reason"]

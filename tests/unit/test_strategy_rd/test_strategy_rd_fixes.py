@@ -562,6 +562,7 @@ class TestMemorySaveExperience:
                     "total_return": 0.42,
                     "sharpe_ratio": 1.2,
                     "max_drawdown": -0.1,
+                    "outcome": "success",
                 },
                 reflection="ok",
             )
@@ -576,4 +577,154 @@ class TestMemorySaveExperience:
         assert metrics.get("total_return") == 0.42
         assert metrics.get("sharpe_ratio") == 1.2
         assert metrics.get("max_drawdown") == -0.1
+        assert meta.get("outcome") == "success"
         assert meta.get("backtest_success") is True
+
+    def test_candidate_outcome_not_marked_success(self):
+        from long_earn.services.memory_service import MemoryServiceImpl
+
+        config = MagicMock()
+        service = MemoryServiceImpl(config, MagicMock(spec=LoggerService))
+
+        service.save_experience(
+            StrategyExperience(
+                name="Candidate",
+                code="yaml",
+                rationale="r",
+                metrics={
+                    "sharpe_ratio": 1.5,
+                    "outcome": "candidate",
+                },
+            )
+        )
+
+        meta = service._store.get_all()[0].metadata
+        assert meta.get("outcome") == "candidate"
+        assert meta.get("backtest_success") is False
+
+    def test_missing_outcome_not_marked_success(self):
+        from long_earn.services.memory_service import MemoryServiceImpl
+
+        config = MagicMock()
+        service = MemoryServiceImpl(config, MagicMock(spec=LoggerService))
+
+        service.save_experience(
+            StrategyExperience(
+                name="Legacy",
+                code="yaml",
+                rationale="r",
+                metrics={"sharpe_ratio": 1.0},
+            )
+        )
+
+        meta = service._store.get_all()[0].metadata
+        assert meta.get("outcome") is None
+        assert meta.get("backtest_success") is False
+
+
+class TestDevelopAgentRequiredOutcome:
+    """develop agent 成功案例检索须 required_outcome=success。"""
+
+    def test_get_experience_context_passes_required_outcome(self):
+        from long_earn.strategy_rd.agents.strategy_develop_agent import (
+            StrategyDevelopAgent,
+        )
+
+        context = _make_mock_context()
+        agent = StrategyDevelopAgent(context=context)
+        context.memory.search_experience = MagicMock(
+            return_value=[
+                StrategyExperience(
+                    name="Winner",
+                    code="name: w\n",
+                    rationale="ok",
+                    metrics={"sharpe_ratio": 1.2, "outcome": "success"},
+                )
+            ]
+        )
+
+        result = agent._get_experience_context("momentum strategy")
+
+        context.memory.search_experience.assert_called_once_with(
+            query="momentum strategy",
+            k=2,
+            min_sharpe=0.5,
+            required_outcome="success",
+        )
+        assert "Winner" in result
+        assert "成功案例" in result
+
+
+class TestSearchExperienceRequiredOutcome:
+    """search_experience required_outcome 过滤 candidate 污染飞轮读路径。"""
+
+    def _make_service(self):
+        from long_earn.services.memory_service import MemoryServiceImpl
+
+        config = MagicMock()
+        service = MemoryServiceImpl(config, MagicMock())
+        return service
+
+    def test_required_outcome_success_filters_candidate(self):
+        svc = self._make_service()
+
+        def fake_store_search(query, k=10, **kw):
+            return [
+                {
+                    "content": "A",
+                    "metadata": {
+                        "experience_type": "strategy",
+                        "term": "Candidate",
+                        "backtest_metrics": {
+                            "sharpe_ratio": 1.5,
+                            "outcome": "candidate",
+                        },
+                    },
+                    "similarity": 0.9,
+                },
+                {
+                    "content": "B",
+                    "metadata": {
+                        "experience_type": "strategy",
+                        "term": "Winner",
+                        "backtest_metrics": {
+                            "sharpe_ratio": 1.2,
+                            "outcome": "success",
+                        },
+                    },
+                    "similarity": 0.8,
+                },
+            ]
+
+        svc._store.search = fake_store_search  # type: ignore[method-assign]
+
+        result = svc.search_experience(
+            query="x", k=5, min_sharpe=0.5, required_outcome="success"
+        )
+
+        names = {r.name for r in result}
+        assert "Candidate" not in names
+        assert "Winner" in names
+
+    def test_required_outcome_reads_top_level_meta(self):
+        svc = self._make_service()
+
+        def fake_store_search(query, k=10, **kw):
+            return [
+                {
+                    "content": ".",
+                    "metadata": {
+                        "experience_type": "strategy",
+                        "term": "TopLevel",
+                        "outcome": "SUCCESS",
+                        "backtest_metrics": {"sharpe_ratio": 0.8},
+                    },
+                    "similarity": 0.9,
+                },
+            ]
+
+        svc._store.search = fake_store_search  # type: ignore[method-assign]
+
+        result = svc.search_experience(query="x", k=5, required_outcome="success")
+        assert len(result) == 1
+        assert result[0].name == "TopLevel"
