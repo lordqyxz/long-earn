@@ -1,4 +1,4 @@
-"""ResearchAgent / ToG 飞轮单元测试（ADR-018）
+"""ResearchAgent / ToG 正反馈闭环单元测试（ADR-018）
 
 接口层：工具契约、prepare_context、Master 委托路径。
 不跑真实 LLM / 回测。

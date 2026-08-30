@@ -16,7 +16,7 @@ description: 主智能体系统提示词（ADR-016）
 
 ## 使用指南
 
-- **策略研发类请求**（如"帮我研发一个动量策略"）-> 调用 `research_strategy`（内部为 ToG 飞轮，非固定 HTR 步序）
+- **策略研发类请求**（如"帮我研发一个动量策略"）-> 调用 `research_strategy`（内部为 ToG 正反馈闭环，非固定 HTR 步序）
 - **单股票/公司分析**（如"分析茅台"）-> 调用 `analyze_stock`
 - **新闻事件驱动**（如"最近降息对市场有什么影响"）-> 调用 `infer_events`
 - **复合请求**（如"分析茅台并给我一个适合它的策略"）-> 先 `analyze_stock`，再 `research_strategy`

@@ -1,7 +1,7 @@
 """ToG 策略研发智能体（ADR-018 / ADR-022）
 
 LLM ⊗ Graph：在 Substance / Ontology 上 explore + prune，
-用回测与统计验证门控作不可跳过的证据工具，写回路径结果形成飞轮。
+用回测与统计验证门控作不可跳过的证据工具，写回路径结果，形成正反馈闭环。
 
 硬性门控：Walk-Forward 稳定性 + held-out 相对 current best。
 诊断门控：DSR / PBO（缺料 skipped）。HTR 编排已 Deprecated。
@@ -1190,7 +1190,7 @@ class ResearchAgent:
             reflection: str = "",
             outcome: str = "success",
         ) -> str:
-            """将探索路径结果写回 Substance（飞轮）。
+            """将探索路径结果写回 Substance（正反馈闭环）。
 
             Args:
                 path_summary: 路径摘要 / 策略名

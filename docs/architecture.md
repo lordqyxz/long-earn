@@ -7,7 +7,7 @@
 
 ## 1. 一句话
 
-**MasterAgent 编排用户任务；ResearchAgent 在图上探索策略飞轮；回测引擎与统计门提供不可跳过的证据；Substance / Ontology 是共享知识图；数据层按能力显式点名，不做静默降级。**
+**MasterAgent 编排用户任务；ResearchAgent 按 ToG 正反馈闭环探索策略；回测引擎与统计门提供不可跳过的证据；Substance / Ontology 是共享知识图；数据层按能力显式点名，不做静默降级。**
 
 ---
 
@@ -72,7 +72,7 @@ flowchart TB
 
 ---
 
-## 4. 策略研发飞轮（ToG）
+## 4. 策略研发正反馈闭环（ToG）
 
 ```mermaid
 flowchart LR
@@ -115,7 +115,7 @@ flowchart LR
 | 场景 | 入口 |
 |------|------|
 | CLI / 对话 | `MasterAgent(context).invoke(...)` |
-| 直入策略飞轮 | `ResearchAgent(context).invoke(idea, constraints)` |
+| 直入策略研发闭环 | `ResearchAgent(context).invoke(idea, constraints)` |
 | 上下文激活 | `context.prepare_context(query)`（确定性；miss 采集由 agent 显式触发，ADR-021） |
 
 DI：一律 `create_runtime_context()` / `initialize_context()`，禁止无 context 构造 Agent。

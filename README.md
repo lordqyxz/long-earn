@@ -7,7 +7,7 @@
 Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
 
 - **分层智能体编排** — MasterAgent（ReAct）负责任务分解与跨能力调度（ADR-016）
-- **ToG 策略研发飞轮** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成飞轮（ADR-018）；HTR 假设树保留为 beam 谱系/状态存储，降为脚手架
+- **ToG 策略研发正反馈闭环** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成正反馈闭环（ADR-018）；HTR 假设树保留为 beam 谱系/状态存储，降为脚手架
 - **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012）
 - **事件图谱基础设施** — `prepare_context` 自动激活事件上下文；缺省时由 agent 层显式触发采集推理（ADR-007 / ADR-018）
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL + 算子目录描述策略，支持进程级并行回测（ADR-005 / ADR-009）
@@ -42,7 +42,7 @@ uv run python -m long_earn --help
 # 主智能体对话（MasterAgent ReAct）
 uv run python -m long_earn agent "分析某只股票"
 
-# 策略研发循环（ResearchAgent ToG 飞轮）
+# 策略研发循环（ResearchAgent ToG 正反馈闭环）
 uv run python -m long_earn research "基于 ROE 的选股策略"
 
 # 启动 FastAPI 后端（回测看板 / REST API / WebSocket，默认 8090）

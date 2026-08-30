@@ -500,7 +500,7 @@ class EventDrivenBacktestEngine:
 
         try:
             if full_data is None:
-                # 牛熊门控：策略声明 regime 时，benchmark/防守腿标的需进入
+                # 牛熊门控：策略声明 regime 时，benchmark/防御资产标的需进入
                 # 面板（门控在 DSLStrategy 内从历史面板读 benchmark 行）。
                 fetch_symbols = list(symbols)
                 regime_spec = getattr(strategy, "regime_spec", None)

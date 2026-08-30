@@ -4,7 +4,7 @@
 >
 > 按 **紧急 × 重要** 四象限组织（艾森豪威尔矩阵），合并功能开发与合规审计。
 > 判定准则：
-> - **重要**：扭曲回测可信度 / 阻断模拟盘准入 / 破坏 ToG 飞轮证据链
+> - **重要**：扭曲回测可信度 / 阻断模拟盘准入 / 破坏 ToG 正反馈闭环的证据链
 > - **紧急**：正在污染当前结果，或架构翻转后若不马上验证会把错误路径固化
 >
 > 威胁优先级仍适用：金融合规 / 数据正确性 > 功能完整性 > 工程质量。
@@ -24,12 +24,12 @@
 > 2026-08-23 性能优化（对标 NautilusTrader）：确定性事件 ID（时间戳派生 bar_trace_id 替代逐事件 uuid4，审计因果链贯穿）+ VisibilityGuard 窗口截断（O(T²)→O(T·W)）+ 因子全期预计算（O(T·U)，等价性由算子因果性证明背书，多 seed 测试守护）+ merged panel 跨 run Arrow 缓存（service 层开启，key 含 PG 数据版本水位，写事务原子自增自动失效）+ 审计批量写入（缓冲 500 条 executemany，查询前 flush 保 read-your-writes）。基准（5 标的 × 2 年小面板）：带审计端到端 2.27s→0.43s（-81%，审计开销 -98%）；大池下 O(T²) 消除收益随池规模放大。下一热点：`portfolio.update_market_values` 每 bar polars filter。
 > 2026-08-30 数据正确性修复：基准指数行情（000300/000905/000001/399006）纳入正式下载管线（`DataIngestionService.INDEX_QUOTES` 显式点名 + 按交易日增量维护，随 `download_data.py` 每次运行自动补齐），消除 regime 门控 benchmark 数据过期的静默退化威胁；存量数据已真机补齐到 2026-08-28。
 > 2026-08-30 引擎正确性修复：`run_walk_forward_parallel` test 折起点误用 `train_ts[0]`（test 回测覆盖训练期，OOS 指标污染，edff513）；此前所有折级 OOS 指标均受此影响，本轮合并门为首个干净窗口验证。
-> 2026-08-30 策略研发轮次结果：relative/combined 网格（1 对照 + 18 组合，训练集内）冠军 `com_rw60_m0`（训练 +162.17%，夏普 1.495，回撤 -20.57%），但 OOS 合并门 **CONTINUE**——测试集三折全负（-26%~-30%/折，夏普 -2.1~-2.9），S1 稳定性门拒绝；归因：价格动量股票腿在 2025-2026 震荡市风格翻转（反复止损），指数级门控无法挽救选股层 alpha 反号。纯 relative 模式训练集即全负，已排除。`best_strategy.yaml` 未变更（现任基准 OOS mean sharpe 1.47，合并门槛极高）。
+> 2026-08-30 策略研发轮次结果：relative/combined 网格（1 对照 + 18 组合，训练集内）冠军 `com_rw60_m0`（训练 +162.17%，夏普 1.495，回撤 -20.57%），但 OOS 合并门 **CONTINUE**——测试集三折全负（-26%~-30%/折，夏普 -2.1~-2.9），S1 稳定性门拒绝；归因：选股端的价格动量因子在 2025-2026 震荡市风格翻转（反复止损），指数级门控无法挽救选股层 alpha 反号。纯 relative 模式训练集即全负，已排除。`best_strategy.yaml` 未变更（现任基准 OOS mean sharpe 1.47，合并门槛极高）。
 > 2026-08-30 数据层死循环治理：财务同步水位表落地（`financial_sync_watermark` + 双水位判定，46382d8）；启动同步与回测读路径（`financial/sync.py::is_financial_stale`）共享同一水位与 `FINANCIAL_RECHECK_DAYS=7` 常量（常量下沉至 backtest.data.financial.sync，遵循 AGENTS.md 6.2「同款判定共享同一水位」铁律）。沉默股票从每次同步全量重查（实测 4620 只 ≈ 20 分钟/次）降为每 7 天一次小窗检查；批次成功才推进水位（含合法 0 行），异常保留重试；PIT 对齐不受影响（行数据仍带真实 announce_date）。行情路径评估后不引入水位：日更域数据状态自愈，仅 ~12 只退市/停牌标的每次多查数秒，且水位会有损逐日精确补齐语义。
 > 2026-08-30 全系统评审与修复（OCR delegate 模式，记录见 `docs/reviews/`）：后端 Critical 6 / High 17 / Medium 56 / Low 63，前端 High 3 / Medium 8 / Low 14。第一轮分支 `fix/review-critical-high` 关闭全部 Critical/High + 约 25 项 Medium/Low；**第二轮**关闭剩余 Medium/Low（止盈对称成交、风控 pre_trade、TLS/pg/算子/策略/API Origin/前端竞态等），ruff/lint-imports/pyright/pytest **1134** 全绿 + 前端 tsc 零错误。回测语义继续变化（止盈不按日内 high 白送；风控卖出走 pre_trade，强制清仓允许跌停价卖出）。详见 remediation「第二轮」。
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
-- [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（股票腿动量因子 OOS 反号，非门控问题）。下一轮方向：重设计股票腿（动量→基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
+- [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（选股端动量因子 OOS 反号，非门控问题）。下一轮方向：重设计选股端（动量因子改为基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
 - [x] **ADR-022 §A 实施（统计验证门控）** — P0–P4 已落地（2026-08-30）；**加固**（2026-08-31，见 `docs/research/2026-08-31-statistical-validation-gates.md`）：
   - **P0** 诊断契约：`dsr`/`pbo` 含 `status|passed|skipped|reason`；写回不再因 DSR 硬拒；PBO 缺料 `skipped`
   - **P1** PBO 迁入 ToG：矩阵 CSCV（`evaluate_returns_matrix`）优先，pair_legacy 兜底

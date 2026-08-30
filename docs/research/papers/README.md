@@ -29,7 +29,7 @@
 - https://arxiv.org/pdf/2307.07697
 - https://arxiv.org/pdf/2407.10805
 
-**明确不落地（本轮）**：Think-on-Graph 3.0（MACER 四角色）— 等 ResearchAgent 飞轮稳定后再评估。
+**明确不落地（本轮）**：Think-on-Graph 3.0（MACER 四角色）— 等 ResearchAgent 正反馈闭环稳定后再评估。
 
 ```bibtex
 @inproceedings{sun2024thinkongraph,

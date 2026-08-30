@@ -6,9 +6,9 @@
 熊市切换防守资产。Faber (2007) 的均线择时模型是最经典实现。
 
 设计：
-- 股票腿固定为网格搜索最优质量动量参数（W20 动量 + ROE>12% + 净利同比>20%
+- 选股端固定为网格搜索最优质量动量参数（W20 动量 + ROE>12% + 净利同比>20%
   + Top5 + 20日调仓 + 15% 止损，近6月 +20.31%）
-- 门控维度扫描：均线窗口（120/200/250）× 防守腿（低波红利ETF / 十年国债ETF /
+- 门控维度扫描：均线窗口（120/200/250）× 防御资产（低波红利ETF / 十年国债ETF /
   空仓持币），外加纯股票对照组
 - benchmark = 沪深300（指数行情已入 PG 缓存）
 
@@ -51,7 +51,7 @@ TRAIN_END = "2024-12-31"
 
 BENCHMARK = "000300.SH"
 
-# 防守腿候选：低波红利ETF / 十年国债ETF / 空仓持币
+# 防御资产候选：低波红利ETF / 十年国债ETF / 空仓持币
 DEFENSIVES: list[tuple[str, str]] = [
     ("512890.SH", "红利低波ETF"),
     ("511260.SH", "十年国债ETF"),
@@ -61,7 +61,7 @@ DEFENSIVES: list[tuple[str, str]] = [
 # 均线窗口：120（半年）/ 200（经典年线）/ 250（Faber 10月线）
 WINDOWS = [120, 200, 250]
 
-# 股票腿：质量动量网格搜索最优参数（近6月 +20.31% 那组）
+# 选股端：质量动量网格搜索最优参数（近6月 +20.31% 那组）
 STOCK_LEG_YAML = """\
 name: {name}
 description: {desc}
@@ -96,7 +96,7 @@ trading_cost:
 
 
 def _regime_block(window: int, defensive: str) -> str:
-    """渲染 regime 配置块（防守腿为空 = 熊市空仓）。"""
+    """渲染 regime 配置块（防御资产为空 = 熊市空仓）。"""
     assets = f'["{defensive}"]' if defensive else "[]"
     return (
         "regime:\n"

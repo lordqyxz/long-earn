@@ -2,7 +2,7 @@
 
 覆盖点（按项目规范：接口契约 + 系统关键环节）：
 1. DSL 解析：regime 字段可选、缺 benchmark 拒绝、warmup 含均线窗口
-2. 端到端：牛市走算子选股、熊市切换防守腿 ETF（切换日强制调仓）
+2. 端到端：牛市走算子选股、熊市切换防御资产 ETF（切换日强制调仓）
 3. 退化路径：benchmark 行缺失时记诊断并退化为始终牛市
 """
 
@@ -71,7 +71,7 @@ def _style_crash_panel() -> pl.DataFrame:
     """风格崩盘测试面板（2025Q1 复刻）：指数横盘，池内股票崩盘。
 
     IDX 恒定 100（绝对均线模式判牛），A/B 每日 -1%（池动量崩），
-    DEF 恒定（防守腿）。rel_window=5 下第 6 日起池动量约 -5% vs 指数 0%
+    DEF 恒定（防御资产）。rel_window=5 下第 6 日起池动量约 -5% vs 指数 0%
     → relative 门判熊。
     """
     rows = []
@@ -99,7 +99,7 @@ def _style_crash_panel() -> pl.DataFrame:
 
 
 def _pool_outperform_panel() -> pl.DataFrame:
-    """池跑赢面板：A/B 每日 +0.5%，IDX 恒定（相对门判牛，全程持股票腿）。"""
+    """池跑赢面板：A/B 每日 +0.5%，IDX 恒定（相对门判牛，全程持有选股组合）。"""
     rows = []
     base = datetime(2024, 1, 1)
     for i in range(40):
@@ -153,11 +153,11 @@ def _index_bull_pool_crash_panel() -> pl.DataFrame:
 
 
 def _barbell_panel(with_benchmark: bool = True) -> pl.DataFrame:
-    """哑铃测试面板：A/B 上行（牛市腿），IDX 前 20 天涨后 20 天跌（牛→熊），
-    DEF 恒定（防守腿）。
+    """哑铃测试面板：A/B 上行（牛市选股组合），IDX 前 20 天涨后 20 天跌（牛→熊），
+    DEF 恒定（防御资产）。
 
     IDX 时间线（window=10 均线）：day0-19 上行 → bull；day21+ 跌破均线 → bear。
-    rebalance_freq=20D 下若切换日不强制调仓，防守腿永远不会被买入。
+    rebalance_freq=20D 下若切换日不强制调仓，防御资产永远不会被买入。
     """
     rows = []
     base = datetime(2024, 1, 1)
@@ -272,7 +272,7 @@ class TestRegimeDslParse:
 
 class TestRegimeGateE2E:
     def test_bull_picks_stocks_bear_switches_to_defensive(self, mock_data_provider):
-        """端到端：牛市买股票腿，熊市切换防守腿 ETF。
+        """端到端：牛市买入选股组合，熊市切换至防御资产 ETF。
 
         DEF.SH 的成交同时证明两件事：熊市门控生效 + 切换日强制调仓生效
         （bear 出现在 day21+，非 rebalance_freq=20D 的调仓相位）。
@@ -290,8 +290,8 @@ class TestRegimeGateE2E:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" in filled, f"熊市应买入防守腿, 实际成交: {filled}"
-        assert filled & {"A.SZ", "B.SH"}, f"牛市应买入股票腿, 实际成交: {filled}"
+        assert "DEF.SH" in filled, f"熊市应买入防御资产, 实际成交: {filled}"
+        assert filled & {"A.SZ", "B.SH"}, f"牛市应买入选股组合, 实际成交: {filled}"
 
     def test_benchmark_missing_degrades_to_bull(self, mock_data_provider):
         """benchmark 行缺失：记一次诊断，门控退化为始终牛市（不阻断回测）。"""
@@ -319,7 +319,7 @@ class TestRegimeWarmupSeed:
 
         增量追踪重构后 deque 只看交易期 bar，warmup 期数据不进 on_bar，
         导致 absolute 模式前 window 个交易日盲判牛市（对照组收益漂移）。
-        预填修复后盲区消除：首 bar 直接切换防守腿，股票腿零成交。
+        预填修复后盲区消除：首 bar 直接切换防御资产，选股组合零成交。
         """
         dsl = parse_strategy_yaml(REGIME_YAML)
         engine = EventDrivenBacktestEngine(
@@ -335,9 +335,9 @@ class TestRegimeWarmupSeed:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" in filled, f"warmup 已破位应首日切防守腿, 实际成交: {filled}"
+        assert "DEF.SH" in filled, f"warmup 已破位应首日切防御资产, 实际成交: {filled}"
         assert not (filled & {"A.SZ", "B.SH"}), (
-            f"门控盲区期不应买入股票腿, 实际成交: {filled}"
+            f"门控盲区期不应买入选股组合, 实际成交: {filled}"
         )
 
 
@@ -359,10 +359,10 @@ class TestRelativeRegime:
         assert compute_warmup_days(combined) >= 250 * 1.5 + 30
 
     def test_style_crash_switches_to_defensive(self, mock_data_provider):
-        """2025Q1 复刻：指数横盘（绝对门判牛），池崩盘 → relative 门判熊切防守腿。
+        """2025Q1 复刻：指数横盘（绝对门判牛），池崩盘 → relative 门判熊切防御资产。
 
         这是 OOS fold 0 失败场景的直接回归测试：absolute 模式在该面板下
-        全程满仓股票腿挨打，relative 模式必须切换。
+        全程满仓选股组合挨打，relative 模式必须切换。
         """
         dsl = parse_strategy_yaml(REL_YAML)
         engine = EventDrivenBacktestEngine(
@@ -377,10 +377,10 @@ class TestRelativeRegime:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" in filled, f"风格崩盘应切换防守腿, 实际成交: {filled}"
+        assert "DEF.SH" in filled, f"风格崩盘应切换防御资产, 实际成交: {filled}"
 
     def test_pool_outperform_stays_in_stocks(self, mock_data_provider):
-        """池跑赢指数 → 全程牛市持股票腿，防守腿零成交。"""
+        """池跑赢指数 → 全程牛市持有选股组合，防御资产零成交。"""
         dsl = parse_strategy_yaml(REL_YAML)
         engine = EventDrivenBacktestEngine(
             data_provider=mock_data_provider(_pool_outperform_panel())
@@ -394,8 +394,8 @@ class TestRelativeRegime:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" not in filled, f"牛市不应触碰防守腿, 实际成交: {filled}"
-        assert filled & {"A.SZ", "B.SH"}, f"牛市应买入股票腿, 实际成交: {filled}"
+        assert "DEF.SH" not in filled, f"牛市不应触碰防御资产, 实际成交: {filled}"
+        assert filled & {"A.SZ", "B.SH"}, f"牛市应买入选股组合, 实际成交: {filled}"
 
     def test_rel_margin_suppresses_noise(self, mock_data_provider):
         """margin 校准：池轻微落后（-5%）在 margin=10% 内不触发熊市。"""
@@ -414,13 +414,13 @@ class TestRelativeRegime:
         assert result.success, result.message
         filled = _fill_symbols(engine)
         assert "DEF.SH" not in filled, (
-            f"落后未超 margin 不应切防守腿, 实际成交: {filled}"
+            f"落后未超 margin 不应切防御资产, 实际成交: {filled}"
         )
 
 
 class TestCombinedRegime:
     def test_index_bull_pool_crash_fires_via_rel_branch(self, mock_data_provider):
-        """combined 判别性测试：指数上行（abs=牛）+ 池崩盘（rel=熊）→ 切防守腿。
+        """combined 判别性测试：指数上行（abs=牛）+ 池崩盘（rel=熊）→ 切防御资产。
 
         面板专门构造为只有 rel 分支能触发，证明 combined 的 OR 逻辑接入了
         相对强度信号（而非仅绝对均线）。
@@ -439,10 +439,10 @@ class TestCombinedRegime:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" in filled, f"rel 分支应触发熊市切防守腿, 实际成交: {filled}"
+        assert "DEF.SH" in filled, f"rel 分支应触发熊市切防御资产, 实际成交: {filled}"
 
     def test_market_crash_fires_via_abs_branch(self, mock_data_provider):
-        """combined 市场级崩盘：指数跌破均线（abs=熊）→ 切防守腿（经典路径保持）。"""
+        """combined 市场级崩盘：指数跌破均线（abs=熊）→ 切防御资产（经典路径保持）。"""
         yaml_combined = REL_YAML.replace("mode: relative", "mode: combined")
         dsl = parse_strategy_yaml(yaml_combined)
         engine = EventDrivenBacktestEngine(
@@ -457,4 +457,4 @@ class TestCombinedRegime:
         )
         assert result.success, result.message
         filled = _fill_symbols(engine)
-        assert "DEF.SH" in filled, f"abs 分支应触发熊市切防守腿, 实际成交: {filled}"
+        assert "DEF.SH" in filled, f"abs 分支应触发熊市切防御资产, 实际成交: {filled}"

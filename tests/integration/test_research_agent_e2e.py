@@ -1,6 +1,6 @@
 """ResearchAgent 端到端集成测试（ADR-018）
 
-验证 ResearchAgent 在真实 LLM + 回测路径上的飞轮闭环：
+验证 ResearchAgent 在真实 LLM + 回测路径上的正反馈闭环：
 1. ResearchAgent 可正确初始化并编译 LangGraph ReAct agent
 2. invoke() 返回包含 summary / result / beam_paths / event_context 的结果
 3. 事件上下文 prepare_context 自动激活

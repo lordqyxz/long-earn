@@ -94,7 +94,7 @@ class DSLStrategy(BaseStrategy):
 
     @property
     def regime_spec(self) -> Any:
-        """暴露 regime 配置给引擎（拉数时并入 benchmark/防守腿标的）。
+        """暴露 regime 配置给引擎（拉数时并入 benchmark/防御资产标的）。
 
         鸭子类型探针：引擎用 getattr(strategy, "regime_spec", None) 探测，
         不引入对 DSLStrategy 的类型依赖。
@@ -143,7 +143,7 @@ class DSLStrategy(BaseStrategy):
     def precompute_panel(self, full_data: pl.DataFrame) -> pl.DataFrame:
         """引擎钩子：全期预计算 factor 列（O(T·U) 一次），返回 enriched 面板。
 
-        替代逐调仓日在历史面板重算因子（O(T²·U/f)）。benchmark/防守腿
+        替代逐调仓日在历史面板重算因子（O(T²·U/f)）。benchmark/防御资产
         标的保留在面板内（regime 门控需要），其因子列多算几列开销可忽略
         （over("symbol") 按 symbol 分区，互不影响）。等价性由算子因果性
         证明背书（见 operator_executor.precompute_factors）。
@@ -181,7 +181,7 @@ class DSLStrategy(BaseStrategy):
         引擎层独立运行，不受此门控影响。
 
         牛熊门控（配置 ``regime`` 时）：absolute=指数 vs 均线，
-        relative=池动量 vs 指数动量，combined=任一触发；熊市切换防守腿
+        relative=池动量 vs 指数动量，combined=任一触发；熊市切换至防御资产
         等权信号（空列表=空仓），牛市走算子链；状态切换日强制调仓
         （不等调仓周期，防熊市延迟入场）。
         """
@@ -272,7 +272,7 @@ class DSLStrategy(BaseStrategy):
         每 bar O(截面规模)：benchmark 收盘价进定长 deque（覆盖最大窗口），
         池内 symbol 各一条定长 deque（rel_window+1，历史不足的 symbol 自动
         跳过）。替代每 bar 全面板 filter/group_by（O(面板行数)，大股票池
-        下不可承受）。benchmark/防守腿不参与池动量，全部排除。
+        下不可承受）。benchmark/防御资产不参与池动量，全部排除。
         """
         cfg = self.dsl.regime
         if cfg is None or bars.height == 0:
@@ -414,7 +414,7 @@ class DSLStrategy(BaseStrategy):
         return prev is not None and prev != state
 
     def _strip_non_pool(self, history_pl: pl.DataFrame) -> pl.DataFrame:
-        """剥离股票池之外的行（benchmark/防守腿），防其混入算子选股候选。"""
+        """剥离股票池之外的行（benchmark/防御资产），防其混入算子选股候选。"""
         cfg = self.dsl.regime
         if cfg is None:
             return history_pl
@@ -422,9 +422,9 @@ class DSLStrategy(BaseStrategy):
         return history_pl.filter(~pl.col("symbol").is_in(non_pool))
 
     def _defensive_signal(self, context, bars: pl.DataFrame):
-        """熊市防守腿信号：等权买入可交易的防守标的（当日无行情的剔除）。
+        """熊市防御资产信号：等权买入可交易的防御标的（当日无行情的剔除）。
 
-        防守腿全缺失或列表为空时返回 None（空仓持币，本身即防守）。
+        防御资产全缺失或列表为空时返回 None（空仓持币，本身即防守）。
         """
         cfg = self.dsl.regime
         assert cfg is not None  # 调用方保证
@@ -443,7 +443,7 @@ class DSLStrategy(BaseStrategy):
                 "rationale": {
                     "formula": (
                         f"benchmark({cfg.benchmark}) 下穿 {cfg.window} 日均线 → "
-                        f"防守腿等权: {'+'.join(tradable)}"
+                        f"防御资产等权: {'+'.join(tradable)}"
                     ),
                     "weights": {"method": "equal"},
                 }

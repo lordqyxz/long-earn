@@ -7,11 +7,11 @@ regime=牛）质量动量池风格性崩盘——指数绝对 MA 门防市场级
 风格崩盘。本脚本扫描 relataive/combined 门控（池动量 vs 指数动量）。
 
 设计：
-- 股票腿固定为质量动量最优参数（W20 动量 + ROE>12% + 净利同比>20% +
+- 选股端固定为质量动量最优参数（W20 动量 + ROE>12% + 净利同比>20% +
   Top5 + 20日调仓 + 15% 止损）
 - 门控维度：mode（relative/combined）× rel_window（10/20/60）×
   rel_margin（0/5%/10%），对照 = 上轮冠军 absolute W120
-- 防守腿固定红利低波 ETF 512890（上轮排序第一），benchmark 沪深300
+- 防御资产固定红利低波 ETF 512890（上轮排序第一），benchmark 沪深300
 
 评估窗口与铁律：近6月 + 训练集全程（不触测试/验证集）。
 
@@ -164,7 +164,7 @@ def main() -> None:
     print(f"并发 worker 数: {max_workers}")
     print(f"近6月窗口: {RECENT_START} ~ {RECENT_END}")
     print(f"训练集对照: {TRAIN_START} ~ {TRAIN_END}")
-    print(f"benchmark: {BENCHMARK} / 防守腿: {DEFENSIVE}")
+    print(f"benchmark: {BENCHMARK} / 防御资产: {DEFENSIVE}")
     print("=" * 118)
 
     combos = build_yamls()

@@ -100,7 +100,7 @@ class UniverseConfig(BaseModel):
 class RegimeConfig(BaseModel):
     """牛熊状态门控配置（哑铃策略）
 
-    以基准指数判定市场状态，熊市切换防守腿（低波红利 ETF / 国债 ETF，
+    以基准指数判定市场状态，熊市切换至防御资产（低波红利 ETF / 国债 ETF，
     空列表表示熊市空仓持币）。三种门控模式：
 
     - ``absolute``：指数收盘价 vs 长期均线（经典 Faber 择时）。防市场级
@@ -110,7 +110,7 @@ class RegimeConfig(BaseModel):
     - ``combined``：两者任一触发即熊市（OR 逻辑，最保守）
 
     门控在 ``DSLStrategy.on_bar`` 内实现（增量收盘价追踪，O(截面)/bar），
-    要求预取面板包含 benchmark 与防守腿标的（并行路径由 ``parallel.py``
+    要求预取面板包含 benchmark 与防御资产标的（并行路径由 ``parallel.py``
     自动并入，单进程路径由引擎拉数时并入）。
     """
 
@@ -121,7 +121,7 @@ class RegimeConfig(BaseModel):
     )
     defensive_assets: list[str] = Field(
         default_factory=list,
-        description="熊市防守腿标的（如低波红利 ETF 512890.SH）；空列表=熊市空仓",
+        description="熊市防御资产（如低波红利 ETF 512890.SH）；空列表=熊市空仓",
     )
     mode: Literal["absolute", "relative", "combined"] = Field(
         default="absolute",
@@ -142,7 +142,7 @@ class RegimeConfig(BaseModel):
         return self.mode in ("relative", "combined")
 
     def non_pool_symbols(self) -> list[str]:
-        """股票池之外需进入预取面板的标的（benchmark + 防守腿）。"""
+        """股票池之外需进入预取面板的标的（benchmark + 防御资产）。"""
         return [self.benchmark, *self.defensive_assets]
 
 
@@ -166,7 +166,7 @@ class StrategyDSL(BaseModel):
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     regime: RegimeConfig | None = Field(
         default=None,
-        description="牛熊状态门控（可选）。配置后熊市切换防守腿，牛市正常选股",
+        description="牛熊状态门控（可选）。配置后熊市切换至防御资产，牛市按选股信号持仓",
     )
     start_date: str | None = Field(default=None, description="回测开始日期")
     end_date: str | None = Field(default=None, description="回测结束日期")

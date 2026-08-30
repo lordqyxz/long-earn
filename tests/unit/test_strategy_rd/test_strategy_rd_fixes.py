@@ -330,7 +330,7 @@ class TestDevelopAgentRequiredOutcome:
 
 
 class TestSearchExperienceRequiredOutcome:
-    """search_experience required_outcome 过滤 candidate 污染飞轮读路径。"""
+    """search_experience required_outcome 过滤 candidate 污染经验检索路径。"""
 
     def _make_service(self):
         from long_earn.services.memory_service import MemoryServiceImpl

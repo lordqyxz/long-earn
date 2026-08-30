@@ -44,7 +44,7 @@ ADR-022 明确：DSR/PBO **在契约齐备前不作硬拒**；缺料必须 `skip
 - AFML 完整 purge 依赖标签视界；本仓库以 `TimeSeriesSplit.gap` 做 **embargo 简化**
 - `BacktestService.run_oos` 默认 `gap=5`（交易日）
 
-## 3. 写回契约（飞轮）
+## 3. 写回契约（正反馈闭环）
 
 | outcome | 条件 |
 |---------|------|

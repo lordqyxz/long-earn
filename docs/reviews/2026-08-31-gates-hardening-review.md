@@ -6,7 +6,7 @@
 
 **统计**：Critical 0 | High 4 | Medium 8 | Low 6（正文枚举；两路复核合并去重）。
 
-**总体结论**：本轮 **写路径**落实「success 须 `oos_passed`」有效，CSCV 矩阵算法与 Bailey 块组合逻辑一致，诊断门未误升硬门、`skipped` 未静默当通过。剩余风险集中在 **飞轮读路径**（candidate≈success）、**DSR 输入错配**、**PBO 列对齐/回退**、**空 test 折下稳定性门折数不足**。
+**总体结论**：本轮 **写路径**落实「success 须 `oos_passed`」有效，CSCV 矩阵算法与 Bailey 块组合逻辑一致，诊断门未误升硬门、`skipped` 未静默当通过。剩余风险集中在 **经验检索路径**（candidate≈success）、**DSR 输入错配**、**PBO 列对齐/回退**、**空 test 折下稳定性门折数不足**。
 
 ---
 
@@ -20,7 +20,7 @@
 
 | # | 位置 | 问题 |
 |---|------|------|
-| H1 | `memory_service.py:113,120-145` + `strategy_develop_agent.py:189-202` | **candidate 污染飞轮读路径**：落盘 `backtest_success=not error`、检索仅 `min_sharpe`，不滤 `outcome`；develop 以「成功案例」注入 train-only 高夏普候选 |
+| H1 | `memory_service.py:113,120-145` + `strategy_develop_agent.py:189-202` | **candidate 污染经验检索路径**：落盘 `backtest_success=not error`、检索仅 `min_sharpe`，不滤 `outcome`；develop 以「成功案例」注入 train-only 高夏普候选 |
 | H2 | `research_agent.py:885-921` | **DSR 观测夏普与矩来源错配**：`observed_sharpe` 用 OOS mean，skew/kurt 用训练集 `daily_returns`；违背 mapping 升硬门前置「同源」 |
 | H3 | `research_agent.py:231-235` + OOS payload 不含顶层 `sharpe_ratio` | **success 写回允许 metrics_json 污染**：LLM 可注入虚高 `sharpe_ratio` 并落盘；证据门不校验夏普真实性 |
 | H4 | `research_agent.py:760-764` | **PBO 矩阵按最短列 index 截断**：跨策略日收益长度不一致时无日历对齐，CSCV 块语义失真 |
@@ -83,7 +83,7 @@ pair_legacy 非标准 CSCV；`run_walk_forward_parallel` 默认 gap=0 与 `run_o
 
 | 评审项 | 处置 | 回归测 |
 |--------|------|--------|
-| **H1** candidate 污染飞轮读路径 | `search_experience(required_outcome="success")`；develop `_get_experience_context` 同步过滤 | `TestSearchExperienceRequiredOutcome`、`TestDevelopAgentRequiredOutcome`、`TestMemorySaveExperience.test_candidate_outcome_not_marked_success` |
+| **H1** candidate 污染经验检索路径 | `search_experience(required_outcome="success")`；develop `_get_experience_context` 同步过滤 | `TestSearchExperienceRequiredOutcome`、`TestDevelopAgentRequiredOutcome`、`TestMemorySaveExperience.test_candidate_outcome_not_marked_success` |
 | **H2** DSR 观测夏普与矩来源错配 | OOS mean + OOS 日收益矩（实现已合入） | `test_run_oos_gates_caches_evidence` 断言 `observed_sharpe_source==oos_mean` |
 | **H3** success 写回 metrics 污染 | 证据字段覆盖 LLM `sharpe_ratio` 等受保护键 | `test_success_writeback_evidence_overrides_inflated_sharpe`、`test_full_pipeline_with_oos`（`outcome==success` + sharpe 来自 OOS mean） |
 | **H4** PBO 矩阵按最短列截断 | 列长不一致 → `pair_legacy` | `test_pbo_mismatched_column_lengths_use_pair_legacy` |

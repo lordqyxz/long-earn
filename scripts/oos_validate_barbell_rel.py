@@ -52,7 +52,7 @@ from long_earn.strategy_optimization.overfit_gates import (  # noqa: E402
     WalkForwardStabilityGate,
 )
 
-# 门控基准与防守腿（哑铃策略面板必备，run_walk_forward 不会自动注入）
+# 门控基准与防御资产（哑铃策略面板必备，run_walk_forward 不会自动注入）
 BENCHMARK = "000300.SH"
 DEFENSIVE = "512890.SH"
 MERGE_THRESHOLD = 0.05
@@ -115,7 +115,7 @@ def main() -> None:
     print(f"候选: {candidate_path.name}")
     print(f"合并门: S1 稳定性门 且 mean(oos_sharpe) 差 > {MERGE_THRESHOLD}")
 
-    # 股票池：候选 universe（main_board+gem）@ 测试集末，另注入 benchmark/防守腿
+    # 股票池：候选 universe（main_board+gem）@ 测试集末，另注入 benchmark/防御资产
     symbols = ctx.data_provider.get_symbols("main_board+gem", test_end)
     formatted = PandasToPolarsProvider.format_symbols(symbols)
     for extra in (BENCHMARK, DEFENSIVE):

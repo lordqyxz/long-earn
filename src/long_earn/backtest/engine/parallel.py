@@ -284,8 +284,8 @@ def _extra_fetch_symbols(strategy_yamls: list[str], benchmark_symbol: str) -> se
 
     - benchmark_symbol：基准指标计算需面板含其行情（此前未并入，
       基准 Alpha/Beta 一直拿不到数据，一并修复）
-    - regime 配置：牛熊门控的 benchmark + 防守腿标的（DSLStrategy
-      从历史面板读 benchmark 行判牛熊，熊市买防守腿）
+    - regime 配置：牛熊门控的 benchmark + 防御资产标的（DSLStrategy
+      从历史面板读 benchmark 行判牛熊，熊市买防御资产）
     解析失败的 YAML 忽略（调用方解析期已报错，此处不重复失败）。
     """
     extra: set[str] = set()
