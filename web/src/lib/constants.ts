@@ -6,6 +6,3 @@ export const CHART_TRADE_LOOKBACK_DAYS_BEFORE = 90
 
 /** K 线图：末笔交易日后向延伸天数 */
 export const CHART_TRADE_LOOKBACK_DAYS_AFTER = 30
-
-/** 事件时间线默认查询天数 */
-export const EVENT_TIMELINE_DAYS = 30

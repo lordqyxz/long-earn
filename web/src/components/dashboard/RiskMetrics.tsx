@@ -1,5 +1,5 @@
 import { Shield, AlertTriangle, ArrowDown, Calendar, TrendingUp, Activity } from 'lucide-react'
-import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
+import { CollapsibleSection } from '@/components/ui/collapsible-section'
 import { formatPercent } from '@/lib/utils'
 import type { RiskMetrics, Benchmark } from '@/api'
 

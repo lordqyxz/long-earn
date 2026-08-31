@@ -1,138 +1,17 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useEffect, useCallback } from 'react'
 import { X, Building2, Loader2 } from 'lucide-react'
-import { symbolDetail, symbolFinancials } from '@/api'
-import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  Cell,
-} from 'recharts'
-import { CHART_COLORS } from '@/lib/chart-colors'
-
-export interface SymbolDetail {
-  symbol: string
-  name: string
-  industry: string
-  region: string
-  listing_date: string
-  total_shares: number
-  float_shares: number
-  market_value: number
-  flow_market_value: number
-}
-
-interface FinancialRecord {
-  report_date: string
-  announce_date: string
-  revenue: number
-  net_profit: number
-  research_expenses: number
-  eps: number
-  bps: number
-  roe: number
-  roe_weighted: number
-  gross_margin: number
-  net_profit_margin: number
-  net_profit_yoy: number
-  revenue_yoy: number
-  debt_to_assets: number
-  ocf: number
-  capex: number
-  investing_cf: number
-  financing_cf: number
-  net_cash_change: number
-  cash_from_sales: number
-}
+import { useSymbolDetail } from '@/hooks/useSymbolDetail'
+import { SymbolFinancialCharts } from '@/components/dashboard/charts/SymbolFinancialCharts'
 
 interface Props {
   symbol: string | null
   onClose: () => void
 }
 
-// ── 配色 ──
-const COLORS = {
-  revenue: CHART_COLORS.up,
-  netProfit: CHART_COLORS.up,
-  netLoss: CHART_COLORS.down,
-  roe: '#8b5cf6',
-  margin: '#f59e0b',
-  grid: CHART_COLORS.grid,
-  textMuted: CHART_COLORS.textMuted,
-  textBright: CHART_COLORS.textBright,
-  // 现金流配色
-  ocf: CHART_COLORS.up,
-  investingCf: '#3b82f6',
-  financingCf: '#f59e0b',
-  capex: '#94a3b8',
-  fcfPositive: CHART_COLORS.up,
-  fcfNegative: CHART_COLORS.down,
-}
-
 export function SymbolDetailDialog({ symbol, onClose }: Props) {
-  const [detail, setDetail] = useState<SymbolDetail | null>(null)
-  const [financials, setFinancials] = useState<FinancialRecord[]>([])
-  const [loading, setLoading] = useState(false)
-  const [loadingFin, setLoadingFin] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [finError, setFinError] = useState<string | null>(null)
+  const { detail, financials, loading, loadingFin, error, finError } = useSymbolDetail(symbol)
 
   const handleClose = useCallback(() => onClose(), [onClose])
-
-  useEffect(() => {
-    if (!symbol) {
-      setDetail(null)
-      setFinancials([])
-      return
-    }
-
-    const controller = new AbortController()
-    setLoading(true)
-    setLoadingFin(true)
-    setError(null)
-    setFinError(null)
-    setDetail(null)
-    setFinancials([])
-
-    symbolDetail({ path: { symbol }, signal: controller.signal })
-      .then(({ data, error }) => {
-        if (controller.signal.aborted) return
-        if (error || !data) throw new Error('获取详情失败')
-        setDetail(parseSymbolDetail(data, symbol))
-      })
-      .catch((e: unknown) => {
-        if (controller.signal.aborted) return
-        if (e instanceof DOMException && e.name === 'AbortError') return
-        setError(e instanceof Error ? e.message : String(e))
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
-
-    symbolFinancials({ path: { symbol }, signal: controller.signal })
-      .then(({ data, error }) => {
-        if (controller.signal.aborted) return
-        if (error) throw new Error('获取财务数据失败')
-        setFinancials(parseFinancialRecords(data?.financials))
-      })
-      .catch((e: unknown) => {
-        if (controller.signal.aborted) return
-        if (e instanceof DOMException && e.name === 'AbortError') return
-        setFinError(e instanceof Error ? e.message : String(e))
-        setFinancials([])
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoadingFin(false)
-      })
-
-    return () => controller.abort()
-  }, [symbol])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -141,23 +20,6 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [handleClose])
-
-  // 财务数据按时间升序排列（图表用）
-  const sortedFinancials = useMemo(
-    () => [...financials].sort((a, b) => a.report_date.localeCompare(b.report_date)),
-    [financials],
-  )
-
-  // 格式化财报日期为短标签 + 计算自由现金流
-  const chartData = useMemo(
-    () =>
-      sortedFinancials.map((f) => ({
-        ...f,
-        label: f.report_date?.slice(0, 7) || '',
-        fcf: (f.ocf || 0) - (f.capex || 0),
-      })),
-    [sortedFinancials],
-  )
 
   if (!symbol) return null
 
@@ -253,261 +115,14 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
                 </div>
               )}
 
-              {!loadingFin && !finError && chartData.length === 0 && (
+              {!loadingFin && !finError && financials.length === 0 && (
                 <div className="py-6 text-center text-sm text-muted-foreground">
                   暂无财务数据
                 </div>
               )}
 
-              {!loadingFin && chartData.length > 0 && (
-                <div className="space-y-4">
-                  {/* 营业收入 */}
-                  <FinanceChartCard title="营业收入" unit="亿">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${(v / 1e8).toFixed(0)}`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => formatMoney(v)}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="revenue" name="营业收入" fill={COLORS.revenue} radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* 净利润 */}
-                  <FinanceChartCard title="净利润" unit="亿">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${(v / 1e8).toFixed(0)}`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => formatMoney(v)}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="net_profit" name="净利润" radius={[2, 2, 0, 0]}>
-                          {chartData.map((d, i) => (
-                            <Cell
-                              key={`np-${i}`}
-                              fill={d.net_profit >= 0 ? COLORS.netProfit : COLORS.netLoss}
-                            />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* ROE + 净利率 */}
-                  <FinanceChartCard title="ROE & 净利率" unit="%">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <LineChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${v.toFixed(0)}%`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => `${v.toFixed(2)}%`}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="roe"
-                          name="ROE"
-                          stroke={COLORS.roe}
-                          strokeWidth={2}
-                          dot={{ r: 2 }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="net_profit_margin"
-                          name="净利率"
-                          stroke={COLORS.margin}
-                          strokeWidth={2}
-                          dot={{ r: 2 }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* 营收 & 净利同比增速 */}
-                  <FinanceChartCard title="同比增长" unit="%">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${v.toFixed(0)}%`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => `${v.toFixed(2)}%`}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="revenue_yoy" name="营收同比" fill="#60a5fa" radius={[2, 2, 0, 0]} />
-                        <Bar dataKey="net_profit_yoy" name="净利同比" fill="#34d399" radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* 资产负债率 */}
-                  <FinanceChartCard title="资产负债率" unit="%">
-                    <ResponsiveContainer width="100%" height={120}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${v.toFixed(0)}%`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => `${v.toFixed(2)}%`}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="debt_to_assets" name="资产负债率" fill="#94a3b8" radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* ── 现金流量 ── */}
-                  <div className="pt-2">
-                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      现金流量
-                    </h4>
-                  </div>
-
-                  {/* 经营活动现金流 */}
-                  <FinanceChartCard title="经营活动现金流量净额" unit="亿">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${(v / 1e8).toFixed(0)}`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => formatMoney(v)}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="ocf" name="经营活动现金流" radius={[2, 2, 0, 0]}>
-                          {chartData.map((d, i) => (
-                            <Cell
-                              key={`ocf-${i}`}
-                              fill={d.ocf >= 0 ? COLORS.ocf : COLORS.netLoss}
-                            />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* 三大活动现金流 */}
-                  <FinanceChartCard title="三大活动现金流" unit="亿">
-                    <ResponsiveContainer width="100%" height={160}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${(v / 1e8).toFixed(0)}`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => formatMoney(v)}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Legend wrapperStyle={{ fontSize: 10 }} />
-                        <Bar dataKey="ocf" name="经营" fill={COLORS.ocf} radius={[2, 2, 0, 0]} />
-                        <Bar dataKey="investing_cf" name="投资" fill={COLORS.investingCf} radius={[2, 2, 0, 0]} />
-                        <Bar dataKey="financing_cf" name="筹资" fill={COLORS.financingCf} radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-
-                  {/* 自由现金流 */}
-                  <FinanceChartCard title="自由现金流 (OCF - CapEx)" unit="亿">
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tickFormatter={(v) => `${(v / 1e8).toFixed(0)}`}
-                          tick={{ fontSize: 10, fill: COLORS.textMuted }}
-                          width={40}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => formatMoney(v)}
-                          labelStyle={{ fontSize: 11 }}
-                          contentStyle={{ fontSize: 11 }}
-                        />
-                        <Bar dataKey="fcf" name="自由现金流" radius={[2, 2, 0, 0]}>
-                          {chartData.map((d, i) => (
-                            <Cell
-                              key={`fcf-${i}`}
-                              fill={d.fcf >= 0 ? COLORS.fcfPositive : COLORS.fcfNegative}
-                            />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </FinanceChartCard>
-                </div>
+              {!loadingFin && financials.length > 0 && (
+                <SymbolFinancialCharts financials={financials} />
               )}
             </>
           )}
@@ -517,63 +132,6 @@ export function SymbolDetailDialog({ symbol, onClose }: Props) {
   )
 }
 
-function parseSymbolDetail(
-  data: Record<string, unknown>,
-  fallbackSymbol: string,
-): SymbolDetail {
-  return {
-    symbol: toString(data.symbol, fallbackSymbol),
-    name: toString(data.name),
-    industry: toString(data.industry),
-    region: toString(data.region),
-    listing_date: toString(data.listing_date),
-    total_shares: toNumber(data.total_shares),
-    float_shares: toNumber(data.float_shares),
-    market_value: toNumber(data.market_value),
-    flow_market_value: toNumber(data.flow_market_value),
-  }
-}
-
-function parseFinancialRecords(
-  raw: Array<{ [key: string]: unknown }> | undefined,
-): FinancialRecord[] {
-  if (!raw) return []
-  return raw.map((item) => ({
-    report_date: toString(item.report_date),
-    announce_date: toString(item.announce_date),
-    revenue: toNumber(item.revenue),
-    net_profit: toNumber(item.net_profit),
-    research_expenses: toNumber(item.research_expenses),
-    eps: toNumber(item.eps),
-    bps: toNumber(item.bps),
-    roe: toNumber(item.roe),
-    roe_weighted: toNumber(item.roe_weighted),
-    gross_margin: toNumber(item.gross_margin),
-    net_profit_margin: toNumber(item.net_profit_margin),
-    net_profit_yoy: toNumber(item.net_profit_yoy),
-    revenue_yoy: toNumber(item.revenue_yoy),
-    debt_to_assets: toNumber(item.debt_to_assets),
-    ocf: toNumber(item.ocf),
-    capex: toNumber(item.capex),
-    investing_cf: toNumber(item.investing_cf),
-    financing_cf: toNumber(item.financing_cf),
-    net_cash_change: toNumber(item.net_cash_change),
-    cash_from_sales: toNumber(item.cash_from_sales),
-  }))
-}
-
-function toString(value: unknown, fallback = ''): string {
-  if (value == null) return fallback
-  return String(value)
-}
-
-function toNumber(value: unknown): number {
-  const n = Number(value)
-  return Number.isFinite(n) ? n : 0
-}
-
-// ── 子组件 ──
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between border-b border-border/50 pb-1.5">
@@ -582,28 +140,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     </div>
   )
 }
-
-function FinanceChartCard({
-  title,
-  unit,
-  children,
-}: {
-  title: string
-  unit: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="rounded-md border border-border/50 p-3">
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-xs font-medium text-foreground">{title}</span>
-        <span className="text-[10px] text-muted-foreground">单位: {unit}</span>
-      </div>
-      {children}
-    </div>
-  )
-}
-
-// ── 格式化工具 ──
 
 function formatShares(shares: number): string {
   if (!shares || shares <= 0) return '-'
@@ -617,10 +153,4 @@ function formatMarketValue(value: number): string {
   if (value >= 1e8) return `${(value / 1e8).toFixed(2)} 亿元`
   if (value >= 1e4) return `${(value / 1e4).toFixed(2)} 万元`
   return `${value.toFixed(0)} 元`
-}
-
-function formatMoney(v: number): string {
-  if (Math.abs(v) >= 1e8) return `${(v / 1e8).toFixed(2)} 亿`
-  if (Math.abs(v) >= 1e4) return `${(v / 1e4).toFixed(2)} 万`
-  return `${v.toFixed(0)}`
 }

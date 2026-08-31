@@ -1,12 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { ResearchState, ResearchEvent, RoundMetrics } from '@/types/research'
 import { NO_BEST_RETURN_SENTINEL } from '@/lib/constants'
-
-const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/research`
+import {
+  buildWsUrl,
+  nextReconnectDelay,
+  shouldSkipReconnect,
+} from '@/lib/wsReconnect'
 
 const RECONNECT_BASE_DELAY_MS = 3000
-const RECONNECT_MAX_DELAY_MS = 30000
 
 const INITIAL_STATE: ResearchState = {
   connected: false,
@@ -34,7 +35,7 @@ export function useResearchWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
     manualCloseRef.current = false
 
-    const ws = new WebSocket(WS_URL)
+    const ws = new WebSocket(buildWsUrl('/ws/research'))
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -57,13 +58,15 @@ export function useResearchWebSocket() {
     }
 
     ws.onclose = () => {
-      // 主动关闭或已被新连接替换的过期连接：短路，不再排定重连
-      if (manualCloseRef.current || wsRef.current !== ws) return
+      if (shouldSkipReconnect({
+        manualClose: manualCloseRef.current,
+        current: wsRef.current,
+        closed: ws,
+      })) return
       setState((s) => ({ ...s, connected: false }))
       const delay = reconnectDelayRef.current
       reconnectTimer.current = setTimeout(() => {
-        // 指数退避：每次翻倍，上限 30 秒
-        reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_DELAY_MS)
+        reconnectDelayRef.current = nextReconnectDelay(delay)
         connect()
       }, delay)
     }

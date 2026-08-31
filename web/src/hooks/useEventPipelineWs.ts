@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { eventStats, eventTimeline, listEvents, listRelations } from '@/api'
-import type { EventStats, EventItem, RelationItem, TimelinePoint } from '@/api'
 import type { PipelineMessage } from '@/types'
-import { EVENT_TIMELINE_DAYS } from '@/lib/constants'
+import {
+  buildWsUrl,
+  nextReconnectDelay,
+  shouldSkipReconnect,
+} from '@/lib/wsReconnect'
 
 const RECONNECT_BASE_DELAY_MS = 5000
-const RECONNECT_MAX_DELAY_MS = 30000
 
-export function useWebSocket() {
+export function useEventPipelineWs() {
   const [connected, setConnected] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [pipelineStage, setPipelineStage] = useState<string>('idle')
@@ -24,14 +25,11 @@ export function useWebSocket() {
 
   const connect = useCallback(() => {
     manualCloseRef.current = false
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/events`
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(buildWsUrl('/ws/events'))
     wsRef.current = ws
 
     ws.onopen = () => {
       setConnected(true)
-      // 成功连接后重置重连退避间隔
       reconnectDelayRef.current = RECONNECT_BASE_DELAY_MS
       addLog('[WebSocket 已连接]')
       ws.send(JSON.stringify({ action: 'subscribe' }))
@@ -74,14 +72,16 @@ export function useWebSocket() {
     }
 
     ws.onclose = () => {
-      // 主动关闭或已被新连接替换的过期连接：短路，不再排定重连
-      if (manualCloseRef.current || wsRef.current !== ws) return
+      if (shouldSkipReconnect({
+        manualClose: manualCloseRef.current,
+        current: wsRef.current,
+        closed: ws,
+      })) return
       setConnected(false)
       const delay = reconnectDelayRef.current
       addLog(`[WebSocket 已断开，${Math.round(delay / 1000)}秒后重连...]`)
       reconnectTimerRef.current = setTimeout(() => {
-        // 指数退避：每次翻倍，上限 30 秒
-        reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_DELAY_MS)
+        reconnectDelayRef.current = nextReconnectDelay(delay)
         connect()
       }, delay)
     }
@@ -115,48 +115,4 @@ export function useWebSocket() {
   }, [])
 
   return { connected, log, pipelineStage, pipelineProgress, triggerPipeline, reloadData }
-}
-
-export function useEventData() {
-  const [stats, setStats] = useState<EventStats | null>(null)
-  const [timeline, setTimeline] = useState<TimelinePoint[]>([])
-  const [events, setEvents] = useState<EventItem[]>([])
-  const [relations, setRelations] = useState<RelationItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const [statsRes, timelineRes, eventsRes, relationsRes] = await Promise.all([
-        eventStats(),
-        eventTimeline({ query: { days: EVENT_TIMELINE_DAYS } }),
-        listEvents({ query: { limit: 100 } }),
-        listRelations({ query: { limit: 50 } }),
-      ])
-
-      const failures: string[] = []
-      if (statsRes.error) failures.push('统计数据')
-      if (timelineRes.error) failures.push('时间线')
-      if (eventsRes.error) failures.push('事件列表')
-      if (relationsRes.error) failures.push('影响关系')
-      if (failures.length > 0) {
-        throw new Error(`${failures.join('、')}加载失败`)
-      }
-
-      setStats(statsRes.data ?? null)
-      setTimeline(timelineRes.data?.timeline ?? [])
-      setEvents(eventsRes.data?.events ?? [])
-      setRelations(relationsRes.data?.relations ?? [])
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => { load() }, [load])
-
-  return { stats, timeline, events, relations, loading, error, reload: load }
 }

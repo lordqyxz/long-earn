@@ -10,7 +10,7 @@ import {
   Tooltip,
   Legend,
 } from 'recharts'
-import { CollapsibleSection } from '@/components/dashboard/CollapsibleSection'
+import { CollapsibleSection } from '@/components/ui/collapsible-section'
 import { TrendingUp } from 'lucide-react'
 import { CHART_COLORS } from '@/lib/chart-colors'
 import type { EquityPoint } from '@/api'

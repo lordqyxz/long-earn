@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
-import { BarChart3, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { cleanEmptyRuns, deleteRun } from '@/api'
 import { RunList } from '@/components/dashboard/RunList'
 import { BacktestDetail } from '@/components/dashboard/BacktestDetail'
+import { RunTabs } from '@/components/dashboard/RunTabs'
 import { useRuns } from '@/hooks/useRuns'
-import { formatPercent } from '@/lib/utils'
 
 type Notice = { type: 'success' | 'error'; message: string }
 
@@ -134,75 +134,24 @@ export function DashboardPage() {
 
       {/* Right: Tabbed content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {openTabs.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center text-muted-foreground">
-              <BarChart3 className="h-12 w-12 mx-auto mb-3 opacity-20" />
-              <p className="text-sm">点击左侧列表中的回测运行以查看详情</p>
-            </div>
+        <RunTabs
+          openTabs={openTabs}
+          activeTab={activeTab}
+          runs={runs}
+          onSelect={setActiveTab}
+          onClose={closeTab}
+        />
+        {openTabs.length > 0 && (
+          <div className="flex-1 overflow-hidden">
+            {openTabs.map((runId) => (
+              <div
+                key={runId}
+                className={activeTab === runId ? 'h-full overflow-auto' : 'hidden'}
+              >
+                <BacktestDetail runId={runId} />
+              </div>
+            ))}
           </div>
-        ) : (
-          <>
-            {/* Tab bar */}
-            <div className="flex items-stretch border-b border-border bg-muted/30 overflow-x-auto shrink-0">
-              {openTabs.map((runId) => {
-                const run = runs.find((r) => r.run_id === runId)
-                const isActive = activeTab === runId
-                const ret = run?.total_return ?? 0
-                return (
-                  <div
-                    key={runId}
-                    role="tab"
-                    tabIndex={0}
-                    aria-selected={isActive}
-                    onClick={() => setActiveTab(runId)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        setActiveTab(runId)
-                      }
-                    }}
-                    className={`group flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-colors whitespace-nowrap ${
-                      isActive
-                        ? 'bg-background text-foreground'
-                        : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-                    }`}
-                  >
-                    <span className="text-xs truncate max-w-[120px]">
-                      {run?.strategy_id || runId.slice(0, 8)}
-                    </span>
-                    {run && (
-                      <span
-                        className={`text-xs font-semibold ${
-                          ret >= 0 ? 'text-success' : 'text-destructive'
-                        }`}
-                      >
-                        {formatPercent(ret, 1)}
-                      </span>
-                    )}
-                    <button
-                      className="ml-1 text-muted-foreground hover:text-destructive opacity-50 group-hover:opacity-100 transition-opacity"
-                      onClick={(e) => closeTab(runId, e)}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-
-            {/* Tab content - all mounted, hidden if inactive */}
-            <div className="flex-1 overflow-hidden">
-              {openTabs.map((runId) => (
-                <div
-                  key={runId}
-                  className={activeTab === runId ? 'h-full overflow-auto' : 'hidden'}
-                >
-                  <BacktestDetail runId={runId} />
-                </div>
-              ))}
-            </div>
-          </>
         )}
       </div>
     </div>

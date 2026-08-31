@@ -19,14 +19,14 @@ web/
 └── src/
     ├── api/                 # openapi-ts 生成的客户端（勿手改，运行 api:gen 重新生成）
     ├── components/
-    │   ├── ui/              # shadcn 基础原语（button/card/badge/table/...）
-    │   ├── dashboard/       # 回测看板相关组件
-    │   ├── research/        # 策略研发相关组件
-    │   └── event-flow/      # 事件分析相关组件
-    ├── hooks/               # 数据获取与 WebSocket hooks
-    ├── lib/                 # 工具函数（cn / 格式化）
-    ├── pages/               # 路由页面
-    └── types/               # 领域类型
+    │   ├── ui/              # shadcn 原语 + CollapsibleSection
+    │   ├── dashboard/       # 回测看板：编排 + trades/ audit/ charts/
+    │   ├── research/        # 策略研发
+    │   └── event-flow/      # 事件分析（Trigger / Stats / Table / Log）
+    ├── hooks/               # 一文件一 hook；WS 与 REST 分开
+    ├── lib/                 # cn / 格式化 / wsReconnect
+    ├── pages/               # 路由组合面
+    └── types/               # OpenAPI 覆盖不到的 WS 类型（events-ws / research）
 ```
 
 ## 开发
