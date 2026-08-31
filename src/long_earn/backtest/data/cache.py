@@ -58,6 +58,7 @@ from long_earn.backtest.data.financial.schemas import (
     FinancialSchemaRegistry,
 )
 from long_earn.core.db import (
+    exec_sql as _exec,
     get_engine,
     raw_psycopg_connection,
     read_connection,
@@ -79,22 +80,6 @@ def _process_write_lock() -> threading.RLock:
 
     with _WRITE_LOCKS_GUARD:
         return _WRITE_LOCKS.setdefault(_PG_LOCK_NAMESPACE, threading.RLock())
-
-
-def _exec(conn: Connection, sql: str, params: list[Any] | None = None) -> Any:
-    """驱动级 SQL 执行适配（保持 psycopg 调用习惯，SQL 字符串零改写）。
-
-    SQLAlchemy ``exec_driver_sql`` 的列表参数语义是 executemany（元素须为
-    元组/字典），与 psycopg「标量参数列表」习惯冲突。本适配按元素类型路由：
-    - 标量列表 → 转元组单执行（本仓绝大多数查询）；
-    - 元组/字典元素的列表 → 原样透传驱动 executemany（save_universe 等
-      批量 upsert）。
-    """
-    if params is None:
-        return conn.exec_driver_sql(sql)
-    if len(params) > 0 and isinstance(params[0], tuple | dict):
-        return conn.exec_driver_sql(sql, params)
-    return conn.exec_driver_sql(sql, tuple(params))
 
 
 # ── 简单表 Core 元数据（DML 类型安全 + DDL 单一真相源）───────────────

@@ -13,8 +13,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-import psycopg
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from long_earn.backtest.domain.interfaces import AuditRecord
 from long_earn.backtest.engine.audit import RUN_TAG_TEST, PostgresAuditProvider
@@ -286,7 +286,7 @@ class TestSelfHealing:
             a.close()  # 落库 (run_id, trace_id, seq=1)
             # b 的 seq 同样从 1 开始 → 同主键 (run_id, trace_id, seq) 冲突
             b.log_event(_make_record(run_id=run_id, trace_id=trace_id))
-            with pytest.raises(psycopg.errors.UniqueViolation):
+            with pytest.raises(IntegrityError):
                 b.query_events(run_id, {})  # 触发 flush → 冲突上抛
             # 自愈后换 trace_id 再写：应恢复成功
             b.log_event(_make_record(run_id=run_id, trace_id=f"{trace_id}-x"))
@@ -295,21 +295,18 @@ class TestSelfHealing:
             a.close()
             b.close()
 
-    def test_connection_drop_self_heals(self) -> None:
-        """连接级故障后应丢弃连接，下次写入重连恢复。
-
-        批量写入时代：连接故障在 flush（query_events 触发）时暴露。
-        """
-        run_id = f"drop-{uuid4().hex[:12]}"
+    def test_flush_uses_pooled_short_connection(self) -> None:
+        """flush 不持有实例长连接；close 后另一 provider 仍可读已落库事件。"""
+        run_id = f"pool-{uuid4().hex[:12]}"
         provider = PostgresAuditProvider()
         _log_run_start(provider, run_id)
-        provider.log_event(_make_record(run_id=run_id))
-        # 故障注入：直接关闭底层连接，模拟服务端断开（不走 close() 的干净路径）
-        assert provider._conn is not None
-        provider._conn.close()
-        provider.log_event(_make_record(run_id=run_id, trace_id="t-drop"))
-        with pytest.raises(psycopg.OperationalError):
-            provider.query_events(run_id, {})  # 触发 flush → 死连接上抛
-        # 自愈后下次写入应重连成功
-        provider.log_event(_make_record(run_id=run_id, trace_id="t-drop2"))
+        provider.log_event(_make_record(run_id=run_id, trace_id="t-pool"))
+        assert "_conn" not in provider.__dict__
         provider.close()
+
+        other = PostgresAuditProvider()
+        try:
+            records = other.query_events(run_id, {"event_type": "MARKET_DATA"})
+            assert len(records) == 1
+        finally:
+            other.close()

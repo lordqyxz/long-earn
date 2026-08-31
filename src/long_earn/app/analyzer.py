@@ -3,21 +3,24 @@
 基于 PostgreSQL 审计日志，提供回测结果分析、风险指标计算、多策略对比
 等功能。同时提供可视化所需的结构化 JSON 数据导出接口。
 
-全量迁移 PostgreSQL 后，审计日志与价格行情统一存储于 PG（``core.pg``
-裁决连接参数），不再有 DuckDB 本地文件。所有连接默认 read_only，
+审计日志与价格行情统一存储于 PG。读路径 ``read_connection(read_only=True)``，
+写路径（删除）``write_transaction()``，连接由 ``core.db`` 池化管理。
 遵循单写者纪律（写者仅 PostgresAuditProvider / DataCache 写入路径）。
 """
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 from loguru import logger
+from sqlalchemy.engine import Connection
 
 from long_earn.backtest.engine.audit import RUN_TAG_PROD
-from long_earn.core.pg import pg_connect
+from long_earn.core.db import exec_sql, read_connection, write_transaction
 
 # 风险指标计算所需的最小日收益率数据点数
 _MIN_DAILY_RETURNS_FOR_RISK = 2
@@ -46,31 +49,29 @@ class BacktestAnalyzer:
     允许 Agent 通过 SQL 查询 PostgreSQL 审计日志，使用 Polars 进行数据分析，
     并导出可视化所需的结构化 JSON 数据。
 
-    所有连接默认 read_only（删除等写操作走独立的可写连接并立即提交）。
+    读路径只读短连接；删除等写操作走 ``write_transaction``，块退出提交。
     """
 
-    def _get_conn(self) -> Any:
-        # 只读连接：审计/分析消费侧一律只读，遵循单写者纪律。
-        # row_factory=None：全模块查询均以 row[N] 元组下标访问（保持
-        # DuckDB 时代 fetchall 契约；PG jsonb 由 psycopg 反序列化为 dict，
-        # 经 _payload_as_dict 统一兼容）。
-        return pg_connect(read_only=True, row_factory=None)
+    @contextmanager
+    def _read(self) -> Iterator[Connection]:
+        """只读短连接（分析侧防误写）。"""
+        with read_connection(read_only=True) as conn:
+            yield conn
 
-    def _get_writable_conn(self) -> Any:
-        # 可写连接：仅在删除操作时短暂使用，用完立即关闭。
-        # 与只读连接一致返回元组行（row_factory=None）：delete_run 以
-        # row[0] 下标访问，默认 dict_row 行会抛 KeyError 被吞掉、返回 0，
-        # 导致删除接口误报 "Run not found"（历史 bug）。
-        return pg_connect(row_factory=None)
+    @contextmanager
+    def _write(self) -> Iterator[Connection]:
+        """可写短事务（仅删除等维护操作）。"""
+        with write_transaction() as conn:
+            yield conn
 
     @staticmethod
-    def _rows_to_pl(conn: Any, query: str, params: list[Any]) -> pl.DataFrame:
-        """执行查询并转为 polars DataFrame（psycopg 无 .pl()）。"""
-        cur = conn.execute(query, params)
-        if cur.description is None:
+    def _rows_to_pl(conn: Connection, query: str, params: list[Any]) -> pl.DataFrame:
+        """执行查询并转为 polars DataFrame。"""
+        result = exec_sql(conn, query, params)
+        if not result.returns_rows:
             return pl.DataFrame()
-        cols = [d.name for d in cur.description]
-        rows = cur.fetchall()
+        cols = list(result.keys())
+        rows = [tuple(row) for row in result.fetchall()]
         return pl.DataFrame(rows, schema=cols, orient="row")
 
     @staticmethod
@@ -100,10 +101,11 @@ class BacktestAnalyzer:
         Returns:
             按启动时间降序排列的 run 列表
         """
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                f"""
+        with self._read() as conn:
+            try:
+                rows = exec_sql(
+                    conn,
+                    f"""
                 SELECT
                     r.run_id,
                     r.started,
@@ -141,16 +143,13 @@ class BacktestAnalyzer:
                     GROUP BY run_id
                 ) s ON r.run_id = s.run_id
                 ORDER BY r.started DESC
-                """
-            ).fetchall()
-        except Exception:
-            conn.close()
-            # DB 故障不静默吞掉：静默返回空列表会让端点 200 空响应与
-            # 「确实没有 run」不可区分，向上抛出由端点自然 500。
-            logger.exception("查询回测运行汇总失败")
-            raise
-
-        conn.close()
+                """,
+                ).fetchall()
+            except Exception:
+                # DB 故障不静默吞掉：静默返回空列表会让端点 200 空响应与
+                # 「确实没有 run」不可区分，向上抛出由端点自然 500。
+                logger.exception("查询回测运行汇总失败")
+                raise
         runs: list[dict[str, Any]] = []
         for row in rows:
             run_id, started, payload, fill_count, event_count, strategy_id, tags = row
@@ -185,28 +184,26 @@ class BacktestAnalyzer:
         Returns:
             删除的记录数
         """
-        conn = self._get_writable_conn()
         try:
-            # 先统计待删除记录数
-            row = conn.execute(
-                f"SELECT COUNT(*) FROM {_AUDIT_TABLE} WHERE run_id = %s",
-                [run_id],
-            ).fetchone()
-            count = row[0] if row else 0
-            if count == 0:
-                conn.close()
-                return 0
-            conn.execute(
-                f"DELETE FROM {_AUDIT_TABLE} WHERE run_id = %s",
-                [run_id],
-            )
-            conn.commit()
-            conn.close()
-            logger.info(f"删除回测运行 {run_id}: {count} 条记录")
-            return count
+            with self._write() as conn:
+                # 先统计待删除记录数
+                row = exec_sql(
+                    conn,
+                    f"SELECT COUNT(*) FROM {_AUDIT_TABLE} WHERE run_id = %s",
+                    [run_id],
+                ).fetchone()
+                count = row[0] if row else 0
+                if count == 0:
+                    return 0
+                exec_sql(
+                    conn,
+                    f"DELETE FROM {_AUDIT_TABLE} WHERE run_id = %s",
+                    [run_id],
+                )
+                logger.info(f"删除回测运行 {run_id}: {count} 条记录")
+                return count
         except Exception as e:
             logger.error(f"删除回测运行 {run_id} 失败: {e}")
-            conn.close()
             raise AuditDeleteError(str(e)) from e
 
     def get_empty_or_error_runs(self) -> list[str]:
@@ -230,10 +227,11 @@ class BacktestAnalyzer:
         # PG 服务器时区不可控（Docker 默认 UTC），直接用 NOW() 比较会有时区
         # 错位；cutoff 与写入侧同钟（naive 本地时间）才能精确表达「30 分钟前」。
         cutoff = datetime.now() - timedelta(minutes=_ORPHAN_FRESHNESS_MINUTES)
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                f"""
+        with self._read() as conn:
+            try:
+                rows = exec_sql(
+                    conn,
+                    f"""
                 SELECT DISTINCT r.run_id
                 FROM {_AUDIT_TABLE} r
                 WHERE
@@ -276,42 +274,39 @@ class BacktestAnalyzer:
                         HAVING COUNT(*) < {_MIN_VALID_FILLS}
                     )
                 """,
-                [cutoff],
-            ).fetchall()
-            conn.close()
-            return [row[0] for row in rows]
-        except Exception:
-            conn.close()
-            # DB 故障不静默吞掉：静默返回空列表会让清理端点误报「无无效
-            # run」，向上抛出由端点自然 500。
-            logger.exception("查询无效回测运行列表失败")
-            raise
+                    [cutoff],
+                ).fetchall()
+            except Exception:
+                # DB 故障不静默吞掉：静默返回空列表会让清理端点误报「无无效
+                # run」，向上抛出由端点自然 500。
+                logger.exception("查询无效回测运行列表失败")
+                raise
+        return [row[0] for row in rows]
 
     def get_zero_return_runs(self) -> list[str]:
         """获取收益率为 0 的回测运行 run_id 列表。
 
         从 RUN_END 事件 payload 中提取 total_return，筛选出精确等于 0 的 run。
         """
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                f"""
+        with self._read() as conn:
+            try:
+                rows = exec_sql(
+                    conn,
+                    f"""
                 SELECT run_id
                 FROM {_AUDIT_TABLE}
                 WHERE event_type = 'RUN_END'
                   AND payload IS NOT NULL
                   AND (payload->>'total_return')::float8 = 0
                 GROUP BY run_id
-                """
-            ).fetchall()
-            conn.close()
-            return [row[0] for row in rows]
-        except Exception:
-            conn.close()
-            # DB 故障不静默吞掉：静默返回空列表与「无零收益 run」不可区分，
-            # 向上抛出由调用方（端点）自然 500。
-            logger.exception("查询零收益回测运行列表失败")
-            raise
+                """,
+                ).fetchall()
+            except Exception:
+                # DB 故障不静默吞掉：静默返回空列表与「无零收益 run」不可区分，
+                # 向上抛出由调用方（端点）自然 500。
+                logger.exception("查询零收益回测运行列表失败")
+                raise
+        return [row[0] for row in rows]
 
     def has_prod_tag(self, run_id: str) -> bool:
         """判断 run 是否携带生产标签（RUN_START payload.tags 含 ``prod``）。
@@ -325,9 +320,9 @@ class BacktestAnalyzer:
         Returns:
             True 表示该 run 带生产标签
         """
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
+        with self._read() as conn:
+            row = exec_sql(
+                conn,
                 f"""
                 SELECT 1 FROM {_AUDIT_TABLE}
                 WHERE run_id = %s
@@ -337,14 +332,11 @@ class BacktestAnalyzer:
                 """,
                 [run_id, RUN_TAG_PROD],
             ).fetchone()
-        finally:
-            conn.close()
         return row is not None
 
     def get_run_summary(self, run_id: str) -> pl.DataFrame:
         """获取特定运行 ID 的审计统计概要"""
-        conn = self._get_conn()
-        try:
+        with self._read() as conn:
             return self._rows_to_pl(
                 conn,
                 f"""
@@ -355,18 +347,16 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             )
-        finally:
-            conn.close()
 
     def trace_trade_lifecycle(self, trace_id: str) -> pl.DataFrame:
         """还原一个交易的完整因果链条"""
-        conn = self._get_conn()
-        try:
+        with self._read() as conn:
             related_ids: set[str] = {trace_id}
 
             current_id = trace_id
             while True:
-                res = conn.execute(
+                res = exec_sql(
+                    conn,
                     f"SELECT parent_id FROM {_AUDIT_TABLE} WHERE trace_id = %s LIMIT 1",
                     [current_id],
                 ).fetchone()
@@ -382,7 +372,8 @@ class BacktestAnalyzer:
                 if curr in visited:
                     continue
                 visited.add(curr)
-                res = conn.execute(
+                res = exec_sql(
+                    conn,
                     f"SELECT trace_id FROM {_AUDIT_TABLE} WHERE parent_id = %s",
                     [curr],
                 ).fetchall()
@@ -397,15 +388,12 @@ class BacktestAnalyzer:
                 + ") ORDER BY timestamp ASC"
             )
             return self._rows_to_pl(conn, query, list(related_ids))
-        finally:
-            conn.close()
 
     def analyze_rejected_events(
         self, run_id: str, event_type: str | None = None
     ) -> pl.DataFrame:
         """分析被拦截或失败的事件"""
-        conn = self._get_conn()
-        try:
+        with self._read() as conn:
             query = (
                 f"SELECT * FROM {_AUDIT_TABLE} "
                 "WHERE run_id = %s AND status != 'SUCCESS'"
@@ -416,8 +404,6 @@ class BacktestAnalyzer:
                 params.append(event_type)
 
             return self._rows_to_pl(conn, query, params)
-        finally:
-            conn.close()
 
     def run_custom_query(
         self, query: str, params: list[Any] | None = None
@@ -426,11 +412,8 @@ class BacktestAnalyzer:
         if params is None:
             params = []
         try:
-            conn = self._get_conn()
-            try:
+            with self._read() as conn:
                 return self._rows_to_pl(conn, query, params)
-            finally:
-                conn.close()
         except Exception as e:
             logger.error(f"Custom audit query failed: {e}")
             return pl.DataFrame()
@@ -452,9 +435,9 @@ class BacktestAnalyzer:
             DataFrame 包含 date (Date), portfolio_value (Float64),
             daily_return (Float64)
         """
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
+        with self._read() as conn:
+            rows = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -463,8 +446,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         if not rows:
             return pl.DataFrame(
@@ -652,15 +633,13 @@ class BacktestAnalyzer:
             metrics = self.get_risk_metrics(rid)
 
             # 获取交易统计
-            conn = self._get_conn()
-            try:
-                trade_count_row = conn.execute(
+            with self._read() as conn:
+                trade_count_row = exec_sql(
+                    conn,
                     f"SELECT COUNT(*) FROM {_AUDIT_TABLE} "
                     "WHERE run_id = %s AND event_type = 'FILL'",
                     [rid],
                 ).fetchone()
-            finally:
-                conn.close()
             trade_count = trade_count_row[0] if trade_count_row else 0
 
             rows.append(
@@ -690,9 +669,9 @@ class BacktestAnalyzer:
         时间戳——同一次回测的 MARKET_DATA 在同一时刻批量落库，若用写入时间
         x 轴会全部挤在同一天。
         """
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
+        with self._read() as conn:
+            rows = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -701,8 +680,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         points: list[dict[str, Any]] = []
         for row in rows:
@@ -726,9 +703,9 @@ class BacktestAnalyzer:
 
     def export_trade_journal(self, run_id: str) -> list[dict[str, Any]]:
         """导出完整交易日志（用于表格/交易明细）"""
-        conn = self._get_conn()
-        try:
-            fills = conn.execute(
+        with self._read() as conn:
+            fills = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, trace_id, parent_id, payload
                 FROM {_AUDIT_TABLE}
@@ -737,8 +714,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         journal: list[dict[str, Any]] = []
         for row in fills:
@@ -783,9 +758,9 @@ class BacktestAnalyzer:
             - risk_trigger: 上游风控触发详情（risk_type/触发数值等）
             - chain: {fill, order, upstream} 三个 trace_id 供前端展示
         """
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
+        with self._read() as conn:
+            rows = exec_sql(
+                conn,
                 f"""
                 SELECT trace_id, parent_id, event_type, component, status, timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -794,8 +769,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         # 每个 trace 一组事件记录（trace → event_type → entry）：确定性
         # trace_id 落地后信号/订单/成交沿因果链共享同一 trace（见
@@ -986,9 +959,9 @@ class BacktestAnalyzer:
 
     def export_audit_event(self, run_id: str, trace_id: str) -> list[dict[str, Any]]:
         """按 trace_id 返回该事件的完整审计行（含原始 payload，供前端点击下钻核验）。"""
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
+        with self._read() as conn:
+            rows = exec_sql(
+                conn,
                 f"""
                 SELECT event_type, component, status, timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -997,8 +970,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id, trace_id],
             ).fetchall()
-        finally:
-            conn.close()
         return [
             {
                 "event_type": r[0],
@@ -1012,9 +983,9 @@ class BacktestAnalyzer:
 
     def export_signal_history(self, run_id: str) -> list[dict[str, Any]]:
         """导出信号历史（用于分析策略决策点）"""
-        conn = self._get_conn()
-        try:
-            signals = conn.execute(
+        with self._read() as conn:
+            signals = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -1023,8 +994,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         return [
             {
@@ -1039,9 +1008,9 @@ class BacktestAnalyzer:
 
         包含权益曲线、交易日志、信号历史、事件统计、基准指标和风险指标。
         """
-        conn = self._get_conn()
-        try:
-            perf = conn.execute(
+        with self._read() as conn:
+            perf = exec_sql(
+                conn,
                 f"""
                 SELECT event_type, COUNT(*) as count
                 FROM {_AUDIT_TABLE}
@@ -1055,17 +1024,22 @@ class BacktestAnalyzer:
             total_events = sum(row[1] for row in perf)
             event_breakdown: dict[str, int] = {row[0]: row[1] for row in perf}
 
-            first_ts = conn.execute(
+            first_row = exec_sql(
+                conn,
                 f"SELECT MIN(timestamp) FROM {_AUDIT_TABLE} WHERE run_id = %s",
                 [run_id],
-            ).fetchone()[0]
-            last_ts = conn.execute(
+            ).fetchone()
+            first_ts = first_row[0] if first_row else None
+            last_row = exec_sql(
+                conn,
                 f"SELECT MAX(timestamp) FROM {_AUDIT_TABLE} WHERE run_id = %s",
                 [run_id],
-            ).fetchone()[0]
+            ).fetchone()
+            last_ts = last_row[0] if last_row else None
 
             # 尝试从 MARKET_DATA 载荷中提取回测基准指标
-            bm_row = conn.execute(
+            bm_row = exec_sql(
+                conn,
                 f"""
                 SELECT payload FROM {_AUDIT_TABLE}
                 WHERE run_id = %s AND event_type = 'MARKET_DATA'
@@ -1073,8 +1047,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchone()
-        finally:
-            conn.close()
 
         bm: dict[str, Any] = {}
         if bm_row:
@@ -1117,9 +1089,9 @@ class BacktestAnalyzer:
 
         每条记录对应一次成交（FILL 事件），金额 = 价格 × 数量。
         """
-        conn = self._get_conn()
-        try:
-            fills = conn.execute(
+        with self._read() as conn:
+            fills = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, trace_id, payload
                 FROM {_AUDIT_TABLE}
@@ -1128,8 +1100,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         traces: list[dict[str, Any]] = []
         for row in fills:
@@ -1230,9 +1200,9 @@ class BacktestAnalyzer:
             trade_points（时间/方向/价格/数量/金额）
         """
         # 1. 读取该标的的价格走势（price_daily 表，PG 统一存储）
-        price_conn = pg_connect(read_only=True, row_factory=None)
-        try:
-            price_rows = price_conn.execute(
+        with read_connection(read_only=True) as price_conn:
+            price_rows = exec_sql(
+                price_conn,
                 """
                 SELECT date, open, high, low, close, volume
                 FROM price_daily
@@ -1241,8 +1211,6 @@ class BacktestAnalyzer:
                 """,
                 [symbol],
             ).fetchall()
-        finally:
-            price_conn.close()
 
         price_history: list[dict[str, Any]] = []
         for row in price_rows:
@@ -1259,9 +1227,9 @@ class BacktestAnalyzer:
 
         # 2. 读取该标的的成交点（从审计日志，按 symbol 在 Python 端过滤
         #    避免 JSON 路径提取与比较的类型转换问题）
-        conn = self._get_conn()
-        try:
-            fill_rows = conn.execute(
+        with self._read() as conn:
+            fill_rows = exec_sql(
+                conn,
                 f"""
                 SELECT timestamp, payload
                 FROM {_AUDIT_TABLE}
@@ -1270,8 +1238,6 @@ class BacktestAnalyzer:
                 """,
                 [run_id],
             ).fetchall()
-        finally:
-            conn.close()
 
         trade_points: list[dict[str, Any]] = []
         for row in fill_rows:

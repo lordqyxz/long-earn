@@ -1,6 +1,6 @@
 ﻿# TODO — 待办清单
 
-> 最后更新：2026-08-30
+> 最后更新：2026-09-01
 >
 > 按 **紧急 × 重要** 四象限组织（艾森豪威尔矩阵），合并功能开发与合规审计。
 > 判定准则：
@@ -27,6 +27,7 @@
 > 2026-08-30 策略研发轮次结果：relative/combined 网格（1 对照 + 18 组合，训练集内）冠军 `com_rw60_m0`（训练 +162.17%，夏普 1.495，回撤 -20.57%），但 OOS 合并门 **CONTINUE**——测试集三折全负（-26%~-30%/折，夏普 -2.1~-2.9），S1 稳定性门拒绝；归因：选股端的价格动量因子在 2025-2026 震荡市风格翻转（反复止损），指数级门控无法挽救选股层 alpha 反号。纯 relative 模式训练集即全负，已排除。`best_strategy.yaml` 未变更（现任基准 OOS mean sharpe 1.47，合并门槛极高）。
 > 2026-08-30 数据层死循环治理：财务同步水位表落地（`financial_sync_watermark` + 双水位判定，46382d8）；启动同步与回测读路径（`financial/sync.py::is_financial_stale`）共享同一水位与 `FINANCIAL_RECHECK_DAYS=7` 常量（常量下沉至 backtest.data.financial.sync，遵循 AGENTS.md 6.2「同款判定共享同一水位」铁律）。沉默股票从每次同步全量重查（实测 4620 只 ≈ 20 分钟/次）降为每 7 天一次小窗检查；批次成功才推进水位（含合法 0 行），异常保留重试；PIT 对齐不受影响（行数据仍带真实 announce_date）。行情路径评估后不引入水位：日更域数据状态自愈，仅 ~12 只退市/停牌标的每次多查数秒，且水位会有损逐日精确补齐语义。
 > 2026-08-30 全系统评审与修复（OCR delegate 模式，记录见 `docs/reviews/`）：后端 Critical 6 / High 17 / Medium 56 / Low 63，前端 High 3 / Medium 8 / Low 14。第一轮分支 `fix/review-critical-high` 关闭全部 Critical/High + 约 25 项 Medium/Low；**第二轮**关闭剩余 Medium/Low（止盈对称成交、风控 pre_trade、TLS/pg/算子/策略/API Origin/前端竞态等），ruff/lint-imports/pyright/pytest **1134** 全绿 + 前端 tsc 零错误。回测语义继续变化（止盈不按日内 high 白送；风控卖出走 pre_trade，强制清仓允许跌停价卖出）。详见 remediation「第二轮」。
+> 2026-09-01 数据库引擎层第二阶段：审计 / 记忆库 / 分析器迁入 `core/db.py`（`read_only` 退出复位防池粘滞、`connect_timeout=5`、审计内存缓冲 + flush 短事务）；业务路径不再 `pg_connect()`。
 > 次线：Web 前端开发（`web/`，React 18 + Vite + TypeScript + Tailwind + Radix UI + Recharts，对接 FastAPI `/api` 与 WebSocket；三页面骨架、OpenAPI 客户端、归因面板等已完成）。
 
 - [ ] **regime relative/combined 通过 OOS 门**（`mode: relative`/`combined`）— 2026-08-30 轮次已收：combined 门控训练集显著占优但 OOS 全折崩溃（选股端动量因子 OOS 反号，非门控问题）。下一轮方向：重设计选股端（动量因子改为基本面/反转混合，参考现任基准的净利增长选股），或放弃哑铃族转向基准增强
@@ -64,7 +65,6 @@
 
 ### 工程化与纵深防御
 
-- [ ] **数据库引擎层第二阶段迁移**（SQLAlchemy Core，承接 ADR-019）：审计 `PostgresAuditProvider` / 记忆库 `substance.persistence` / 分析器 `app.analyzer` 迁移到 `core/db.py` 统一引擎层（第一阶段 DataCache 已完成，79142ba）；迁移时复用 read/write 上下文与 COPY 逃生舱模式，消解三处手工连接管理分叉
 - [ ] **ADR-022 §A 残余（可选 hardening）**：跨 invoke 持久化 current best / 候选矩阵到盘；DSR/PBO 升硬性门控需单独 ADR；网格指纹用真实渲染 YAML 替代 `grid:i`；完整 purge（按标签视界）与 CPCV；相关试验 \(N_{\mathrm{eff}}\)
 - [ ] **性能监控**：LLM Token + 回测耗时（`MonitoringService`）
 - [ ] **配置中心化**：多环境 `config.yaml`

@@ -6,11 +6,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-import psycopg
 from loguru import logger
 
 from long_earn.backtest.domain.interfaces import AuditProvider, AuditRecord
-from long_earn.core.pg import pg_connect
+from long_earn.core.db import exec_sql, read_connection, write_transaction
 
 # query_events 过滤字段白名单 — 防止 key 拼接 SQL 注入（P2-13）
 _QUERY_FILTER_WHITELIST = frozenset(
@@ -109,17 +108,17 @@ class PostgresAuditProvider(AuditProvider):
     合并」的旧架构（P0-11 缺口根治）。
 
     批量写入：``log_event`` 缓冲事件，满 ``_FLUSH_EVERY`` 条或 ``close()``
-    时以 ``executemany`` 批量落库（长回测数千事件，逐条 INSERT+commit
-    在共享 PG 上是网格并发的热点）。``query_events`` / ``get_causal_chain``
-    查询前先 flush 缓冲，保留「写后立即可读」语义。
+    时以 ``exec_sql`` executemany 批量落库。``query_events`` /
+    ``get_causal_chain`` 查询前先 flush 缓冲，保留「写后立即可读」语义。
 
-    线程安全：进程内所有 DuckDB 时代的锁语义不再需要——psycopg 连接
-    每次操作独立提交，PG 服务端处理并发；本实现保留单连接 + 锁以兼容
-    单进程多线程写入（引擎审计为旁路，性能非瓶颈）。
+    连接：不持有实例级长连接。缓冲在内存；flush/查询时分别进入
+    ``write_transaction`` / ``read_connection``，块退出归还连接池
+    （语句失败由引擎层 rollback 自愈，替代手工 ``_heal_after_error``）。
 
-    单调序列号：``seq`` 列确保即使墙钟回退（``datetime.now()`` 非单调）也能
-    保证主键唯一性与因果排序（P1-10）；seq 在入缓冲时分配，批量落库
-    保持缓冲顺序。
+    线程安全：``_lock`` 保护 seq 与缓冲；并发 flush 串行化以免缓冲交错。
+
+    单调序列号：``seq`` 列确保即使墙钟回退也能保证主键唯一性与因果排序
+    （P1-10）；seq 在入缓冲时分配，批量落库保持缓冲顺序。
     """
 
     _FLUSH_EVERY = 500
@@ -135,40 +134,24 @@ class PostgresAuditProvider(AuditProvider):
                     """
 
     def __init__(self) -> None:
-        # 连接参数由 core.pg 统一裁决
-        self._conn: psycopg.Connection | None = None
         self._lock = threading.Lock()
         self._seq = 0
         self._buffer: list[tuple[Any, ...]] = []
         self._init_db()
 
-    def _get_conn(self) -> psycopg.Connection:
-        # 锁保护：调用方已持锁，或通过 _with_conn 上下文访问
-        if self._conn is None:
-            # 元组行：query_events / get_causal_chain 用 row[N] 下标访问，
-            # 保持 DuckDB 时代 fetchall 返回元组的契约（PG jsonb 由
-            # psycopg 反序列化为 dict，兼容性由调用方处理）
-            self._conn = pg_connect(row_factory=None)
-        return self._conn
-
     def _init_db(self) -> None:
-        with self._lock:
-            conn = self._get_conn()
-            # 创建审计专用 Schema（与 DuckDB 时代同名，迁移无缝）
-            conn.execute('CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
-            conn.execute(_AUDIT_DDL)
+        with write_transaction() as conn:
+            exec_sql(conn, 'CREATE SCHEMA IF NOT EXISTS "backtest_audit"')
+            exec_sql(conn, _AUDIT_DDL)
             for idx in _AUDIT_INDEXES:
-                conn.execute(idx)
-            conn.commit()
+                exec_sql(conn, idx)
         logger.info("Audit provider initialized (PostgreSQL)")
 
     def close(self) -> None:
-        """显式关闭连接（关闭前冲刷缓冲，保证审计完整性）。
+        """冲刷缓冲后归还（无实例连接可关）。
 
-        冲刷失败（如 PK 冲突 / PG 不可达）时自愈后重试一次；重试仍失败
-        则丢弃缓冲并记 error 日志（含条数）——close 不抛异常，但连接必关
-        （避免 flush 异常跳过 ``conn.close()`` 导致句柄泄漏 + RUN_END
-        静默丢失）。
+        冲刷失败时自愈后重试一次；重试仍失败则丢弃缓冲并记 error。
+        close 不抛异常。
         """
         with self._lock:
             try:
@@ -184,36 +167,6 @@ class PostgresAuditProvider(AuditProvider):
                         f"（审计链可能缺失尾部事件）: {exc2}"
                     )
                     self._buffer = []
-            finally:
-                if self._conn is not None:
-                    try:
-                        self._conn.close()
-                    except Exception as exc:
-                        logger.warning(f"关闭审计 PostgreSQL 连接时异常: {exc}")
-                    finally:
-                        self._conn = None
-
-    def _heal_after_error(self, exc: Exception) -> None:
-        """语句/连接失败后的自愈，防止连接被毒化。
-
-        psycopg3 的隐式事务在语句失败后进入 aborted 状态，之后所有语句
-        都抛 ``InFailedSqlTransaction`` 且永不自愈（调用方持有的异常只是
-        第一因，后续全部是连锁失败）；必须 ``rollback()`` 清除。连接级
-        故障（服务端断开等）则丢弃连接，下次操作重连。
-        """
-        conn = self._conn
-        if conn is None:
-            return
-        try:
-            if getattr(conn, "closed", False) or isinstance(
-                exc, psycopg.OperationalError
-            ):
-                conn.close()
-                self._conn = None
-            else:
-                conn.rollback()
-        except Exception:
-            self._conn = None
 
     def log_event(self, record: AuditRecord) -> None:
         """缓冲写入；满 ``_FLUSH_EVERY`` 条批量落库（executemany 一次提交）。"""
@@ -252,26 +205,18 @@ class PostgresAuditProvider(AuditProvider):
     def _flush_locked(self) -> None:
         """批量落库缓冲事件（调用方须已持 ``self._lock``）。
 
-        失败语义：语句失败自愈连接后**整批回填缓冲**并上抛——瞬态故障
-        （PG 重启等）在下一次 flush（后续 log_event / 查询 / close）自动
-        重试，事件不丢；批量写入相对逐条写入把单次失败的最大丢失量从 1 条
-        放大到一批，回填即为此设计。永久性失败（如 PK 冲突）经回填反复
-        重试仍失败时，由 ``_MAX_BUFFER`` 上限截断（丢弃最旧事件并记
-        error 日志），保证内存有界。
-        psycopg3 的批量写入走 cursor.executemany（Connection 无此便捷方法）。
+        失败语义：语句失败后**整批回填缓冲**并上抛——瞬态故障在下一次
+        flush（后续 log_event / 查询 / close）自动重试，事件不丢。
+        永久性失败由 ``_MAX_BUFFER`` 上限截断。
+        连接在 ``write_transaction`` 块内借还，失败由引擎层 rollback。
         """
         if not self._buffer:
             return
         rows, self._buffer = self._buffer, []
         try:
-            # _get_conn 也须在 try 内：连接失败（PG 不可达）时整批回填缓冲，
-            # 否则 rows 已取出而异常跳过回填——最多一批事件静默丢失且无日志
-            conn = self._get_conn()
-            with conn.cursor() as cur:
-                cur.executemany(self._INSERT_SQL, rows)
-            conn.commit()
-        except Exception as exc:
-            self._heal_after_error(exc)
+            with write_transaction() as conn:
+                exec_sql(conn, self._INSERT_SQL, rows)
+        except Exception:
             self._buffer = rows + self._buffer
             self._truncate_buffer_locked()
             raise
@@ -311,14 +256,8 @@ class PostgresAuditProvider(AuditProvider):
         with self._lock:
             # read-your-writes：查询前冲刷缓冲，保证本进程已写事件可见
             self._flush_locked()
-            conn = self._get_conn()
-            try:
-                # key 已过白名单（_QUERY_FILTER_WHITELIST），无注入风险；
-                # psycopg 严格参数类型把 str 标为 QueryNoTemplate，运行时兼容
-                res = conn.execute(query, params).fetchall()  # type: ignore[arg-type]
-            except Exception as exc:
-                self._heal_after_error(exc)
-                raise
+            with read_connection() as conn:
+                res = exec_sql(conn, query, params).fetchall()
 
         records = []
         for row in res:
@@ -342,17 +281,14 @@ class PostgresAuditProvider(AuditProvider):
         with self._lock:
             # read-your-writes：查询前冲刷缓冲
             self._flush_locked()
-            conn = self._get_conn()
-            try:
-                res = conn.execute(
+            with read_connection() as conn:
+                res = exec_sql(
+                    conn,
                     "SELECT run_id, timestamp, event_type, trace_id, parent_id, "
                     "component, status, payload, latency_ms "
                     'FROM "backtest_audit".logs WHERE trace_id = %s ORDER BY seq ASC',
                     [trace_id],
                 ).fetchall()
-            except Exception as exc:
-                self._heal_after_error(exc)
-                raise
 
         records = []
         for row in res:

@@ -1,46 +1,43 @@
-"""SQLAlchemy 2.0 Core 引擎层 — 数据底座的统一连接/事务入口（2026-08-30）。
+"""SQLAlchemy 2.0 Core 引擎层 — 数据底座的统一连接/事务入口。
 
-数据库操作稳定化第一阶段（ADR-021 后续工程决策）：DataCache 等批量分析型
-负载迁移到 SQLAlchemy Core（仅 Core，不用 ORM——COPY 百万行装载、polars/
-pandas 直读的负载与 ORM 会话模型冲突）。连接参数仍由 ``core.pg`` 单一裁决，
-本模块只负责引擎生命周期与连接/事务语义的统一。
+连接参数仍由 ``core.pg`` 单一裁决；本模块只负责引擎生命周期与
+连接/事务语义。仅 Core，不用 ORM（COPY 百万行装载、polars/pandas
+直读的负载与 ORM 会话模型冲突）。
 
 设计要点：
-- **进程级单例 Engine**：池化替代旧「DataCache 线程局部连接 / 审计实例连接 /
-  分析器短连接」三种分叉模式。Engine 不可跨进程 pickle——spawn worker 子进程
-  首次调用时惰性自建（与「worker 各自建连」的既有纪律一致）。
-- **读路径**：``read_connection()`` 上下文，连接归还自动 rollback——单条语句
-  失败后连接状态由池复位，天然消除 psycopg3 aborted-transaction 中毒
-  （替代手工自愈；旧 autocommit 读的「不持长事务」语义由短上下文等价实现）。
-- **写路径**：``write_transaction()`` 上下文（engine.begin() 语义）：成功
-  commit / 异常 rollback。调用方的进程内单写者 RLock 与 ``pg_advisory_xact_lock``
-  纪律原样保留在块内（应用层逻辑，与驱动无关）。
-- **COPY 逃生舱**：SQLAlchemy 无 COPY 抽象；``raw_psycopg_connection()``
-  下沉到 psycopg3 原生连接，``save_prices`` 等批量装载路径使用（共享外层
-  事务，块退出统一 commit/rollback，脏标记原子性保持）。
-- **SQL 执行风格**：DataCache 经 ``exec_driver_sql`` 保持 psycopg ``%s``
-  占位符与列表/元组参数不变（全仓 SQL 字符串零改写）；行消费走 Row 的
-  整数下标（与 DuckDB 时代 fetchall 元组契约兼容）。
-- **DDL 策略**：维持「构造即建表」幂等 DDL（13 个 PG 测试文件的依赖假设），
-  不引入 alembic。
-
-第二阶段（未做）：审计 ``PostgresAuditProvider`` / ``substance.persistence`` /
-``app.analyzer`` 迁移到本模块。
+- **进程级单例 Engine**：池化短连接。Engine 不可跨进程 pickle——
+  spawn worker 子进程首次调用时惰性自建。
+- **禁止长占池连接**：不得把池连接挂在实例字段上跨请求/跨事件持有。
+  审计缓冲等应用状态放在内存，flush 时再 ``write_transaction()``。
+- **读路径**：``read_connection()`` 短上下文，归还自动 rollback；
+  ``read_only=True`` 时设置底层 psycopg ``read_only``，分析侧防误写；
+  **退出必须复位**（会话级参数，池 rollback 不清，否则污染后续写事务）。
+- **写路径**：``write_transaction()``（``engine.begin()``）：成功
+  commit / 异常 rollback，连接归还时复位（替代手工自愈）。
+- **连接超时**：``connect_timeout=5``，缺库环境快速失败而非挂死。
+- **COPY / executemany**：只允许在上述上下文块内。COPY 经
+  ``raw_psycopg_connection()`` 逃生舱；批量 DML 经 ``exec_sql``
+  传入「元组/字典元素的列表」走驱动 executemany。
+- **SQL 风格**：``exec_sql`` 保持 psycopg ``%s`` 占位符；行消费走
+  Row 整数下标（DuckDB 时代 fetchall 元组契约）。
+- **DDL**：构造即建表，不引入 alembic。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import URL, Connection as _SaConnection, Engine, create_engine
+from sqlalchemy.engine import CursorResult
 
 from long_earn.core.pg import resolve_pg_params
 
 __all__ = [
     "db_version",
+    "exec_sql",
     "get_engine",
     "raw_psycopg_connection",
     "read_connection",
@@ -63,19 +60,42 @@ def get_engine() -> Engine:
         port=int(params["port"]),
         database=params["dbname"],
     )
-    return create_engine(url, pool_pre_ping=True)
+    # connect_timeout：PG 不可达时快速失败，避免单元/冒烟在缺库环境挂死
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 5},
+    )
 
 
 @contextmanager
-def read_connection() -> Iterator[_SaConnection]:
-    """只读/短语句连接上下文：归还自动 rollback，异常后连接状态自愈。"""
+def read_connection(*, read_only: bool = False) -> Iterator[_SaConnection]:
+    """只读/短语句连接上下文：归还自动 rollback，异常后连接状态自愈。
+
+    Args:
+        read_only: True 时设置底层会话只读（分析/看板消费侧防误写）。
+            退出时必须复位：``read_only`` 是会话级参数，池 ``rollback``
+            不会清掉；若不复位，后续借到同一物理连接的写事务会被拒。
+    """
     with get_engine().connect() as conn:
-        yield conn
+        if not read_only:
+            yield conn
+            return
+        raw = raw_psycopg_connection(conn)
+        raw.read_only = True
+        try:
+            yield conn
+        finally:
+            raw.read_only = False
 
 
 @contextmanager
 def write_transaction() -> Iterator[_SaConnection]:
-    """写事务上下文：成功 commit，异常 rollback（连接复位自愈）。"""
+    """写事务上下文：成功 commit，异常 rollback（连接复位自愈）。
+
+    COPY 与 executemany 必须在本块（或 ``read_connection`` 块）内完成，
+    不得把借出的连接存到实例上跨块使用。
+    """
     with get_engine().begin() as conn:
         yield conn
 
@@ -90,7 +110,26 @@ def raw_psycopg_connection(conn: _SaConnection) -> Any:
     return conn.connection.driver_connection
 
 
+def exec_sql(
+    conn: _SaConnection,
+    sql: str,
+    params: Sequence[Any] | None = None,
+) -> CursorResult[Any]:
+    """驱动级 SQL 执行（保持 psycopg ``%s`` 占位符，SQL 字符串零改写）。
+
+    ``exec_driver_sql`` 的列表参数语义是 executemany（元素须为元组/字典），
+    与 psycopg「标量参数列表」习惯冲突。本函数按元素类型路由：
+    - 标量列表 → 转元组单执行（本仓绝大多数查询）；
+    - 元组/字典元素的列表 → 原样透传驱动 executemany。
+    """
+    if params is None:
+        return conn.exec_driver_sql(sql)
+    if len(params) > 0 and isinstance(params[0], tuple | dict):
+        return conn.exec_driver_sql(sql, params)
+    return conn.exec_driver_sql(sql, tuple(params))
+
+
 def db_version() -> str:
     """返回 PostgreSQL 服务器版本（连通性自检，驱动无关入口）。"""
     with read_connection() as conn:
-        return str(conn.exec_driver_sql("SELECT version()").scalar())
+        return str(exec_sql(conn, "SELECT version()").scalar())

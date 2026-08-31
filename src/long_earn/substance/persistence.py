@@ -11,17 +11,17 @@ ADR-007 Phase 4：原子写入 + 事务保证 + 列式检索。
 
 from __future__ import annotations
 
-import contextlib
 import json
+import threading
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psycopg
 from loguru import logger
+from sqlalchemy.engine import Connection
 
-from long_earn.core.pg import pg_connect
+from long_earn.core.db import exec_sql, read_connection, write_transaction
 from long_earn.substance.model import FilterLogic, ReviewStatus, Substance
 
 SCHEMA_VERSION = 4
@@ -97,30 +97,29 @@ ON CONFLICT (sid) DO UPDATE SET
 """
 
 
-def _ensure_schema(conn: psycopg.Connection) -> None:
+_schema_lock = threading.Lock()
+_schema_state = {"ready": False}
+
+
+def _ensure_schema(conn: Connection) -> None:
     """幂等建表与建索引（PostgreSQL 方言，可重复调用）。"""
-    conn.execute(_DDL)
-    conn.execute(_ALTER_REVIEW_STATUS)
-    conn.execute(_INDEX_VISIBLE)
-    conn.execute(_INDEX_FORM)
-    conn.execute(_INDEX_CREATED)
+    exec_sql(conn, _DDL)
+    exec_sql(conn, _ALTER_REVIEW_STATUS)
+    exec_sql(conn, _INDEX_VISIBLE)
+    exec_sql(conn, _INDEX_FORM)
+    exec_sql(conn, _INDEX_CREATED)
 
 
-def _connect() -> psycopg.Connection:
-    """打开 PostgreSQL 读写连接并确保 schema 存在。
-
-    连接参数由 ``core.pg`` 统一裁决（env → 默认值）。DDL 幂等，
-    每次调用都保证表与索引就绪后返回已提交的读写连接。
-    """
-    conn = pg_connect(row_factory=None)
-    try:
-        _ensure_schema(conn)
-        conn.commit()
-    except Exception:
-        with contextlib.suppress(Exception):
-            conn.close()
-        raise
-    return conn
+def _ensure_schema_once() -> None:
+    """进程内只跑一次 DDL（幂等）；写路径与读路径共用。"""
+    if _schema_state["ready"]:
+        return
+    with _schema_lock:
+        if _schema_state["ready"]:
+            return
+        with write_transaction() as conn:
+            _ensure_schema(conn)
+        _schema_state["ready"] = True
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -190,16 +189,9 @@ def save_substance(substance: Substance) -> None:
     Args:
         substance: 待持久化的物质
     """
-    conn = _connect()
-    try:
-        conn.execute(_UPSERT_SQL, _substance_params(substance))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+    _ensure_schema_once()
+    with write_transaction() as conn:
+        exec_sql(conn, _UPSERT_SQL, _substance_params(substance))
 
 
 def save_many(substances: Iterable[Substance]) -> int:
@@ -211,18 +203,11 @@ def save_many(substances: Iterable[Substance]) -> int:
     substances_list = list(substances)
     if not substances_list:
         return 0
-    conn = _connect()
-    try:
+    _ensure_schema_once()
+    with write_transaction() as conn:
         for s in substances_list:
-            conn.execute(_UPSERT_SQL, _substance_params(s))
-        conn.commit()
-        return len(substances_list)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+            exec_sql(conn, _UPSERT_SQL, _substance_params(s))
+    return len(substances_list)
 
 
 def _substance_params(s: Substance) -> list[Any]:
@@ -252,22 +237,16 @@ def _substance_params(s: Substance) -> list[Any]:
 
 def load_all() -> list[Substance]:
     """从 PostgreSQL 全量加载物质（启动时一次性载入内存热存储）。"""
-    conn = _connect()
-    try:
-        rows = conn.execute(
+    _ensure_schema_once()
+    with read_connection() as conn:
+        rows = exec_sql(
+            conn,
             "SELECT sid, form, content, keys, filter_keys, filter_logic, "
             "created_at, visible_from, expires_at, source, confidence, "
             "source_id, target_id, relation_type, conflict_group, "
             "insertion_order, decay_half_life_days, review_status, metadata "
-            "FROM substances ORDER BY created_at;"
+            "FROM substances ORDER BY created_at;",
         ).fetchall()
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
 
     substances: list[Substance] = []
     for row in rows:
@@ -281,31 +260,20 @@ def load_all() -> list[Substance]:
 
 def count_substances() -> int:
     """返回 PostgreSQL 中物质总数（替代 meta.json 的权威计数）。"""
-    conn = _connect()
     try:
-        result = conn.execute("SELECT COUNT(*) FROM substances;").fetchone()
-        conn.commit()
+        _ensure_schema_once()
+        with read_connection() as conn:
+            result = exec_sql(conn, "SELECT COUNT(*) FROM substances;").fetchone()
         return int(result[0]) if result else 0
     except Exception:
-        conn.rollback()
         return 0
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
 
 
 def drop_all() -> None:
     """清空物质表（迁移/重置专用，业务代码不应调用）。"""
-    conn = _connect()
-    try:
-        conn.execute("DELETE FROM substances;")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+    _ensure_schema_once()
+    with write_transaction() as conn:
+        exec_sql(conn, "DELETE FROM substances;")
 
 
 def delete_substance(sid: str) -> bool:
@@ -317,17 +285,13 @@ def delete_substance(sid: str) -> bool:
     Returns:
         是否删除成功
     """
-    conn = _connect()
     try:
-        conn.execute("DELETE FROM substances WHERE sid = %s", [sid])
-        conn.commit()
+        _ensure_schema_once()
+        with write_transaction() as conn:
+            exec_sql(conn, "DELETE FROM substances WHERE sid = %s", [sid])
         return True
     except Exception:
-        conn.rollback()
         return False
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
 
 
 def save_meta(directory: str | Path, substance_count: int) -> None:

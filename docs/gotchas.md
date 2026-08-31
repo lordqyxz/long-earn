@@ -15,7 +15,7 @@
 
 ## 2. 数据层
 
-- **数据库引擎层**：PG 连接与事务统一走 `core/db.py`（SQLAlchemy 2.0 Core，`postgresql+psycopg`；连接参数由 `core/pg.py` 裁决）。读路径 `read_connection()`，写路径 `write_transaction()`；COPY 经 `raw_psycopg_connection()`。**DataCache 已迁移**；审计/记忆库/分析器仍走 psycopg 直连（第二阶段，见 TODO）。简单表用 Core `Table`；批量分析型负载保持驱动级原生 SQL，不用 ORM。DDL「构造即建表」，不引入 alembic。
+- **数据库引擎层**：PG 连接与事务统一走 `core/db.py`（SQLAlchemy 2.0 Core，`postgresql+psycopg`；连接参数由 `core/pg.py` 裁决）。读路径 `read_connection()`（分析侧 `read_only=True`，退出必须复位会话标志，否则池连接会粘滞污染写事务），写路径 `write_transaction()`；COPY 经 `raw_psycopg_connection()`；批量 DML 经 `exec_sql`（元组列表 = executemany）。**禁止**把池连接挂在实例字段上跨请求持有（审计缓冲在内存，flush 时短借写事务）。业务路径不直接 `pg_connect()`。简单表用 Core `Table`；批量分析型负载保持驱动级原生 SQL，不用 ORM。DDL「构造即建表」，不引入 alembic。
 - **数据缓存**：PostgreSQL `long_earn` 库；全量下载经 `scripts/download_data.py`（miniqmt）。regime 基准四指数纳入 `DataIngestionService.INDEX_QUOTES`。面板路径：PostgreSQL Cache + 显式主源 miniqmt，失败即失败（ADR-018）。ciccwm 为情报独占；akshare 仅显式点名。不得手动 DELETE/DROP 缓存权威表。
 - **三组接口**：`DataConnector` / `MarketIntelligenceProvider` / `RealtimeDataProvider` 分离，不混用。签名以 `services/__init__.py` 与 `backtest/data/connector.py` 为准。
 - **并发下载**：`DataIngestionService --max-workers`（1–8，默认 4）；子进程隔离防 xtquant SIGABRT；主进程串行写 PG。
