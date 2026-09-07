@@ -118,6 +118,27 @@ class MemoryService(Protocol):
         """
         ...
 
+    def save_session_summary(
+        self,
+        thread_id: str,
+        summary: str,
+        turns: int,
+    ) -> str:
+        """保存会话摘要到记忆（ADR-024 §A 跨会话沉淀）。
+
+        会话结束时由 MasterAgent.close_session 调用；摘要以 KNOWLEDGE
+        形态落库，可经 ``search`` 检索供未来会话复用。
+
+        Args:
+            thread_id: 会话线程标识
+            summary: 会话摘要文本
+            turns: 会话轮次（用户消息数）
+
+        Returns:
+            物质 ID
+        """
+        ...
+
     def save_events(
         self,
         events: list[dict[str, Any]],

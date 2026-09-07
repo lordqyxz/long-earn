@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from long_earn.master_agent import MasterAgent
 from long_earn.master_agent_tools import (
@@ -123,7 +124,7 @@ class TestToolSetContract:
                 return_value=MagicMock(),
             ),
             patch(
-                "long_earn.master_agent.create_react_agent",
+                "long_earn.master_agent.create_agent",
                 return_value=MagicMock(),
             ),
             patch(
@@ -498,3 +499,154 @@ class TestRunEventCollectionTool:
         assert "未采集到相关素材" in out
         payload = _payload(out)
         assert payload["event_count"] == 0
+
+
+# ── 会话主循环测试（ADR-024 §A）──────────────────────────────────
+
+
+def _thread_messages(agent: MasterAgent, thread_id: str) -> list[Any]:
+    """读取 thread 在 checkpointer 中累积的消息历史。"""
+    state = agent._agent.get_state({"configurable": {"thread_id": thread_id}})
+    return list(state.values.get("messages", []))
+
+
+class TestSessionLoop:
+    """会话主循环契约：thread_id 多轮复用 / thread 隔离 / close_session 摘要沉淀
+
+    走真实 create_agent + MemorySaver 编译路径，仅 mock 重依赖
+    （ResearchAgent / 领域子图 / 工具构建）；FakeListChatModel 每次
+    agent.invoke 消耗一个响应（无工具 → 单次模型调用），
+    close_session 的摘要 LLM 用 ``_stub_summary_llm`` 显式替换。
+    """
+
+    @pytest.fixture
+    def session_agent(self) -> MasterAgent:
+        model = FakeListChatModel(responses=["第一轮回复", "第二轮回复"])
+        with (
+            patch(
+                "long_earn.master_agent.ResearchAgent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_stock_analysis_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_event_inference_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.build_master_tools",
+                return_value=[],
+            ),
+        ):
+            ctx = MagicMock()
+            ctx.logger = MagicMock()
+            ctx.memory = MagicMock()
+            ctx.require_llm.return_value.get_llm.return_value = model
+            return MasterAgent(ctx)
+
+    @staticmethod
+    def _stub_summary_llm(agent: MasterAgent, behavior: Any) -> None:
+        """替换 close_session 摘要 LLM（返回文本或抛异常）。"""
+        mock_llm = MagicMock()
+        if isinstance(behavior, Exception):
+            mock_llm.invoke.side_effect = behavior
+        else:
+            mock_llm.invoke.return_value = MagicMock(content=behavior)
+        agent._llm = mock_llm
+
+    def test_multi_turn_same_thread_accumulates(
+        self, session_agent: MasterAgent
+    ) -> None:
+        """同一 thread_id 连续 invoke：消息历史累积（2 轮 → 4 条）"""
+        session_agent.invoke("第一问", thread_id="t1")
+        result = session_agent.invoke("第二问", thread_id="t1")
+        assert result["summary"] == "第二轮回复"
+        messages = _thread_messages(session_agent, "t1")
+        assert len(messages) == 4
+        assert messages[0].content == "第一问"
+        assert messages[2].content == "第二问"
+
+    def test_threads_isolated(self, session_agent: MasterAgent) -> None:
+        """不同 thread_id 的会话历史互不可见"""
+        session_agent.invoke("问题A", thread_id="ta")
+        session_agent.invoke("问题B", thread_id="tb")
+        assert len(_thread_messages(session_agent, "ta")) == 2
+        assert len(_thread_messages(session_agent, "tb")) == 2
+        assert _thread_messages(session_agent, "ta")[0].content == "问题A"
+
+    def test_invoke_passes_thread_id_config(self, session_agent: MasterAgent) -> None:
+        """invoke 的 config 须携带 configurable.thread_id（ADR-024 §A）"""
+        with patch.object(session_agent, "_agent", MagicMock()) as mock_agent:
+            mock_agent.invoke.return_value = {"messages": []}
+            session_agent.invoke("查询", thread_id="t9")
+            config = mock_agent.invoke.call_args.kwargs["config"]
+            assert config["configurable"]["thread_id"] == "t9"
+            assert config["recursion_limit"] > 0
+
+    def test_close_session_persists_summary(self, session_agent: MasterAgent) -> None:
+        """close_session：LLM 摘要 → memory.save_session_summary → 清理 thread"""
+        session_agent.invoke("第一问", thread_id="t1")
+        self._stub_summary_llm(session_agent, "摘要文本")
+        closed = session_agent.close_session("t1")
+        assert closed["summary"] == "摘要文本"
+        assert closed["turns"] == 1
+        session_agent.context.memory.save_session_summary.assert_called_once_with(
+            thread_id="t1", summary="摘要文本", turns=1
+        )
+        # thread 状态已清理：checkpointer 中不再有历史
+        assert not _thread_messages(session_agent, "t1")
+
+    def test_close_session_counts_turns(self, session_agent: MasterAgent) -> None:
+        """turns 按 HumanMessage 数计（含工具中间态时只数用户消息）"""
+        session_agent.invoke("第一问", thread_id="t1")
+        session_agent.invoke("第二问", thread_id="t1")
+        self._stub_summary_llm(session_agent, "摘要文本")
+        closed = session_agent.close_session("t1")
+        assert closed["turns"] == 2
+
+    def test_close_session_empty_history_skips(
+        self, session_agent: MasterAgent
+    ) -> None:
+        """空会话 close：不写记忆、不报错"""
+        closed = session_agent.close_session("never-used")
+        assert closed == {"summary": "", "substance_id": "", "turns": 0}
+        session_agent.context.memory.save_session_summary.assert_not_called()
+
+    def test_close_session_llm_failure_falls_back(
+        self, session_agent: MasterAgent
+    ) -> None:
+        """摘要 LLM 失败时回退最终 AI 回复，不静默吞异常"""
+        session_agent.invoke("第一问", thread_id="t1")
+        self._stub_summary_llm(session_agent, RuntimeError("llm 不可用"))
+        closed = session_agent.close_session("t1")
+        assert closed["summary"] == "第一轮回复"
+        assert closed["turns"] == 1
+        session_agent.context.memory.save_session_summary.assert_called_once_with(
+            thread_id="t1", summary="第一轮回复", turns=1
+        )
+
+
+class TestSaveSessionSummary:
+    """MemoryServiceImpl.save_session_summary：KNOWLEDGE 形态沉淀契约"""
+
+    def test_saves_knowledge_substance(self) -> None:
+        from long_earn.services.memory_service import MemoryServiceImpl
+
+        impl = MemoryServiceImpl(
+            config=MagicMock(), logger=MagicMock(), ontology_graph=None
+        )
+        with patch.object(impl, "_store") as mock_store:
+            mock_store.add.return_value = "sid-1"
+            sid = impl.save_session_summary(
+                thread_id="t1", summary="用户关注茅台基本面", turns=3
+            )
+        assert sid == "sid-1"
+        s = mock_store.add.call_args.args[0]
+        assert s.metadata["experience_type"] == "session_summary"
+        assert s.metadata["category"] == "会话摘要"
+        assert s.metadata["term"] == "t1"
+        assert s.metadata["turns"] == 3
+        assert s.content == "用户关注茅台基本面"
+        assert s.keys == ["t1"]

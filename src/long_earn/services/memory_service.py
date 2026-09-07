@@ -1,9 +1,10 @@
 """记忆服务实现 — 委托 SubstanceStore（物质-运动统一架构，ADR-007）。
 
-MemoryService Protocol 4 方法（ADR-007 破坏性收窄）：
+MemoryService Protocol 方法：
 - search: 知识检索（格式化字符串）
 - save_experience: 策略经验存取（StrategyExperience 值对象，结构化 metadata）
 - search_experience: 策略经验检索（返回 list[StrategyExperience]，无 markdown 往返）
+- save_session_summary: 会话摘要沉淀（ADR-024 §A，KNOWLEDGE 形态）
 - initialize: 生命周期初始化
 """
 
@@ -380,6 +381,30 @@ class MemoryServiceImpl(MemoryService):
             if len(trees) >= k:
                 break
         return trees
+
+    # ── 会话摘要沉淀（ADR-024 §A）────────────────────────────
+
+    def save_session_summary(
+        self,
+        thread_id: str,
+        summary: str,
+        turns: int,
+    ) -> str:
+        """保存会话摘要为 knowledge Substance（category="会话摘要"）。"""
+        s = Substance(
+            form=SubstanceForm.KNOWLEDGE,
+            content=summary,
+            keys=[thread_id],
+            metadata={
+                "experience_type": "session_summary",
+                "category": "会话摘要",
+                "term": thread_id,
+                "turns": turns,
+            },
+        )
+        sid = self._store.add(s)
+        self.logger.debug(f"会话摘要已存储: {thread_id} ({sid})")
+        return sid
 
     # ── 事件推理（ADR-007 Phase 2）────────────────────────────
 

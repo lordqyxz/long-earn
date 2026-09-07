@@ -337,19 +337,40 @@ def agent(
     query: str = typer.Argument(
         "分析净利润增长策略", help="用户查询（主智能体 ReAct 调度）"
     ),
+    thread_id: str = typer.Option(
+        "default", "--thread-id", help="会话线程 ID（同一 ID 多轮复用消息历史）"
+    ),
+    close: bool = typer.Option(
+        False, "--close", help="结束会话：摘要沉淀入记忆库后退出"
+    ),
 ) -> None:
-    """主智能体 —— ReAct 任务分解 + 工具调度（ADR-016）。"""
+    """主智能体 —— ReAct 任务分解 + 工具调度（ADR-016 / ADR-024 §A）。"""
     from long_earn.context_init import initialize_context
     from long_earn.master_agent import MasterAgent
 
     ctx = initialize_context()
     master_agent = MasterAgent(ctx)
 
+    if close:
+        typer.echo(f"正在结束会话: {thread_id}\n")
+        try:
+            result = master_agent.close_session(thread_id)
+            typer.echo("\n" + "=" * 60)
+            typer.echo("会话摘要（已沉淀入记忆库）:")
+            typer.echo("=" * 60)
+            typer.echo(result.get("summary", "（空会话，无摘要）"))
+            ctx.monitoring.log_report(ctx.logger)
+        except Exception as e:
+            ctx.logger.error(f"关闭会话异常: {e}")
+            typer.echo(f"\n关闭会话时出现错误: {e}", err=True)
+            raise typer.Exit(code=1) from e
+        return
+
     ctx.logger.info(f"开始处理用户查询: {query}")
     typer.echo(f"正在处理: {query}\n")
 
     try:
-        result = master_agent.invoke(query)
+        result = master_agent.invoke(query, thread_id=thread_id)
         typer.echo("\n" + "=" * 60)
         typer.echo("分析结果:")
         typer.echo("=" * 60)
