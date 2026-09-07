@@ -1,11 +1,14 @@
-"""主智能体单元测试（ADR-024 §C 工具分层）
+"""主智能体单元测试（ADR-024 §A 会话主循环 / §C 工具分层 / §D 子代理任务）
 
-验证结构化输出契约 + 工具集契约 + 各工具执行路径 + ReAct 编译。
+验证结构化输出契约 + 工具集契约 + 各工具执行路径 + ReAct 编译 +
+任务句柄与轮询语义。
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +55,18 @@ def _build_tools(ctx: MagicMock) -> list[Any]:
 
 def _tool_by_name(tools: list[Any], name: str) -> Any:
     return next(t for t in tools if t.name == name)
+
+
+def _wait_for_task(tools: list[Any], task_id: str, timeout: float = 5.0) -> str:
+    """轮询 query_task 直到任务离开 running 态，返回最终输出文本。"""
+    qt = _tool_by_name(tools, "query_task")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = qt.invoke({"task_id": task_id})
+        if "仍在运行" not in out:
+            return out
+        time.sleep(0.01)
+    pytest.fail(f"任务 {task_id} 未在 {timeout}s 内完成")
 
 
 # ── 结构化输出契约测试 ───────────────────────────────────────────
@@ -105,7 +120,7 @@ class TestToolOutputContract:
 
 
 class TestToolSetContract:
-    """验证工具集契约：8 个工具、名称、描述、参数 schema"""
+    """验证工具集契约：9 个工具、名称、描述、参数 schema"""
 
     @pytest.fixture
     def mock_master_agent(self) -> MasterAgent:
@@ -140,10 +155,10 @@ class TestToolSetContract:
             ctx.require_llm.return_value.get_llm.return_value = MagicMock()
             return MasterAgent(ctx)
 
-    def test_eight_tools_defined(self, mock_master_agent: MasterAgent) -> None:
-        """验证 8 个分层工具全部定义"""
+    def test_nine_tools_defined(self, mock_master_agent: MasterAgent) -> None:
+        """验证 9 个分层工具全部定义"""
         tools = mock_master_agent._build_tools()
-        assert len(tools) == 8
+        assert len(tools) == 9
 
     def test_tool_names(self, mock_master_agent: MasterAgent) -> None:
         """验证 query_*/run_* 两组工具名称"""
@@ -154,6 +169,7 @@ class TestToolSetContract:
             "query_ontology",
             "query_market",
             "query_memory",
+            "query_task",
             "web_search",
             "run_research",
             "run_stock_analysis",
@@ -364,13 +380,13 @@ class TestWebSearchTool:
         assert "未找到搜索结果" in out
 
 
-# ── run_* 工具执行测试 ───────────────────────────────────────────
+# ── run_* 后台任务测试（ADR-024 §D）─────────────────────────────
 
 
 class TestRunResearchTool:
-    """run_research：委托 ResearchAgent（ToG）"""
+    """run_research：提交 ResearchAgent 后台任务并返回句柄"""
 
-    def test_returns_structured_output(self) -> None:
+    def test_returns_handle_then_result(self) -> None:
         ctx = _make_context()
         research_agent = MagicMock()
         research_agent.invoke.return_value = {
@@ -387,14 +403,23 @@ class TestRunResearchTool:
             stock_analysis_subgraph=MagicMock(),
             event_inference_subgraph=MagicMock(),
         )
-        out = _tool_by_name(tools, "run_research").invoke(
+        handle = _tool_by_name(tools, "run_research").invoke(
             {"idea": "动量", "constraints": ""}
         )
-        payload = _payload(out)
+        hp = _payload(handle)
+        assert hp["task_id"].startswith("task-")
+        assert hp["task_kind"] == "run_research"
+        assert hp["status"] == "running"
+        assert "query_task" in handle
+
+        result = _wait_for_task(tools, hp["task_id"])
+        assert "已完成" in result
+        payload = _payload(result)
+        assert payload["tool"] == "run_research"
         assert payload["strategy_name"] == "双均线"
         assert payload["strategy_yaml"] == "name: dual_ma"
         assert payload["metrics"]["sharpe_ratio"] == 1.5
-        assert "sharpe_ratio: 1.5" in out
+        research_agent.invoke.assert_called_once_with("动量", "")
 
     def test_failure_is_structured(self) -> None:
         ctx = _make_context()
@@ -406,14 +431,21 @@ class TestRunResearchTool:
             stock_analysis_subgraph=MagicMock(),
             event_inference_subgraph=MagicMock(),
         )
-        out = _tool_by_name(tools, "run_research").invoke({"idea": "动量"})
-        assert "策略研发执行失败" in out and "回测数据缺失" in out
+        task_id = _payload(
+            _tool_by_name(tools, "run_research").invoke({"idea": "动量"})
+        )["task_id"]
+        out = _wait_for_task(tools, task_id)
+        assert "失败" in out and "回测数据缺失" in out
+        payload = _payload(out)
+        assert payload["status"] == "failed"
+        assert payload["error"] == "RuntimeError: 回测数据缺失"
+        assert payload["retryable"] is True
 
 
 class TestRunStockAnalysisTool:
-    """run_stock_analysis：五视角子图委托"""
+    """run_stock_analysis：五视角子图后台任务"""
 
-    def test_returns_structured_output(self) -> None:
+    def test_returns_handle_then_result(self) -> None:
         ctx = _make_context()
         subgraph = MagicMock()
         subgraph.invoke.return_value = {"summary": "茅台基本面强劲"}
@@ -423,10 +455,13 @@ class TestRunStockAnalysisTool:
             stock_analysis_subgraph=subgraph,
             event_inference_subgraph=MagicMock(),
         )
-        out = _tool_by_name(tools, "run_stock_analysis").invoke(
-            {"query": "分析茅台", "symbols": "600519"}
-        )
-        payload = _payload(out)
+        task_id = _payload(
+            _tool_by_name(tools, "run_stock_analysis").invoke(
+                {"query": "分析茅台", "symbols": "600519"}
+            )
+        )["task_id"]
+        result = _wait_for_task(tools, task_id)
+        payload = _payload(result)
         assert payload["analysis"] == "茅台基本面强劲"
         subgraph.invoke.assert_called_once_with({"query": "分析茅台 (股票: 600519)"})
 
@@ -440,13 +475,15 @@ class TestRunStockAnalysisTool:
             stock_analysis_subgraph=subgraph,
             event_inference_subgraph=MagicMock(),
         )
-        out = _tool_by_name(tools, "run_stock_analysis").invoke({"query": "分析茅台"})
-        payload = _payload(out)
+        task_id = _payload(
+            _tool_by_name(tools, "run_stock_analysis").invoke({"query": "分析茅台"})
+        )["task_id"]
+        payload = _payload(_wait_for_task(tools, task_id))
         assert payload["analysis"] == "数据缺失"
 
 
 class TestRunEventCollectionTool:
-    """run_event_collection：事件采集与推理子图委托"""
+    """run_event_collection：事件采集与推理子图后台任务"""
 
     def test_full_pipeline_structured_output(self) -> None:
         ctx = _make_context()
@@ -474,9 +511,10 @@ class TestRunEventCollectionTool:
             stock_analysis_subgraph=MagicMock(),
             event_inference_subgraph=subgraph,
         )
-        out = _tool_by_name(tools, "run_event_collection").invoke(
-            {"query": "茅台 新闻"}
-        )
+        task_id = _payload(
+            _tool_by_name(tools, "run_event_collection").invoke({"query": "茅台 新闻"})
+        )["task_id"]
+        out = _wait_for_task(tools, task_id)
         payload = _payload(out)
         assert payload["collected_count"] == 1
         assert payload["event_count"] == 1
@@ -495,10 +533,130 @@ class TestRunEventCollectionTool:
             stock_analysis_subgraph=MagicMock(),
             event_inference_subgraph=subgraph,
         )
-        out = _tool_by_name(tools, "run_event_collection").invoke({"query": "冷门主题"})
+        task_id = _payload(
+            _tool_by_name(tools, "run_event_collection").invoke({"query": "冷门主题"})
+        )["task_id"]
+        out = _wait_for_task(tools, task_id)
         assert "未采集到相关素材" in out
         payload = _payload(out)
         assert payload["event_count"] == 0
+
+
+class TestQueryTaskTool:
+    """query_task：任务轮询契约（running / succeeded / failed / unknown）"""
+
+    @staticmethod
+    def _tools_with_blocked_research(
+        release: threading.Event,
+    ) -> tuple[list[Any], MagicMock]:
+        ctx = _make_context()
+        research_agent = MagicMock()
+
+        def _block(idea: str, constraints: str = "") -> dict[str, Any]:
+            release.wait(timeout=5)
+            return {"result": "研发完成"}
+
+        research_agent.invoke.side_effect = _block
+        tools = build_master_tools(
+            ctx,
+            research_agent=research_agent,
+            stock_analysis_subgraph=MagicMock(),
+            event_inference_subgraph=MagicMock(),
+        )
+        return tools, research_agent
+
+    def test_running_then_succeeded(self) -> None:
+        """运行中任务报 running，完成后返回底层输出原文"""
+        release = threading.Event()
+        tools, _ = self._tools_with_blocked_research(release)
+        qt = _tool_by_name(tools, "query_task")
+        task_id = _payload(
+            _tool_by_name(tools, "run_research").invoke({"idea": "动量"})
+        )["task_id"]
+
+        running = qt.invoke({"task_id": task_id})
+        payload = _payload(running)
+        assert "仍在运行" in running
+        assert payload["status"] == "running"
+        assert payload["task_id"] == task_id
+
+        release.set()
+        final = _wait_for_task(tools, task_id)
+        assert "已完成" in final
+        assert "研发完成" in final
+
+    def test_unknown_task_id(self) -> None:
+        ctx = _make_context()
+        tools = build_master_tools(
+            ctx,
+            research_agent=MagicMock(),
+            stock_analysis_subgraph=MagicMock(),
+            event_inference_subgraph=MagicMock(),
+        )
+        out = _tool_by_name(tools, "query_task").invoke({"task_id": "task-999"})
+        assert "任务不存在" in out
+        assert _payload(out)["status"] == "unknown"
+
+
+class TestTaskRunner:
+    """TaskRunner 生命周期契约（ADR-024 §D）"""
+
+    def test_submit_returns_monotonic_ids(self) -> None:
+        from long_earn.master_agent_tasks import TaskRunner
+
+        runner = TaskRunner(logger=MagicMock())
+        first = runner.submit("run_research", lambda: QueryEventsOutput(summary="s"))
+        second = runner.submit("run_research", lambda: QueryEventsOutput(summary="s"))
+        assert first == "task-1"
+        assert second == "task-2"
+        _drain(runner)
+
+    def test_success_state_carries_output(self) -> None:
+        from long_earn.master_agent_tasks import TaskRunner
+
+        runner = TaskRunner(logger=MagicMock())
+        expected = QueryEventsOutput(summary="ok", query="q", items=["e1"])
+        task_id = runner.submit("query", lambda: expected)
+        _drain(runner)
+        state = runner.get(task_id)
+        assert state is not None
+        assert state.status == "succeeded"
+        assert state.output is expected
+        assert state.finished_at is not None
+
+    def test_failure_state_is_structured(self) -> None:
+        from long_earn.master_agent_tasks import TaskRunner
+
+        runner = TaskRunner(logger=MagicMock())
+
+        def _boom() -> QueryEventsOutput:
+            raise RuntimeError("子图崩溃")
+
+        task_id = runner.submit("query", _boom)
+        _drain(runner)
+        state = runner.get(task_id)
+        assert state is not None
+        assert state.status == "failed"
+        assert state.error == "RuntimeError: 子图崩溃"
+        assert state.retryable is True
+        assert state.output is None
+
+    def test_unknown_task_returns_none(self) -> None:
+        from long_earn.master_agent_tasks import TaskRunner
+
+        runner = TaskRunner(logger=MagicMock())
+        assert runner.get("task-404") is None
+
+
+def _drain(runner: Any, timeout: float = 5.0) -> None:
+    """等待 runner 内已提交任务全部完成（测试辅助）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = runner.get("task-1")
+        if state is not None and state.status != "running":
+            return
+        time.sleep(0.01)
+    pytest.fail("任务未在期限内完成")
 
 
 # ── 会话主循环测试（ADR-024 §A）──────────────────────────────────

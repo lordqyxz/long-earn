@@ -97,7 +97,7 @@ class MasterAgent:
         )
 
     def _build_tools(self) -> list[Any]:
-        """构建工具集（ADR-024 §C：5 个 query_* + 3 个 run_*）"""
+        """构建工具集（ADR-024 §C/§D：6 个 query_* + 3 个 run_* 后台任务）"""
         return build_master_tools(
             self.context,
             research_agent=self._research_agent,

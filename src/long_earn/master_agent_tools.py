@@ -1,11 +1,12 @@
-"""主智能体工具层（ADR-024 §C 工具分层）
+"""主智能体工具层（ADR-024 §C 工具分层 / §D 子代理任务）
 
 工具按两组前缀划分，命名即契约：
 
 - ``query_*`` — 只读、秒级、可在 ReAct 循环内高频并行调用；除 ``web_search``
   （联网检索 Provider，ADR-021 审计豁免的基础设施能力）外零语言模型调用；
 - ``run_*`` — 有状态、长时（10 秒级以上）、含语言模型推理的子图任务；
-  本阶段为同步执行，异步任务句柄（TaskHandle）由 ADR-024 §D 落地。
+  经 :class:`~long_earn.master_agent_tasks.TaskRunner` 提交后台执行并返回
+  任务句柄，主循环立即继续；``query_task`` 轮询进度与产物（ADR-024 §D）。
 
 所有工具产出 typed dataclass，经 :meth:`ToolOutput.render` 渲染为
 「摘要 + <details> 结构化详情」两段文本，禁止截断式压平。
@@ -21,6 +22,12 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from langchain_core.tools import tool
 
+from long_earn.master_agent_tasks import (
+    TASK_FAILED,
+    TASK_RUNNING,
+    TASK_SUCCEEDED,
+    TaskRunner,
+)
 from long_earn.ontology import ConceptQuery
 from long_earn.services.kimi_web_search import kimi_web_search
 
@@ -119,6 +126,26 @@ class RunEventCollectionOutput(ToolOutput):
     relation_count: int
     saved_count: int
     events: list[dict[str, Any]]
+
+
+@dataclass
+class TaskHandleOutput(ToolOutput):
+    """run_* 提交产出：后台任务句柄（ADR-024 §D）。"""
+
+    task_id: str
+    task_kind: str
+    status: str
+
+
+@dataclass
+class QueryTaskOutput(ToolOutput):
+    """query_task 产出：后台任务进度（完成任务的产物经底层输出原文返回）。"""
+
+    task_id: str
+    task_kind: str
+    status: str
+    error: str
+    retryable: bool
 
 
 def _detail_fields(output: ToolOutput) -> dict[str, Any]:
@@ -408,35 +435,30 @@ def _make_web_search_tool(context: RuntimeContext) -> Any:
 # ── run_* 工具组 ────────────────────────────────────────────────
 
 
-def _make_run_research_tool(context: RuntimeContext, research_agent: Any) -> Any:
+def _make_run_research_tool(
+    context: RuntimeContext, research_agent: Any, runner: TaskRunner
+) -> Any:
     logger = context.logger
     monitoring = context.monitoring
 
     @tool
     def run_research(idea: str, constraints: str = "") -> str:
-        """策略研发：委托 Think-on-Graph ResearchAgent 图探索 + 回测/统计门证据
-        （长时任务，分钟级），返回最佳策略 YAML、指标与探索路径。
+        """策略研发：提交 Think-on-Graph ResearchAgent 后台执行
+        （长时任务，分钟级），立即返回任务句柄；用 query_task(task_id)
+        轮询进度与结果（最佳策略 YAML、指标与探索路径）。
 
         Args:
             idea: 策略研发想法或方向描述
             constraints: 约束条件（可选，如股票池、风险偏好、股票分析结论）
 
         Returns:
-            摘要 + <details> 结构化详情（strategy_name / strategy_yaml / metrics）
+            摘要 + <details> 结构化详情（task_id / task_kind / status）
         """
-        with monitoring.track("run_research"):
-            logger.info(f"run_research 调用: {idea} (约束: {constraints})")
-            try:
+        logger.info(f"run_research 调用: {idea} (约束: {constraints})")
+
+        def _execute() -> RunResearchOutput:
+            with monitoring.track("run_research"):
                 result = research_agent.invoke(idea, constraints)
-            except Exception as e:
-                logger.error(f"run_research 失败: {e}")
-                return RunResearchOutput(
-                    summary=f"策略研发执行失败: {e}",
-                    result="",
-                    strategy_name="",
-                    strategy_yaml="",
-                    metrics={},
-                ).render()
             backtest = result.get("backtest_result")
             metrics: dict[str, Any] = {}
             if isinstance(backtest, dict):
@@ -463,39 +485,47 @@ def _make_run_research_tool(context: RuntimeContext, research_agent: Any) -> Any
                 strategy_name=name,
                 strategy_yaml=strategy_yaml,
                 metrics=metrics,
-            ).render()
+            )
+
+        task_id = runner.submit("run_research", _execute)
+        return TaskHandleOutput(
+            summary=(
+                f"策略研发任务已提交: {task_id}（分钟级长时任务），"
+                f'用 query_task(task_id="{task_id}") 轮询结果'
+            ),
+            task_id=task_id,
+            task_kind="run_research",
+            status=TASK_RUNNING,
+        ).render()
 
     return run_research
 
 
 def _make_run_stock_analysis_tool(
-    context: RuntimeContext, stock_analysis_subgraph: Any
+    context: RuntimeContext, stock_analysis_subgraph: Any, runner: TaskRunner
 ) -> Any:
     logger = context.logger
     monitoring = context.monitoring
 
     @tool
     def run_stock_analysis(query: str, symbols: str = "") -> str:
-        """股票分析：委托股票分析子图进行五视角并行分析
-        （巴菲特/芒格/彼得林奇/费雪/资金流向），返回综合分析结论（长时任务）。
+        """股票分析：提交五视角并行分析子图后台执行
+        （巴菲特/芒格/彼得林奇/费雪/资金流向），立即返回任务句柄；用
+        query_task(task_id) 轮询进度与综合分析结论（长时任务）。
 
         Args:
             query: 股票分析查询（如股票名称、代码或分析方向）
             symbols: 特定股票代码（可选，如 600519）
 
         Returns:
-            摘要 + <details> 结构化详情（analysis 为综合结论全文）
+            摘要 + <details> 结构化详情（task_id / task_kind / status）
         """
-        with monitoring.track("run_stock_analysis"):
-            full_query = f"{query} (股票: {symbols})" if symbols else query
-            logger.info(f"run_stock_analysis 调用: {full_query}")
-            try:
+        full_query = f"{query} (股票: {symbols})" if symbols else query
+        logger.info(f"run_stock_analysis 调用: {full_query}")
+
+        def _execute() -> RunStockAnalysisOutput:
+            with monitoring.track("run_stock_analysis"):
                 result = stock_analysis_subgraph.invoke({"query": full_query})
-            except Exception as e:
-                logger.error(f"run_stock_analysis 失败: {e}")
-                return RunStockAnalysisOutput(
-                    summary=f"股票分析执行失败: {e}", analysis=""
-                ).render()
             analysis = (
                 result.get("summary")
                 or result.get("error")
@@ -505,43 +535,45 @@ def _make_run_stock_analysis_tool(
             summary = head + ("…" if len(analysis) > _ANALYSIS_HEAD_LIMIT else "")
             return RunStockAnalysisOutput(
                 summary=f"股票分析完成：{summary}", analysis=analysis
-            ).render()
+            )
+
+        task_id = runner.submit("run_stock_analysis", _execute)
+        return TaskHandleOutput(
+            summary=(
+                f"股票分析任务已提交: {task_id}（长时任务），"
+                f'用 query_task(task_id="{task_id}") 轮询结果'
+            ),
+            task_id=task_id,
+            task_kind="run_stock_analysis",
+            status=TASK_RUNNING,
+        ).render()
 
     return run_stock_analysis
 
 
 def _make_run_event_collection_tool(
-    context: RuntimeContext, event_inference_subgraph: Any
+    context: RuntimeContext, event_inference_subgraph: Any, runner: TaskRunner
 ) -> Any:
     logger = context.logger
     monitoring = context.monitoring
 
     @tool
     def run_event_collection(query: str) -> str:
-        """事件采集与推理：委托事件推理子图拉取新闻素材、抽取事件、推理市场
-        影响并落库 Substance（长时任务，含语言模型推理；query_events 覆盖不足
-        时先运行本工具，之后重新 query_events）。
+        """事件采集与推理：提交事件推理子图后台执行，拉取新闻素材、抽取事件、
+        推理市场影响并落库 Substance（长时任务，含语言模型推理），立即返回任务
+        句柄；query_events 覆盖不足时先运行本工具，完成后重新 query_events。
 
         Args:
             query: 采集主题（新闻内容、热点话题、标的或板块关键词）
 
         Returns:
-            摘要 + <details> 结构化详情（计数统计与抽取的事件清单）
+            摘要 + <details> 结构化详情（task_id / task_kind / status）
         """
-        with monitoring.track("run_event_collection"):
-            logger.info(f"run_event_collection 调用: {query}")
-            try:
+        logger.info(f"run_event_collection 调用: {query}")
+
+        def _execute() -> RunEventCollectionOutput:
+            with monitoring.track("run_event_collection"):
                 result = event_inference_subgraph.invoke({"query": query})
-            except Exception as e:
-                logger.error(f"run_event_collection 失败: {e}")
-                return RunEventCollectionOutput(
-                    summary=f"事件采集执行失败: {e}",
-                    collected_count=0,
-                    event_count=0,
-                    relation_count=0,
-                    saved_count=0,
-                    events=[],
-                ).render()
             stats = result.get("summary") or {}
             collected = result.get("collected_items") or []
             extracted = result.get("extracted_events") or []
@@ -570,9 +602,80 @@ def _make_run_event_collection_tool(
                 relation_count=relation_count,
                 saved_count=len(saved_sids),
                 events=events,
-            ).render()
+            )
+
+        task_id = runner.submit("run_event_collection", _execute)
+        return TaskHandleOutput(
+            summary=(
+                f"事件采集任务已提交: {task_id}（长时任务），"
+                f'用 query_task(task_id="{task_id}") 轮询结果'
+            ),
+            task_id=task_id,
+            task_kind="run_event_collection",
+            status=TASK_RUNNING,
+        ).render()
 
     return run_event_collection
+
+
+def _make_query_task_tool(context: RuntimeContext, runner: TaskRunner) -> Any:
+    logger = context.logger
+    monitoring = context.monitoring
+
+    @tool
+    def query_task(task_id: str) -> str:
+        """查询后台任务进度与产物（只读、秒级）：返回运行中/已完成/已失败状态；
+        已完成任务返回底层结构化产物（策略 YAML、分析结论、事件清单等），
+        失败任务返回失败原因与可重试标记。
+
+        Args:
+            task_id: 任务句柄 ID（run_* 工具返回的 task-N）
+
+        Returns:
+            运行中/失败：摘要 + <details> 结构化详情；
+            已完成：任务状态行 + 底层输出「摘要 + <details>」原文
+        """
+        with monitoring.track("query_task"):
+            logger.info(f"query_task 调用: {task_id}")
+            state = runner.get(task_id)
+            if state is None:
+                return QueryTaskOutput(
+                    summary=f"任务不存在: {task_id}（task_id 来自 run_* 工具返回）",
+                    task_id=task_id,
+                    task_kind="",
+                    status="unknown",
+                    error="",
+                    retryable=False,
+                ).render()
+            if state.status == TASK_SUCCEEDED:
+                output = state.output
+                assert output is not None  # 成功态契约保证
+                return (
+                    f"任务 {task_id}（{state.kind}）已完成，结果如下。\n\n"
+                    f"{output.render()}"
+                )
+            if state.status == TASK_FAILED:
+                return QueryTaskOutput(
+                    summary=(
+                        f"任务 {task_id}（{state.kind}）失败: {state.error}"
+                        f"{'（可重新提交 run_*）' if state.retryable else ''}"
+                    ),
+                    task_id=task_id,
+                    task_kind=state.kind,
+                    status=TASK_FAILED,
+                    error=state.error,
+                    retryable=state.retryable,
+                ).render()
+            return QueryTaskOutput(
+                summary=(f"任务 {task_id}（{state.kind}）仍在运行，请稍后再次查询"),
+                task_id=task_id,
+                task_kind=state.kind,
+                status=TASK_RUNNING,
+                error="",
+                retryable=False,
+            ).render()
+
+    return query_task
 
 
 # ── 工具集组装 ──────────────────────────────────────────────────
@@ -585,7 +688,10 @@ def build_master_tools(
     stock_analysis_subgraph: Any,
     event_inference_subgraph: Any,
 ) -> list[Any]:
-    """构建 ADR-024 §C 分层工具集（5 个 ``query_*`` + 3 个 ``run_*``）。
+    """构建 ADR-024 §C 分层工具集（6 个 ``query_*`` + 3 个 ``run_*``）。
+
+    ``run_*`` 任务经共享 :class:`TaskRunner` 后台执行（ADR-024 §D），
+    句柄与进度经 ``query_task`` 查询；Runner 生命周期随工具集（进程内）。
 
     Args:
         context: 运行时上下文（DI 容器；connector / realtime_provider
@@ -597,13 +703,15 @@ def build_master_tools(
     Returns:
         LangChain 工具列表
     """
+    runner = TaskRunner(context.logger)
     return [
         _make_query_events_tool(context),
         _make_query_ontology_tool(context),
         _make_query_market_tool(context),
         _make_query_memory_tool(context),
+        _make_query_task_tool(context, runner),
         _make_web_search_tool(context),
-        _make_run_research_tool(context, research_agent),
-        _make_run_stock_analysis_tool(context, stock_analysis_subgraph),
-        _make_run_event_collection_tool(context, event_inference_subgraph),
+        _make_run_research_tool(context, research_agent, runner),
+        _make_run_stock_analysis_tool(context, stock_analysis_subgraph, runner),
+        _make_run_event_collection_tool(context, event_inference_subgraph, runner),
     ]

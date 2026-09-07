@@ -57,7 +57,7 @@
 
 ### 能力扩展（门控）
 
-- [~] **ADR-024 实施（会话主循环与工具分层）** — Accepted 2026-09-07；**§C 工具分层已落地**（2026-09-07：`master_agent_tools.py` 8 个 query_*/run_* 工具 + ToolOutput 结构化输出两段渲染，`summarize` 退役、`infer_events` 拆分为 query_events/run_event_collection）；**§A 会话主循环已落地**（2026-09-08：`invoke(query, thread_id)` 经 MemorySaver 按线程持久化历史，`close_session` LLM 摘要沉淀 `save_session_summary` 入 Substance，CLI `agent --thread-id/--close`；`create_react_agent` 迁移 `langchain.agents.create_agent`）；余量：§D 异步任务句柄（query_task 随之落地）→ §B 上下文引擎；§E 仅接口化，无新增实现量
+- [~] **ADR-024 实施（会话主循环与工具分层）** — Accepted 2026-09-07；**§C 工具分层已落地**（2026-09-07：`master_agent_tools.py` 8 个 query_*/run_* 工具 + ToolOutput 结构化输出两段渲染，`summarize` 退役、`infer_events` 拆分为 query_events/run_event_collection）；**§A 会话主循环已落地**（2026-09-08：`invoke(query, thread_id)` 经 MemorySaver 按线程持久化历史，`close_session` LLM 摘要沉淀 `save_session_summary` 入 Substance，CLI `agent --thread-id/--close`；`create_react_agent` 迁移 `langchain.agents.create_agent`）；**§D 子代理任务已落地**（2026-09-08：`master_agent_tasks.TaskRunner` daemon 线程 + 信号量并发上限，`run_*` 提交后台返回 TaskHandle，新增 `query_task` 轮询工具，失败语义含 error/retryable）；余量：§B 上下文引擎；§E 仅接口化，无新增实现量
 - [ ] **AUDIT-P1-04** 行业集中度风控（ADR-013 P2）— **暂缓**（`instrument_details.industry` 已有板块回填，但引擎风控未贯通持仓行业暴露；覆盖率/质量门未建）
 - [ ] **行业对比视角**（`stock_analysis`；可与 AUDIT-P1-04 同批联动）
 - [ ] **多策略组合**
