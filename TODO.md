@@ -1,6 +1,6 @@
 ﻿# TODO — 待办清单
 
-> 最后更新：2026-09-01
+> 最后更新：2026-09-07
 >
 > 按 **紧急 × 重要** 四象限组织（艾森豪威尔矩阵），合并功能开发与合规审计。
 > 判定准则：
@@ -57,6 +57,7 @@
 
 ### 能力扩展（门控）
 
+- [~] **ADR-024 实施（会话主循环与工具分层）** — Accepted 2026-09-07；**§C 工具分层已落地**（2026-09-07：`master_agent_tools.py` 8 个 query_*/run_* 工具 + ToolOutput 结构化输出两段渲染，`summarize` 退役、`infer_events` 拆分为 query_events/run_event_collection）；余量：§A 会话主循环（thread_id + checkpointer）→ §D 异步任务句柄（query_task 随之落地）→ §B 上下文引擎；§E 仅接口化，无新增实现量
 - [ ] **AUDIT-P1-04** 行业集中度风控（ADR-013 P2）— **暂缓**（`instrument_details.industry` 已有板块回填，但引擎风控未贯通持仓行业暴露；覆盖率/质量门未建）
 - [ ] **行业对比视角**（`stock_analysis`；可与 AUDIT-P1-04 同批联动）
 - [ ] **多策略组合**
