@@ -9,6 +9,10 @@
 会话主循环按 ADR-024 §A：消息历史经 MemorySaver checkpointer 持久化，
 ``invoke(query, thread_id)`` 多轮复用；``close_session`` 将摘要沉淀入
 MemoryService（Substance KNOWLEDGE 形态），实现跨会话积累。
+
+上下文引擎按 ADR-024 §B：结构化笔记由
+:class:`~long_earn.master_agent_context.ContextEngine` 维护并经
+middleware 临时注入；消息历史超阈值折叠（官方 SummarizationMiddleware）。
 """
 
 from __future__ import annotations
@@ -16,16 +20,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from long_earn.core.prompt_loader import MarkdownPromptTemplate
 from long_earn.event_inference import create_event_inference_subgraph
+from long_earn.master_agent_context import ContextEngine, SessionNotesMiddleware
 from long_earn.master_agent_tools import build_master_tools
 from long_earn.stock_analysis.subgraph import create_stock_analysis_subgraph
 from long_earn.strategy_rd.research_agent import ResearchAgent
 
 if TYPE_CHECKING:
+    from langchain.agents.middleware import AgentMiddleware
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.runnables import RunnableConfig
 
@@ -38,14 +45,21 @@ _DEFAULT_RECURSION_LIMIT = 50
 # 缺省会话线程标识（ADR-024 §A）
 _DEFAULT_THREAD_ID = "default"
 
+# 紧凑化触发阈值：历史超过此消息条数时折叠旧消息（ADR-024 §B）
+_COMPACTION_TRIGGER_MESSAGES = 40
+
+# 紧凑化保留策略：折叠时保留最近 N 条消息（ADR-024 §B）
+_COMPACTION_KEEP_MESSAGES = 16
+
 
 class MasterAgent:
-    """主智能体 (ADR-016 / ADR-018 / ADR-024 §A / §C)
+    """主智能体 (ADR-016 / ADR-018 / ADR-024 §A / §B / §C)
 
     ReAct 智能体，负责任务分解、工具调度、结果整合。
     策略研发委托 ToG ResearchAgent（ADR-018）；工具按 query_*/run_*
     两组前缀分层（ADR-024 §C）；消息历史经 checkpointer 按线程持久化，
-    多轮 invoke 复用同一会话（ADR-024 §A）。
+    多轮 invoke 复用同一会话（ADR-024 §A）；结构化笔记每轮临时注入、
+    历史超阈值折叠（ADR-024 §B，见 ContextEngine）。
 
     用法::
 
@@ -87,6 +101,13 @@ class MasterAgent:
         # 会话状态持久化（ADR-024 §A：起步 MemorySaver，后续接 PG）
         self._checkpointer = MemorySaver()
 
+        # 上下文引擎（ADR-024 §B）：结构化笔记维护
+        self._context_engine = ContextEngine(
+            llm=self._llm,
+            logger=context.logger,
+            prepare_context=context.prepare_context,
+        )
+
         # 创建 ReAct agent（langchain.agents.create_agent，
         # langgraph.prebuilt.create_react_agent 已于 LangGraph V1.0 废弃）
         self._agent = create_agent(
@@ -94,7 +115,28 @@ class MasterAgent:
             tools=tools,
             system_prompt=system_prompt,
             checkpointer=self._checkpointer,
+            middleware=self._build_middleware(),
         )
+
+    def _build_middleware(self) -> list[AgentMiddleware]:
+        """构建上下文引擎中间件（ADR-024 §B）。
+
+        - 笔记注入：每轮模型调用前将 thread 笔记并入 system message
+          （临时生效，不写入 checkpointer 历史）；
+        - 紧凑化：历史超过 ``_COMPACTION_TRIGGER_MESSAGES`` 条消息时
+          折叠旧消息为摘要块，保留最近 ``_COMPACTION_KEEP_MESSAGES`` 条。
+        """
+        compaction_prompt = MarkdownPromptTemplate(
+            "master_agent_compaction.md",
+            caller_file=__file__,
+        ).format()
+        summarizer = SummarizationMiddleware(
+            model=self._llm,
+            trigger=("messages", _COMPACTION_TRIGGER_MESSAGES),
+            keep=("messages", _COMPACTION_KEEP_MESSAGES),
+            summary_prompt=compaction_prompt,
+        )
+        return [SessionNotesMiddleware(self._context_engine), summarizer]
 
     def _build_tools(self) -> list[Any]:
         """构建工具集（ADR-024 §C/§D：6 个 query_* + 3 个 run_* 后台任务）"""
@@ -120,10 +162,15 @@ class MasterAgent:
         """
         self._logger.info(f"主智能体开始处理: {user_query}")
 
+        # 首轮笔记初始化（ADR-024 §B：ContextActivation 确定性激活，ADR-021）
+        if not self._context_engine.has_notes(thread_id):
+            self._context_engine.initialize_notes(thread_id, user_query)
+
         config: RunnableConfig = {
             "recursion_limit": _DEFAULT_RECURSION_LIMIT,
             "configurable": {"thread_id": thread_id},
         }
+        prev_len = len(self._session_messages(thread_id))
 
         try:
             result = self._agent.invoke(
@@ -135,6 +182,10 @@ class MasterAgent:
             return {"summary": f"处理过程中出现异常: {e}", "messages": []}
 
         messages = result.get("messages", [])
+        # 轮末笔记增量提炼（失败保留旧笔记，不中断主循环）
+        if messages:
+            self._context_engine.update_notes(thread_id, messages[prev_len:])
+
         final_answer = ""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and msg.content:
@@ -171,6 +222,7 @@ class MasterAgent:
             turns=turns,
         )
         self._checkpointer.delete_thread(thread_id)
+        self._context_engine.delete_notes(thread_id)
         self._logger.info(f"会话已关闭并沉淀: {thread_id} → {substance_id}")
         return {"summary": summary, "substance_id": substance_id, "turns": turns}
 

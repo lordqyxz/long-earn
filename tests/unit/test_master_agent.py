@@ -1,4 +1,4 @@
-"""主智能体单元测试（ADR-024 §A 会话主循环 / §C 工具分层 / §D 子代理任务）
+﻿"""主智能体单元测试（ADR-024 §A 会话主循环 / §C 工具分层 / §D 子代理任务）
 
 验证结构化输出契约 + 工具集契约 + 各工具执行路径 + ReAct 编译 +
 任务句柄与轮询语义。
@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from long_earn.master_agent import MasterAgent
 from long_earn.master_agent_tools import (
@@ -679,7 +680,9 @@ class TestSessionLoop:
 
     @pytest.fixture
     def session_agent(self) -> MasterAgent:
-        model = FakeListChatModel(responses=["第一轮回复", "第二轮回复"])
+        # 每次 invoke 消耗一条（无工具 → 单次模型调用）；轮末笔记提炼各消耗
+        # 一条（非 JSON → 解析失败 → 保留旧笔记，不消耗断言用响应）
+        model = FakeListChatModel(responses=["第一轮回复", "n", "第二轮回复", "n"])
         with (
             patch(
                 "long_earn.master_agent.ResearchAgent",
@@ -784,6 +787,333 @@ class TestSessionLoop:
         session_agent.context.memory.save_session_summary.assert_called_once_with(
             thread_id="t1", summary="第一轮回复", turns=1
         )
+
+    def test_invoke_initializes_notes_from_activation(self) -> None:
+        """首轮笔记来自 ContextActivation 确定性激活（ADR-024 §B / ADR-021）"""
+        with (
+            patch(
+                "long_earn.master_agent.ResearchAgent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_stock_analysis_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_event_inference_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.build_master_tools",
+                return_value=[],
+            ),
+        ):
+            ctx = MagicMock()
+            ctx.logger = MagicMock()
+            ctx.memory = MagicMock()
+            ctx.prepare_context.return_value = (
+                "事件A：降息利好高估值板块\n事件B：白酒库存周期见底"
+            )
+            ctx.require_llm.return_value.get_llm.return_value = FakeListChatModel(
+                responses=["回复", "n"]
+            )
+            agent = MasterAgent(ctx)
+
+        agent.invoke("分析白酒板块", thread_id="t-notes")
+        notes = agent._context_engine.get_notes("t-notes")
+        assert notes is not None
+        assert notes.task == "分析白酒板块"
+        assert "事件A：降息利好高估值板块" in notes.facts
+        assert "事件B：白酒库存周期见底" in notes.facts
+
+    def test_close_session_deletes_notes(self) -> None:
+        """close_session 清理 thread 笔记（随 thread 生命周期存续）"""
+        with (
+            patch(
+                "long_earn.master_agent.ResearchAgent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_stock_analysis_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.create_event_inference_subgraph",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "long_earn.master_agent.build_master_tools",
+                return_value=[],
+            ),
+        ):
+            ctx = MagicMock()
+            ctx.logger = MagicMock()
+            ctx.memory = MagicMock()
+            ctx.require_llm.return_value.get_llm.return_value = FakeListChatModel(
+                responses=["回复", "n"]
+            )
+            agent = MasterAgent(ctx)
+
+        agent.invoke("第一问", thread_id="t-clean")
+        assert agent._context_engine.has_notes("t-clean")
+        self._stub_summary_llm(agent, "摘要")
+        agent.close_session("t-clean")
+        assert not agent._context_engine.has_notes("t-clean")
+
+
+# ── 上下文引擎测试（ADR-024 §B）──────────────────────────────────
+
+
+class TestSessionNotes:
+    """SessionNotes 渲染契约：标签包裹、空字段跳过"""
+
+    def test_render_all_sections(self) -> None:
+        from long_earn.master_agent_context import SessionNotes
+
+        notes = SessionNotes(
+            task="研发动量策略",
+            facts=["A股动量效应显著", "IC 加权年化 6%"],
+            symbols=["600519", "000858"],
+            constraints=["回撤不超过 15%"],
+        )
+        text = notes.render()
+        assert text.startswith("<session_notes>")
+        assert text.endswith("</session_notes>")
+        for expected in [
+            "## 当前任务",
+            "研发动量策略",
+            "## 已确认事实",
+            "- A股动量效应显著",
+            "## 关注标的",
+            "- 600519",
+            "## 用户约束",
+            "- 回撤不超过 15%",
+        ]:
+            assert expected in text
+
+    def test_render_empty_returns_empty(self) -> None:
+        from long_earn.master_agent_context import SessionNotes
+
+        assert SessionNotes().render() == ""
+
+    def test_render_skips_empty_sections(self) -> None:
+        from long_earn.master_agent_context import SessionNotes
+
+        text = SessionNotes(task="只查行情").render()
+        assert "## 当前任务" in text
+        assert "## 已确认事实" not in text
+        assert "## 关注标的" not in text
+        assert "## 用户约束" not in text
+
+
+class TestContextEngine:
+    """ContextEngine 笔记生命周期（ADR-024 §B）：初始化 / 提炼 / 清理"""
+
+    @staticmethod
+    def _engine(llm: Any = None, prepare: Any = None) -> Any:
+        from long_earn.master_agent_context import ContextEngine
+
+        return ContextEngine(
+            llm=llm or MagicMock(),
+            logger=MagicMock(),
+            prepare_context=prepare if prepare is not None else (lambda query: ""),
+        )
+
+    @staticmethod
+    def _turn_messages() -> list[Any]:
+        """一轮典型增量消息（用户 → 工具结果 → 助手回复）。"""
+        from langchain_core.messages import ToolMessage
+
+        return [
+            HumanMessage("分析茅台"),
+            ToolMessage(
+                content="贵州茅台最新报价 1680 元\n\n<details>\n{}\n</details>",
+                tool_call_id="c1",
+            ),
+            AIMessage("茅台基本面稳健，估值合理"),
+        ]
+
+    def test_initialize_notes_activation_hit(self) -> None:
+        """激活 hit：ContextActivation 事件文本进入 facts（ADR-021 首轮笔记来源）"""
+        engine = self._engine(prepare=lambda q: "事件A\n事件B")
+        notes = engine.initialize_notes("t1", "查询")
+        assert notes.task == "查询"
+        assert notes.facts == ["事件A", "事件B"]
+        assert engine.has_notes("t1")
+
+    def test_initialize_notes_miss_keeps_facts_empty(self) -> None:
+        """激活 miss：facts 留空，补采集交由主模型决策"""
+        engine = self._engine(prepare=lambda q: "")
+        notes = engine.initialize_notes("t1", "查询")
+        assert notes.facts == []
+        assert notes.task == "查询"
+
+    def test_initialize_notes_prepare_raises(self) -> None:
+        """prepare_context 异常容错：笔记以空事实初始化，不抛出"""
+
+        def _boom(query: str) -> str:
+            raise RuntimeError("激活服务不可用")
+
+        engine = self._engine(prepare=_boom)
+        notes = engine.initialize_notes("t1", "查询")
+        assert notes.facts == []
+
+    def test_update_notes_llm_json(self) -> None:
+        """轮末提炼：LLM 返回合法 JSON 覆盖笔记"""
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(
+            content='{"task": "研发动量策略", "facts": ["动量 IC 0.05"], '
+            '"symbols": ["600519"], "constraints": ["仅多头"]}'
+        )
+        engine = self._engine(llm=llm)
+        engine.initialize_notes("t1", "初始查询")
+        updated = engine.update_notes("t1", self._turn_messages())
+        assert updated is not None
+        assert updated.task == "研发动量策略"
+        assert updated.facts == ["动量 IC 0.05"]
+        assert updated.symbols == ["600519"]
+        assert updated.constraints == ["仅多头"]
+
+    def test_update_notes_accepts_fenced_json(self) -> None:
+        """LLM 输出 ```json 围栏时正常解析"""
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(
+            content='```json\n{"task": "t", "facts": [], "symbols": [], '
+            '"constraints": []}\n```'
+        )
+        engine = self._engine(llm=llm)
+        engine.initialize_notes("t1", "q")
+        updated = engine.update_notes("t1", self._turn_messages())
+        assert updated is not None
+        assert updated.task == "t"
+
+    def test_update_notes_invalid_json_keeps_old(self) -> None:
+        """LLM 返回非 JSON：保留旧笔记"""
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="这不是 JSON")
+        engine = self._engine(llm=llm)
+        engine.initialize_notes("t1", "初始查询")
+        updated = engine.update_notes("t1", self._turn_messages())
+        assert updated is not None
+        assert updated.task == "初始查询"
+        assert updated.facts == []
+
+    def test_update_notes_llm_error_keeps_old(self) -> None:
+        """LLM 调用异常：保留旧笔记，不中断主循环"""
+        llm = MagicMock()
+        llm.invoke.side_effect = RuntimeError("llm 不可用")
+        engine = self._engine(llm=llm)
+        engine.initialize_notes("t1", "初始查询")
+        updated = engine.update_notes("t1", self._turn_messages())
+        assert updated is not None
+        assert updated.task == "初始查询"
+
+    def test_update_notes_without_notes_returns_none(self) -> None:
+        """thread 无笔记时 update 返回 None（先初始化后更新）"""
+        engine = self._engine()
+        assert engine.update_notes("t404", self._turn_messages()) is None
+
+    def test_update_notes_empty_delta_keeps_old(self) -> None:
+        """无增量消息时不调 LLM，返回当前笔记"""
+        llm = MagicMock()
+        engine = self._engine(llm=llm)
+        engine.initialize_notes("t1", "初始查询")
+        updated = engine.update_notes("t1", [])
+        assert updated is not None
+        assert updated.task == "初始查询"
+        llm.invoke.assert_not_called()
+
+    def test_notes_lifecycle_delete(self) -> None:
+        """delete_notes 清理后 has_notes 为 False、render 返回空串"""
+        engine = self._engine()
+        engine.initialize_notes("t1", "查询")
+        assert engine.render_notes("t1") != ""
+        engine.delete_notes("t1")
+        assert not engine.has_notes("t1")
+        assert engine.render_notes("t1") == ""
+
+
+class TestSessionNotesMiddleware:
+    """笔记注入中间件：wrap_model_call 契约（注入 / 无笔记透传）"""
+
+    @staticmethod
+    def _request() -> Any:
+        from langchain.agents.middleware import ModelRequest
+
+        return ModelRequest(
+            model=MagicMock(),
+            messages=[HumanMessage("查询")],
+            system_message=SystemMessage("你是主智能体。"),
+        )
+
+    def test_injects_notes_into_system_message(self) -> None:
+        """有笔记时 system_message 追加笔记块，原消息列表不动"""
+        from langchain.agents.middleware import ModelRequest
+        from langchain_core.runnables import RunnableConfig
+
+        from long_earn.master_agent_context import (
+            ContextEngine,
+            SessionNotesMiddleware,
+        )
+
+        engine = ContextEngine(
+            llm=MagicMock(),
+            logger=MagicMock(),
+            prepare_context=lambda q: "",
+        )
+        engine.initialize_notes("t1", "研发动量策略")
+        middleware = SessionNotesMiddleware(engine)
+
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(request: ModelRequest) -> Any:
+            captured["request"] = request
+            return object()
+
+        config: RunnableConfig = {"configurable": {"thread_id": "t1"}}
+        with patch("long_earn.master_agent_context.get_config", return_value=config):
+            middleware.wrap_model_call(self._request(), handler)
+
+        injected = captured["request"].system_message
+        assert injected is not None
+        assert "<session_notes>" in str(injected.content)
+        assert "研发动量策略" in str(injected.content)
+        assert "你是主智能体。" in str(injected.content)
+        # 笔记块位于系统提示之后
+        assert str(injected.content).index("你是主智能体。") < str(
+            injected.content
+        ).index("<session_notes>")
+
+    def test_no_notes_passes_through(self) -> None:
+        """无笔记时请求原样透传（不 override）"""
+        from langchain.agents.middleware import ModelRequest
+        from langchain_core.runnables import RunnableConfig
+
+        from long_earn.master_agent_context import (
+            ContextEngine,
+            SessionNotesMiddleware,
+        )
+
+        engine = ContextEngine(
+            llm=MagicMock(),
+            logger=MagicMock(),
+            prepare_context=lambda q: "",
+        )
+        middleware = SessionNotesMiddleware(engine)
+
+        original = self._request()
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(request: ModelRequest) -> Any:
+            captured["request"] = request
+            return object()
+
+        config: RunnableConfig = {"configurable": {"thread_id": "t-unknown"}}
+        with patch("long_earn.master_agent_context.get_config", return_value=config):
+            middleware.wrap_model_call(original, handler)
+
+        assert captured["request"] is original
+        assert captured["request"].system_message is original.system_message
 
 
 class TestSaveSessionSummary:
