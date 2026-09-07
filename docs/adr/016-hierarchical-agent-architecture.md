@@ -3,8 +3,8 @@ id: 16
 title: 分层智能体架构
 status: Accepted
 date: 2026-07
-summary: MasterAgent ReAct 负责任务分解与跨子图编排；§C 策略研发条款已由 ADR-018 取代。
-amended_by: ["ADR-018"]
+summary: MasterAgent ReAct 负责任务分解与跨子图编排；§A 工具表已由 ADR-024 修订；§C 策略研发条款已由 ADR-018 取代。
+amended_by: ["ADR-018", "ADR-024"]
 related: ["ADR-022", "ADR-017"]
 ---
 
