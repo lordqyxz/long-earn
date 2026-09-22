@@ -78,21 +78,54 @@ class AkshareFallbackProvider:
         for symbol in symbols:
             ak_code = xt_to_ak(symbol)
             try:
+                # P0 复权断裂修复（2026-09-23）：与 miniqmt 主路径同语义——
+                # 落库原始价 + 等比因子列（adj_factor = qfq/raw，同批同锚自洽）。
+                # 降级源仅供应急，因子跨批次仍可能漂移（qfq 为锚点相对调整），
+                # 主路径（miniqmt front_ratio）才是 PIT 正确实现。
                 df = self._ak.stock_zh_a_hist(
+                    symbol=ak_code,
+                    period="daily",
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="",
+                )
+                if df is None or df.empty:
+                    continue
+                df_qfq = self._ak.stock_zh_a_hist(
                     symbol=ak_code,
                     period="daily",
                     start_date=start_date.replace("-", ""),
                     end_date=end_date.replace("-", ""),
                     adjust="qfq",
                 )
-                if df is None or df.empty:
-                    continue
 
                 # 列名标准化
                 df = df.rename(columns=KLINE_COLUMN_MAP)
                 df = df[list(set(KLINE_COLUMN_MAP.values()) & set(df.columns))]
                 df["symbol"] = symbol
                 df["date"] = pd.to_datetime(df["date"])
+
+                # 因子计算：同批 qfq close / 原始 close，按日期对齐
+                try:
+                    qfq = df_qfq.rename(columns=KLINE_COLUMN_MAP)
+                    qfq["date"] = pd.to_datetime(qfq["date"])
+                    merged = df[["date", "close"]].merge(
+                        qfq[["date", "close"]],
+                        on="date",
+                        how="left",
+                        suffixes=("", "_qfq"),
+                    )
+                    raw_close = merged["close"]
+                    qfq_close = merged["close_qfq"]
+                    factor = (qfq_close / raw_close).where(
+                        (raw_close > 0) & (qfq_close > 0), 1.0
+                    )
+                    df["adj_factor"] = factor.to_numpy()
+                except Exception as factor_exc:
+                    logger.warning(
+                        f"akshare 因子计算失败 {symbol}（降级不复权）: {factor_exc}"
+                    )
+                    df["adj_factor"] = 1.0
                 all_dfs.append(df)
             except Exception as e:
                 logger.warning(f"akshare 获取 {symbol} 行情失败: {e}")

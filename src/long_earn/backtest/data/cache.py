@@ -260,7 +260,15 @@ def _panel_rebuild_sql(symbols: list[str] | None) -> str:
         INSERT INTO panel_daily ({all_cols})
         SELECT
             p.symbol, p.date,
-            p.open, p.high, p.low, p.close, p.volume, p.is_tradable,
+            -- P0 复权断裂修复：panel 输出复权价 = 原始价 × 等比前复权因子。
+            -- NULLIF 兜底历史 NaN 因子行（PG float8 'NaN' 是合法值 ≠ NULL，
+            -- COALESCE 单独救不回）；因子缺失/非法时退化为不复权（旧行重导前
+            -- 过渡语义），契约列型不变、下游零感知。
+            p.open * COALESCE(NULLIF(p.adj_factor, 'NaN'::float8), 1.0),
+            p.high * COALESCE(NULLIF(p.adj_factor, 'NaN'::float8), 1.0),
+            p.low * COALESCE(NULLIF(p.adj_factor, 'NaN'::float8), 1.0),
+            p.close * COALESCE(NULLIF(p.adj_factor, 'NaN'::float8), 1.0),
+            p.volume, p.is_tradable,
             {f_cols}
         FROM price_daily p
         LEFT JOIN fin_span f
@@ -483,6 +491,7 @@ class DataCache:
                     close DOUBLE PRECISION,
                     volume DOUBLE PRECISION,
                     is_tradable BOOLEAN DEFAULT TRUE,
+                    adj_factor DOUBLE PRECISION DEFAULT 1.0,
                     PRIMARY KEY (symbol, date)
                 )
             """,
@@ -493,6 +502,14 @@ class DataCache:
                     conn,
                     "ALTER TABLE price_daily "
                     "ADD COLUMN IF NOT EXISTS is_tradable BOOLEAN DEFAULT TRUE",
+                )
+            # P0 复权断裂修复（2026-09-23）：等比前复权因子列（幂等）。
+            # price_daily 存原始价；复权价 = 原始价 × adj_factor 在物化/读取层现算。
+            with contextlib.suppress(Exception):
+                _exec(
+                    conn,
+                    "ALTER TABLE price_daily "
+                    "ADD COLUMN IF NOT EXISTS adj_factor DOUBLE PRECISION DEFAULT 1.0",
                 )
 
             # 财务数据 schema 元表（版本管理）
@@ -654,11 +671,23 @@ class DataCache:
         end_date: str,
         fields: list[str] | None = None,
     ) -> pd.DataFrame | None:
-        """从缓存获取行情数据"""
+        """从缓存获取行情数据。
+
+        P0 复权断裂修复：price_daily 存原始价，读取层统一乘 adj_factor 输出
+        复权价（与 panel_daily 物化语义一致）。因子列缺失（旧行未重导）时
+        退化为原始价。
+        """
         # fields=None 时选全部列；否则仅选指定字段。
         # 注意避免 `symbol, date, *` 产生重复列名（pandas 报
         # "duplicate keys"），因此 symbol/date 始终显式列出且去重。
-        extra = [f for f in (fields or []) if f not in ("symbol", "date")]
+        requested = list(fields or [])
+        extra = [f for f in requested if f not in ("symbol", "date")]
+        price_cols = {"open", "high", "low", "close"}
+        need_factor = bool(price_cols & set(extra))
+        # 复权计算需要 adj_factor：随查询一并取回（若未显式请求）
+        fetch_factor = need_factor and "adj_factor" not in extra
+        if fetch_factor:
+            extra = [*extra, "adj_factor"]
         select_fields = ", ".join(["symbol", "date", *extra])
         placeholders = ", ".join(["%s"] * len(symbols))
 
@@ -690,6 +719,15 @@ class DataCache:
                     )
                 return None
             df["date"] = pd.to_datetime(df["date"])
+            # 复权应用：输出价 = 原始价 × adj_factor（因子缺失/非法按 1.0）。
+            # 辅助列 adj_factor 仅在调用方显式请求时保留。
+            if fetch_factor and "adj_factor" in df.columns:
+                factor = df["adj_factor"]
+                factor = factor.where(factor.notna() & (factor > 0), 1.0)
+                for c in ("open", "high", "low", "close"):
+                    if c in df.columns:
+                        df[c] = df[c] * factor
+                df = df.drop(columns=["adj_factor"])
             logger.debug(
                 f"缓存命中 prices: {len(df)} 行, {df['symbol'].nunique()} 只股票"
             )
@@ -719,10 +757,21 @@ class DataCache:
         if df["date"].dtype == "object":
             df["date"] = pd.to_datetime(df["date"])
 
-        # 动态构建列清单：兼容新旧 schema（is_tradable 列可选）
+        # adj_factor 规范化：NaN/非正值 → None（NULL）。注意 pandas float 列
+        # 的 .where(cond, None) 会把 None 折回 NaN，须先转 object 再置 None；
+        # 否则 COPY 落库 PG float8 'NaN'（合法值 ≠ NULL），物化层 COALESCE 救不回。
+        if "adj_factor" in df.columns:
+            bad = ~(df["adj_factor"].notna() & (df["adj_factor"] > 0))
+            df["adj_factor"] = df["adj_factor"].astype(object).where(~bad, None)
+
+        # 动态构建列清单：兼容新旧 schema（is_tradable / adj_factor 列可选）。
+        # adj_factor 仅在调用方提供时写入——缺失时不触碰该列，ON CONFLICT
+        # 更新清单不含它，既有因子得以保留（如仅补财务数据的路径）。
         insert_cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
         if "is_tradable" in df.columns:
             insert_cols.append("is_tradable")
+        if "adj_factor" in df.columns:
+            insert_cols.append("adj_factor")
         cols_str = ", ".join(insert_cols)
         update_cols = ", ".join(f"{c} = EXCLUDED.{c}" for c in insert_cols)
 

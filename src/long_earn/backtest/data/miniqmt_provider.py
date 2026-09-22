@@ -16,6 +16,7 @@ xtquant 数据格式说明：
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -276,7 +277,16 @@ class MiniQmtClient:
     ) -> pd.DataFrame:
         """获取多只股票的 K 线数据，返回标准化 DataFrame。
 
-        返回列：date, symbol, open, high, low, close, volume, is_tradable
+        返回列：date, symbol, open, high, low, close, volume, is_tradable, adj_factor
+
+        P0 复权断裂修复（2026-09-23）：落库价改为**原始价**（dividend_type="none"），
+        另在同批查询等比前复权（"front_ratio"）的 close，逐 bar 计算因子
+        ``adj_factor = 复权close / 原始close``。等比复权为纯乘法调整——因子是
+        事件乘子的连乘积、最新段恒为 1、价格恒为正，不存在精确前复权
+        （"front"）的「锚点随查询时点漂移 + 累计减除致负价」问题（历史缺陷曾
+        制造 +1854% 假动量与 851 行负价，见 verify/adjust_break_diagnosis_20260923.md）。
+        同批双查询保证 raw 与 factor 永远同锚自洽。
+
         xtquant 不可用 / 超时 / 异常时返回空 DataFrame（不抛、不卡、不让主进程崩）。
         """
         xtdata = self._ensure_xtdata()
@@ -308,7 +318,7 @@ class MiniQmtClient:
                 start_time=start_time,
                 end_time=end_time,
                 count=-1,
-                dividend_type="front",
+                dividend_type="none",
                 fill_data=False,
             )
         except TimeoutError:
@@ -318,6 +328,44 @@ class MiniQmtClient:
             logger.warning(f"get_market_data_ex 异常: {e}")
             return pd.DataFrame()
 
+        # 同批等比前复权查询（仅 close）：失败降级为因子 1.0（等价不复权），
+        # 打 warning 提示数据质量降级——绝不因因子查询失败而丢弃原始价。
+        # 存「复权 close 按日期映射」，比值在行循环内用原始价现算（除法必须
+        # 逐 bar 对照同 symbol 同日的原始 close）。
+        adj_close_maps: dict[str, dict[str, float]] = {}
+        try:
+            adj = self._run_with_timeout(
+                xtdata.get_market_data_ex,
+                self._DOWNLOAD_TIMEOUT,
+                field_list=["time", "close"],
+                stock_list=stock_list,
+                period=period,
+                start_time=start_time,
+                end_time=end_time,
+                count=-1,
+                dividend_type="front_ratio",
+                fill_data=False,
+            )
+            for sym, adata in (adj or {}).items():
+                if adata is None or (hasattr(adata, "empty") and adata.empty):
+                    continue
+                a_times = adata.get("time")
+                if a_times is None or len(a_times) == 0:
+                    continue
+                a_dates = (
+                    pd.to_datetime(a_times, unit="ms", utc=True)
+                    .dt.tz_convert("Asia/Shanghai")
+                    .dt.strftime("%Y-%m-%d")
+                )
+                a_close = pd.to_numeric(adata["close"], errors="coerce").to_numpy()
+                adj_close_maps[sym] = {
+                    str(d): float(c)
+                    for d, c in zip(a_dates, a_close, strict=False)
+                    if c is not None and math.isfinite(c) and c > 0
+                }
+        except (TimeoutError, Exception) as e:
+            logger.warning(f"等比前复权查询失败，因子降级为 1.0（不复权）: {e}")
+
         rows: list[dict[str, Any]] = []
         for symbol, data in (raw or {}).items():
             if data is None or (hasattr(data, "empty") and data.empty):
@@ -326,20 +374,34 @@ class MiniQmtClient:
             if times is None or len(times) == 0:
                 continue
             dates = pd.to_datetime(times, unit="ms", utc=True)
+            adj_close_map = adj_close_maps.get(symbol, {})
             for i in range(len(data)):
                 dt = dates.iloc[i].tz_convert("Asia/Shanghai")
+                date_str = dt.strftime("%Y-%m-%d")
+                raw_close = float(data.iloc[i].get("close", 0.0) or 0.0)
+                # 因子 = 同批同日复权 close / 原始 close；缺位 / 原始价非法时
+                # 降级 1.0（等价不复权，不影响原始价正确性）
+                adj_close = adj_close_map.get(date_str)
+                factor = (
+                    adj_close / raw_close
+                    if adj_close is not None and raw_close > 0
+                    else 1.0
+                )
+                if not math.isfinite(factor) or factor <= 0:
+                    factor = 1.0
                 rows.append(
                     {
-                        "date": dt.strftime("%Y-%m-%d"),
+                        "date": date_str,
                         "symbol": symbol,
                         "open": float(data.iloc[i].get("open", 0.0) or 0.0),
                         "high": float(data.iloc[i].get("high", 0.0) or 0.0),
                         "low": float(data.iloc[i].get("low", 0.0) or 0.0),
-                        "close": float(data.iloc[i].get("close", 0.0) or 0.0),
+                        "close": raw_close,
                         "volume": float(data.iloc[i].get("volume", 0.0) or 0.0),
                         # P1-09: suspendFlag=1 表示停牌，is_tradable = NOT suspendFlag
                         "is_tradable": int(data.iloc[i].get("suspendFlag", 0) or 0)
                         == 0,
+                        "adj_factor": float(factor),
                     }
                 )
 
@@ -708,17 +770,23 @@ class MiniQmtDataProvider:
     def _fetch_kline(
         self,
         symbols: list[str],
-        start_date: str,
-        end_date: str,
+        start_date: str,  # noqa: ARG002 - 签名兼容保留，恒定全历史抓取
+        end_date: str,  # noqa: ARG002 - 同上
     ) -> pd.DataFrame | None:
-        """从 miniqmt 下载 K 线数据。"""
+        """从 miniqmt 下载 K 线数据。
+
+        P0 复权断裂修复：**恒定全历史抓取**（忽略 start_date，仅保留签名兼容）。
+        逐 bar 复权因子 ``adj_factor`` 是「该 bar 之后全部除权事件乘子」的连乘积
+        ——新事件发生后历史 bar 的因子会合法地整体重缩放，任何窗口化抓取都会让
+        新旧批次的因子锚点在窗口边界断裂（正是 2020~2021 污染的成因）。全历史
+        同批双查询（none + front_ratio）保证落库的 (原始价, 因子) 序列永远内部
+        自洽；upsert 幂等，重写成本可接受（QMT 本地存储，日频数据量级小）。
+        """
         try:
-            start_fmt = start_date.replace("-", "")
-            end_fmt = end_date.replace("-", "")
             df = self.client.get_kline(
                 stock_list=symbols,
-                start_time=start_fmt,
-                end_time=end_fmt,
+                start_time="",
+                end_time="",
                 period="1d",
             )
             if df.empty:

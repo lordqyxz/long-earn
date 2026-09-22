@@ -259,10 +259,15 @@ class StockServiceImpl(StockService):
             records = df.to_dict(orient="records")
             for r in records:
                 r["date"] = r.get("date", "")
-                r["open"] = r.get("open", 0)
-                r["high"] = r.get("high", 0)
-                r["low"] = r.get("low", 0)
-                r["close"] = r.get("close", 0)
+                # P0 复权断裂修复：get_kline 返回原始价 + adj_factor（等比前复权），
+                # 展示层现算复权价（与回测面板一致；因子缺失按 1.0 = 不复权）。
+                factor = r.get("adj_factor")
+                if not isinstance(factor, (int, float)) or not factor > 0:
+                    factor = 1.0
+                r["open"] = r.get("open", 0) * factor
+                r["high"] = r.get("high", 0) * factor
+                r["low"] = r.get("low", 0) * factor
+                r["close"] = r.get("close", 0) * factor
                 r["volume"] = r.get("volume", 0)
             return records
         except Exception as e:
