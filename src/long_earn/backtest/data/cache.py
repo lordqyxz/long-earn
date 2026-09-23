@@ -34,6 +34,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 from sqlalchemy import (
@@ -241,7 +242,12 @@ def _panel_rebuild_sql(symbols: list[str] | None) -> str:
         ["symbol", "date", *PANEL_PRICE_FIELDS, *PANEL_FINANCIAL_FIELDS]
     )
     fin_filter = "WHERE symbol = ANY(%s::varchar[])" if symbols is not None else ""
-    price_filter = "WHERE p.symbol = ANY(%s::varchar[])" if symbols is not None else ""
+    # 数据有效性过滤：is_valid=false 的坏行（入库前打标，见 save_prices）
+    # 不进面板；symbol 过滤可选，两者按有无参数拼接。
+    if symbols is not None:
+        price_filter = "WHERE p.is_valid AND p.symbol = ANY(%s::varchar[])"
+    else:
+        price_filter = "WHERE p.is_valid"
     return f"""
         WITH fin AS (
             SELECT symbol, report_date, announce_date, {fin_cols}
@@ -492,6 +498,7 @@ class DataCache:
                     volume DOUBLE PRECISION,
                     is_tradable BOOLEAN DEFAULT TRUE,
                     adj_factor DOUBLE PRECISION DEFAULT 1.0,
+                    is_valid BOOLEAN DEFAULT TRUE,
                     PRIMARY KEY (symbol, date)
                 )
             """,
@@ -510,6 +517,15 @@ class DataCache:
                     conn,
                     "ALTER TABLE price_daily "
                     "ADD COLUMN IF NOT EXISTS adj_factor DOUBLE PRECISION DEFAULT 1.0",
+                )
+            # 数据有效性标记（2026-09-24）：入库前由 save_prices 判定。
+            # 坏行（OHLC<=0/NaN，如 QMT 源负原始价、退市股全 0 行）打
+            # is_valid=false 保留入库作审计，物化/读取层默认过滤。
+            with contextlib.suppress(Exception):
+                _exec(
+                    conn,
+                    "ALTER TABLE price_daily "
+                    "ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT TRUE",
                 )
 
             # 财务数据 schema 元表（版本管理）
@@ -696,6 +712,7 @@ class DataCache:
             FROM price_daily
             WHERE symbol IN ({placeholders})
               AND date >= %s::date AND date <= %s::date
+              AND is_valid
             ORDER BY date, symbol
         """
         params = [*symbols, start_date, end_date]
@@ -764,6 +781,19 @@ class DataCache:
             bad = ~(df["adj_factor"].notna() & (df["adj_factor"] > 0))
             df["adj_factor"] = df["adj_factor"].astype(object).where(~bad, None)
 
+        # 数据有效性标记（入库前判定）：任一 OHLC 缺失/非正/非有限 → is_valid=False。
+        # volume=0 不判坏（停牌日无成交但价格有效）。坏行仍入库（审计可追溯），
+        # 下游 _panel_rebuild_sql / get_prices 默认 WHERE is_valid 过滤。
+        price_cols_present = [c for c in ("open", "high", "low", "close") if c in df.columns]
+        if price_cols_present:
+            bad_price = pd.Series(False, index=df.index)
+            for c in price_cols_present:
+                col = df[c]
+                bad_price |= ~(col.notna() & (col > 0) & np.isfinite(col.fillna(0.0)))
+            df["is_valid"] = ~bad_price
+        else:
+            df["is_valid"] = True
+
         # 动态构建列清单：兼容新旧 schema（is_tradable / adj_factor 列可选）。
         # adj_factor 仅在调用方提供时写入——缺失时不触碰该列，ON CONFLICT
         # 更新清单不含它，既有因子得以保留（如仅补财务数据的路径）。
@@ -772,6 +802,7 @@ class DataCache:
             insert_cols.append("is_tradable")
         if "adj_factor" in df.columns:
             insert_cols.append("adj_factor")
+        insert_cols.append("is_valid")
         cols_str = ", ".join(insert_cols)
         update_cols = ", ".join(f"{c} = EXCLUDED.{c}" for c in insert_cols)
 

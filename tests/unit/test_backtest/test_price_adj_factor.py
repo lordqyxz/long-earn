@@ -165,8 +165,63 @@ def test_get_prices_applies_adj_factor(adj_cache: DataCache) -> None:
             _exec(conn, "DELETE FROM panel_dirty WHERE symbol = %s", [sym])
 
 
-# ── 4. 宽表端到端：read_wide_panel 见到复权价 ─────────────────────────
+# ── 4. 入库前有效性标记：坏行打标 is_valid=false + 下游过滤 ───────────
 
+
+@pytest.mark.integration
+def test_save_prices_flags_invalid_rows(adj_cache: DataCache) -> None:
+    sym = f"AF-{uuid4().hex[:8]}.SH"
+    try:
+        df_in = _mk_prices([sym], [1.0])
+        # 构造坏行：close=0（停牌填充）、close<0（QMT 负原始价）、close=NaN
+        df_in.loc[1, "close"] = 0.0
+        df_in.loc[2, "close"] = -3.5
+        df_in.loc[3, "close"] = np.nan
+        adj_cache.save_prices(df_in)
+
+        with adj_cache._read() as conn:
+            from long_earn.backtest.data.cache import _exec
+
+            rows = _exec(
+                conn,
+                "SELECT date, close, is_valid FROM price_daily "
+                "WHERE symbol = %s ORDER BY date",
+                [sym],
+            ).fetchall()
+        flags = {str(d): (c, v) for d, c, v in rows}
+        assert flags["2024-03-28"] == (10.0, True), "有效行 is_valid=true"
+        assert flags["2024-03-29"] == (0.0, False), "close=0 打标坏行"
+        assert flags["2024-04-01"] == (-3.5, False), "负价打标坏行"
+        assert flags["2024-04-02"][1] is False, "close=NaN 打标坏行"
+
+        # 读取层过滤：get_prices 只回有效行
+        got = adj_cache.get_prices(
+            [sym], "2024-03-01", "2024-04-30", fields=["close"]
+        )
+        assert got is not None
+        assert got["close"].tolist() == [10.0], "坏行不应透出"
+
+        # 物化层过滤：panel_daily 只含有效行
+        adj_cache.rebuild_panel_symbols([sym])
+        with adj_cache._read() as conn:
+            from long_earn.backtest.data.cache import _exec
+
+            n = _exec(
+                conn,
+                "SELECT count(*) FROM panel_daily WHERE symbol = %s",
+                [sym],
+            ).fetchone()
+        assert n == (1,), "panel 物化过滤坏行"
+    finally:
+        with adj_cache._read() as conn:
+            from long_earn.backtest.data.cache import _exec
+
+            _exec(conn, "DELETE FROM price_daily WHERE symbol = %s", [sym])
+            _exec(conn, "DELETE FROM panel_daily WHERE symbol = %s", [sym])
+            _exec(conn, "DELETE FROM panel_dirty WHERE symbol = %s", [sym])
+
+
+# ── 5. 宽表端到端：read_wide_panel 见到复权价 ─────────────────────────
 
 @pytest.mark.integration
 def test_wide_panel_prices_are_adjusted(adj_cache: DataCache) -> None:
@@ -187,7 +242,7 @@ def test_wide_panel_prices_are_adjusted(adj_cache: DataCache) -> None:
             _exec(conn, "DELETE FROM panel_dirty WHERE symbol = %s", [sym])
 
 
-# ── 5. get_kline 同批双查询产出因子 + 失败降级 ────────────────────────
+# ── 6. get_kline 同批双查询产出因子 + 失败降级 ────────────────────────
 
 
 class _StubXtdata:
