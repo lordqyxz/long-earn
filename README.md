@@ -19,7 +19,8 @@ Long Earn 是 AI 驱动的量化交易研究平台，核心能力（**均为冻�
 - **分层智能体编排** — MasterAgent（ReAct）负责任务分解与跨能力调度（ADR-016，**Superseded**：编排已迁 DSH，见新仓 ADR-001）
 - **ToG 策略研发正反馈闭环** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成正反馈闭环（ADR-018，**Superseded**：方法论迁 `skills/quant-research/SKILL.md` 与 `run_research` 六步编排）；HTR 假设树保留为 beam 谱系/状态存储，降为脚手架（ADR-010 **Deprecated**：作为影子验证参照暂时保留）
 - **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012，**Superseded**：四大师提示词资产已迁 `skills/personas/`，仅 `strategy_generate` / `strategy_review` 两档；第五视角「资金流向」经 M5 任务 3 评估为退役，见新仓 `docs/stock-analysis-disposition.md`）
-- **事件图谱基础设施** — `prepare_context` 自动激活事件上下文；缺省时由 agent 层显式触发采集推理（ADR-007 / ADR-018）
+- **记忆与推理引擎** — Substance 统一建模事件 / 关系 / 知识 / 策略经验，双索引检索 + PostgreSQL 持久化；`prepare_context` 自动激活上下文，缺省时由 agent 层显式触发采集推理（ADR-007「物质-运动统一架构」**Accepted，在新仓延续为图记忆系统**；ADR-018 已 Superseded）
+  > 术语订正：旧版写作「事件图谱」，与实际内涵不符。ADR 历史原文中的该用词保留不追溯改写。
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL + 算子目录描述策略，支持进程级并行回测（ADR-005 / ADR-009）
 - **实时行情监控** — 实时行情 Provider（显式主源 miniqmt，次源 ciccwm）+ 价格阈值告警（ADR-011 / ADR-018）
 
