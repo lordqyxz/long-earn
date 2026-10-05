@@ -21,10 +21,10 @@ Long Earn 是 AI 驱动的量化交易研究平台，核心能力（下列能力
 - **分层智能体编排** — MasterAgent（ReAct）任务分解与跨能力调度（ADR-016，**Superseded**：载体改为 DSH + TS 假设树，见新仓 ADR-001）
 - **ToG 策略研发正反馈闭环** — ResearchAgent explore→prune，以回测与统计验证门控为不可跳过证据（ADR-018 / ADR-022，**Superseded**：方法论迁新仓 `skills/quant-research/SKILL.md`，编排迁 `research_cycle.ts`；判据迁引擎 `gates`）；假设树状态保留；ADR-010 HTR 编排已 Deprecated（作为影子验证参照暂时保留）
 - **多视角股票分析** — 五视角并行（ADR-012，**Superseded**：四大师提示词资产迁新仓 `skills/personas/` 的两档 `strategy_generate` / `strategy_review`；第五视角「资金流向」经 M5 任务 3 评估为**退役**，评估见新仓 `docs/stock-analysis-disposition.md`）
-- **事件图谱** — `prepare_context` 确定性激活；miss 时由 agent 显式触发采集（ADR-007 / ADR-021）
+- **事件图谱** — `prepare_context` 确定性激活；miss 时由 agent 显式触发采集（ADR-007 维持 Accepted，无替代实现亦未被推翻；ADR-021 **Superseded**：确定性脚手架与 LLM 推理的分离由节点级升为**进程 + 语言**边界，见新仓 ADR-001）
 - **自我进化（规划中）** — Deferred；解锁节奏 ADR-022 L0–L3（规格 ADR-017）
-- **内嵌回测引擎** — 事件驱动 + YAML DSL + 进程级并行（ADR-005 / ADR-008）
-- **实时行情监控** — 主源 miniqmt、次源 ciccwm + 价格告警（ADR-011 / ADR-018）
+- **内嵌回测引擎** — 事件驱动 + YAML DSL + 进程级并行（ADR-005 / ADR-008，**Superseded**：实现迁引擎仓 `d:/dev/long-earn-engine`（`src/engine/kernel.rs` + `gates` 子命令），方法论延续且事件溯源为结构性强化；**进程级并行扇出编排未实装**）
+- **实时行情监控** — 主源 miniqmt、次源 ciccwm + 价格告警（ADR-011 **Superseded**：统一模板随 persona 迁新仓 `skills/personas/`，改为无渲染层的提示词资产；ADR-018 **Superseded**：编排载体迁新仓 `packages/plugin/src/research_cycle.ts`）
 
 运行时总览：[docs/architecture.md](docs/architecture.md)。
 
