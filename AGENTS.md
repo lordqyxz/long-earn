@@ -9,11 +9,18 @@
 
 ## 一、项目定位
 
-Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
+> **归档冻结（M5，2026-10-06）**：本仓库代码**不再演化**，仅保留可运行的 PostgreSQL
+> 数据服务与一次性黄金语料导出脚本；除舆情管线维护外禁止新增逻辑。ADR 已于 2026-10-06
+> 完成划线（逐条对照见新仓 `docs/adr-status.md`）。跨仓库链接见本文 §八。
+>
+> **未闭合**：M5 验收第一条后半「无 LangGraph 运行时依赖」**不满足**——LangGraph 编排层
+> （含 HTR）作为新仓 M4 任务 6 影子验证的参照**暂时保留**，退役不预设时间点。
 
-- **分层智能体编排** — MasterAgent（ReAct）任务分解与跨能力调度（ADR-016）
-- **ToG 策略研发正反馈闭环** — ResearchAgent explore→prune，以回测与统计验证门控为不可跳过证据（ADR-018 / ADR-022）；假设树状态保留；ADR-010 HTR 编排已 Deprecated
-- **多视角股票分析** — 五视角并行（ADR-012）
+Long Earn 是 AI 驱动的量化交易研究平台，核心能力（下列能力**均已不再演化**，状态以 ADR 为准）：
+
+- **分层智能体编排** — MasterAgent（ReAct）任务分解与跨能力调度（ADR-016，**Superseded**：载体改为 DSH + TS 假设树，见新仓 ADR-001）
+- **ToG 策略研发正反馈闭环** — ResearchAgent explore→prune，以回测与统计验证门控为不可跳过证据（ADR-018 / ADR-022，**Superseded**：方法论迁新仓 `skills/quant-research/SKILL.md`，编排迁 `research_cycle.ts`；判据迁引擎 `gates`）；假设树状态保留；ADR-010 HTR 编排已 Deprecated（作为影子验证参照暂时保留）
+- **多视角股票分析** — 五视角并行（ADR-012，**Superseded**：四大师提示词资产迁新仓 `skills/personas/` 的两档 `strategy_generate` / `strategy_review`；第五视角「资金流向」经 M5 任务 3 评估为**退役**，评估见新仓 `docs/stock-analysis-disposition.md`）
 - **事件图谱** — `prepare_context` 确定性激活；miss 时由 agent 显式触发采集（ADR-007 / ADR-021）
 - **自我进化（规划中）** — Deferred；解锁节奏 ADR-022 L0–L3（规格 ADR-017）
 - **内嵌回测引擎** — 事件驱动 + YAML DSL + 进程级并行（ADR-005 / ADR-008）
@@ -138,3 +145,14 @@ PostgreSQL `long_earn` 权威缓存不得随意 DELETE/DROP；全量刷新仅经
 | 评审规则 | [docs/review-rules.md](docs/review-rules.md) |
 | 研究与论文 | [docs/research/papers/README.md](docs/research/papers/README.md) |
 | 待办 | [TODO.md](TODO.md) |
+
+### 关联仓库（三方互链，M5 任务 5）
+
+| 仓库 | 路径 | 定位与入口文档 |
+|------|------|----------------|
+| 本仓（冻结遗留，Python） | `d:/dev/long-earn` | **归档冻结**：代码不再演化，仅保留 PG 数据服务与一次性黄金语料导出。ADR `docs/adr/`；规划源 `docs/plan/` |
+| 新项目（TS monorepo） | `d:/dev/dsh-long-earn-quant` | DSH 插件 / 编排服务 / 前端，本仓能力的接替方。ADR 划线对照表 `docs/adr-status.md`；五视角处置评估 `docs/stock-analysis-disposition.md`；里程碑进度 `docs/milestones.md` |
+| 确定性引擎（Rust） | `d:/dev/long-earn-engine` | 回测与门控的现行实现，CLI 子进程消费（`run` / `gates`）。`README.md` 与 `docs/adr/` |
+
+本仓在三方拓扑中的角色：**事实供给方（PostgreSQL 权威缓存）+ 一次性黄金语料导出方**。
+M3.5 已取消「旧项目消费 Rust 引擎」路径，本仓不再接入引擎（规划源 `docs/plan/milestones.md` M3.5 节）。

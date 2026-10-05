@@ -1,14 +1,24 @@
 # Long Earn
 
+> **归档冻结（M5，2026-10-06）**：本仓库为**冻结遗留仓库**——代码不再演化，仅保留
+> **可运行的 PostgreSQL 数据服务**与**一次性黄金语料导出脚本**。LLM 推理与对话编排已迁
+> `d:/dev/dsh-long-earn-quant`，确定性回测计算已迁 `d:/dev/long-earn-engine`（Rust，CLI 子进程消费）。
+> 除舆情管线维护外**禁止新增逻辑**。跨仓库链接见 [AGENTS.md](AGENTS.md) §八。
+>
+> **未闭合（如实标注）**：规划源 M5 验收第一条「long-earn 仓库标记冻结，无 LangGraph
+> 运行时依赖」——前半已成立，**后半不满足**。LangGraph 编排层（含 HTR）作为新仓 M4 任务 6
+> **影子验证的参照暂时保留**，退役取决于验证结果、不预设时间点（风险表原文）。该条在影子
+> 验证通过前不可勾选。
+
 自我进化的量化交易系统。基于 LangGraph 的证券交易顾问智能体，支持策略研发、股票分析和实时行情监控。
 
 ## 项目简介
 
-Long Earn 是 AI 驱动的量化交易研究平台，核心能力：
+Long Earn 是 AI 驱动的量化交易研究平台，核心能力（**均为冻结遗留实现**，ADR 处置见下）：
 
-- **分层智能体编排** — MasterAgent（ReAct）负责任务分解与跨能力调度（ADR-016）
-- **ToG 策略研发正反馈闭环** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成正反馈闭环（ADR-018）；HTR 假设树保留为 beam 谱系/状态存储，降为脚手架
-- **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012）
+- **分层智能体编排** — MasterAgent（ReAct）负责任务分解与跨能力调度（ADR-016，**Superseded**：编排已迁 DSH，见新仓 ADR-001）
+- **ToG 策略研发正反馈闭环** — ResearchAgent 在 Substance/Ontology 上 explore→prune，以回测与统计门为不可跳过证据，写回经验形成正反馈闭环（ADR-018，**Superseded**：方法论迁 `skills/quant-research/SKILL.md` 与 `run_research` 六步编排）；HTR 假设树保留为 beam 谱系/状态存储，降为脚手架（ADR-010 **Deprecated**：作为影子验证参照暂时保留）
+- **多视角股票分析** — 巴菲特 / 芒格 / 彼得林奇 / 费雪 / 资金流向五视角并行分析（ADR-012，**Superseded**：四大师提示词资产已迁 `skills/personas/`，仅 `strategy_generate` / `strategy_review` 两档；第五视角「资金流向」经 M5 任务 3 评估为退役，见新仓 `docs/stock-analysis-disposition.md`）
 - **事件图谱基础设施** — `prepare_context` 自动激活事件上下文；缺省时由 agent 层显式触发采集推理（ADR-007 / ADR-018）
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL + 算子目录描述策略，支持进程级并行回测（ADR-005 / ADR-009）
 - **实时行情监控** — 实时行情 Provider（显式主源 miniqmt，次源 ciccwm）+ 价格阈值告警（ADR-011 / ADR-018）
@@ -103,7 +113,7 @@ uv run python scripts/download_data.py               # 全量下载行情/财务
 | 类别 | 技术 |
 |------|------|
 | 语言 | Python 3.13 |
-| 工作流框架 | LangGraph |
+| 工作流框架 | LangGraph（**冻结遗留，尚未退役**：作为新仓 M4 任务 6 影子验证的参照暂时保留） |
 | LLM | DeepSeek（默认）/ Ollama / DashScope / OpenAI 兼容 API |
 | 回测引擎 | 自研事件驱动引擎（Polars + NumPy） |
 | 统一存储 | PostgreSQL（行情缓存 / 回测审计 / Substance 物质库，ADR-019） |
