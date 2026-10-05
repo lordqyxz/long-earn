@@ -1,13 +1,20 @@
 ---
 id: 24
 title: 会话主循环与工具分层架构
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-09-07
 summary: MasterAgent 升级为会话式智能体套件；工具按 query_*/run_* 分层，事件与本体经查询工具接入主循环，长时任务异步隔离。
 related: ["ADR-016", "ADR-021", "ADR-007", "ADR-014", "ADR-018"]
 ---
 
 # ADR-024: 会话主循环与工具分层架构
+
+> **处置（M5 划线，2026-10-06）：Superseded —— 会话主循环改由 DSH 运行时承担。**
+> **为什么**：本 ADR 规划的五部件（会话主循环、上下文引擎、工具分层、子代理任务、底座读接口）与 DSH 已提供的会话管理、工具声明式注册、`ctx.jobs` 后台任务、subagents、技能库逐项重合；自建该基建的收益无法覆盖其上下文维护成本。新仓 ADR-001 §决策 1 据此改为整体借用 DSH，本仓库进入归档冻结，既有 LangGraph 编排层不再作为新功能的承载面（其退役节奏按规划源 M5 风险表执行——影子验证不达标则保留，**不预设退役时间点**）。
+> **新实现在哪**：会话主循环与工具/子代理注册由 DSH 承担；分层语义落在新仓 `packages/plugin/src/index.ts`（`query_events` / `query_runs` / `query_symbols` / `query_task`）与 `packages/plugin/src/memory_graph.ts`（`query_memory`），长时工具 `run_research` 见 `packages/plugin/src/research_job.ts`（`ctx.jobs.start` + `agent.inject` 进度通知）、`run_memory_curate` 见 `packages/plugin/src/memory_curate_job.ts`；子代理模板见 `packages/plugin/src/research_subagent.ts`。
+> **延续了什么**：`query_*`（只读、秒级、零语言模型调用）/ `run_*`（有状态、长时、返回任务句柄）的**命名即契约**分层不变；「长任务不阻塞主循环 + `query_task` 轮询句柄」「编排决策留在主智能体、子代理只作上下文隔离与工具可见性裁剪」「工具产出结构化两段式而非截断压平」三条语义均延续。
+> **变了什么**：消息历史持久化由 LangGraph checkpointer 改为 DSH 会话自持；§B 上下文三机制（紧凑化 / 结构化笔记 / 按需加载）改由 DSH 运行时提供，本仓不再实现；子代理由 LangGraph 子图改为 DSH subagent；工具可见性裁剪由 DSH 声明式注册承担。
 
 ## 背景
 

@@ -1,7 +1,8 @@
 ---
 id: 8
 title: 并行回测编排与参数网格
-status: Accepted
+status: Superseded
+superseded_by: "long-earn-engine ADR-001（docs/adr/001-event-sourcing-and-component-contracts.md）"
 date: 2026-06
 summary: ProcessPool 与共享面板并行编排；B5/B6 为硬性约束。模板渲染层已由 ADR-011 取代。
 related: ["ADR-011"]
@@ -9,6 +10,12 @@ related: ["ADR-011"]
 
 # ADR-008: 并行回测编排与参数网格
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 架构延续，实现主体迁引擎仓，worker 语言变更。**
+> **为什么**：B 部分的四条契约仍成立，但承载它的 Python 进程池（`src/long_earn/backtest/engine/parallel.py`）随本仓归档冻结不再演化，回测进程改由 Rust 引擎承担。
+> **新实现在哪**：引擎仓 `d:/dev/long-earn-engine`——单次执行入口 `src/main.rs`（`run` / `gates` 子命令）、面板加载 `src/panel/loader.rs`（Arrow IPC）；TS 侧调用桥 `packages/server/src/engine/cli.ts`（`spawn` 数组传参、不经 shell；退出码归属分类、墙钟超时）与 `outputs.ts`（三件套入口校验）。
+> **延续了什么**：①**进程隔离**——每个 worker 独立构造引擎 / 策略 / 撮合，无共享可变状态（旧侧显式 `LONG_EARN_DISABLE_XTQUANT=1` 与独立 audit 实例，新侧由子进程边界天然保证）；②**Arrow IPC 面板**契约不变，且「面板单一消费者」原则被新仓 ADR-001 §决策 3 加固——TS 桥不解析 Arrow，只做存在性预检；③**B5 warmup 注入**契约（warmup 段仅进 VisibilityGuard history、不产生交易、PIT 不变）；④**B6 diagnostics 保真**（`degenerate` / `step_failures` / `factor_failures` 不得裁减，串行与批量核心指标等价）。
+> **变了什么**：worker 语言 Python → Rust；共享内存零拷贝分发（`multiprocessing.shared_memory`）改为「面板文件 + 进程级隔离」——面板由文件传入、每进程独立加载，内存放大换取更简单的故障域；`max_workers` / 256 组合上限 / `allow_large_grid` 等 Python 侧参数随本仓冻结失效。
+> **未实装声明（防止名实不符）**：引擎仓当前仅提供单次 `run`，参数网格与 Walk-Forward 的**扇出编排**尚未在 Rust 侧实装（引擎 `src/` 无并行运行时依赖，扇出由调用方在 TS 侧串行驱动）。故 B1–B4 的并行编排语义是**待实现的延续契约**，不是现行行为；判据（B5 / B6）仍为硬性约束。
 
 ## 背景
 

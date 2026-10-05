@@ -1,7 +1,8 @@
 ---
 id: 18
 title: Think-on-Graph 策略研发正反馈闭环
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-08
 summary: 探索控制器移交 ResearchAgent；回测与统计验证门控为不可跳过的证据链。
 amended_by: ["ADR-021"]
@@ -11,6 +12,12 @@ related: ["ADR-010", "ADR-016", "ADR-022"]
 
 # ADR-018: Think-on-Graph 策略研发正反馈闭环
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 编排载体变更，研究方法论不变。**
+> **为什么**：`strategy_rd/research_agent.py`（LangGraph `create_react_agent` + ToG 工具集）随本仓库归档冻结不再演化；其承载的方法论已在 TS 侧以「方法论文档 + 编排进程」重新落地，探索控制器不再是一个 ReAct 智能体实例。
+> **新实现在哪**：六步编排 = 新仓 `packages/plugin/src/research_cycle.ts`（S1 定基线 → S2 构思 → S3 证据摄入 → S4 裁定登记 → S5/S6 → 周期记账）；探索状态与剪枝/合并 = `packages/server/src/tree/`；方法论纪律（六步循环 / 门控证据要求 / Arbor 三动作语义 / 初始基线接受规则 / 双季度验证） = `skills/quant-research/SKILL.md`；子代理模板与只读查询工具 = `packages/plugin/src/research_subagent.ts`。
+> **延续了什么**：explore→prune 的图式探索方法论、统计验证门控不可跳过、探索与证据解耦（模型负责搜索、确定性计算负责证明）三条不变；「不可跳过」的保障方式还被强化——由「服务端拦截」升级为「编排层不存在该路径 + 服务端兜底」（`packages/server/src/tree/{gates,service}.ts`），无门控证据即停在 S4 之前（`awaiting_evidence`）而非抛异常。
+> **变了什么**：证据来源由进程内 `run_backtest` / `run_oos_gates` 改为**按实参摄入**引擎产物（插件在 Node 半区够不着二进制与 PIT 面板），见新仓 ADR-001 §决策 3 与 `packages/server/src/engine/{cli,outputs,bridge}.ts`；假设树持久化由 JSON Store 改为 SQLite 五表并 SSE 广播；§C 事件图谱「缺失即补采集」的触发点随本仓冻结不再演化。
+> **退役节奏**：与 LangGraph HTR 的影子验证（新仓 M4 任务 6）未执行；按规划源 M5 风险表，LangGraph HTR 保留至通过，退役不预设时间点。
 
 ## 背景
 

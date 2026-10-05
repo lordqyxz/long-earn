@@ -1,13 +1,19 @@
 ---
 id: 12
 title: 大师智能节点可复用技能包
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-07
 summary: MasterPersona 协议与注册表；四 mode 可扩展，统一大师视角调用契约。
 ---
 
 # ADR-012: 大师智能节点可复用技能包
 
+> **处置（M5 划线，2026-10-06）：Superseded —— persona 迁 DSH 技能库（SKILL.md 资产）。**
+> **为什么**：四大师原为 LangGraph 子图内的 Python 节点（`MasterPersona` 协议 + `PersonaRegistry` 全局注册表 + jinja2 prompt 文件）；新架构中提示词资产须能被模型直接读取，且 DSH 已提供技能库，故不再需要运行时注册表与 Python 节点。
+> **新实现在哪**：提示词资产 = 新仓 `skills/personas/<name>/{strategy_generate,strategy_review}.md`（buffett / charles_munger / fiske / petter，索引见 `skills/personas/README.md`）；协议定型 = `packages/contract/src/persona.ts`（纯类型，`verdict` 词表与输出字段）；资产一致性判据 = `packages/server/test/personas.assets.test.ts`（词表 / 占位符 / 输出字段 / 门控权限）。
+> **延续了什么**：统一调用契约（`PersonaContext` / `PersonaResult` 的形状与 `verdict` / `rationale` / `weaknesses` / `suggestions` / `confidence` / `raw_analysis` 字段）、失败回退策略（单个大师失败不影响主流程）、新增大师零拓扑改动三点延续。
+> **变了什么**：运行时注册表取消（文档即提示词，故不引入 `PersonaRegistry` 类变量与 fixture 重置）；mode 由四档收敛为 `strategy_generate` / `strategy_review` 两档（`stock_analysis` / `result_synthesis` 未随迁）；裁定权限收紧——`strategy_review` 在回测证据为空时不得给出「接受」，该裁定降为**建议**，门控证据只认 `BACKTEST_RUN` + `GATE_PASS`（写入 `skills/quant-research/SKILL.md` §8）；「大师仍为单次语言模型调用」的约定由子代理模板承载。
 
 ## 背景
 

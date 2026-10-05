@@ -1,7 +1,8 @@
 ---
 id: 11
 title: 统一 jinja2 与 ChatPromptTemplate 提示词体系
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-07
 summary: 统一采用 jinja2 与 LangChain ChatPromptTemplate；取代 ADR-008 自研渲染层。
 related: ["ADR-008"]
@@ -10,6 +11,11 @@ related: ["ADR-008"]
 
 # ADR-011: 统一 jinja2 与 ChatPromptTemplate 提示词体系
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 模板体系随 persona 迁移演进（渲染引擎 → 文档即提示词）。**
+> **为什么**：提示词资产随 ADR-012 迁入 DSH 技能库后，其消费者从「Python 渲染管线」变为「模型直接读取文档」，运行时模板渲染层不再有消费方；引入一套 jinja2 渲染器只会形成无人消费的第二套口径。
+> **新实现在哪**：`skills/quant-research/SKILL.md`（研究方法论与循环纪律）与 `skills/personas/<name>/{strategy_generate,strategy_review}.md`（四大师两 mode）；资产形状与字段约束定型于 `packages/contract/src/persona.ts`，一致性判据在 `packages/server/test/personas.assets.test.ts`。
+> **延续了什么**：§A 的核心判断继续有效——prompt 消费者是模型而非浏览器，**任何情况下不得引入 HTML 转义**（转义会污染变量值并破坏 JSON）；指令与数据分离、system / human / ai 多消息结构优于单字符串 prompt 的结论亦延续，在新仓以 Markdown frontmatter 划分元数据与消息结构，而非 `MarkdownChatPromptTemplate` 类。
+> **变了什么**：渲染引擎由 LangChain `PromptTemplate(template_format='jinja2')` + `MarkdownChatPromptTemplate` 改为**无渲染层**（文档即提示词）；变量插值需求消失，故不移植 `${var}` → `{{ var }}` 的语法迁移与 `scripts/check_deprecated_syntax.py` 守卫；§D 中「DSL YAML 参数插值（`param_grid.render_template`）一并切换」的条款随 Python 参数网格冻结失效——参数网格若在未来落地于引擎仓，模板插值不再是跨语言共享语法面。附录「实时分析能力」（`RealtimeDataProvider` / `PriceAlertMonitor` / 资金流向分析师）随本仓冻结保留为旧侧事实，未迁新仓。
 
 ## 背景
 

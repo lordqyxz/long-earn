@@ -10,6 +10,7 @@ related: ["ADR-018", "ADR-022", "ADR-015"]
 
 # ADR-010: 假设树精炼（Hypothesis Tree Refinement）
 
+> **处置（M5 划线，2026-10-06）：维持 Deprecated，补退役节奏注记。** 假设树状态与合并 / 统计门的思想已在新仓落地（`packages/server/src/tree/`、`skills/quant-research/SKILL.md`、引擎 `src/gates/`），与本 ADR 的 Deprecated 判定一致，无须改判。**须修正的是退役节奏的读数**：正文与 `deprecated_note` 称「编排实现已于 2026-08-31 删除」，但规划源 M5 任务 2（退役 master_agent 三件套与 LangGraph 编排层）截至本次划线仍为待办，且 M5 风险表明确规定「影子验证不达标 → LangGraph HTR 保留至通过，退役不预设时间点」——新仓 M4 任务 6（与 LangGraph HTR 的影子验证）尚未执行。故本 ADR 的现行读数为：**禁止新增依赖、不得再演化**（约束不变），但旧 LangGraph HTR 实现作为影子验证参照**暂时保留**，不得据此推断其已退役。
 
 > 下文「决策」为历史原文（当时以六步循环为唯一编排）。现行策略研发控制面以 ADR-018 ResearchAgent 为准；勿再新增对本 ADR 编排路径的依赖。
 

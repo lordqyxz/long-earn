@@ -1,7 +1,8 @@
 ---
 id: 22
 title: 统计验证门控与自我进化分期解锁
-status: Accepted
+status: Superseded
+superseded_by: "long-earn-engine ADR-001（docs/adr/001-event-sourcing-and-component-contracts.md）"
 date: 2026-08-30
 summary: 规定 Walk-Forward 硬性门控、DSR/PBO 诊断角色与自我进化 L0–L3 分期解锁。
 related: ["ADR-015", "ADR-017"]
@@ -10,6 +11,12 @@ related: ["ADR-015", "ADR-017"]
 
 # ADR-022: 统计验证门控（statistical validation gates）用法与自我进化（self-evolution）分期解锁（staged unlock）
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 判据不变，实现迁引擎 `gates` 子命令。**
+> **为什么**：本 ADR 规定的门控角色、契约与解锁节奏本身未被推翻，但承载它的 Python 侧（`run_oos_gates` 与 AcceptanceGate 路径）随本仓归档冻结不再演化；三道门已在 Rust 引擎侧实装为独立裁决流程。
+> **新实现在哪**：引擎仓 `src/gates/`——`walk_forward.rs`（WalkForwardStability）、`deflated_sharpe.rs`（DeflatedSharpe，含 `n_eff_spectral` / `n_eff_avg_corr` 两种有效试验数估计与 `dsr_at_n_eff` 上界参照）、`cscv.rs`（CSCV-PBO）、`matrix.rs`（全候选收益矩阵）、`ensemble.rs`（top-K 集成模式）、`mod.rs`（`run_gates` 编排，三道门共用同一收益矩阵与试验集合）。入口：`long-earn-engine.exe gates --runs-dir <DIR> --winner <NAME> --out <JSON>`（`--ensemble <K>` 为集成模式；未通过退出码 2）。调用侧：新仓 `packages/server/src/tree/gates.ts`（回源 PG 校验证据存在性）与 `packages/plugin/src/research_cycle.ts` S3 证据摄入。
+> **延续了什么**：全部判据沿用——①门控角色分工：Walk-Forward 稳定性 + held-out OOS 合并阈值为**硬性门控**，DSR / PBO 为**诊断门控**、输入不齐时 `skipped` 而不得静默视为通过；②DSR 契约：日收益序列（skew / kurtosis）+ 完整试验登记 + 相关试验用 \(N_{\mathrm{eff}}\)；③PBO 契约：全体候选 IS/OOS 矩阵，PBO > 0.5 为选噪强信号；④**明确不覆盖**前视偏差 / 成本 / 幸存者偏差 / 样本外结构性断裂，CSCV**补**而不**替代** Walk-Forward；⑤§B 自我进化 L0–L3 分期解锁表与「禁止因 stagnation 自动改 prompt 或放宽统计门阈值」。
+> **变了什么**：门的裁决由 Python 服务内调用改为独立 CLI 裁决流程（读 runs 目录 → 出判据报告 JSON），与引擎正确性验证正交；集成模式的统计对象被显式区分（`--ensemble <K>` 量的是 top-K 选择规则，与单配置 winner 不可混读）；门控证据在新仓成为**编排态的外来事实**——假设树只持 `run_id` 并回源校验，不复制指标（避免两份真相漂移）。
+> **仍未闭合**：DSR 升为硬性门控的前置条件尚未满足——引擎侧已给出 \(N_{\mathrm{eff}}\) 敏感度诊断，但「相关试验不得当独立 N」所需的**试验登记面**尚未由新仓统一供给；PBO 的全候选矩阵供给同理。两者在补齐前仍按 `skipped` 如实标注。
 
 ## 背景
 

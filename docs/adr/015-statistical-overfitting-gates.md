@@ -1,7 +1,8 @@
 ---
 id: 15
 title: 统计过拟合反馈与探索修复
-status: Accepted
+status: Superseded
+superseded_by: "long-earn-engine ADR-001（docs/adr/001-event-sourcing-and-component-contracts.md）"
 date: 2026-07-27
 summary: Tier A/B 确立失败信号上行与探索多样性修复；原 Tier S 硬性门控已外移。
 amended_by: ["ADR-022"]
@@ -10,6 +11,11 @@ related: ["ADR-010", "ADR-005", "ADR-013"]
 
 # ADR-015: 统计过拟合反馈与探索修复
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 判据不变，实现迁引擎 `gates` 子命令；Tier A/B 方法论在新仓延续。**
+> **为什么**：本 ADR 的正文已按 ADR-022 §C 裁掉 Tier S；剩下的失败反馈与探索多样性条款，其 Python 载体（`_collect_tried_directions` / `is_frontier` / 反向传播提示模板）随本仓归档冻结不再演化，语义改由新仓假设树与研究编排承载。
+> **新实现在哪**：统计门判据与实现 = 引擎仓 `src/gates/`（`walk_forward.rs` / `deflated_sharpe.rs` / `cscv.rs` / `matrix.rs` / `mod.rs`），入口 `long-earn-engine.exe gates --runs-dir <DIR> --winner <NAME> --out <JSON>`（另支持 `--ensemble <K>` 集成模式；未通过退出码 2）；Tier A 失败信号上行 = 新仓 `packages/plugin/src/research_cycle.ts` + `research_trace.ts`（每步树变更含 REJECTED 拒绝码，立即回流为会话可见的进度通知）；Tier B 探索多样性与前沿语义 = `packages/server/src/tree/store.ts` 节点状态 + `packages/server/src/tree/limits.ts`（`HTR_MAX_CYCLES=8` / `HTR_MAX_DEPTH=4` / `HTR_BRANCHING_FACTOR=3`）。
+> **延续了什么**：Tier A 的核心命题——**失败信号必须上行**，被拒绝的假设同样写回结果与拒绝原因，使反思阶段有据可依而非无依据推断；Tier B 的核心命题——已验证但未充分展开的叶节点仍属探索候选，选择须为严格集合语义、强制不同方向。两条在新仓分别由拒绝码审计与硬上界 / 分支约束兑现；「先补统计显著性再扩探索」的动机不变。
+> **变了什么**：失败信号的上行通道由提示词模板改为结构化审计记录 + 逐步痕迹（下游消费方是编排进程而非语言模型提示词）；前沿语义由 `is_frontier()` 的 Python 判定改为树存储层的状态查询；原 Tier S 三道门的实现彻底离开本仓（见 ADR-022 条目）。
 
 ## 背景
 

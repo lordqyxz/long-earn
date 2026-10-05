@@ -1,7 +1,8 @@
 ---
 id: 21
 title: 确定性脚手架与语言模型推理分层
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-08
 summary: LLM 推理限于 agent 节点；确定性脚手架与 CI 静态检查守卫调用边界。
 related: ["ADR-018", "ADR-022"]
@@ -9,6 +10,12 @@ related: ["ADR-018", "ADR-022"]
 
 # ADR-021: 确定性脚手架与语言模型推理分层
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 原则延续，并由节点级分离升为进程级分离。**
+> **为什么**：本 ADR 在单进程内划出的「agent 节点可推理、脚手架层只产出确定性结构化中间态」边界，在新架构中不再需要靠约定与静态检查维持——两类职责被物理拆到两个进程、两种语言里，边界由进程边界保证。
+> **新实现在哪**：确定性计算 = 引擎仓 `d:/dev/long-earn-engine`（Rust CLI 子进程，零数据库依赖），经 `packages/server/src/engine/cli.ts` 调用；语言模型推理 = DSH 会话运行时，插件侧只做薄编排（`packages/plugin/src/llm.ts` 的 `ctx.llm` 解析回退链）；两侧只经 Arrow IPC 文件与 JSON 契约通信。
+> **延续了什么**：三条原则不变——①语言模型推理只发生于编排 / agent 侧，脚手架层只产出确定性、类型化的结构化中间态；②确定性规则优先（路由 / 分类 / 解析 / 文件 / 标的可由规则判定者，语言模型仅作未命中时的次级路径，且该路径必须在 agent 层）；③「语言模型提议 + 确定性门裁决」的分层可维护、可测试。§B 中 `resolve_stock_ref`（6 位代码正则 → 名称字典 → 语言模型）的判据本身作为方法论沿用。
+> **升级了什么**：分离粒度从「LangGraph 节点 / 工具闭包」升为**进程 + 语言**边界；旧侧「同进程内靠白名单静态检查防回流」的维护面消失，脚手架层可脱离语言模型独立测试这一收益变为结构性事实。
+> **变了什么**：§C 静态合规检查 `scripts/check_llm_call_sites.py` 随本仓冻结不再演化——新仓的等价守卫是「契约包禁止运行时导入 + 插件层保持薄 + 领域契约留在 HTTP 侧」（新仓 ADR-001 §决策 5 与 `packages/contract/` 纯类型约束）；§B 三处违例的整改对象（`prepare_context` / `get_stock_data` / escape_hatch）随 LangGraph 编排层一并冻结，不再修改。
 
 ## 背景
 

@@ -1,7 +1,8 @@
 ---
 id: 16
 title: 分层智能体架构
-status: Accepted
+status: Superseded
+superseded_by: "dsh-long-earn-quant ADR-001（docs/adr/001-dsh-runtime-and-deterministic-engine-boundary.md）"
 date: 2026-07
 summary: MasterAgent ReAct 负责任务分解与跨子图编排；§A 工具表已由 ADR-024 修订；§C 策略研发条款已由 ADR-018 取代。
 amended_by: ["ADR-018", "ADR-024"]
@@ -10,6 +11,12 @@ related: ["ADR-022", "ADR-017"]
 
 # ADR-016: 分层智能体架构
 
+> **处置（M5 划线，2026-10-06）：Superseded —— 编排载体变更，分层方法论延续。**
+> **为什么**：MasterAgent（ReAct 任务分解）与 ResearchAgent（策略研发子图）的**载体**不再是 LangGraph 图节点——主循环改由 DSH 会话承担（新仓 ADR-001 §决策 1），研究编排态改由 TS 假设树承担（新仓 ADR-001 §决策 2）。本仓库归档冻结，图节点不再演化。
+> **新实现在哪**：任务分解与工具调度 = DSH 会话主循环；假设树编排态 = 新仓 `packages/server/src/tree/`（`service.ts` 单一写路径 `apply`、`gates.ts` 证据回源校验、`limits.ts` 硬上界、`store.ts` SQLite 五表、`sse.ts` 变更广播），Arbor 三动作（`EXPAND` / `PRUNE` / `MERGE`）定义见 `packages/contract/src/tree.ts`；六步研究编排见 `packages/plugin/src/research_cycle.ts`；循环纪律见 `skills/quant-research/SKILL.md`。
+> **延续了什么**：分层方法论本身不变——主智能体负责分解与编排、领域能力下沉为可复用单元、上层不感知下层领域概念。§B「算子缺口闭环不暴露给主智能体」的抽象泄漏防护，在新仓体现为 SKILL.md 与 TS 模板的分层：`skills/quant-research/SKILL.md` 独占循环纪律与判据取值，`packages/plugin/src/research_subagent.ts` 只给机读契约并以 `discipline_source` 指针回指（两处都写纪律必然漂移）。
+> **变了什么**：编排载体（LangGraph 图 → DSH 会话 + TS 单一写路径）；§D 表中「三段式数据分割」「PIT 对齐」两项的实施位置移出本仓库，分别由引擎侧与数据层承担（见 ADR-005 / ADR-022 条目）；§D「OOS 合并门与统计验证门」判据不变，实现迁引擎 `gates` 子命令。
+> **退役节奏**：本 ADR 所述 LangGraph 编排层是否实物退役，取决于规划源 M4 任务 6（与 LangGraph HTR 的影子验证）——截至本次划线该验证未执行，故不写成已退役。
 
 ## 背景
 
