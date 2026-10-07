@@ -3,7 +3,7 @@
 > **归档冻结（M5，2026-10-06）**：本仓库为**冻结遗留仓库**——代码不再演化，仅保留
 > **可运行的 PostgreSQL 数据服务**与**一次性黄金语料导出脚本**。LLM 推理与对话编排已迁
 > `d:/dev/dsh-long-earn-quant`，确定性回测计算已迁 `d:/dev/long-earn-engine`（Rust，CLI 子进程消费）。
-> 除舆情管线维护外**禁止新增逻辑**。跨仓库链接见 [AGENTS.md](AGENTS.md) §八。
+> 除舆情管线维护外**禁止新增逻辑**。跨仓库链接见 [docs/development/AGENTS.md](docs/development/AGENTS.md) §八。
 >
 > **未闭合（如实标注）**：规划源 M5 验收第一条「long-earn 仓库标记冻结，无 LangGraph
 > 运行时依赖」——前半已成立，**后半不满足**。LangGraph 编排层（含 HTR）作为新仓 M4 任务 6
@@ -24,7 +24,7 @@ Long Earn 是 AI 驱动的量化交易研究平台，核心能力（**均为冻�
 - **内嵌回测引擎** — 事件驱动引擎直接集成在主项目中，YAML DSL + 算子目录描述策略，支持进程级并行回测（ADR-005 / ADR-009）
 - **实时行情监控** — 实时行情 Provider（显式主源 miniqmt，次源 ciccwm）+ 价格阈值告警（ADR-011 / ADR-018）
 
-开发规范与铁律约束见 [AGENTS.md](AGENTS.md)。
+开发规范与铁律约束见 [docs/development/AGENTS.md](docs/development/AGENTS.md)。
 
 ## 快速开始
 
@@ -93,7 +93,7 @@ uv run python scripts/download_data.py               # 全量下载行情/财务
 
 ## 架构
 
-运行时总览与调用图见 [docs/architecture.md](docs/architecture.md)；ADR 见同目录 `docs/adr/*.md`（编写规范 [docs/adr/AGENTS.md](docs/adr/AGENTS.md)）；开发规范见 [AGENTS.md](AGENTS.md)；实现约束见 [docs/gotchas.md](docs/gotchas.md)。
+运行时总览与调用图见 [docs/architecture.md](docs/architecture.md)；ADR 见同目录 `docs/adr/*.md`（编写规范 [docs/adr/AGENTS.md](docs/adr/AGENTS.md)）；开发规范见 [docs/development/AGENTS.md](docs/development/AGENTS.md)；实现约束见 [docs/gotchas.md](docs/gotchas.md)。
 
 **依赖注入**：所有 Agent 与子图通过 `RuntimeContext` 初始化（`create_runtime_context()` / `initialize_context()`），禁止无 context 构造。服务接口定义为 `Protocol`，测试中用 Mock 替换。
 

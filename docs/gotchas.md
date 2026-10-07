@@ -1,7 +1,7 @@
 # 关键实现约束（Gotchas）
 
-> 从根目录 [AGENTS.md](../AGENTS.md) 拆出。记录易踩坑、反直觉或必须牢记的实现事实；字段级细节以源码为准。  
-> 项目规范与质量门槛见 AGENTS.md；架构决策见 [adr/AGENTS.md](adr/AGENTS.md)。
+> 从 [docs/development/AGENTS.md](development/AGENTS.md) 拆出。记录易踩坑、反直觉或必须牢记的实现事实；字段级细节以源码为准。
+> 项目规范与质量门槛见 [docs/development/AGENTS.md](development/AGENTS.md)；架构决策见 [adr/AGENTS.md](adr/AGENTS.md)。
 
 ---
 

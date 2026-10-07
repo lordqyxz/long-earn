@@ -1,7 +1,7 @@
 # 架构决策记录（ADR）
 
 > **代码是第一真相**：本文档只维护 ADR **编写与维护规范**。各决策正文见同目录 `NNNN-*.md`（元数据在 YAML frontmatter）；实施进度、文件清单、覆盖率以源码为准。  
-> 项目级开发规范见根目录 [AGENTS.md](../../AGENTS.md)。运行时总览见 [architecture.md](../architecture.md)。
+> 项目级开发规范见 [docs/development/AGENTS.md](../development/AGENTS.md)。运行时总览见 [architecture.md](../architecture.md)。
 
 ---
 
