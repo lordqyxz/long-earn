@@ -155,7 +155,7 @@ PostgreSQL `long_earn` 权威缓存不得随意 DELETE/DROP；全量刷新仅经
 |------|------|----------------|
 | 本仓（冻结遗留，Python） | `d:/dev/long-earn` | **归档冻结**：代码不再演化，仅保留 PG 数据服务与一次性黄金语料导出。ADR `docs/adr/`；规划源 `docs/plan/` |
 | 新项目（TS monorepo） | `d:/dev/dsh-long-earn-quant` | DSH 插件 / 编排服务 / 前端，本仓能力的接替方。ADR 划线对照表 `docs/adr-status.md`；五视角处置评估 `docs/stock-analysis-disposition.md`；里程碑进度 `docs/milestones.md` |
-| 确定性引擎（Rust） | `d:/dev/long-earn-engine` | 回测与门控的现行实现，CLI 子进程消费（`run` / `gates`）。验证经验见 `docs/validation/backtest-engine.md`；规范见 `docs/development/AGENTS.md` |
+| 确定性引擎（Rust） | `d:/dev/long-earn-engine` | 回测与门控的现行实现，CLI 子进程消费（`run` / `gates`）。当前待办见 `TODO.md`，验证经验见 `docs/validation/backtest-engine.md`，开发约束见 `docs/development/AGENTS.md` |
 
 本仓在三方拓扑中的角色：**事实供给方（PostgreSQL 权威缓存）+ 一次性黄金语料导出方**。
 M3.5 已取消「旧项目消费 Rust 引擎」路径，本仓不再接入引擎（规划源 `docs/plan/milestones.md` M3.5 节）。
